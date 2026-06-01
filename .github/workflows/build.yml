@@ -14,12 +14,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build Windows
+      - name: Build and Zip Windows
         shell: bash
         run: |
           cd frontend/windows/
           g++.exe -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxinput
-          zip ns-pc-control-windows.zip ns-gamepad.exe
+          # 7z is pre-installed on windows-latest runners
+          7z a ns-pc-control-windows.zip ns-gamepad.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-artifact
@@ -29,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
       - name: Build Linux
         run: |
           cd frontend/linux/
@@ -57,8 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install ARM Cross-Compiler
-        run: sudo apt-get update && sudo apt-get install -y g++-aarch64-linux-gnu cmake
+      - name: Install ARM Cross-Compiler and zip
+        run: sudo apt-get update && sudo apt-get install -y g++-aarch64-linux-gnu cmake zip
       - name: Build Pi Backend
         run: |
           cd backend/rpi
