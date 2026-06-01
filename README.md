@@ -1,8 +1,8 @@
-# 🎮 Nintendo Switch PC Control (Windows & Linux)
+# 🎮 Nintendo Switch PC Control (Windows & Linux & macOS)
 
-**Control your Nintendo Switch from a PC (Windows or Linux) with ultra-low latency using a Raspberry Pi.**
+**Control your Nintendo Switch from a PC (Windows, Linux or macOS) with low latency using a Raspberry Pi.**
 
-This project was built from scratch in **pure C++** and uses **UDP** to guarantee the lowest possible latency. It's the ideal setup for playing Switch games using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions.
+This project was built from scratch in **C++** and uses **UDP** to guarantee the lowest possible latency. It's the ideal setup for playing Switch games using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions.
 
 ---
 
@@ -129,6 +129,60 @@ jstest /dev/input/js0
 *You may need to run with `sudo` or add your user to the `input` group if the application cannot access controller events.*
 
 ---
+
+## 🍎 macOS
+
+The macOS frontend uses Apple's **GameController framework**, which natively supports Xbox, PlayStation, MFi, and Switch Pro Controllers over USB or Bluetooth — no third-party drivers needed.
+
+#### ⚙️ Prerequisite: Xcode Command Line Tools
+
+If you don't have them installed yet, run the following and click **Install** in the dialog that appears:
+
+```bash
+xcode-select --install
+```
+
+Verify the installation completed:
+
+```bash
+clang++ --version
+# Expected output: Apple clang version 15.x.x (or similar)
+```
+
+#### Build the frontend
+
+1. Navigate to the `frontend/macos/` folder.
+
+2. Compile the frontend:
+
+```bash
+clang++ -std=c++17 -ObjC++ \
+        -framework GameController -framework Foundation \
+        ns-gamepad.mm -o ns-gamepad
+```
+
+#### Run the application
+
+```bash
+./ns-gamepad 192.168.1.X
+```
+
+#### 🎮 Controller support
+
+Connect your controller via USB or pair it via Bluetooth before launching the app. If a controller is already connected when the app starts, it will be picked up automatically. If you connect one afterwards, it will be detected on the fly.
+
+> **Supported controllers:** Xbox One/Series, PlayStation 4/5, Switch Pro Controller (macOS 12+), and most MFi-certified gamepads.
+
+#### 🔒 Input Monitoring permission (Bluetooth controllers)
+
+On **macOS 10.15 Catalina and later**, Bluetooth controllers may require the **Input Monitoring** permission. If your controller is connected but inputs aren't being read, go to:
+
+**System Settings → Privacy & Security → Input Monitoring**
+
+and enable it for Terminal (or whichever app you're running the frontend from).
+
+---
+
 
 ## 🕹️ Controls & Shortcuts
 
