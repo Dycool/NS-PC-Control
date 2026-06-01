@@ -4,6 +4,9 @@
 
 This project was built from scratch in **C++** and uses **UDP** to guarantee the lowest possible latency. It's the ideal setup for playing Switch games using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions.
 
+> **📦 Pre-compiled Binaries Available!**
+> You can download ready-to-use frontend executables for Windows, Linux, and macOS directly from the **[Releases](https://github.com/Dycool/Nintendo-Switch-PC-Control/releases)** page.
+
 ---
 
 ## 🛠️ Build and Run Tutorial
