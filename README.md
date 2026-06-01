@@ -2,7 +2,7 @@
 
 **Control your Nintendo Switch from a PC (Windows or Linux) with ultra-low latency using a Raspberry Pi.**
 
-This project was built from scratch in **pure C++** and uses **UDP** to guarantee the lowest possible latency (1-2ms processing time). It's the ideal setup for playing Switch games via local *Cloud Gaming* tools (like Moonlight / Sunshine / OBS) using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions.
+This project was built from scratch in **pure C++** and uses **UDP** to guarantee the lowest possible latency. It's the ideal setup for playing Switch games using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions.
 
 ---
 
