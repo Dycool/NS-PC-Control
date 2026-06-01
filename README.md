@@ -101,7 +101,7 @@ g++ -O3 -pthread ns-gamepad.cpp -o ns-gamepad
 3. Run the application:
 
 ```bash
-./ns-gamepad 192.168.1.X
+./ns-gamepad 192.168.1.X [/dev/input/jsY]
 ```
 
 *You may need to run with `sudo` or add your user to the `input` group if the application cannot access controller events.*
