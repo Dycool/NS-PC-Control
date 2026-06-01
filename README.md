@@ -29,7 +29,7 @@ sudo reboot
 Once rebooted, clone only the backend portion of the repository:
 
 ```bash
-git clone --depth 1 --filter=blob:none --sparse [https://github.com/Dycool/Nintendo-Switch-PC-Control.git](https://github.com/Dycool/Nintendo-Switch-PC-Control.git) && \
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Dycool/Nintendo-Switch-PC-Control.git && \
 cd Nintendo-Switch-PC-Control && \
 git sparse-checkout set backend
 ```
