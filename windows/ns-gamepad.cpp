@@ -133,7 +133,7 @@ ns::HIDReport map_xinput_to_switch(const XINPUT_GAMEPAD& pad) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Uso: gamepad.exe <IP_DA_RASPBERRY_PI>\n";
+        std::cerr << "Uso: gamepad.exe <RASPBERRY PI IP>\n";
         return 1;
     }
 
