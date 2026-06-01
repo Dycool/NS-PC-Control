@@ -10,79 +10,127 @@ This project was built from scratch in **pure C++** and uses **UDP** to guarante
 
 ### Part 1: Raspberry Pi (Backend Only)
 
-To save space and time on your Raspberry Pi, clone **only** the backend folder:
+Clone only the backend portion of the repository:
 
-1. **Clone only the backend folder**:
-   ```bash
-   git clone --no-checkout https://github.com
-   cd Nintendo-Switch-PC-Control
-   git sparse-checkout set backend
-   git checkout
-   ```
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Dycool/Nintendo-Switch-PC-Control.git && \
+cd Nintendo-Switch-PC-Control && \
+git sparse-checkout set backend
+```
 
-2. **Compile the backend** C++ code:
-   ```bash
-   cd backend/rpi
-   mkdir build && cd build
-   cmake ..
-   make
-   ```
+#### Compile the backend
 
-3. **Run the USB Gadget Script**:
-   This script makes the Pi pretend to be a HORI Pokken controller. You must run this *before* plugging the Pi into the Switch and *before* starting the backend.
-   ```bash
-   cd .. # Go back to backend/rpi folder
-   sudo bash setup_gadget.sh
-   ```
+```bash
+cd backend/rpi
+mkdir build && cd build
+cmake ..
+make
+```
 
-4. **Start the Backend**:
-   ```bash
-   cd build
-   sudo chrt -f 99 ./ns-backend
-   ```
-   *(The `chrt` command gives the process maximum real-time priority for lowest latency).*
+#### Run the USB Gadget Script
 
-5. **Connect to Switch:** Now, plug the appropriate USB port (USB-C on Pi 4, inner Micro-USB on Pi Zero) into the Switch dock.
+This script makes the Pi emulate a HORI Pokken Controller. Run it **before** connecting the Pi to the Switch and **before** starting the backend.
+
+```bash
+cd .. # Return to backend/rpi
+sudo bash setup_gadget.sh
+```
+
+#### Start the Backend
+
+```bash
+cd build
+sudo chrt -f 99 ./ns-backend
+```
+
+*(`chrt -f 99` gives the process maximum real-time priority for the lowest possible latency.)*
+
+#### Connect to the Switch
+
+Connect the Raspberry Pi to the Switch dock:
+
+* **Raspberry Pi 4:** USB-C port
+* **Raspberry Pi Zero / Zero 2 W:** Inner Micro-USB data port
 
 ---
 
 ### Part 2: PC (Frontend Only)
 
-On your computer, clone **only** the frontend folder:
+Clone only the frontend portion of the repository:
 
-1. **Clone only the frontend folder**:
-   ```bash
-   git clone --no-checkout https://github.com
-   cd Nintendo-Switch-PC-Control
-   git sparse-checkout set frontend
-   git checkout
-   ```
-
-#### 🪟 For Windows
-1. **Navigate** to the `frontend/windows/` folder.
-2. **Compile the frontend:** Double-click the `build.bat` script in Windows Explorer, or run it from the command line. It will automatically detect MSVC or MinGW/MSYS2 and compile the `gamepad.exe` executable.
-3. **Run the program:** Open a command prompt (CMD or PowerShell), navigate to the folder containing the compiled executable, and run it by providing your Pi's IP address:
-   ```cmd
-   gamepad.exe 192.168.1.X
-   ```
-
-#### 🐧 For Linux (Ubuntu / Debian / SteamOS)
-1. **Navigate** to the `frontend/linux/` folder.
-2. **Compile the frontend:** Use `g++` (requires `build-essential`):
-   ```bash
-   g++ -O3 -pthread ns-gamepad.cpp -o ns-gamepad
-   ```
-3. **Run the program:** Provide your Pi's IP address:
-   ```bash
-   ./ns-gamepad 192.168.1.X
-   ```
-   *(Note: You may need to run with `sudo` or add your user to the `input` group if the program cannot read your controller events).*
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Dycool/Nintendo-Switch-PC-Control.git && \
+cd Nintendo-Switch-PC-Control && \
+git sparse-checkout set frontend
+```
 
 ---
 
-### 🕹️ Controls & Shortcuts
+## 🪟 Windows
 
-Any XInput-compatible controller (Xbox, standard PC gamepads) connected to your PC will now control the Nintendo Switch.
+1. Navigate to the `frontend/windows/` folder.
 
-* **HOME Button:** Press Left Stick + Right Stick simultaneously (L3 + R3).
-* **CAPTURE Button:** Press START + BACK simultaneously.
+2. Build the frontend by running:
+
+```cmd
+build.bat
+```
+
+The script automatically detects **MSVC** or **MinGW/MSYS2** and builds `gamepad.exe`.
+
+3. Run the application and provide your Raspberry Pi's IP address:
+
+```cmd
+gamepad.exe 192.168.1.X
+```
+
+---
+
+## 🐧 Linux (Ubuntu / Debian / SteamOS)
+
+1. Navigate to the `frontend/linux/` folder.
+
+2. Compile the frontend:
+
+```bash
+g++ -O3 -pthread ns-gamepad.cpp -o ns-gamepad
+```
+
+*(Requires `build-essential` or an equivalent GCC toolchain.)*
+
+3. Run the application:
+
+```bash
+./ns-gamepad 192.168.1.X
+```
+
+*You may need to run with `sudo` or add your user to the `input` group if the application cannot access controller events.*
+
+---
+
+## 🕹️ Controls & Shortcuts
+
+Any **XInput-compatible controller** connected to your PC (Xbox controllers and most standard PC gamepads) can control the Nintendo Switch.
+
+| Action  | Shortcut                              |
+| ------- | ------------------------------------- |
+| HOME    | Press **L3 + R3** simultaneously      |
+| CAPTURE | Press **START + BACK** simultaneously |
+
+---
+
+## ⚡ Latency Optimization
+
+For the lowest possible latency:
+
+* Use a wired Ethernet connection whenever possible.
+* Run the backend with `sudo chrt -f 99`.
+* Connect controllers directly to the PC via USB.
+* Keep the Raspberry Pi and PC on the same local network.
+* Avoid Wi-Fi power-saving modes.
+
+---
+
+## 📄 License
+
+See the repository license for details.
