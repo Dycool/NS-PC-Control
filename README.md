@@ -11,31 +11,19 @@ This project was built from scratch in **pure C++** and uses **UDP** to guarante
 ### Part 1: Raspberry Pi (Backend Only)
 
 #### ⚙️ Prerequisite: Enable USB Gadget Mode (Boot Settings)
-Before the Raspberry Pi can emulate a USB controller, you must enable the USB OTG drivers at the system level. 
+Before the Raspberry Pi can emulate a USB controller, you must enable the USB OTG drivers at the system level. You can do this quickly by running the following commands in your Pi's terminal:
 
-1. Edit the boot config file:
-   ```bash
-   sudo nano /boot/firmware/config.txt 
-   # Note: use /boot/config.txt on older Raspberry Pi OS versions
-   ```
-2. Scroll to the bottom and add the following line:
-   ```ini
-   dtoverlay=dwc2
-   ```
-3. Save and exit (Ctrl+O, Enter, Ctrl+X).
-4. Edit the kernel command line file:
-   ```bash
-   sudo nano /boot/firmware/cmdline.txt
-   # Note: use /boot/cmdline.txt on older Raspberry Pi OS versions
-   ```
-5. Add the following text right after `rootwait`. **(Important: Do not add a new line; `cmdline.txt` must remain a single, continuous line of text):**
-   ```text
-   modules-load=dwc2,libcomposite
-   ```
-6. Reboot your Raspberry Pi to apply the changes:
-   ```bash
-   sudo reboot
-   ```
+```bash
+# 1. Enable the dwc2 driver in config.txt
+echo "dtoverlay=dwc2" | sudo tee -a /boot/firmware/config.txt
+
+# 2. Add required modules to cmdline.txt (this safely inserts them on the same line)
+sudo sed -i 's/rootwait/rootwait modules-load=dwc2,libcomposite/' /boot/firmware/cmdline.txt
+
+# 3. Reboot the system to apply changes
+sudo reboot
+```
+*(Note: If you are using an older version of Raspberry Pi OS, you may need to remove `/firmware` from the file paths above).*
 
 #### Clone the backend
 
