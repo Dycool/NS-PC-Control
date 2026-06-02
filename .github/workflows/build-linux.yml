@@ -1,0 +1,24 @@
+name: Test Build Linux
+
+on:
+  push:
+    paths:
+      - 'frontend/linux/**'
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Linux
+        run: |
+          cd frontend/linux/
+          g++ -O3 -pthread ns-gamepad.cpp -o ns-gamepad
+          zip ns-pc-control-linux.zip ns-gamepad
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifact
+          path: frontend/linux/ns-pc-control-linux.zip
