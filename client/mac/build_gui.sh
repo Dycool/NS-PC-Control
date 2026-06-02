@@ -61,6 +61,9 @@ cat > ns-gui.app/Contents/Info.plist <<EOF
     <string>This app uses Bluetooth to communicate with wireless game controllers.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
     <string>This app uses Bluetooth to communicate with wireless game controllers.</string>
+    <!-- Required on macOS 10.15+ for Bluetooth HID controllers -->
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>This app needs input monitoring to read game controller inputs when the window is not focused.</string>
 </dict>
 </plist>
 EOF

@@ -171,19 +171,27 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification*)aNotification {
-    // Register for controller notifications
+    // Register for controller notifications (same pattern as CLI: queue:nil for immediate handler attachment)
     [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification
-        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+        object:nil queue:nil usingBlock:^(NSNotification* note) {
             GCController* ctrl = (GCController*)note.object;
             if (ctrl.extendedGamepad)
                 attach_handlers(ctrl.extendedGamepad, &state);
-            [self refreshControllerList];
-            if (!connected)
-                [ctrlNameField setStringValue:@""];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self refreshControllerList];
+                if (!connected)
+                    [ctrlNameField setStringValue:@""];
+            });
     }];
     [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidDisconnectNotification
-        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) {
-            [self refreshControllerList];
+        object:nil queue:nil usingBlock:^(NSNotification* note) {
+            BOOL wasConnected = connected;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Auto-disconnect if connected (controller was lost)
+                if (wasConnected)
+                    [self disconnect];
+                [self refreshControllerList];
+            });
     }];
 
     // Create window
@@ -398,12 +406,8 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
 
 - (void)updateUI {
     if (connected) {
-        // Update controller name while connected
-        NSArray* controllers = [GCController controllers];
-        if ([controllers count] > 0) {
-            GCController* ctrl = controllers[0];
-            [ctrlNameField setStringValue:ctrl.vendorName ?: @""];
-        }
+        NSString* title = [[ctrlPopUp selectedItem] title];
+        [ctrlNameField setStringValue:title ?: @""];
     } else {
         // Refresh controller list if empty
         if ([[ctrlPopUp itemTitles] count] == 0 || [[[ctrlPopUp selectedItem] title] isEqualToString:@"No controllers detected"]) {
