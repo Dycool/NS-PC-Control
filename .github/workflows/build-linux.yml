@@ -26,12 +26,12 @@ jobs:
           cd client/linux/
           g++ -std=c++17 -O2 -Wall ns-gui.cpp -o ns-gui $(pkg-config --cflags --libs gtk+-3.0) -lpthread
 
-      - name: Package
-        run: |
-          cd client/linux/
-           zip ns-pc-control-linux.zip ns-gamepad ns-gui
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-gamepad
+          path: client/linux/ns-gamepad
 
       - uses: actions/upload-artifact@v6
         with:
-          name: linux-artifact
-          path: client/linux/ns-pc-control-linux.zip
+          name: linux-gui
+          path: client/linux/ns-gui

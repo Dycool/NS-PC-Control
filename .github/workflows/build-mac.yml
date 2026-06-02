@@ -23,12 +23,12 @@ jobs:
           cd client/mac/
           bash build_gui.sh
 
-      - name: Package
-        run: |
-          cd client/mac/
-          zip -r ns-pc-control-mac.zip ns-gamepad ns-gui.app
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos-gamepad
+          path: client/mac/ns-gamepad
 
       - uses: actions/upload-artifact@v6
         with:
-          name: macos-artifact
-          path: client/mac/ns-pc-control-mac.zip
+          name: macos-gui
+          path: client/mac/ns-gui.app
