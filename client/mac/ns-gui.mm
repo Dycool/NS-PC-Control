@@ -55,17 +55,6 @@ inline uint64_t now_us() noexcept {
 }
 }
 
-// ── Gamepad state struct (same as console version) ──
-struct GamepadState {
-    std::atomic<bool>  btn_a{false}, btn_b{false}, btn_x{false}, btn_y{false};
-    std::atomic<bool>  btn_l{false}, btn_r{false};
-    std::atomic<float> zl{0.0f}, zr{0.0f};
-    std::atomic<bool>  btn_menu{false}, btn_options{false};
-    std::atomic<bool>  btn_lstick{false}, btn_rstick{false};
-    std::atomic<bool>  dpad_up{false}, dpad_down{false}, dpad_left{false}, dpad_right{false};
-    std::atomic<float> lx{0.0f}, ly{0.0f}, rx{0.0f}, ry{0.0f};
-};
-
 static uint8_t float_to_byte(float val, bool invert = false, float dz = 0.15f) {
     if (std::abs(val) < dz) return 128;
     int scaled;
@@ -76,27 +65,28 @@ static uint8_t float_to_byte(float val, bool invert = false, float dz = 0.15f) {
     return (uint8_t)(invert ? 255 - scaled : scaled);
 }
 
-static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
+static ns::HIDReport read_gamepad(GCExtendedGamepad* gp) {
     ns::HIDReport r; r.reset();
-    if (st.btn_a.load()) r.buttons |= ns::BTN_B;
-    if (st.btn_b.load()) r.buttons |= ns::BTN_A;
-    if (st.btn_x.load()) r.buttons |= ns::BTN_Y;
-    if (st.btn_y.load()) r.buttons |= ns::BTN_X;
-    if (st.btn_l.load()) r.buttons |= ns::BTN_L;
-    if (st.btn_r.load()) r.buttons |= ns::BTN_R;
-    if (st.zl.load() > 0.5f) r.buttons |= ns::BTN_ZL;
-    if (st.zr.load() > 0.5f) r.buttons |= ns::BTN_ZR;
-    bool plus = st.btn_menu.load();
-    bool minus = st.btn_options.load();
+    if (gp.buttonA.pressed) r.buttons |= ns::BTN_B;
+    if (gp.buttonB.pressed) r.buttons |= ns::BTN_A;
+    if (gp.buttonX.pressed) r.buttons |= ns::BTN_Y;
+    if (gp.buttonY.pressed) r.buttons |= ns::BTN_X;
+    if (gp.leftShoulder.pressed) r.buttons |= ns::BTN_L;
+    if (gp.rightShoulder.pressed) r.buttons |= ns::BTN_R;
+    if (gp.leftTrigger.value > 0.5f) r.buttons |= ns::BTN_ZL;
+    if (gp.rightTrigger.value > 0.5f) r.buttons |= ns::BTN_ZR;
+    bool plus = gp.buttonMenu.pressed;
+    bool minus = gp.buttonOptions ? gp.buttonOptions.pressed : false;
     if (plus) r.buttons |= ns::BTN_PLUS;
     if (minus) r.buttons |= ns::BTN_MINUS;
-    bool ls = st.btn_lstick.load(), rs = st.btn_rstick.load();
+    bool ls = gp.leftThumbstickButton ? gp.leftThumbstickButton.pressed : false;
+    bool rs = gp.rightThumbstickButton ? gp.rightThumbstickButton.pressed : false;
     if (ls) r.buttons |= ns::BTN_LSTICK;
     if (rs) r.buttons |= ns::BTN_RSTICK;
     if (ls && rs) { r.buttons |= ns::BTN_HOME; r.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK); }
     if (plus && minus) { r.buttons |= ns::BTN_CAPTURE; r.buttons &= ~(ns::BTN_PLUS | ns::BTN_MINUS); }
-    bool up = st.dpad_up.load(), down = st.dpad_down.load();
-    bool left = st.dpad_left.load(), right = st.dpad_right.load();
+    bool up = gp.dpad.up.pressed, down = gp.dpad.down.pressed;
+    bool left = gp.dpad.left.pressed, right = gp.dpad.right.pressed;
     if (up && right) r.hat = ns::HAT_NE;
     else if (up && left) r.hat = ns::HAT_NW;
     else if (down && right) r.hat = ns::HAT_SE;
@@ -105,59 +95,26 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
     else if (down) r.hat = ns::HAT_S;
     else if (left) r.hat = ns::HAT_W;
     else if (right) r.hat = ns::HAT_E;
-    r.lx = float_to_byte(st.lx.load(), false);
-    r.ly = float_to_byte(st.ly.load(), true);
-    r.rx = float_to_byte(st.rx.load(), false);
-    r.ry = float_to_byte(st.ry.load(), true);
+    r.lx = float_to_byte(gp.leftThumbstick.xAxis.value, false);
+    r.ly = float_to_byte(gp.leftThumbstick.yAxis.value, true);
+    r.rx = float_to_byte(gp.rightThumbstick.xAxis.value, false);
+    r.ry = float_to_byte(gp.rightThumbstick.yAxis.value, true);
     return r;
-}
-
-static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
-    gp.buttonA.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_a.store((bool)p); };
-    gp.buttonB.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_b.store((bool)p); };
-    gp.buttonX.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_x.store((bool)p); };
-    gp.buttonY.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_y.store((bool)p); };
-    gp.leftShoulder.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_l.store((bool)p); };
-    gp.rightShoulder.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_r.store((bool)p); };
-    gp.leftTrigger.valueChangedHandler = ^(GCControllerButtonInput*, float v, BOOL) { st->zl.store(v); };
-    gp.rightTrigger.valueChangedHandler = ^(GCControllerButtonInput*, float v, BOOL) { st->zr.store(v); };
-    gp.buttonMenu.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_menu.store((bool)p); };
-    if (gp.buttonOptions) {
-        gp.buttonOptions.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_options.store((bool)p); };
-    }
-    if (gp.leftThumbstickButton) {
-        gp.leftThumbstickButton.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_lstick.store((bool)p); };
-    }
-    if (gp.rightThumbstickButton) {
-        gp.rightThumbstickButton.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->btn_rstick.store((bool)p); };
-    }
-    gp.dpad.up.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->dpad_up.store((bool)p); };
-    gp.dpad.down.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->dpad_down.store((bool)p); };
-    gp.dpad.left.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->dpad_left.store((bool)p); };
-    gp.dpad.right.valueChangedHandler = ^(GCControllerButtonInput*, float, BOOL p) { st->dpad_right.store((bool)p); };
-    gp.leftThumbstick.xAxis.valueChangedHandler = ^(GCControllerAxisInput*, float v) { st->lx.store(v); };
-    gp.leftThumbstick.yAxis.valueChangedHandler = ^(GCControllerAxisInput*, float v) { st->ly.store(v); };
-    gp.rightThumbstick.xAxis.valueChangedHandler = ^(GCControllerAxisInput*, float v) { st->rx.store(v); };
-    gp.rightThumbstick.yAxis.valueChangedHandler = ^(GCControllerAxisInput*, float v) { st->ry.store(v); };
 }
 
 // ── App Delegate ──
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
     NSTextField* ipField;
-    NSTextField* portField;
     NSPopUpButton* ctrlPopUp;
     NSButton* connectBtn;
     NSTextField* statusField;
     NSTextField* ctrlNameField;
-    NSTextField* pktCountField;
 
-    GamepadState state;
     std::thread senderThread;
     std::atomic<bool> connected;
     std::atomic<bool> senderRunning;
     int sock;
     uint8_t hmacKey[32];
-    uint32_t packetCount;
     uint32_t seq;
 }
 - (void)refreshControllerList;
@@ -183,7 +140,7 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
     }];
 
     // Create window
-    NSRect frame = NSMakeRect(0, 0, 420, 230);
+    NSRect frame = NSMakeRect(0, 0, 420, 210);
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
         backing:NSBackingStoreBuffered defer:NO];
@@ -193,7 +150,7 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
 
     NSView* view = [window contentView];
 
-    // IP
+    // IP (supports ip:port format like Windows client)
     NSTextField* ipLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(15, 185, 100, 20)];
     [ipLabel setStringValue:@"Raspberry Pi IP:"];
     [ipLabel setBezeled:NO];
@@ -202,24 +159,12 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
     [ipLabel setSelectable:NO];
     [view addSubview:ipLabel];
 
-    ipField = [[NSTextField alloc] initWithFrame:NSMakeRect(120, 183, 160, 22)];
+    ipField = [[NSTextField alloc] initWithFrame:NSMakeRect(120, 183, 280, 22)];
     {
         NSString* saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastIP"];
         [ipField setStringValue:saved ?: @"192.168.1.100"];
     }
     [view addSubview:ipField];
-
-    NSTextField* portLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(290, 185, 35, 20)];
-    [portLabel setStringValue:@"Port:"];
-    [portLabel setBezeled:NO];
-    [portLabel setDrawsBackground:NO];
-    [portLabel setEditable:NO];
-    [portLabel setSelectable:NO];
-    [view addSubview:portLabel];
-
-    portField = [[NSTextField alloc] initWithFrame:NSMakeRect(325, 183, 55, 22)];
-    [portField setStringValue:@"7331"];
-    [view addSubview:portField];
 
     // Controller selector
     NSTextField* ctrlLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(15, 155, 90, 20)];
@@ -265,21 +210,7 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
     [ctrlNameField setTextColor:[NSColor grayColor]];
     [view addSubview:ctrlNameField];
 
-    pktCountField = [[NSTextField alloc] initWithFrame:NSMakeRect(15, 38, 400, 17)];
-    [pktCountField setStringValue:@"Packets sent: 0"];
-    [pktCountField setBezeled:NO];
-    [pktCountField setDrawsBackground:NO];
-    [pktCountField setEditable:NO];
-    [pktCountField setSelectable:NO];
-    [pktCountField setTextColor:[NSColor grayColor]];
-    [view addSubview:pktCountField];
-
-    // Attach to existing controllers
-    for (GCController* ctrl in [GCController controllers]) {
-        if (ctrl.extendedGamepad) {
-            attach_handlers(ctrl.extendedGamepad, &state);
-        }
-    }
+    // Attach to existing controllers is handled by polling in sender thread
 
     [self refreshControllerList];
     [window makeKeyAndOrderFront:nil];
@@ -309,16 +240,25 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
 }
 
 - (void)connect {
-    NSString* ip = [ipField stringValue];
-    if ([ip length] == 0) {
+    NSString* ipStr = [ipField stringValue];
+    if ([ipStr length] == 0) {
         NSAlert* alert = [[NSAlert alloc] init];
         [alert setMessageText:@"Please enter a Raspberry Pi IP address."];
         [alert runModal];
         return;
     }
 
-    int port = [portField intValue];
-    if (port <= 0 || port > 65535) port = ns::DEFAULT_PORT;
+    // Parse ip:port (same as Windows client)
+    char ipBuf[64];
+    [ipStr getCString:ipBuf maxLength:sizeof(ipBuf) encoding:NSUTF8StringEncoding];
+    int port = ns::DEFAULT_PORT;
+    char* colon = strchr(ipBuf, ':');
+    if (colon) {
+        *colon = '\0';
+        port = atoi(colon + 1);
+        if (port <= 0 || port > 65535) port = ns::DEFAULT_PORT;
+    }
+    NSString* ip = [NSString stringWithUTF8String:ipBuf];
 
     int sel = (int)[ctrlPopUp indexOfSelectedItem];
     if (sel < 0) {
@@ -329,14 +269,13 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
     }
 
     // Save last IP
-    [[NSUserDefaults standardUserDefaults] setObject:ip forKey:@"lastIP"];
+    [[NSUserDefaults standardUserDefaults] setObject:ipStr forKey:@"lastIP"];
 
     // Derive HMAC key
     derive_key(ns::DEFAULT_SECRET, hmacKey);
 
     connected = true;
     senderRunning = true;
-    packetCount = 0;
     seq = 0;
 
     // Start sender thread
@@ -358,19 +297,6 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
         memcpy(&dest, res->ai_addr, sizeof(dest));
         freeaddrinfo(res);
 
-        // Use the selected controller (index `sel`)
-        NSArray* controllers = [GCController controllers];
-        int idx = 0;
-        for (GCController* ctrl in controllers) {
-            if (ctrl.extendedGamepad) {
-                if (idx == sel) {
-                    attach_handlers(ctrl.extendedGamepad, &self->state);
-                    break;
-                }
-                idx++;
-            }
-        }
-
         while (self->senderRunning) {
             ns::Packet pkt{};
             pkt.magic = ns::PROTO_MAGIC;
@@ -378,14 +304,22 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
             pkt.flags = ns::FLAG_NONE;
             pkt.seq = self->seq++;
             pkt.ts_us = ns::now_us();
-            pkt.report = map_gc_to_switch(self->state);
+
+            // Poll controller state directly (works even in background)
+            pkt.report.reset();
+            NSArray* controllers = [GCController controllers];
+            if (sel < (int)[controllers count]) {
+                GCController* ctrl = controllers[sel];
+                if (ctrl.extendedGamepad)
+                    pkt.report = read_gamepad(ctrl.extendedGamepad);
+            }
+
             {
                 uint8_t fullHmac[32];
                 hmac_sha256(self->hmacKey, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, fullHmac);
                 memcpy(pkt.hmac, fullHmac, ns::HMAC_TAG_SIZE);
             }
             sendto(self->sock, &pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));
-            self->packetCount++;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         close(self->sock);
@@ -393,9 +327,8 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
 
     [connectBtn setTitle:@"Disconnect"];
     [ipField setEnabled:NO];
-    [portField setEnabled:NO];
     [ctrlPopUp setEnabled:NO];
-    [statusField setStringValue:[NSString stringWithFormat:@"Connected to %@:%d", ip, port]];
+    [statusField setStringValue:[NSString stringWithFormat:@"Connected to %s:%d", ipBuf, port]];
 }
 
 - (void)disconnect {
@@ -405,15 +338,18 @@ static void attach_handlers(GCExtendedGamepad* gp, GamepadState* st) {
 
     [connectBtn setTitle:@"Connect"];
     [ipField setEnabled:YES];
-    [portField setEnabled:YES];
     [ctrlPopUp setEnabled:YES];
     [statusField setStringValue:@"Disconnected"];
-    [pktCountField setStringValue:@"Packets sent: 0"];
 }
 
 - (void)updateUI {
     if (connected) {
-        [pktCountField setStringValue:[NSString stringWithFormat:@"Packets sent: %u", packetCount]];
+        // Update controller name while connected
+        NSArray* controllers = [GCController controllers];
+        if ([controllers count] > 0) {
+            GCController* ctrl = controllers[0];
+            [ctrlNameField setStringValue:ctrl.vendorName ?: @""];
+        }
     } else {
         // Refresh controller list if empty
         if ([[ctrlPopUp itemTitles] count] == 0 || [[[ctrlPopUp selectedItem] title] isEqualToString:@"No controllers detected"]) {
