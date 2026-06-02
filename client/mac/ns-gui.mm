@@ -355,6 +355,16 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
         self->sock = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (self->sock < 0) return;
 
+        int opt = 1;
+        setsockopt(self->sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(self->sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+
+        struct sockaddr_in local_bind{};
+        local_bind.sin_family = AF_INET;
+        local_bind.sin_addr.s_addr = INADDR_ANY;
+        local_bind.sin_port = htons(42069);
+        ::bind(self->sock, (struct sockaddr*)&local_bind, sizeof(local_bind));
+
         struct addrinfo hints{}, *res = nullptr;
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
