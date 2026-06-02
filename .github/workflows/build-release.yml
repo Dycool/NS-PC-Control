@@ -1,0 +1,46 @@
+name: Build All Binaries and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # 1. Call the reusable workflows
+  build-windows:
+    uses: ./.github/workflows/build-windows.yml
+    
+  build-linux:
+    uses: ./.github/workflows/build-linux.yml
+    
+  build-macos:
+    uses: ./.github/workflows/build-macos.yml
+    
+  build-pi-backend:
+    uses: ./.github/workflows/build-pi.yml
+
+  # 2. Gather artifacts and create the release
+  release:
+    needs: [build-windows, build-linux, build-macos, build-pi-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: final-release
+          merge-multiple: true
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            final-release/ns-pc-control-windows.zip
+            final-release/ns-pc-control-linux.zip
+            final-release/ns-pc-control-mac.zip
+            final-release/ns-pc-control-raspberry-pi.zip
+          draft: true
+          generate_release_notes: true
