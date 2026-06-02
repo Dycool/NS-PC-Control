@@ -304,6 +304,19 @@ extern "C" gboolean on_timer(gpointer) {
     return G_SOURCE_CONTINUE;
 }
 
+static std::string get_exe_dir() {
+    char buf[1024];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        std::string exe(buf);
+        size_t pos = exe.find_last_of("/");
+        if (pos != std::string::npos)
+            return exe.substr(0, pos);
+    }
+    return ".";
+}
+
 // ── Entry point ──
 int main(int argc, char* argv[]) {
     gtk_init(&argc, &argv);
@@ -313,6 +326,7 @@ int main(int argc, char* argv[]) {
     gtk_window_set_default_size(GTK_WINDOW(window), 400, 240);
     gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
+    gtk_window_set_icon_from_file(GTK_WINDOW(window), (get_exe_dir() + "/icon.png").c_str(), nullptr);
 
     GtkWidget* grid = gtk_grid_new();
     gtk_container_add(GTK_CONTAINER(window), grid);

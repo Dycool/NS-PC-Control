@@ -1,0 +1,11 @@
+# Build artifacts
+*.exe
+*.obj
+*.o
+*.res
+*.manifest
+
+# IDE
+.vs/
+*.suo
+*.user

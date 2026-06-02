@@ -22,7 +22,12 @@ if exist "C:\msys64\ucrt64\bin\g++.exe" (
 echo === Building GUI app ===
 where cl >nul 2>&1
 if %ERRORLEVEL% == 0 (
-    cl /std:c++17 /O2 /EHsc /W3 ns-gui.cpp /link ws2_32.lib xinput.lib setupapi.lib comctl32.lib gdiplus.lib user32.lib kernel32.lib gdi32.lib advapi32.lib /out:ns-gui.exe /SUBSYSTEM:WINDOWS
+    if exist icon.ico (
+        rc /nologo ns-gui.rc
+        cl /std:c++17 /O2 /EHsc /W3 ns-gui.cpp ns-gui.res /link ws2_32.lib xinput.lib setupapi.lib comctl32.lib gdiplus.lib user32.lib kernel32.lib gdi32.lib advapi32.lib /out:ns-gui.exe /SUBSYSTEM:WINDOWS
+    ) else (
+        cl /std:c++17 /O2 /EHsc /W3 ns-gui.cpp /link ws2_32.lib xinput.lib setupapi.lib comctl32.lib gdiplus.lib user32.lib kernel32.lib gdi32.lib advapi32.lib /out:ns-gui.exe /SUBSYSTEM:WINDOWS
+    )
     goto :end
 )
 

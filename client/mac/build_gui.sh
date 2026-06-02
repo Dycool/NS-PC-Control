@@ -1,5 +1,7 @@
 #!/bin/bash
-# Build macOS GUI app
+# Build macOS GUI app with icon
+set -e
+
 clang++ -std=c++17 -ObjC++ -O2 -Wall \
     ns-gui.mm \
     -framework Cocoa -framework GameController -framework Foundation \
@@ -9,7 +11,28 @@ echo "Built ns-gui"
 # Create .app bundle
 mkdir -p ns-gui.app/Contents/MacOS
 mkdir -p ns-gui.app/Contents/Resources
+
 cp ns-gui ns-gui.app/Contents/MacOS/
+
+# Generate icon.icns from icon.png (requires macOS 10.8+)
+if [ -f icon.png ]; then
+    mkdir -p icon.iconset
+    # Standard icon sizes required by Apple
+    cp icon.png icon.iconset/icon_256x256.png
+    sips -z 16 16 icon.png --out icon.iconset/icon_16x16.png >/dev/null 2>&1
+    sips -z 32 32 icon.png --out icon.iconset/icon_16x16@2x.png >/dev/null 2>&1
+    sips -z 32 32 icon.png --out icon.iconset/icon_32x32.png >/dev/null 2>&1
+    sips -z 64 64 icon.png --out icon.iconset/icon_32x32@2x.png >/dev/null 2>&1
+    sips -z 128 128 icon.png --out icon.iconset/icon_128x128.png >/dev/null 2>&1
+    sips -z 256 256 icon.png --out icon.iconset/icon_128x128@2x.png >/dev/null 2>&1
+    sips -z 256 256 icon.png --out icon.iconset/icon_256x256.png >/dev/null 2>&1
+    sips -z 512 512 icon.png --out icon.iconset/icon_256x256@2x.png >/dev/null 2>&1
+    sips -z 512 512 icon.png --out icon.iconset/icon_512x512.png >/dev/null 2>&1
+    sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png >/dev/null 2>&1
+    iconutil -c icns icon.iconset -o ns-gui.app/Contents/Resources/icon.icns
+    rm -rf icon.iconset
+    echo "Created icon.icns"
+fi
 
 cat > ns-gui.app/Contents/Info.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -28,6 +51,8 @@ cat > ns-gui.app/Contents/Info.plist <<EOF
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.15</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
 </dict>
 </plist>
 EOF
