@@ -1,6 +1,6 @@
 # 🍓 Raspberry Pi Server Setup
 
-To use your Raspberry Pi as a controller emulator, you must configure it to act as a USB Gadget.
+To use your Raspberry Pi as a controller emulator, you must configure it to act as a USB Gadget. 
 
 ## ⚙️ Prerequisite: Enable USB Gadget Mode (Boot Settings)
 Before the Raspberry Pi can emulate a USB controller, you must enable the USB OTG drivers at the system level. Run the following commands in your Pi's terminal:
@@ -22,9 +22,30 @@ Connect the Raspberry Pi to the Switch dock via USB:
 * **Raspberry Pi 4:** Use the USB-C port.
 * **Raspberry Pi Zero / Zero 2 W:** Use the Inner Micro-USB data port.
 
-## 🔄 Automate on Boot (Systemd Service)
+---
 
-If you want the Raspberry Pi to automatically set up the USB gadget and start the backend every time you turn it on, create a systemd service.
+## 🚀 Running the Server (Manual Method)
+
+If you are running the pre-compiled release or just built the project from source, you need to run the setup script before starting the backend. 
+
+**1. Make the gadget script executable and run it:**
+This script sets up the `libcomposite` gadget to make the Pi emulate a HORI Pokken Controller. Run it **before** connecting the Pi to the Switch.
+```bash
+chmod +x setup_gadget.sh
+sudo bash setup_gadget.sh
+```
+
+**2. Start the server backend:**
+We run the backend with `chrt -f 99` to give the process maximum real-time priority, ensuring the lowest possible latency.
+```bash
+sudo chrt -f 99 ./ns-backend
+```
+
+---
+
+## 🔄 Automate on Boot (Optional Systemd Service)
+
+If you want the Raspberry Pi to automatically set up the USB gadget and start the backend every time you turn it on (so you don't have to run the commands above manually), create a systemd service.
 
 1. Create a new service file:
 ```bash
