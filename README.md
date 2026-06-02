@@ -5,7 +5,7 @@
 This project was built from scratch in **C++** and uses **UDP** to guarantee the lowest possible latency. It's the ideal setup for playing Switch games using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions.
 
 > **📦 Pre-compiled Binaries Available!**
-> You can download ready-to-use frontend executables for Windows, Linux, and macOS directly from the **[Releases](https://github.com/Dycool/Nintendo-Switch-PC-Control/releases)** page.
+> You can download ready-to-use client executables for Windows, Linux, and macOS directly from the **[Releases](https://github.com/Dycool/Nintendo-Switch-PC-Control/releases)** page.
 
 ---
 
@@ -109,14 +109,14 @@ sudo systemctl start ns-control.service
 
 ---
 
-### Part 2: PC (Frontend Only)
+### Part 2: PC (client Only)
 
-Clone only the frontend portion of the repository:
+Clone only the client portion of the repository:
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/Dycool/Nintendo-Switch-PC-Control.git
 cd Nintendo-Switch-PC-Control
-git sparse-checkout set frontend
+git sparse-checkout set client
 ```
 
 ---
@@ -126,9 +126,9 @@ git sparse-checkout set frontend
 **Prerequisite:** You must have **MSYS2** installed. [Get it here](https://www.msys2.org/). 
 *Note: After installing, you must open the **MSYS2 UCRT64** terminal (not the default MSYS terminal) to build the project.*
 
-1. Open the **MSYS2 UCRT64** terminal and navigate to the `frontend/windows/` folder.
+1. Open the **MSYS2 UCRT64** terminal and navigate to the `client/windows/` folder.
 
-2. Build the frontend by running:
+2. Build the client by running:
 
 ```bash
 g++.exe -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxinput
@@ -138,9 +138,9 @@ g++.exe -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -
 
 ## 🐧 Linux (Ubuntu / Debian / SteamOS)
 
-1. Navigate to the `frontend/linux/` folder.
+1. Navigate to the `client/linux/` folder.
 
-2. Compile the frontend:
+2. Compile the client:
 
 ```bash
 g++ -O3 -pthread ns-gamepad.cpp -o ns-gamepad
@@ -167,7 +167,7 @@ jstest /dev/input/js0
 
 ## 🍎 macOS
 
-The macOS frontend uses Apple's **GameController framework**, which natively supports Xbox, PlayStation, MFi, and Switch Pro Controllers over USB or Bluetooth — no third-party drivers needed.
+The macOS client uses Apple's **GameController framework**, which natively supports Xbox, PlayStation, MFi, and Switch Pro Controllers over USB or Bluetooth — no third-party drivers needed.
 
 #### ⚙️ Prerequisite: Xcode Command Line Tools
 
@@ -184,11 +184,11 @@ clang++ --version
 # Expected output: Apple clang version 15.x.x (or similar)
 ```
 
-#### Build the frontend
+#### Build the client
 
-1. Navigate to the `frontend/macos/` folder.
+1. Navigate to the `client/macos/` folder.
 
-2. Compile the frontend:
+2. Compile the client:
 
 ```bash
 clang++ -std=c++17 -ObjC++ \
@@ -214,7 +214,7 @@ On **macOS 10.15 Catalina and later**, Bluetooth controllers may require the **I
 
 **System Settings → Privacy & Security → Input Monitoring**
 
-and enable it for Terminal (or whichever app you're running the frontend from).
+and enable it for Terminal (or whichever app you're running the client from).
 
 ---
 
