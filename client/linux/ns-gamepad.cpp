@@ -1,6 +1,7 @@
 #include <iostream>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <thread>
 #include <algorithm>
 #include <cstring>
@@ -227,7 +228,8 @@ ns::HIDReport map_linux_js_to_switch(const GamepadState& pad) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [device_path]\n";
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [device_path]\n"
+                  << "       e.g. " << argv[0] << " 192.168.1.100 /dev/input/js1\n";
         return 1;
     }
     std::string host   = argv[1];

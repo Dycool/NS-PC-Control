@@ -11,6 +11,7 @@
 #include <iostream>            // Standard I/O for console output
 #include <chrono>              // High-resolution timing
 #include <cstdint>             // Fixed-width integer types
+#include <cstdlib>             // atoi
 #include <thread>              // Threading support
 #include <algorithm>           // Standard algorithms (clamp)
 #include "sha256.h"            // HMAC-SHA256 for packet authentication
@@ -186,11 +187,13 @@ ns::HIDReport map_xinput_to_switch(const XINPUT_GAMEPAD& pad) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP>\n";
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [controller_index]\n";
         return 1;
     }
-    std::string host = argv[1];
-    uint16_t port    = ns::DEFAULT_PORT;
+    std::string host  = argv[1];
+    uint16_t port     = ns::DEFAULT_PORT;
+    DWORD ctrl_index  = 0;
+    if (argc > 2) { ctrl_index = (DWORD)std::clamp(std::atoi(argv[2]), 0, 3); }
 
     // Derive HMAC key from compiled-in default secret (always active)
     uint8_t hmac_key[32];
@@ -236,8 +239,7 @@ int main(int argc, char** argv) {
         // Clear state structure
         ZeroMemory(&state, sizeof(XINPUT_STATE));
         
-        // Attempt to read XInput gamepad state (controller index 0)
-        if (XInputGetState(0, &state) == ERROR_SUCCESS) {
+        if (XInputGetState(ctrl_index, &state) == ERROR_SUCCESS) {
             
             // Convert XInput format to Switch HID format
             ns::HIDReport report = map_xinput_to_switch(state.Gamepad);

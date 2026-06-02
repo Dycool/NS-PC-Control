@@ -21,6 +21,12 @@
 #include <arpa/inet.h>
 #include <errno.h>
 
+#ifdef USE_UPNP
+#include <miniupnpc/miniupnpc.h>
+#include <miniupnpc/upnpcommands.h>
+#include <miniupnpc/upnperrors.h>
+#endif
+
 using namespace ns;
 using Clock = std::chrono::steady_clock;
 using us    = std::chrono::microseconds;
@@ -115,8 +121,14 @@ static void writer_thread(const std::string& dev, int hz) {
             {
                 std::lock_guard<std::mutex> lk(g_mtx);
                 if (silent) {
-                    g_report.reset();
-                    g_autofire_mask = 0;
+                    // EXPLICIT NEUTRAL STATE (Switch standard)
+                    g_report.buttons = 0;
+                    g_report.hat     = 8;
+                    g_report.lx      = 128;
+                    g_report.ly      = 128;
+                    g_report.rx      = 128;
+                    g_report.ry      = 128;
+                    g_autofire_mask  = 0;
                 }
                 r       = g_report;
                 af_mask = g_autofire_mask;
@@ -196,12 +208,75 @@ static bool rate_allow(uint32_t ip) {
     return s.count <= RATE_MAX_PKT;
 }
 
+#ifdef USE_UPNP
+// ── UPnP port forwarding ──
+static bool g_upnp_active = false;
+static UPNPUrls g_upnp_urls{};
+static IGDdatas g_upnp_data{};
+static char g_upnp_lan_addr[64]{}; // Renamed to reflect what this actually holds
+
+static bool upnp_add_mapping(uint16_t port) {
+    struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, nullptr);
+    if (!devlist) {
+        std::fprintf(stderr, "[backend] UPnP: no IGD (router) found\n");
+        return false;
+    }
+    
+    // This populates g_upnp_lan_addr with your LOCAL IP (e.g. 192.168.1.50)
+    int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data, g_upnp_lan_addr, sizeof(g_upnp_lan_addr));
+    freeUPNPDevlist(devlist);
+    
+    if (igd != 1 && igd != 2) {
+        std::fprintf(stderr, "[backend] UPnP: no valid IGD (code %d)\n", igd);
+        return false;
+    }
+    
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+    
+    // Request the port mapping using the LAN IP
+    int r = UPNP_AddPortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype,
+                                port_str, port_str, g_upnp_lan_addr, "ns-backend", "UDP", nullptr, "0");
+    if (r != 0) {
+        std::fprintf(stderr, "[backend] UPnP: AddPortMapping failed: %s (code %d)\n", strupnperror(r), r);
+        return false;
+    }
+    
+    g_upnp_active = true;
+
+    // Fetch and display the actual Public/External IP for the user
+    char external_ip[40];
+    if (UPNP_GetExternalIPAddress(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, external_ip) == 0) {
+        std::printf("[backend] UPnP: UDP port %u successfully forwarded!\n", port);
+        std::printf("[backend] UPnP: Tell your client to connect to -> %s:%u\n", external_ip, port);
+    } else {
+        std::printf("[backend] UPnP: UDP port %u forwarded to LAN IP %s (Could not fetch public IP)\n", port, g_upnp_lan_addr);
+    }
+    
+    return true;
+}
+
+static void upnp_remove_mapping(uint16_t port) {
+    if (!g_upnp_active) return;
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+    UPNP_DeletePortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, port_str, "UDP", nullptr);
+    std::puts("[backend] UPnP: port mapping removed cleanly");
+    FreeUPNPUrls(&g_upnp_urls);
+    g_upnp_active = false;
+}
+#else
+static bool upnp_add_mapping(uint16_t) { return false; }
+static void upnp_remove_mapping(uint16_t) {}
+#endif
+
 // ── UDP receive loop (main thread) ────────────────────────────────────────────
 int main(int argc, char** argv) {
     uint16_t    port      = DEFAULT_PORT;
     std::string device    = "/dev/hidg0";
     int         rate_hz   = WRITER_HZ;
     std::string bind_addr = "0.0.0.0";
+    bool        do_upnp   = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -210,8 +285,9 @@ int main(int argc, char** argv) {
         else if (a == "-r" && i+1 < argc) rate_hz   = std::atoi(argv[++i]);
         else if (a == "-b" && i+1 < argc) bind_addr = argv[++i];
         else if (a == "-v")               g_verbose  = true;
+        else if (a == "--upnp")           do_upnp    = true;
         else if (a == "-h") {
-            puts("ns-backend  [-p PORT] [-d /dev/hidg0] [-r HZ] [-b ADDR] [-v]");
+            puts("ns-backend  [-p PORT] [-d /dev/hidg0] [-r HZ] [-b ADDR] [--upnp] [-v]");
             return 0;
         }
     }
@@ -229,6 +305,9 @@ int main(int argc, char** argv) {
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
+
+    // ── UPnP port forwarding ──
+    if (do_upnp) upnp_add_mapping(port);
 
     // ── Create UDP socket ─────────────────────────────────────────────────────
     int sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
@@ -337,8 +416,14 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             if (pkt.flags & FLAG_RESET) {
-                g_report.reset();
-                g_autofire_mask = 0;
+                // EXPLICIT NEUTRAL STATE (Switch standard)
+                g_report.buttons = 0;
+                g_report.hat     = 8;
+                g_report.lx      = 128;
+                g_report.ly      = 128;
+                g_report.rx      = 128;
+                g_report.ry      = 128;
+                g_autofire_mask  = 0;
                 if (g_verbose) puts("[backend] reset received");
             } else {
                 g_report = pkt.report;
@@ -360,6 +445,7 @@ int main(int argc, char** argv) {
     }
 
     puts("[backend] shutting down");
+    upnp_remove_mapping(port);
     close(ep);
     close(sock);
     wt.join();

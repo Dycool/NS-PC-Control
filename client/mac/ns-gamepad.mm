@@ -26,6 +26,7 @@
 #include <iostream>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <thread>
 #include <algorithm>
 #include <atomic>
@@ -339,10 +340,12 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP>\n";
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [controller_index]\n";
         return 1;
     }
     std::string host = argv[1];
+    int ctrl_index = 0;
+    if (argc > 2) { ctrl_index = std::clamp(std::atoi(argv[2]), 0, 3); }
 
     // Derive HMAC key from compiled-in default secret (always active)
     uint8_t hmac_key[32];
@@ -446,16 +449,23 @@ int main(int argc, char** argv) {
     }];
 
     // Handle controllers that were already connected when the program launched
-    for (GCController* ctrl in [GCController controllers]) {
+    NSArray* existing = [GCController controllers];
+    int found = 0;
+    for (GCController* ctrl in existing) {
         if (ctrl.extendedGamepad) {
-            NSString* name = ctrl.vendorName ?: @"Unknown Controller";
-            std::cout << "Found existing controller: " << name.UTF8String << "\n";
-            attach_handlers(ctrl.extendedGamepad, statePtr);
-            break;  // Use only the first extended-gamepad-capable controller
+            if (found == ctrl_index) {
+                NSString* name = ctrl.vendorName ?: @"Unknown Controller";
+                std::cout << "Using controller: " << name.UTF8String << " (index " << ctrl_index << ")\n";
+                attach_handlers(ctrl.extendedGamepad, statePtr);
+                break;
+            }
+            ++found;
         }
     }
+    if (found <= ctrl_index)
+        std::cout << "Controller index " << ctrl_index << " not found — waiting for connection...\n";
 
-    if ([[GCController controllers] count] == 0)
+    if ([existing count] == 0)
         std::cout << "No controller detected — waiting for one to be connected...\n";
 
     // ── Main NSRunLoop ─────────────────────────────────────────────────────────

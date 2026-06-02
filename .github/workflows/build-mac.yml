@@ -12,13 +12,22 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Build macOS
+
+      - name: Build Terminal Client
         run: |
           cd client/mac/
           clang++ -std=c++17 -ObjC++ -framework GameController -framework Foundation ns-gamepad.mm -o ns-gamepad
-          zip ns-pc-control-mac.zip ns-gamepad
-          
+
+      - name: Build GUI App Bundle
+        run: |
+          cd client/mac/
+          bash build_gui.sh
+
+      - name: Package
+        run: |
+          cd client/mac/
+          zip -r ns-pc-control-mac.zip ns-gamepad ns-gui.app
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-artifact

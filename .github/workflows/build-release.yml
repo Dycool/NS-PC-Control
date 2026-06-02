@@ -10,7 +10,6 @@ permissions:
   contents: write
 
 jobs:
-  # 1. Call the reusable workflows
   build-windows:
     uses: ./.github/workflows/build-windows.yml
     
@@ -23,7 +22,6 @@ jobs:
   build-pi-server:
     uses: ./.github/workflows/build-pi.yml
 
-  # 2. Gather artifacts and create the release
   release:
     needs: [build-windows, build-linux, build-mac, build-pi-server]
     runs-on: ubuntu-latest
