@@ -1,0 +1,24 @@
+name: Test Build macOS
+
+on:
+  push:
+    paths:
+      - 'frontend/mac/**'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build macOS
+        run: |
+          cd frontend/mac/
+          clang++ -std=c++17 -ObjC++ -framework GameController -framework Foundation ns-gamepad.mm -o ns-gamepad
+          zip ns-pc-control-mac.zip ns-gamepad
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifact
+          path: frontend/mac/ns-pc-control-mac.zip
