@@ -78,7 +78,6 @@ static std::atomic<bool> g_senderRunning{false};
 static std::thread g_senderThread;
 static uint8_t g_hmacKey[32]{};
 static uint32_t g_packetCount = 0;
-static int g_selectedJoyIndex = 0;
 
 struct JoyInfo {
     std::string device;

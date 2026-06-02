@@ -16,19 +16,33 @@ jobs:
       - name: Install ARM Cross-Compiler and deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-aarch64-linux-gnu cmake zip
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y libminiupnpc-dev:arm64 2>/dev/null || echo "miniupnpc:arm64 not available, UPnP disabled"
-        
+          sudo apt-get install -y g++-aarch64-linux-gnu cmake zip wget
+
+      - name: Cross-compile miniupnpc for aarch64
+        run: |
+          wget -q https://github.com/miniupnp/miniupnp/archive/refs/tags/miniupnpc_2_2_8.tar.gz
+          tar xzf miniupnpc_2_2_8.tar.gz
+          cd miniupnp-miniupnpc_2_2_8
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_INSTALL_PREFIX=/tmp/miniupnpc \
+            -DBUILD_SHARED_LIBS=OFF
+          make -j$(nproc)
+          make install
+
       - name: Build Pi Server
         run: |
           cd server/rpi
           mkdir build && cd build
-          cmake .. -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
-          make
+          cmake .. \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DMINIUPNPC_INCLUDE_DIRS=/tmp/miniupnpc/include \
+            -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a
+          make -j$(nproc)
           cp ../setup_gadget.sh .
-          zip ns-pc-control-raspberry-pi.zip ns-server setup_gadget.sh
+          zip ns-pc-control-raspberry-pi.zip ns-backend setup_gadget.sh
           
       - uses: actions/upload-artifact@v4
         with:
