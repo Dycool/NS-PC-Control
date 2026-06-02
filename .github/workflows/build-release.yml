@@ -20,7 +20,7 @@ jobs:
   build-mac:
     uses: ./.github/workflows/build-mac.yml
     
-  build-pi-backend:
+  build-pi-server:
     uses: ./.github/workflows/build-pi.yml
 
   # 2. Gather artifacts and create the release
