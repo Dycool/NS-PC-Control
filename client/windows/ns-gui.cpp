@@ -15,8 +15,6 @@
 #include <devguid.h>
 #include <cfgmgr32.h>
 #include <dbt.h>
-#include <objidl.h>
-#include <gdiplus.h>
 
 #include <string>
 #include <vector>
@@ -34,7 +32,6 @@
 #pragma comment(lib, "xinput.lib")
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "gdiplus.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -581,23 +578,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
 }
 
-// ── Load icon.png from the executable's directory ──
-static HICON LoadPNGIcon() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileName(nullptr, exePath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(exePath, L'\\');
-    if (lastSlash) lastSlash[1] = L'\0';
-    wcscat_s(exePath, L"icon.png");
-
-    if (GetFileAttributes(exePath) == INVALID_FILE_ATTRIBUTES)
-        return nullptr;
-
-    Gdiplus::Bitmap bitmap(exePath);
-    HICON hIcon = nullptr;
-    bitmap.GetHICON(&hIcon);
-    return hIcon;
-}
-
 // ── Entry point ──
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     g_hInst = hInst;
@@ -605,13 +585,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
-    // Initialize GDI+ for PNG loading
-    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    ULONG_PTR gdiplusToken;
-    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
-
-    // Load icon.png from exe directory
-    HICON hIcon = LoadPNGIcon();
+    // Load icon from embedded resource (ID 1 from ns-gui.rc)
+    HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(1));
 
     const wchar_t CLASS_NAME[] = L"NSGamepadWindow";
     WNDCLASS wc{};
@@ -650,6 +625,5 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
     DoDisconnect();
     WSACleanup();
-    Gdiplus::GdiplusShutdown(gdiplusToken);
     return 0;
 }
