@@ -102,7 +102,7 @@ static void writer_thread(const std::string& dev, int hz) {
 
         auto next = Clock::now() + tick;
         HIDReport prev{};
-        prev.buttons = 0xFF; // force first write after (re)connect
+        prev.buttons = 0xFFFF; // Force first write after (re)connect
         bool error_shown = false;
 
         // ── Inner loop: write until disconnected ─────────────────────────────
@@ -112,19 +112,20 @@ static void writer_thread(const std::string& dev, int hz) {
             auto now = Clock::now();
             next = std::max(next + tick, now + tick);
 
-            // Watchdog
+            // Watchdog: Trigger if we haven't received a UDP packet in 250ms
             uint64_t last = g_last_rx_us.load(std::memory_order_acquire);
-            bool silent = (last != 0) && (now_us() - last > (uint64_t)WATCHDOG_MS * 1000u);
+            bool silent = (last != 0) && (now_us() - last > 250'000u);
 
             HIDReport r;
             uint16_t  af_mask;
             {
                 std::lock_guard<std::mutex> lk(g_mtx);
                 if (silent) {
-                    // EXPLICIT NEUTRAL STATE (Switch standard)
-                    g_report.buttons = 0;
-                    g_report.hat     = 8;
-                    g_report.lx      = 128;
+                    // EXPLICIT NEUTRAL STATE: 
+                    // Do not use reset() as it zeroes values (which presses UP/LEFT)
+                    g_report.buttons = 0;   // 0 means no buttons pressed
+                    g_report.hat     = 8;   // 8 is the HID standard for a centered D-Pad
+                    g_report.lx      = 128; // 128 (0x80) is centered for joysticks
                     g_report.ly      = 128;
                     g_report.rx      = 128;
                     g_report.ry      = 128;
@@ -135,7 +136,7 @@ static void writer_thread(const std::string& dev, int hz) {
             }
 
             if (silent && last != 0) {
-                if (g_verbose) std::puts("[backend] watchdog: zeroing inputs");
+                if (g_verbose) std::puts("[backend] watchdog: connection lost, returning to neutral");
                 g_last_rx_us.store(0, std::memory_order_release);
             }
 
@@ -147,6 +148,7 @@ static void writer_thread(const std::string& dev, int hz) {
                 af_tick = 0; af_state = 0;
             }
 
+            // Skip if the state hasn't changed to save CPU
             if (r == prev) continue;
 
             ssize_t n = write(fd, &r, sizeof(r));
@@ -170,8 +172,12 @@ static void writer_thread(const std::string& dev, int hz) {
     }
 
     if (fd >= 0) {
-        HIDReport zero{};
-        write(fd, &zero, sizeof(zero));
+        // Send a true neutral state before cleanly shutting down the backend
+        HIDReport neutral{};
+        neutral.buttons = 0; 
+        neutral.hat = 8;
+        neutral.lx = 128; neutral.ly = 128; neutral.rx = 128; neutral.ry = 128;
+        write(fd, &neutral, sizeof(neutral));
         close(fd);
     }
 }
