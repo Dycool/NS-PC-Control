@@ -74,7 +74,11 @@ enum Flags : uint8_t {
     FLAG_AUTOFIRE = 0x02,  // autofire_mask is active
 };
 
+// ── HMAC authentication tag (truncated HMAC-SHA256) ─────────────────────────
+static constexpr std::size_t HMAC_TAG_SIZE = 16;
+
 // ── UDP wire packet (frontend -> backend) ─────────────────────────────────────
+// If --secret is set on both sides, the HMAC tag covers all fields *before* hmac[].
 struct Packet {
     uint32_t  magic;         // PROTO_MAGIC
     uint8_t   version;       // PROTO_VERSION
@@ -83,9 +87,11 @@ struct Packet {
     uint32_t  seq;           // monotonic sequence counter
     uint64_t  ts_us;         // sender steady_clock microseconds (for latency stats)
     HIDReport report;
+    uint8_t   hmac[HMAC_TAG_SIZE];
 } __attribute__((packed));
 
-static constexpr std::size_t PACKET_SIZE = sizeof(Packet);
+static constexpr std::size_t PACKET_SIZE     = sizeof(Packet);
+static constexpr std::size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 inline uint64_t now_us() noexcept {

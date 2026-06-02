@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <linux/joystick.h>
 #include <sys/resource.h>
+#include "sha256.h"
 
 // Undefine conflicting button macros from linux/joystick.h to avoid naming conflicts
 // with the custom Button enum defined in the ns namespace
@@ -79,7 +80,10 @@ enum Flags : uint8_t {
     FLAG_AUTOFIRE=0x02      // Enable autofire for specified buttons
 };
 
-/// UDP wire packet structure sent from PC frontend to Raspberry Pi backend (~24 bytes)
+/// HMAC authentication tag (truncated HMAC-SHA256)
+static constexpr size_t HMAC_TAG_SIZE = 16;
+
+/// UDP wire packet structure sent from PC frontend to Raspberry Pi backend (~44 bytes with HMAC)
 struct Packet {
     uint32_t  magic;         // PROTO_MAGIC for validation
     uint8_t   version;       // PROTO_VERSION for compatibility
@@ -88,11 +92,13 @@ struct Packet {
     uint32_t  seq;           // Monotonic sequence counter for packet ordering
     uint64_t  ts_us;         // Sender's steady_clock timestamp in microseconds (for latency calculation)
     HIDReport report;        // The actual gamepad input report
+    uint8_t   hmac[HMAC_TAG_SIZE];
 };
 #pragma pack(pop)
 
 /// Cached packet size for efficiency (avoids repeated sizeof calculations)
-static constexpr size_t PACKET_SIZE = sizeof(Packet);
+static constexpr size_t PACKET_SIZE      = sizeof(Packet);
+static constexpr size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
 
 /// Get current time in microseconds using steady_clock (high precision, monotonic)
 inline uint64_t now_us() noexcept {
@@ -219,15 +225,27 @@ ns::HIDReport map_linux_js_to_switch(const GamepadState& pad) {
 }
 
 int main(int argc, char** argv) {
-    // Validate command-line arguments
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [device_path (e.g. /dev/input/js0)]\n";
+    // Parse arguments (positional: IP [device], optional: --secret KEY)
+    std::string host;
+    std::string device = "/dev/input/js0";
+    uint8_t  hmac_key[32];
+    bool     have_secret = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string a(argv[i]);
+        if (a == "--secret" && i + 1 < argc) {
+            derive_key(argv[++i], hmac_key);
+            have_secret = true;
+        } else if (host.empty()) {
+            host = a;
+        } else if (device == "/dev/input/js0") {
+            device = a;
+        }
+    }
+    if (host.empty()) {
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [device_path] [--secret KEY]\n";
         return 1;
     }
-
-    // Parse IP address and device path from arguments
-    std::string host = argv[1];
-    std::string device = (argc >= 3) ? argv[2] : "/dev/input/js0";  // Default to /dev/input/js0
 
     // Open Linux joystick device for reading raw input events
     int js_fd = open(device.c_str(), O_RDONLY);
@@ -290,6 +308,11 @@ int main(int argc, char** argv) {
             pkt.seq           = packet_seq++;
             pkt.ts_us         = ns::now_us();                    // Current timestamp for latency measurement
             pkt.report        = map_linux_js_to_switch(state);   // Convert state to Switch format
+            if (have_secret) {
+                uint8_t full_hmac[32];
+                hmac_sha256(hmac_key, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
+                memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+            }
 
             // Send packet to Raspberry Pi via UDP
             sendto(sock, &pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));

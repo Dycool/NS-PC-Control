@@ -204,6 +204,40 @@ For the lowest possible latency:
 * Avoid Wi-Fi power-saving modes.
 
 ---
+
+## 🔐 Secure Remote Access (Internet / Port Forwarding)
+
+To safely expose the Raspberry Pi to the internet (outside your home network), you can enable **packet authentication** using a shared secret:
+
+**Backend (Raspberry Pi):**
+```bash
+sudo chrt -f 99 ./ns-backend -s "your-shared-secret"
+```
+
+**Frontend (PC):**
+```bash
+# Windows
+./ns-gamepad.exe <PI_IP> --secret "your-shared-secret"
+
+# Linux
+./ns-gamepad <PI_IP> --secret "your-shared-secret"
+
+# macOS
+./ns-gamepad <PI_IP> --secret "your-shared-secret"
+```
+
+Each UDP datagram is authenticated with a truncated **HMAC-SHA256** tag using the shared secret. The backend silently drops any packet with an invalid or missing tag — preventing remote attackers from injecting controller inputs over the internet.
+
+**Latency impact:** Negligible (~1 µs per packet). No encryption overhead — the payload remains visible on the wire (button states), which is acceptable for a game controller use case.
+
+> **Without `--secret` / `-s`**, behavior is identical to the original — no authentication, suitable only for trusted local networks.
+
+---
+
+## Planned
+
+* UI for clients
+---
 ## Planned
 
 * UI for clients
