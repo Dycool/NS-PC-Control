@@ -92,17 +92,17 @@ void fetch_pad_throttled(DWORD index, ns::HIDReport& rep, bool& conn) {
 }
 
 int main(int argc, char** argv) {
-    std::string host = ""; uint16_t port = ns::DEFAULT_PORT;
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "-p" && i+1 < argc) port = (uint16_t)std::atoi(argv[++i]);
-        else if (host.empty()) host = arg;
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]>\n";
+        return 1;
     }
 
-    if (host.empty()) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [-p PORT]\n";
-        return 1;
+    std::string host = argv[1];
+    uint16_t port = ns::DEFAULT_PORT;
+    size_t colon = host.find(':');
+    if (colon != std::string::npos) {
+        port = (uint16_t)std::atoi(host.c_str() + colon + 1);
+        host.resize(colon);
     }
 
     uint8_t hmac_key[32]; derive_key(ns::DEFAULT_SECRET, hmac_key);
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     sockaddr_in dest{}; memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
 
-    std::cout << "Started as a Multi-Client Node... Connect Xbox controllers and enjoy!\n";
+    std::cout << "Started... Press Ctrl+C to stop\n";
     uint32_t seq = 0;
 
     while (true) {
