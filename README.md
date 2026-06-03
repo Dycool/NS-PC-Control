@@ -2,16 +2,16 @@
   <img src="client/windows/icon.png" alt="Icon" width="128" height="128">
 </p>
 
-# 🎮 Nintendo Switch PC Control 
+# 🎮 NS PC Control 
 
-**Control your Nintendo Switch from a PC (Windows, Linux, or macOS) with low latency using a Raspberry Pi.**
+**Control your Console from a PC (Windows, Linux, or macOS) with low latency using a Raspberry Pi.**
 
 This project was built from scratch in **C++** and uses **UDP** to guarantee the lowest possible latency. It's the ideal setup for playing Switch games using your PC controller, avoiding the typical lag of Bluetooth or heavy script-based solutions. 
 
 With version 2.0.0+, clients now feature a **Graphical User Interface (GUI)** for easy connection, alongside the classic CLI.
 
 > **📦 Pre-compiled Binaries Available!**
-> You can download ready-to-use GUI/CLI clients and the Raspberry Pi server directly from the **[Releases](https://github.com/Dycool/Nintendo-Switch-PC-Control/releases)** page.
+> You can download ready-to-use GUI/CLI clients and the Raspberry Pi server directly from the **[Releases](https://github.com/Dycool/NS-PC-Control/releases)** page.
 
 ---
 
@@ -31,7 +31,7 @@ With version 2.0.0+, clients now feature a **Graphical User Interface (GUI)** fo
 
 ## 🕹️ Controls & Shortcuts
 
-Any **XInput-compatible controller** connected to your PC (Xbox controllers and most standard PC gamepads) can control the Nintendo Switch.
+Any **XInput-compatible controller** connected to your PC (Xbox controllers and most standard PC gamepads).
 
 | Action  | Shortcut                                |
 | ------- | --------------------------------------- |
