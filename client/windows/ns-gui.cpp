@@ -159,7 +159,7 @@ static std::string g_targetHost;
 static uint16_t g_targetPort = ns::DEFAULT_PORT;
 
 // ── Registry helpers ──
-static const wchar_t* REG_KEY = L"Software\\NintendoSwitchPCControl";
+static const wchar_t* REG_KEY = L"Software\\NSPCControl";
 static const wchar_t* REG_VAL_IP = L"LastIP";
 
 static std::wstring LoadSavedIP() {

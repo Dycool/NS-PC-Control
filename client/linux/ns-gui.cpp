@@ -158,7 +158,7 @@ static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
 
     conn = true;
 
-    // Standardised button mapping (Xbox physical -> Nintendo Switch)
+    // Standardised button mapping (Xbox physical -> Switch)
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)) rep.buttons |= ns::BTN_B;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B)) rep.buttons |= ns::BTN_A;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X)) rep.buttons |= ns::BTN_Y;
