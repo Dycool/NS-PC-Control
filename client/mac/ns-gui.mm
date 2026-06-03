@@ -209,6 +209,8 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
     // Trigger the Input Monitoring permission prompt if needed
     if (!CGPreflightListenEventAccess()) CGRequestListenEventAccess();
 
+    memset(hmacKey, 0, sizeof(hmacKey));
+
     for (int i = 0; i < 4; ++i) {
         controllers[i] = nil;
         hwNames[i] = @"";

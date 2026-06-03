@@ -105,10 +105,14 @@ int main(int argc, char** argv) {
     }
 
     std::string host = argv[1];
-    uint16_t port = ns::DEFAULT_PORT;
+    int port = ns::DEFAULT_PORT;
     size_t colon = host.find(':');
     if (colon != std::string::npos) {
-        port = (uint16_t)std::atoi(host.c_str() + colon + 1);
+        port = std::atoi(host.c_str() + colon + 1);
+        if (port < 1 || port > 65535) {
+            std::cerr << "Invalid port: " << port << " (must be 1–65535)\n";
+            timeEndPeriod(1); return 1;
+        }
         host.resize(colon);
     }
 
@@ -122,7 +126,7 @@ int main(int argc, char** argv) {
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET; hints.ai_socktype = SOCK_DGRAM; 
 
-    char port_buf[8]; snprintf(port_buf, sizeof(port_buf), "%u", port);
+    char port_buf[8]; snprintf(port_buf, sizeof(port_buf), "%d", port);
     if (getaddrinfo(host.c_str(), port_buf, &hints, &res) != 0 || res == nullptr) {
         std::cerr << "ERROR: Unable to resolve IP: " << host << "\n";
         timeEndPeriod(1); WSACleanup(); return 1;

@@ -36,6 +36,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include "../../server/rpi/include/sha256.h"
 #include "../../server/rpi/include/protocol.hpp"
@@ -214,16 +215,28 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
 //  Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
+    // Single-instance lock
+    int lock_fd = open("/tmp/ns-gamepad.lock", O_CREAT | O_RDWR, 0644);
+    if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
+        std::cerr << "Another instance is already running.\n";
+        if (lock_fd >= 0) close(lock_fd);
+        return 1;
+    }
+
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]>\n";
         return 1;
     }
 
     std::string host = argv[1];
-    uint16_t port = ns::DEFAULT_PORT;
+    int port = ns::DEFAULT_PORT;
     size_t colon = host.find(':');
     if (colon != std::string::npos) {
-        port = (uint16_t)std::atoi(host.c_str() + colon + 1);
+        port = std::atoi(host.c_str() + colon + 1);
+        if (port < 1 || port > 65535) {
+            std::cerr << "Invalid port: " << port << " (must be 1–65535)\n";
+            close(lock_fd); return 1;
+        }
         host.resize(colon);
     }
 
@@ -243,7 +256,7 @@ int main(int argc, char** argv) {
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
-    char port_str[8]; snprintf(port_str, sizeof(port_str), "%u", port);
+    char port_str[8]; snprintf(port_str, sizeof(port_str), "%d", port);
 
     if (getaddrinfo(host.c_str(), port_str, &hints, &res) != 0 || !res) {
         std::cerr << "Cannot resolve address: " << host << "\n";
@@ -378,5 +391,7 @@ int main(int argc, char** argv) {
     g_running.store(false, std::memory_order_relaxed);
     if (sender.joinable()) sender.join();
     close(sock);
+    close(lock_fd);
+    unlink("/tmp/ns-gamepad.lock");
     return 0;
 }
