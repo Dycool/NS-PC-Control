@@ -73,4 +73,10 @@ fi
 
 echo "$UDC" > "$GADGET_DIR/UDC"
 echo "[gadget] Bound to UDC: $UDC"
-echo "[gadget] Done. Exposed 4 interfaces: /dev/hidg0 to /dev/hidg3"
+
+# Allow ns-backend to access HID devices without root
+sleep 0.5
+for i in {0..3}; do
+    chmod 666 "/dev/hidg$i" 2>/dev/null || true
+done
+echo "[gadget] Done. Exposed 4 interfaces: /dev/hidg0 to /dev/hidg3 (world-readable)"

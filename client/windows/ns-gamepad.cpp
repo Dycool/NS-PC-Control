@@ -3,6 +3,7 @@
 #endif
 
 #include <windows.h>           
+#include <mmsystem.h>          
 #include <winsock2.h>          
 #include <ws2tcpip.h>          
 #include <xinput.h>            
@@ -96,9 +97,11 @@ void fetch_pad_throttled(DWORD index, ns::HIDReport& rep, bool& conn) {
 }
 
 int main(int argc, char** argv) {
+    timeBeginPeriod(1);
+
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]>\n";
-        return 1;
+        timeEndPeriod(1); return 1;
     }
 
     std::string host = argv[1];
@@ -122,7 +125,7 @@ int main(int argc, char** argv) {
     char port_buf[8]; snprintf(port_buf, sizeof(port_buf), "%u", port);
     if (getaddrinfo(host.c_str(), port_buf, &hints, &res) != 0 || res == nullptr) {
         std::cerr << "ERROR: Unable to resolve IP: " << host << "\n";
-        WSACleanup(); return 1;
+        timeEndPeriod(1); WSACleanup(); return 1;
     }
     
     sockaddr_in dest{}; memcpy(&dest, res->ai_addr, sizeof(dest));
@@ -184,5 +187,5 @@ int main(int argc, char** argv) {
 
     std::cout << "\nShutting down...\n";
     closesocket(sock); WSACleanup(); 
-    return 0;
+    timeEndPeriod(1); return 0;
 }

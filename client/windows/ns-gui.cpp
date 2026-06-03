@@ -6,6 +6,7 @@
 #define _UNICODE
 
 #include <windows.h>
+#include <mmsystem.h>
 #include <windowsx.h>
 #include <commctrl.h>
 #include <winsock2.h>
@@ -491,6 +492,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 // ── Entry point ──
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
+    timeBeginPeriod(1);
     g_hInst = hInst;
 
     WSADATA wsa{};
@@ -536,5 +538,5 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
     DoDisconnect();
     WSACleanup();
-    return 0;
+    timeEndPeriod(1); return 0;
 }
