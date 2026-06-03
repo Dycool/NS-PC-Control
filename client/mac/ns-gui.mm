@@ -262,7 +262,7 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
     NSWindow* window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
         backing:NSBackingStoreBuffered defer:NO];
-    [window setTitle:@"Nintendo Switch PC Control (Mac)"];
+    [window setTitle:@"NS PC Control (Mac)"];
     [window setDelegate:self];
     [window center];
 

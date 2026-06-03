@@ -352,7 +352,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             HFONT hTitleFont = CreateFont(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            HWND hTitle = CreateWindow(L"STATIC", L"Nintendo Switch PC Control",
+            HWND hTitle = CreateWindow(L"STATIC", L"NS PC Control",
                 WS_VISIBLE | WS_CHILD, x, y, 380, 30, hWnd, nullptr, g_hInst, nullptr);
             SendMessage(hTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
             y += 40;
@@ -459,7 +459,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Title label gets red accent
             wchar_t buf[64];
             GetWindowText(hCtrl, buf, 64);
-            if (wcscmp(buf, L"Nintendo Switch PC Control") == 0) {
+            if (wcscmp(buf, L"NS PC Control") == 0) {
                 SetTextColor(hdc, ACCENT_RED);
             }
             static HBRUSH hWhiteBrush = []{ return CreateSolidBrush(RGB(255,255,255)); }();
@@ -512,7 +512,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     RECT rc{0, 0, 410, 280};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX), FALSE);
 
-    HWND hWnd = CreateWindowEx(0, CLASS_NAME, L"Nintendo Switch PC Control",
+    HWND hWnd = CreateWindowEx(0, CLASS_NAME, L"NS PC Control",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, hInst, nullptr);
