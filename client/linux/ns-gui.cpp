@@ -27,30 +27,14 @@
 #include <cmath>
 #include <mutex>
 
+#include <SDL2/SDL.h>
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <linux/joystick.h>
 #include <sys/resource.h>
-
-// Undefine conflicting macros
-#undef BTN_A
-#undef BTN_B
-#undef BTN_X
-#undef BTN_Y
-#undef BTN_L
-#undef BTN_R
-#undef BTN_TL
-#undef BTN_TR
-#undef BTN_SELECT
-#undef BTN_START
-#undef BTN_MODE
-#undef BTN_THUMBL
-#undef BTN_THUMBR
 
 #include "../../server/rpi/include/sha256.h"
 
@@ -98,20 +82,8 @@ static std::thread g_senderThread;
 static uint8_t g_hmacKey[32]{};
 static std::atomic<uint32_t> g_packetCount{0};
 
-// ── Shared Gamepad State ──
-struct GamepadState {
-    bool    buttons[16] = {false};
-    int16_t axes[8]     = {0};
-
-    void clear_inputs() {
-        std::memset(buttons, 0, sizeof(buttons));
-        std::memset(axes, 0, sizeof(axes));
-    }
-};
-
-static GamepadState g_states[4];
-static int          g_fds[4] = {-1, -1, -1, -1};
-static std::string  g_dev_paths[4] = {"", "", "", ""};
+// ── Shared Gamepad State (SDL2) ──
+static SDL_GameController* g_pads[4] = {nullptr, nullptr, nullptr, nullptr};
 static char         g_hw_names[4][128]; // Stored safely for the GTK thread to read
 static std::mutex   g_hw_mtx;           // Protects hardware string arrays
 
@@ -125,124 +97,109 @@ static uint8_t apply_deadzone(int16_t val, bool invert = false, int deadzone = 8
     return (uint8_t)(invert ? (255 - scaled) : scaled);
 }
 
-// ── Input Mapping ──
-static ns::HIDReport map_linux_js_to_switch(const GamepadState& pad, const char* hw_name) {
-    ns::HIDReport r; r.reset();
-    if (pad.buttons[0]) r.buttons |= ns::BTN_B; 
-    if (pad.buttons[1]) r.buttons |= ns::BTN_A; 
-    if (pad.buttons[2]) r.buttons |= ns::BTN_Y; 
-    if (pad.buttons[3]) r.buttons |= ns::BTN_X; 
-    if (pad.buttons[4]) r.buttons |= ns::BTN_L; 
-    if (pad.buttons[5]) r.buttons |= ns::BTN_R; 
-    if (pad.axes[2] > 0) r.buttons |= ns::BTN_ZL;
-    if (pad.axes[5] > 0) r.buttons |= ns::BTN_ZR;
-    if (pad.buttons[6]) r.buttons |= ns::BTN_MINUS;  
-    if (pad.buttons[7]) r.buttons |= ns::BTN_PLUS;   
-    if (pad.buttons[9])  r.buttons |= ns::BTN_LSTICK; 
-    if (pad.buttons[10]) r.buttons |= ns::BTN_RSTICK; 
-    if (pad.buttons[9] && pad.buttons[10]) { r.buttons |= ns::BTN_HOME; r.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK); }
-    if (pad.buttons[6] && pad.buttons[7]) { r.buttons |= ns::BTN_CAPTURE; r.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS); }
-
-    bool up = (pad.axes[7] < -16000), down = (pad.axes[7] > 16000);
-    bool left = (pad.axes[6] < -16000), right = (pad.axes[6] > 16000);
-    r.hat = ns::HAT_NEUTRAL;
-    if (up && right) r.hat = ns::HAT_NE; else if (up && left) r.hat = ns::HAT_NW;
-    else if (down && right) r.hat = ns::HAT_SE; else if (down && left) r.hat = ns::HAT_SW;
-    else if (up) r.hat = ns::HAT_N; else if (down) r.hat = ns::HAT_S;
-    else if (left) r.hat = ns::HAT_W; else if (right) r.hat = ns::HAT_E;
-
-    // Detect Bluetooth/wireless axis layout — shifts right stick from 3/4 to 2/3
-    std::string name = hw_name;
-    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-    bool wireless = (name.find("wireless") != std::string::npos ||
-                     name.find("bluetooth") != std::string::npos);
-    int rx_axis = wireless ? 2 : 3;
-    int ry_axis = wireless ? 3 : 4;
-
-    r.lx = apply_deadzone(pad.axes[0], false); r.ly = apply_deadzone(pad.axes[1], false);
-    r.rx = apply_deadzone(pad.axes[rx_axis], false); r.ry = apply_deadzone(pad.axes[ry_axis], false);
-    return r;
-}
-
-// ── Smart Hardware Discovery ──
-static bool is_valid_gamepad(int fd, std::string& out_name) {
-    char name[128];
-    if (ioctl(fd, JSIOCGNAME(sizeof(name)), name) < 0) strncpy(name, "Unknown Device", sizeof(name));
-    char axes = 0, buttons = 0;
-    ioctl(fd, JSIOCGAXES, &axes);
-    ioctl(fd, JSIOCGBUTTONS, &buttons);
-    out_name = name;
-    // Discard mice/keyboards: Real gamepads have at least 2 axes and 4 buttons
-    return (axes >= 2 && buttons >= 4);
-}
+// ── SDL2 Discovery & Input ──
 
 static void scan_for_gamepads() {
     static uint64_t last_scan = 0;
     uint64_t now = ns::now_us();
-    if (now - last_scan < 1'000'000) return; // Scan once per second
+
+    SDL_GameControllerUpdate();
+
+    if (now - last_scan < 1'000'000) return;
     last_scan = now;
 
-    for (int i = 0; i < 16; ++i) {
-        char path[32]; snprintf(path, sizeof(path), "/dev/input/js%d", i);
-        
-        bool already_mapped = false;
+    int num = SDL_NumJoysticks();
+    for (int i = 0; i < num; ++i) {
+        if (!SDL_IsGameController(i)) continue;
+
+        // Check by instance ID to avoid double-mapping
+        SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+        bool found = false;
         for (int p = 0; p < 4; ++p) {
-            if (g_dev_paths[p] == path) { already_mapped = true; break; }
-        }
-        if (already_mapped) continue;
-
-        int fd = open(path, O_RDONLY | O_NONBLOCK);
-        if (fd < 0) continue;
-
-        std::string hw_name;
-        if (is_valid_gamepad(fd, hw_name)) {
-            for (int p = 0; p < 4; ++p) {
-                if (g_fds[p] < 0) {
-                    std::lock_guard<std::mutex> lock(g_hw_mtx);
-                    g_fds[p] = fd;
-                    g_dev_paths[p] = path;
-                    strncpy(g_hw_names[p], hw_name.c_str(), sizeof(g_hw_names[p]) - 1);
-                    g_states[p].clear_inputs();
+            if (g_pads[p]) {
+                SDL_Joystick* js = SDL_GameControllerGetJoystick(g_pads[p]);
+                if (js && SDL_JoystickInstanceID(js) == id) {
+                    found = true;
                     break;
                 }
             }
-        } else {
-            close(fd);
+        }
+        if (found) continue;
+
+        // Find a free slot
+        for (int p = 0; p < 4; ++p) {
+            if (!g_pads[p]) {
+                SDL_GameController* pad = SDL_GameControllerOpen(i);
+                if (!pad) break;
+                {
+                    std::lock_guard<std::mutex> lock(g_hw_mtx);
+                    g_pads[p] = pad;
+                    const char* name = SDL_GameControllerName(pad);
+                    strncpy(g_hw_names[p], name ? name : "Unknown", sizeof(g_hw_names[p]) - 1);
+                }
+                break;
+            }
         }
     }
 }
 
-// ── Read Controller State ──
+// ── Read Controller State (SDL2) ──
 static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     rep.reset();
-    if (g_fds[index] < 0) { conn = false; return; }
+    SDL_GameController* pad = g_pads[index];
+    if (!pad) { conn = false; return; }
 
-    struct js_event event;
-    while (true) {
-        ssize_t bytes = read(g_fds[index], &event, sizeof(event));
-        if (bytes > 0) {
-            uint8_t type = event.type & ~JS_EVENT_INIT;
-            if (type == JS_EVENT_BUTTON && event.number < 16) {
-                g_states[index].buttons[event.number] = event.value;
-            } else if (type == JS_EVENT_AXIS && event.number < 8) {
-                g_states[index].axes[event.number] = event.value;
-            }
-        } else {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                // Device physically unplugged
-                std::lock_guard<std::mutex> lock(g_hw_mtx);
-                close(g_fds[index]);
-                g_fds[index] = -1;
-                g_dev_paths[index] = "";
-                g_hw_names[index][0] = '\0';
-                conn = false;
-                return;
-            }
-            break;
-        }
+    if (!SDL_GameControllerGetAttached(pad)) {
+        std::lock_guard<std::mutex> lock(g_hw_mtx);
+        SDL_GameControllerClose(pad);
+        g_pads[index] = nullptr;
+        g_hw_names[index][0] = '\0';
+        conn = false;
+        return;
     }
+
     conn = true;
-    rep = map_linux_js_to_switch(g_states[index], g_hw_names[index]);
+
+    // Standardised button mapping (Xbox physical -> Nintendo Switch)
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)) rep.buttons |= ns::BTN_B;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B)) rep.buttons |= ns::BTN_A;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X)) rep.buttons |= ns::BTN_Y;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y)) rep.buttons |= ns::BTN_X;
+
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) rep.buttons |= ns::BTN_L;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) rep.buttons |= ns::BTN_R;
+
+    if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT)   > 16000) rep.buttons |= ns::BTN_ZL;
+    if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)  > 16000) rep.buttons |= ns::BTN_ZR;
+
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK))    rep.buttons |= ns::BTN_MINUS;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START))   rep.buttons |= ns::BTN_PLUS;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK))  rep.buttons |= ns::BTN_LSTICK;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) rep.buttons |= ns::BTN_RSTICK;
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_GUIDE))   rep.buttons |= ns::BTN_HOME;
+
+    // D-Pad
+    bool up    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
+    bool down  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    bool left  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+
+    rep.hat = ns::HAT_NEUTRAL;
+    if (up && right) rep.hat = ns::HAT_NE; else if (up && left) rep.hat = ns::HAT_NW;
+    else if (down && right) rep.hat = ns::HAT_SE; else if (down && left) rep.hat = ns::HAT_SW;
+    else if (up) rep.hat = ns::HAT_N; else if (down) rep.hat = ns::HAT_S;
+    else if (left) rep.hat = ns::HAT_W; else if (right) rep.hat = ns::HAT_E;
+
+    // Analog sticks — SDL sets UP as negative, Switch expects UP as positive
+    int16_t lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+    int16_t ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+    int16_t rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
+    int16_t ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+
+    rep.lx = apply_deadzone(lx, false);
+    rep.ly = apply_deadzone(ly, true);   // invert Y
+    rep.rx = apply_deadzone(rx, false);
+    rep.ry = apply_deadzone(ry, true);   // invert Y
 }
 
 // ── Network Sender Thread ──
@@ -305,7 +262,7 @@ static void SenderThread(std::string host, uint16_t port) {
     }
 
     for (int i = 0; i < 4; ++i) {
-        if (g_fds[i] >= 0) { close(g_fds[i]); g_fds[i] = -1; g_hw_names[i][0] = '\0'; g_dev_paths[i] = ""; }
+        if (g_pads[i]) { SDL_GameControllerClose(g_pads[i]); g_pads[i] = nullptr; g_hw_names[i][0] = '\0'; }
     }
     close(sock);
 }
@@ -344,7 +301,7 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
     g_packetCount = 0;
     g_connected = true;
 
-    for (int i=0; i<4; ++i) { g_hw_names[i][0] = '\0'; g_dev_paths[i] = ""; g_fds[i] = -1; }
+    for (int i=0; i<4; ++i) { g_hw_names[i][0] = '\0'; g_pads[i] = nullptr; }
 
     g_senderRunning = true;
     g_senderThread = std::thread(SenderThread, std::string(ipBuf), (uint16_t)port);
@@ -402,7 +359,14 @@ extern "C" void on_window_destroy(GtkWidget*, gpointer) {
 int main(int argc, char* argv[]) {
     // Elevate priority
     setpriority(PRIO_PROCESS, 0, -20);
-    
+
+    // Initialise SDL2 GameController subsystem
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
+        std::cerr << "Failed to initialise SDL2: " << SDL_GetError() << "\n";
+        return 1;
+    }
+
     gtk_init(&argc, &argv);
 
     GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -465,5 +429,7 @@ int main(int argc, char* argv[]) {
 
     gtk_widget_show_all(window);
     gtk_main();
+
+    SDL_Quit();
     return 0;
 }
