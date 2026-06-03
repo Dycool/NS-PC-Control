@@ -73,14 +73,12 @@ static void save_config(const char* full) {
 static GtkWidget* ipEntry = nullptr;
 static GtkWidget* connectBtn = nullptr;
 static GtkWidget* statusLabel = nullptr;
-static GtkWidget* pktLabel = nullptr;
 static GtkWidget* ctrlLabels[4]; // Labels to display P1 to P4 status
 
 static std::atomic<bool> g_connected{false};
 static std::atomic<bool> g_senderRunning{false};
 static std::thread g_senderThread;
 static uint8_t g_hmacKey[32]{};
-static std::atomic<uint32_t> g_packetCount{0};
 
 // ── Shared Gamepad State (SDL2) ──
 static SDL_GameController* g_pads[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -178,6 +176,13 @@ static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) rep.buttons |= ns::BTN_RSTICK;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_GUIDE))   rep.buttons |= ns::BTN_HOME;
 
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) {
+        rep.buttons |= ns::BTN_HOME; rep.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK);
+    }
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)) {
+        rep.buttons |= ns::BTN_CAPTURE; rep.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);
+    }
+
     // D-Pad
     bool up    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
     bool down  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
@@ -197,9 +202,9 @@ static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     int16_t ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
 
     rep.lx = apply_deadzone(lx, false);
-    rep.ly = apply_deadzone(ly, true);   // invert Y
+    rep.ly = apply_deadzone(ly, false);
     rep.rx = apply_deadzone(rx, false);
-    rep.ry = apply_deadzone(ry, true);   // invert Y
+    rep.ry = apply_deadzone(ry, false);
 }
 
 // ── Network Sender Thread ──
@@ -255,8 +260,6 @@ static void SenderThread(std::string host, uint16_t port) {
         }
 
         sendto(sock, (const char*)&pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));
-        g_packetCount++;
-        
         if (active_count > 0) next_tick += std::chrono::milliseconds(2);
         else next_tick += std::chrono::milliseconds(500);
     }
@@ -274,12 +277,10 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
         g_connected = false;
         g_senderRunning = false;
         if (g_senderThread.joinable()) g_senderThread.join();
-        g_packetCount = 0;
         
         gtk_button_set_label(GTK_BUTTON(connectBtn), "Connect");
         gtk_widget_set_sensitive(ipEntry, TRUE);
         gtk_label_set_text(GTK_LABEL(statusLabel), "Disconnected");
-        gtk_label_set_text(GTK_LABEL(pktLabel), "Packets sent: 0");
         
         for (int i = 0; i < 4; ++i) {
             char buf[64]; snprintf(buf, sizeof(buf), "P%d: Waiting...", i + 1);
@@ -298,7 +299,6 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
 
     save_config(ipStr);
     derive_key(ns::DEFAULT_SECRET, g_hmacKey);
-    g_packetCount = 0;
     g_connected = true;
 
     for (int i=0; i<4; ++i) { g_hw_names[i][0] = '\0'; g_pads[i] = nullptr; }
@@ -315,10 +315,6 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
 
 extern "C" gboolean on_timer(gpointer) {
     if (g_connected) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Packets sent: %u", g_packetCount.load());
-        gtk_label_set_text(GTK_LABEL(pktLabel), buf);
-
         std::lock_guard<std::mutex> lock(g_hw_mtx);
         for (int i = 0; i < 4; ++i) {
             char lbl[128];
@@ -418,11 +414,6 @@ int main(int argc, char* argv[]) {
         gtk_widget_set_halign(ctrlLabels[i], GTK_ALIGN_START);
         gtk_grid_attach(GTK_GRID(grid), ctrlLabels[i], 0, 4 + i, 4, 1);
     }
-
-    // Row 8: Packets
-    pktLabel = gtk_label_new("Packets sent: 0");
-    gtk_widget_set_halign(pktLabel, GTK_ALIGN_START);
-    gtk_grid_attach(GTK_GRID(grid), pktLabel, 0, 8, 4, 1);
 
     // Timer for UI updates (100ms)
     g_timeout_add(100, on_timer, nullptr);

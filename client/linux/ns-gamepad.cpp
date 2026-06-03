@@ -143,6 +143,13 @@ void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) rep.buttons |= ns::BTN_RSTICK;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_GUIDE))   rep.buttons |= ns::BTN_HOME;
 
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) {
+        rep.buttons |= ns::BTN_HOME; rep.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK);
+    }
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)) {
+        rep.buttons |= ns::BTN_CAPTURE; rep.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);
+    }
+
     // D-Pad
     bool up    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
     bool down  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
@@ -162,9 +169,9 @@ void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     int16_t ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
 
     rep.lx = apply_deadzone(lx, false);
-    rep.ly = apply_deadzone(ly, true);   // invert Y
+    rep.ly = apply_deadzone(ly, false);
     rep.rx = apply_deadzone(rx, false);
-    rep.ry = apply_deadzone(ry, true);   // invert Y
+    rep.ry = apply_deadzone(ry, false);
 }
 
 
