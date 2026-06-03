@@ -90,7 +90,8 @@ static void hori_thread(const std::string& dev, int hz) {
             next = std::max(next + tick, now + tick);
 
             uint64_t last = g_last_rx_us.load(std::memory_order_acquire);
-            bool silent = (last != 0) && (now_us() - last > 250'000u);
+            // CORREÇÃO: Utilizar a constante do WATCHDOG em vez de um valor fixo.
+            bool silent = (last != 0) && (now_us() - last > (WATCHDOG_MS * 1000ULL));
 
             HIDReport r;
             uint16_t af_mask;
@@ -161,7 +162,8 @@ static void gc_hub_thread(const std::string& dev) {
             while (read(fd, discard, sizeof(discard)) > 0) {} // Drain Rumble
 
             uint64_t last = g_last_rx_us.load(std::memory_order_acquire);
-            bool silent = (last != 0) && (now_us() - last > 250'000u);
+            // CORREÇÃO: Utilizar a constante do WATCHDOG.
+            bool silent = (last != 0) && (now_us() - last > (WATCHDOG_MS * 1000ULL));
 
             GCHubReport r;
             {
@@ -283,7 +285,15 @@ int main(int argc, char** argv) {
     std::printf("[backend] Mode: %s | UDP %s:%u | HMAC=always\n", 
                 g_multiplayer ? "GameCube 4-Player Hub" : "HORI 1-Player", bind_addr.c_str(), port);
 
-    std::thread wt(g_multiplayer ? (void(*)(const std::string&, int))gc_hub_thread : hori_thread, device, WRITER_HZ);
+    // CORREÇÃO: Utilização de uma Lambda function para inicializar as threads com segurança (Evitar UB).
+    std::thread wt([&]() {
+        if (g_multiplayer) {
+            gc_hub_thread(device);
+        } else {
+            hori_thread(device, WRITER_HZ);
+        }
+    });
+    
     std::thread st(stats_thread);
 
     int ep = epoll_create1(0);
@@ -314,8 +324,14 @@ int main(int argc, char** argv) {
         if (!g_have_auth) { g_auth_addr = sender; g_have_auth = true; }
 
         bool is_reset = (pkt.flags & FLAG_RESET);
-        bool sequence_jump = (expected_seq > pkt.seq) && ((expected_seq - pkt.seq) > 100);
-        if (!first_pkt && pkt.seq < expected_seq && !is_reset && !sequence_jump) continue;
+        
+        // CORREÇÃO: Matemática de inteiros assinados (int32_t) lida perfeitamente com os "wrap-arounds" 
+        // e overflow do Packet Sequence Number após chegar ao limite.
+        int32_t seq_diff = (int32_t)(pkt.seq - expected_seq);
+        bool is_old = seq_diff < 0;
+        bool sequence_jump = seq_diff > 100;
+        
+        if (!first_pkt && is_old && !is_reset && !sequence_jump) continue;
         
         first_pkt = false; expected_seq = pkt.seq + 1;
 

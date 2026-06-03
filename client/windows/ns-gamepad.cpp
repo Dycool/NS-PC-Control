@@ -14,18 +14,19 @@
 #include <cstdlib>             // atoi
 #include <thread>              // Threading support
 #include <algorithm>           // Standard algorithms (clamp)
+#include <string>
 #include "sha256.h"            // HMAC-SHA256 for packet authentication
 
 namespace ns {
 
 // Protocol constants for communication with Raspberry Pi backend
 static constexpr uint32_t PROTO_MAGIC   = 0x4E535743u;  // 'NSWC' magic number for packet validation
-static constexpr uint8_t  PROTO_VERSION = 1;             // Protocol version for compatibility checking
+static constexpr uint8_t  PROTO_VERSION = 2;             // Bumped to version 2 for unified (HORI/GC) protocol
 static constexpr uint16_t DEFAULT_PORT  = 7331;          // UDP port for sending gamepad data
 static constexpr const char* DEFAULT_SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY";
 
-/// Nintendo Switch Pro Controller button bitmask layout
-/// Bits correspond to specific buttons, allowing multiple buttons to be represented in a single uint16_t
+// ── 1. HORI Controller Structs ──
+
 enum Button : uint16_t {
     BTN_Y=1<<0, BTN_B=1<<1, BTN_A=1<<2, BTN_X=1<<3,      // Face buttons
     BTN_L=1<<4, BTN_R=1<<5, BTN_ZL=1<<6, BTN_ZR=1<<7,    // Shoulder buttons
@@ -33,57 +34,71 @@ enum Button : uint16_t {
     BTN_HOME=1<<12, BTN_CAPTURE=1<<13,                    // System buttons
 };
 
-/// D-pad (hat switch) direction values
-/// Represents the 8 cardinal directions plus neutral state
 enum Hat : uint8_t {
     HAT_N=0, HAT_NE=1, HAT_E=2, HAT_SE=3,
     HAT_S=4, HAT_SW=5, HAT_W=6, HAT_NW=7, HAT_NEUTRAL=8,
 };
 
-/// Packed 8-byte HID input report structure
-/// Layout must exactly match the USB gadget HID descriptor on the Raspberry Pi backend
 #pragma pack(push, 1)
 struct HIDReport {
-    uint16_t buttons = 0;   // Bitmask of pressed buttons (Button enum values)
-    uint8_t  hat     = HAT_NEUTRAL;  // D-pad direction (Hat enum value)
-    uint8_t  lx      = 128; // Left stick X axis (0-255, 128 = center)
-    uint8_t  ly      = 128; // Left stick Y axis (0-255, 128 = center)
-    uint8_t  rx      = 128; // Right stick X axis (0-255, 128 = center)
-    uint8_t  ry      = 128; // Right stick Y axis (0-255, 128 = center)
-    uint8_t  vendor  = 0;   // Vendor-specific data (unused)
+    uint16_t buttons = 0;
+    uint8_t  hat     = HAT_NEUTRAL;
+    uint8_t  lx      = 128;
+    uint8_t  ly      = 128;
+    uint8_t  rx      = 128;
+    uint8_t  ry      = 128;
+    uint8_t  vendor  = 0;
     
-    /// Reset all fields to default neutral state
     void reset() noexcept { buttons = 0; hat = HAT_NEUTRAL; lx = ly = rx = ry = 128; vendor = 0; }
 };
 
-/// Packet flag bits for controlling backend behavior
-enum Flags : uint8_t { 
-    FLAG_NONE=0x00,         // No special flags
-    FLAG_RESET=0x01,        // Reset all inputs to neutral
-    FLAG_AUTOFIRE=0x02      // Enable autofire for specified buttons
+// ── 2. GameCube Structs ──
+
+struct GCController {
+    uint8_t status = 0x00, btn1 = 0, btn2 = 0;
+    uint8_t stick_x = 128, stick_y = 128, cstick_x = 128, cstick_y = 128;
+    uint8_t l_analog = 0, r_analog = 0;
 };
 
-/// HMAC authentication tag (truncated HMAC-SHA256)
+struct GCHubReport {
+    uint8_t      id = 0x21;
+    GCController p1, p2, p3, p4;
+
+    void reset() noexcept { 
+        id = 0x21;
+        p1 = GCController{}; p2 = GCController{}; p3 = GCController{}; p4 = GCController{};
+    }
+};
+
+// ── 3. Wire Packet ──
+
+enum Flags : uint8_t { 
+    FLAG_NONE=0x00, FLAG_RESET=0x01, FLAG_AUTOFIRE=0x02 
+};
+
 static constexpr size_t HMAC_TAG_SIZE = 16;
 
-/// UDP wire packet structure sent from PC frontend to Raspberry Pi backend (~44 bytes with HMAC)
 struct Packet {
-    uint32_t  magic;         // PROTO_MAGIC for validation
-    uint8_t   version;       // PROTO_VERSION for compatibility
-    uint8_t   flags;         // Flags bitmask (Flags enum)
-    uint16_t  autofire_mask; // Button bitmask for autofire (valid when FLAG_AUTOFIRE is set)
-    uint32_t  seq;           // Monotonic sequence counter for packet ordering
-    uint64_t  ts_us;         // Sender's steady_clock timestamp in microseconds (for latency calculation)
-    HIDReport report;        // The actual gamepad input report
-    uint8_t   hmac[HMAC_TAG_SIZE];  // HMAC-SHA256 tag (all-zero when no secret)
+    uint32_t  magic;
+    uint8_t   version;
+    uint8_t   flags;
+    uint16_t  autofire_mask;
+    uint32_t  seq;
+    uint64_t  ts_us;
+    
+    // Union to support both controller protocols via UDP payload
+    union {
+        HIDReport   hori;
+        GCHubReport gc;
+    } payload;
+    
+    uint8_t   hmac[HMAC_TAG_SIZE];
 };
 #pragma pack(pop)
 
-/// Cached packet size for efficiency (avoids repeated sizeof calculations)
 static constexpr size_t PACKET_SIZE      = sizeof(Packet);
 static constexpr size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
 
-/// Get current time in microseconds using steady_clock (high precision, monotonic)
 inline uint64_t now_us() noexcept {
     using namespace std::chrono;
     return (uint64_t)duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
@@ -91,81 +106,56 @@ inline uint64_t now_us() noexcept {
 
 }
 
-/// Convert raw XInput analog stick value to normalized 0-255 range with deadzone applied
-/// @param val Raw axis value from XInput gamepad (typically -32768 to 32767 for SHORT type)
-/// @param invert If true, inverts the output (255 - scaled). Used for Y-axis (down = positive)
-/// @param deadzone Threshold below which values are considered neutral (default 8000 for ~24% deadzone)
-/// @return Normalized axis value (0-255, 128 = center/neutral)
 uint8_t apply_deadzone(SHORT val, bool invert = false, int deadzone = 8000) {
-    // If within deadzone, return center position
     if (val > -deadzone && val < deadzone) return 128;
 
     int scaled;
     if (val >= deadzone) {
-        // Positive direction: scale from deadzone to max value (32767)
         scaled = 128 + ((val - deadzone) * 127) / (32767 - deadzone);
     } else {
-        // Negative direction: scale from deadzone to min value (-32768)
         scaled = 128 - ((abs(val) - deadzone) * 128) / (32768 - deadzone);
     }
     
-    // Clamp to valid range and optionally invert
     scaled = std::clamp(scaled, 0, 255);
     return (uint8_t)(invert ? (255 - scaled) : scaled);
 }
 
-/// Convert XInput gamepad state to Switch Pro Controller HID report format
-/// Maps Xbox/XInput button layout to Nintendo Switch Pro Controller conventions
-/// Note: Xbox and Switch button layouts differ (A/B and X/Y are swapped)
-/// @param pad XINPUT_GAMEPAD structure containing current controller state
-/// @return HIDReport formatted for USB transmission to Raspberry Pi
 ns::HIDReport map_xinput_to_switch(const XINPUT_GAMEPAD& pad) {
     ns::HIDReport r;
     r.reset();
 
-    // Map face buttons (note: Xbox layout differs from Switch)
-    // Xbox A -> Switch B, Xbox B -> Switch A, etc.
     if (pad.wButtons & XINPUT_GAMEPAD_A) r.buttons |= ns::BTN_B; 
     if (pad.wButtons & XINPUT_GAMEPAD_B) r.buttons |= ns::BTN_A;
     if (pad.wButtons & XINPUT_GAMEPAD_X) r.buttons |= ns::BTN_Y;
     if (pad.wButtons & XINPUT_GAMEPAD_Y) r.buttons |= ns::BTN_X;
 
-    // Map shoulder buttons
     if (pad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER)  r.buttons |= ns::BTN_L;
     if (pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) r.buttons |= ns::BTN_R;
     
-    // Map trigger buttons (analog values: 0-255)
-    // Threshold of 128 represents ~50% trigger press
     if (pad.bLeftTrigger > 128)  r.buttons |= ns::BTN_ZL;
     if (pad.bRightTrigger > 128) r.buttons |= ns::BTN_ZR;
 
-    // Map menu/select buttons
     if (pad.wButtons & XINPUT_GAMEPAD_BACK)  r.buttons |= ns::BTN_MINUS;
     if (pad.wButtons & XINPUT_GAMEPAD_START) r.buttons |= ns::BTN_PLUS;
     
-    // Map stick button presses (thumbstick clicks)
     if (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB)  r.buttons |= ns::BTN_LSTICK;
     if (pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) r.buttons |= ns::BTN_RSTICK;
 
-    // Special: Both sticks pressed simultaneously = HOME button
     if ((pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) && (pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB)) {
         r.buttons |= ns::BTN_HOME;
-        r.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK);  // Remove individual stick presses
+        r.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK);
     }
 
-    // Special: BACK + START simultaneously = CAPTURE button
     if ((pad.wButtons & XINPUT_GAMEPAD_BACK) && (pad.wButtons & XINPUT_GAMEPAD_START)) {
         r.buttons |= ns::BTN_CAPTURE;
-        r.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);     // Remove individual menu presses
+        r.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);
     }
 
-    // Map D-pad (hat switch) directions
     bool up    = (pad.wButtons & XINPUT_GAMEPAD_DPAD_UP);
     bool down  = (pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN);
     bool left  = (pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
     bool right = (pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT);
 
-    // Set hat value based on combination of directional inputs
     if (up && right)       r.hat = ns::HAT_NE;
     else if (up && left)   r.hat = ns::HAT_NW;
     else if (down && right)r.hat = ns::HAT_SE;
@@ -175,120 +165,170 @@ ns::HIDReport map_xinput_to_switch(const XINPUT_GAMEPAD& pad) {
     else if (left)         r.hat = ns::HAT_W;
     else if (right)        r.hat = ns::HAT_E;
 
-    // Map analog sticks with deadzone
-    // Note: Y-axis is inverted (true) because XInput's positive Y is up, but normalized form expects positive = down
-    r.lx = apply_deadzone(pad.sThumbLX, false);     // Left stick X (not inverted)
-    r.ly = apply_deadzone(pad.sThumbLY, true);      // Left stick Y (inverted)
-    r.rx = apply_deadzone(pad.sThumbRX, false);     // Right stick X (not inverted)
-    r.ry = apply_deadzone(pad.sThumbRY, true);      // Right stick Y (inverted)
+    r.lx = apply_deadzone(pad.sThumbLX, false);
+    r.ly = apply_deadzone(pad.sThumbLY, true);
+    r.rx = apply_deadzone(pad.sThumbRX, false);
+    r.ry = apply_deadzone(pad.sThumbRY, true);
 
     return r;
 }
 
+// Mapeia XInput para o formato do Adaptador GameCube
+ns::GCController map_xinput_to_gc(DWORD index, bool& is_connected) {
+    ns::GCController gc;
+    XINPUT_STATE state;
+    ZeroMemory(&state, sizeof(XINPUT_STATE));
+
+    if (XInputGetState(index, &state) != ERROR_SUCCESS) {
+        is_connected = false;
+        gc.status = 0x00; // Desconectado
+        return gc;
+    }
+
+    is_connected = true;
+    gc.status = 0x10; // Conectado e funcional
+
+    const XINPUT_GAMEPAD& pad = state.Gamepad;
+
+    // Face Buttons & D-PAD (btn1)
+    if (pad.wButtons & XINPUT_GAMEPAD_A) gc.btn1 |= (1 << 0);
+    if (pad.wButtons & XINPUT_GAMEPAD_B) gc.btn1 |= (1 << 1);
+    if (pad.wButtons & XINPUT_GAMEPAD_X) gc.btn1 |= (1 << 2);
+    if (pad.wButtons & XINPUT_GAMEPAD_Y) gc.btn1 |= (1 << 3);
+    if (pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT)  gc.btn1 |= (1 << 4);
+    if (pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) gc.btn1 |= (1 << 5);
+    if (pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN)  gc.btn1 |= (1 << 6);
+    if (pad.wButtons & XINPUT_GAMEPAD_DPAD_UP)    gc.btn1 |= (1 << 7);
+
+    // Sistema & Shoulder (btn2)
+    if (pad.wButtons & XINPUT_GAMEPAD_START) gc.btn2 |= (1 << 0);
+    if (pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) gc.btn2 |= (1 << 1); // Z mapeado para RB
+    if (pad.bRightTrigger > 128) gc.btn2 |= (1 << 2); // R mapeado para RT
+    if (pad.bLeftTrigger > 128)  gc.btn2 |= (1 << 3); // L mapeado para LT
+
+    // Analógicos (Nota: Gamecube usa Up/Right = Alto (255), Down/Left = Baixo (0). 
+    // Logo, o eixo Y NÃO precisa de ser invertido ao contrário da Switch)
+    gc.stick_x = apply_deadzone(pad.sThumbLX, false);
+    gc.stick_y = apply_deadzone(pad.sThumbLY, false); 
+    gc.cstick_x = apply_deadzone(pad.sThumbRX, false);
+    gc.cstick_y = apply_deadzone(pad.sThumbRY, false);
+
+    // Gatilhos analógicos
+    gc.l_analog = pad.bLeftTrigger;
+    gc.r_analog = pad.bRightTrigger;
+
+    return gc;
+}
+
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [controller_index]\n";
+    std::string host = "";
+    uint16_t port    = ns::DEFAULT_PORT;
+    bool multiplayer = false;
+    DWORD ctrl_index = 0;
+
+    // Parser simples de argumentos
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-m") {
+            multiplayer = true;
+        } else if (host.empty()) {
+            host = arg;
+        } else {
+            ctrl_index = (DWORD)std::clamp(std::atoi(arg.c_str()), 0, 3);
+        }
+    }
+
+    if (host.empty()) {
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP> [-m] [controller_index]\n";
         return 1;
     }
-    std::string host  = argv[1];
-    uint16_t port     = ns::DEFAULT_PORT;
-    DWORD ctrl_index  = 0;
-    if (argc > 2) { ctrl_index = (DWORD)std::clamp(std::atoi(argv[2]), 0, 3); }
 
-    // Derive HMAC key from compiled-in default secret (always active)
     uint8_t hmac_key[32];
     derive_key(ns::DEFAULT_SECRET, hmac_key);
 
-    // Elevate process and thread priority for real-time input polling
-    // HIGH_PRIORITY_CLASS ensures the process gets more CPU time
-    // THREAD_PRIORITY_TIME_CRITICAL ensures minimal latency for input reading
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
-    // Initialize Winsock2 library (required for socket operations on Windows)
     WSADATA wsa{};
-    WSAStartup(MAKEWORD(2, 2), &wsa);  // Request Winsock 2.2
+    WSAStartup(MAKEWORD(2, 2), &wsa); 
 
-    // Create UDP socket for sending packets to Raspberry Pi
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
     
-    // Set up address info hints for DNS resolution
     struct addrinfo hints{}, *res = nullptr;
-    hints.ai_family = AF_INET;      // IPv4
-    hints.ai_socktype = SOCK_DGRAM; // UDP
+    hints.ai_family = AF_INET;     
+    hints.ai_socktype = SOCK_DGRAM; 
 
-    // Convert port number to string for getaddrinfo
     char port_buf[8];
     snprintf(port_buf, sizeof(port_buf), "%u", port);
     
-    // Resolve hostname to IP address
     getaddrinfo(host.c_str(), port_buf, &hints, &res);
     
-    // Copy resolved address to destination socket address structure
     sockaddr_in dest{};
     memcpy(&dest, res->ai_addr, sizeof(dest));
-    freeaddrinfo(res);  // Free DNS lookup results
+    freeaddrinfo(res);
 
-    std::cout << "Started... Press CTRL+C to exit.\n";
+    std::cout << "Started in " << (multiplayer ? "GameCube (4-Player)" : "HORI (1-Player)") << " Mode... Press CTRL+C to exit.\n";
 
-    uint32_t seq = 0;              // Packet sequence counter
-    XINPUT_STATE state;            // XInput controller state structure
+    uint32_t seq = 0;
 
-    // Main polling loop: continuously read XInput state and send to Raspberry Pi
     while (true) {
-        // Clear state structure
-        ZeroMemory(&state, sizeof(XINPUT_STATE));
-        
-        if (XInputGetState(ctrl_index, &state) == ERROR_SUCCESS) {
-            
-            // Convert XInput format to Switch HID format
-            ns::HIDReport report = map_xinput_to_switch(state.Gamepad);
+        ns::Packet pkt{};
+        pkt.magic   = ns::PROTO_MAGIC;
+        pkt.version = ns::PROTO_VERSION;
+        pkt.flags   = ns::FLAG_NONE;
+        pkt.seq     = seq++;
+        pkt.ts_us   = ns::now_us();
 
-            // Construct UDP packet
-            ns::Packet pkt{};
-            pkt.magic         = ns::PROTO_MAGIC;
-            pkt.version       = ns::PROTO_VERSION;
-            pkt.flags         = ns::FLAG_NONE;
-            pkt.seq           = seq++;
-            pkt.ts_us         = ns::now_us();
-            pkt.report        = report;
-            {
-                uint8_t full_hmac[32];
-                hmac_sha256(hmac_key, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
-                memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+        bool any_connected = false;
+
+        if (multiplayer) {
+            // MODO GAMECUBE: Lê ativamente os 4 slots XInput
+            pkt.payload.gc.id = 0x21;
+            bool c1, c2, c3, c4;
+            
+            pkt.payload.gc.p1 = map_xinput_to_gc(0, c1);
+            pkt.payload.gc.p2 = map_xinput_to_gc(1, c2);
+            pkt.payload.gc.p3 = map_xinput_to_gc(2, c3);
+            pkt.payload.gc.p4 = map_xinput_to_gc(3, c4);
+            
+            any_connected = (c1 || c2 || c3 || c4);
+            
+            if (!any_connected) {
+                pkt.payload.gc.reset();
             }
-
-            // Send packet to Raspberry Pi
-            sendto(sock, (const char*)&pkt, (int)ns::PACKET_SIZE, 0, (const sockaddr*)&dest, sizeof(dest));
-            
-            // Maintain consistent transmission rate (~500 Hz at 2ms interval)
-            std::this_thread::sleep_for(std::chrono::milliseconds(2)); 
-            
         } else {
-            // Controller not connected: send neutral state packet to signal disconnection
-            ns::Packet pkt{};
-            pkt.magic         = ns::PROTO_MAGIC;
-            pkt.version       = ns::PROTO_VERSION;
-            pkt.flags         = ns::FLAG_NONE;
-            pkt.seq           = seq++;
-            pkt.ts_us         = ns::now_us();
-            pkt.report.reset();  // All inputs to neutral/zero
-            {
-                uint8_t full_hmac[32];
-                hmac_sha256(hmac_key, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
-                memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-            }
-
-            // Send disconnection packet
-            sendto(sock, (const char*)&pkt, (int)ns::PACKET_SIZE, 0, (const sockaddr*)&dest, sizeof(dest));
+            // MODO HORI (Single Player)
+            XINPUT_STATE state;
+            ZeroMemory(&state, sizeof(XINPUT_STATE));
             
-            // Use longer sleep when disconnected to avoid spamming connection attempts
+            if (XInputGetState(ctrl_index, &state) == ERROR_SUCCESS) {
+                pkt.payload.hori = map_xinput_to_switch(state.Gamepad);
+                any_connected = true;
+            } else {
+                pkt.payload.hori.reset();
+            }
+        }
+
+        // Gera e anexa o HMAC
+        {
+            uint8_t full_hmac[32];
+            hmac_sha256(hmac_key, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
+            memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+        }
+
+        // Envia o pacote
+        sendto(sock, (const char*)&pkt, (int)ns::PACKET_SIZE, 0, (const sockaddr*)&dest, sizeof(dest));
+        
+        // Se pelo menos um comando estiver ligado dorme por 2ms (~500Hz)
+        // Caso contrário, não tenta com tanta frequência para poupar CPU (500ms)
+        if (any_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2)); 
+        } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }
 
-    // Cleanup (unreachable in normal operation due to infinite loop, but good practice)
     closesocket(sock);
-    WSACleanup();  // Shut down Winsock2
+    WSACleanup(); 
     return 0;
 }
