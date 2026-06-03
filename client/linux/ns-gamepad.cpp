@@ -145,6 +145,8 @@ ns::HIDReport map_linux_js_to_switch(const GamepadState& pad) {
     bool left  = (pad.axes[6] < -16000);
     bool right = (pad.axes[6] >  16000);
 
+    r.hat = ns::HAT_NEUTRAL; // default neutral when D-pad is not pressed
+
     if      (up && right)   r.hat = ns::HAT_NE;
     else if (up && left)    r.hat = ns::HAT_NW;
     else if (down && right) r.hat = ns::HAT_SE;
@@ -155,10 +157,11 @@ ns::HIDReport map_linux_js_to_switch(const GamepadState& pad) {
     else if (right)         r.hat = ns::HAT_E;
 
     // Map analog sticks (axes 0-1 for left stick, 3-4 for right stick)
+    // Y axes are inverted: Linux UP = negative, Switch UP = positive
     r.lx = apply_deadzone(pad.axes[0], false);
-    r.ly = apply_deadzone(pad.axes[1], false);  
+    r.ly = apply_deadzone(pad.axes[1], true);
     r.rx = apply_deadzone(pad.axes[3], false);
-    r.ry = apply_deadzone(pad.axes[4], false);  
+    r.ry = apply_deadzone(pad.axes[4], true);
 
     return r;
 }
@@ -356,14 +359,11 @@ int main(int argc, char** argv) {
         ns::HIDReport* out_reports[4] = { &pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4 };
         int active_count = 0;
 
-        // 3. Read active controllers and pack sequentially
+        // 3. Read active controllers, preserving fixed slot assignment
         for (int i = 0; i < 4; ++i) {
-            ns::HIDReport temp_rep;
             bool is_conn = false;
-            read_pad(i, temp_rep, is_conn);
-            
-            if (is_conn && active_count < 4) {
-                *out_reports[active_count] = temp_rep;
+            read_pad(i, *out_reports[i], is_conn);
+            if (is_conn) {
                 active_count++;
             }
         }
