@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     sockaddr_in dest{}; memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
 
-    std::cout << "Started in 4-Player Hub Mode... Connect Xbox controllers and enjoy!\n";
+    std::cout << "Started as a Multi-Client Node... Connect Xbox controllers and enjoy!\n";
     uint32_t seq = 0;
 
     while (true) {
@@ -135,16 +135,24 @@ int main(int argc, char** argv) {
         pkt.seq     = seq++;
         pkt.ts_us   = ns::now_us();
 
-        bool c1, c2, c3, c4;
+        // VERY IMPORTANT: Initialize all 4 slots to hardware-neutral (128 for sticks, 8 for hat)
+        // If left at pure 0 from memset, the Pi reads it as analog sticks pushed Top-Left!
+        pkt.report.reset();
+
+        ns::HIDReport* out_reports[4] = { &pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4 };
+        int active_count = 0;
         
-        // Scan all 4 XInput slots
-        fetch_pad_throttled(0, pkt.report.p1, c1);
-        fetch_pad_throttled(1, pkt.report.p2, c2);
-        fetch_pad_throttled(2, pkt.report.p3, c3);
-        fetch_pad_throttled(3, pkt.report.p4, c4);
-        
-        bool any_connected = (c1 || c2 || c3 || c4);
-        if (!any_connected) pkt.report.reset();
+        // Scan all 4 XInput slots and pack ONLY the connected ones sequentially to the front
+        for (DWORD i = 0; i < 4; ++i) {
+            ns::HIDReport temp_rep;
+            bool is_conn = false;
+            fetch_pad_throttled(i, temp_rep, is_conn);
+            
+            if (is_conn && active_count < 4) {
+                *out_reports[active_count] = temp_rep;
+                active_count++;
+            }
+        }
 
         // Sign packet
         {
@@ -156,7 +164,7 @@ int main(int argc, char** argv) {
         sendto(sock, (const char*)&pkt, (int)ns::PACKET_SIZE, 0, (const sockaddr*)&dest, sizeof(dest));
         
         // Sleep to throttle transmission (~500Hz when active, 2Hz when idle)
-        if (any_connected) std::this_thread::sleep_for(std::chrono::milliseconds(2)); 
+        if (active_count > 0) std::this_thread::sleep_for(std::chrono::milliseconds(2)); 
         else std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
