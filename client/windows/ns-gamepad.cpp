@@ -17,7 +17,7 @@
 #include "sha256.h"            
 
 // Import external protocol structures
-#include "protocol.hpp"
+#include "../../server/rpi/include/protocol.hpp"
 
 uint8_t apply_deadzone(SHORT val, bool invert = false, int deadzone = 8000) {
     if (val > -deadzone && val < deadzone) return 128;
