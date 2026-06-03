@@ -6,8 +6,8 @@ If you prefer to compile the binaries yourself rather than using the release zip
 
 1. Clone only the server portion of the repository:
 ```bash
-git clone --depth 1 --filter=blob:none --sparse [https://github.com/Dycool/Nintendo-Switch-PC-Control.git](https://github.com/Dycool/Nintendo-Switch-PC-Control.git)
-cd Nintendo-Switch-PC-Control
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Dycool/NS-PC-Control.git
+cd NS-PC-Control
 git sparse-checkout set server
 ```
 
@@ -25,8 +25,8 @@ make
 
 Clone only the client portion of the repository to your PC:
 ```bash
-git clone --depth 1 --filter=blob:none --sparse [https://github.com/Dycool/Nintendo-Switch-PC-Control.git](https://github.com/Dycool/Nintendo-Switch-PC-Control.git)
-cd Nintendo-Switch-PC-Control
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Dycool/NS-PC-Control.git
+cd NS-PC-Control
 git sparse-checkout set client
 ```
 
