@@ -51,6 +51,12 @@ Detailed guides and technical information are in our `docs/` folder:
 
 ---
 
+## 🚀 Planned Features
+
+* Keyboard support
+
+---
+
 ## 📚 References
 
 | Component | Technology |
@@ -61,6 +67,12 @@ Detailed guides and technical information are in our `docs/` folder:
 | **Raspberry Pi server** | [Linux USB Gadget (configfs / libcomposite)](https://www.kernel.org/doc/html/latest/usb/gadget_configfs.html) / UDP sockets |
 | **Cryptography** | [HMAC-SHA256](https://datatracker.ietf.org/doc/html/rfc4868) (standalone C++ implementation) |
 | **Protocol** | Custom UDP-based protocol with magic/version/sequence number guards |
+
+---
+
+## 🐛 Reporting Issues
+
+Found a bug or have a feature request? Open an issue at **[github.com/Dycool/NS-PC-Control/issues](https://github.com/Dycool/NS-PC-Control/issues)** with as much detail as possible (OS, controller model, reproduction steps).
 
 ---
 
