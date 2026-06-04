@@ -103,29 +103,32 @@ bool is_key_down_global(int linux_key_code) {
 
 int name_to_linux_key(std::string name) {
     std::transform(name.begin(), name.end(), name.begin(), ::toupper);
-    if (name.length() == 1 && name[0] >= 'A' && name[0] <= 'Z') return KEY_A + (name[0] - 'A');
-    if (name.length() == 1 && name[0] >= '1' && name[0] <= '9') return KEY_1 + (name[0] - '1');
-    if (name == "0") return KEY_0;
     
-    if (name == "UP") return KEY_UP;
-    if (name == "DOWN") return KEY_DOWN;
-    if (name == "LEFT") return KEY_LEFT;
-    if (name == "RIGHT") return KEY_RIGHT;
-    if (name == "SHIFT_L" || name == "LSHIFT" || name == "LEFT SHIFT") return KEY_LEFTSHIFT;
-    if (name == "SHIFT_R" || name == "RSHIFT" || name == "RIGHT SHIFT") return KEY_RIGHTSHIFT;
-    if (name == "CONTROL_L" || name == "LCTRL") return KEY_LEFTCTRL;
-    if (name == "CONTROL_R" || name == "RCTRL") return KEY_RIGHTCTRL;
-    if (name == "ALT_L" || name == "LALT") return KEY_LEFTALT;
-    if (name == "ALT_R" || name == "RALT") return KEY_RIGHTALT;
-    if (name == "SPACE") return KEY_SPACE;
-    if (name == "RETURN" || name == "ENTER") return KEY_ENTER;
-    if (name == "TAB") return KEY_TAB;
-    if (name == "ESCAPE" || name == "ESC") return KEY_ESC;
-    if (name == "BACKSPACE") return KEY_BACKSPACE;
-    if (name == "HOME") return KEY_HOME;
-    if (name == "PRINT" || name == "SNAPSHOT" || name == "PRINTSCREEN") return KEY_SYSRQ;
-    
-    return KEY_RESERVED;
+    // FIX: Exact mapping to Linux EVDEV hardware scan codes
+    static const std::unordered_map<std::string, int> key_map = {
+        {"A", KEY_A}, {"B", KEY_B}, {"C", KEY_C}, {"D", KEY_D}, {"E", KEY_E},
+        {"F", KEY_F}, {"G", KEY_G}, {"H", KEY_H}, {"I", KEY_I}, {"J", KEY_J},
+        {"K", KEY_K}, {"L", KEY_L}, {"M", KEY_M}, {"N", KEY_N}, {"O", KEY_O},
+        {"P", KEY_P}, {"Q", KEY_Q}, {"R", KEY_R}, {"S", KEY_S}, {"T", KEY_T},
+        {"U", KEY_U}, {"V", KEY_V}, {"W", KEY_W}, {"X", KEY_X}, {"Y", KEY_Y},
+        {"Z", KEY_Z},
+        {"1", KEY_1}, {"2", KEY_2}, {"3", KEY_3}, {"4", KEY_4}, {"5", KEY_5},
+        {"6", KEY_6}, {"7", KEY_7}, {"8", KEY_8}, {"9", KEY_9}, {"0", KEY_0},
+        {"UP", KEY_UP}, {"DOWN", KEY_DOWN}, {"LEFT", KEY_LEFT}, {"RIGHT", KEY_RIGHT},
+        {"SHIFT_L", KEY_LEFTSHIFT}, {"LSHIFT", KEY_LEFTSHIFT}, {"LEFT SHIFT", KEY_LEFTSHIFT},
+        {"SHIFT_R", KEY_RIGHTSHIFT}, {"RSHIFT", KEY_RIGHTSHIFT}, {"RIGHT SHIFT", KEY_RIGHTSHIFT},
+        {"CONTROL_L", KEY_LEFTCTRL}, {"LCTRL", KEY_LEFTCTRL},
+        {"CONTROL_R", KEY_RIGHTCTRL}, {"RCTRL", KEY_RIGHTCTRL},
+        {"ALT_L", KEY_LEFTALT}, {"LALT", KEY_LEFTALT},
+        {"ALT_R", KEY_RIGHTALT}, {"RALT", KEY_RIGHTALT},
+        {"SPACE", KEY_SPACE}, {"RETURN", KEY_ENTER}, {"ENTER", KEY_ENTER},
+        {"TAB", KEY_TAB}, {"ESCAPE", KEY_ESC}, {"ESC", KEY_ESC},
+        {"BACKSPACE", KEY_BACKSPACE}, {"HOME", KEY_HOME},
+        {"PRINT", KEY_SYSRQ}, {"SNAPSHOT", KEY_SYSRQ}, {"PRINTSCREEN", KEY_SYSRQ}
+    };
+
+    auto it = key_map.find(name);
+    return (it != key_map.end()) ? it->second : KEY_RESERVED;
 }
 
 // ── Gamepad Logic ──
