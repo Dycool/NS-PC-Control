@@ -194,10 +194,11 @@ struct KeyBindings {
 
     static std::unordered_map<std::string, std::string> defaults() {
         return {
-            {"Y","Z"}, {"B","X"}, {"A","C"}, {"X","V"},
+            {"Y","Z"}, {"B","X"}, {"A","V"}, {"X","C"},
             {"L","Q"}, {"R","E"}, {"ZL","1"}, {"ZR","2"},
             {"MINUS","3"}, {"PLUS","4"},
             {"LSTICK","LSHIFT"}, {"RSTICK","RSHIFT"},
+            {"HOME","HOME"}, {"CAPTURE","SNAPSHOT"},
             {"LSTICK_UP","W"}, {"LSTICK_DOWN","S"},
             {"LSTICK_LEFT","A"}, {"LSTICK_RIGHT","D"},
             {"RSTICK_UP","I"}, {"RSTICK_DOWN","K"},
@@ -303,6 +304,7 @@ struct KeyBindings {
                 {"F7", SDL_SCANCODE_F7}, {"F8", SDL_SCANCODE_F8},
                 {"F9", SDL_SCANCODE_F9}, {"F10", SDL_SCANCODE_F10},
                 {"F11", SDL_SCANCODE_F11}, {"F12", SDL_SCANCODE_F12},
+                {"HOME", SDL_SCANCODE_HOME}, {"SNAPSHOT", SDL_SCANCODE_PRINTSCREEN},
             };
             for (auto& km : kmap)
                 if (name == km.n) return keystate[km.sc] != 0;
@@ -328,6 +330,8 @@ struct KeyBindings {
         k = get_key("PLUS");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_PLUS;
         k = get_key("LSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_LSTICK;
         k = get_key("RSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_RSTICK;
+        k = get_key("HOME");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_HOME;
+        k = get_key("CAPTURE"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_CAPTURE;
 
         bool up = false, down = false, left = false, right = false;
         k = get_key("DPAD_UP");    if (!k.empty()) up    = is_down(k);

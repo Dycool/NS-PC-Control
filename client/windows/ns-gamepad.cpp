@@ -109,10 +109,11 @@ struct KeyBindings {
 
     static std::unordered_map<std::string, std::string> defaults() {
         return {
-            {"Y","Z"}, {"B","X"}, {"A","C"}, {"X","V"},
+            {"Y","Z"}, {"B","X"}, {"A","V"}, {"X","C"},
             {"L","Q"}, {"R","E"}, {"ZL","1"}, {"ZR","2"},
             {"MINUS","3"}, {"PLUS","4"},
             {"LSTICK","LSHIFT"}, {"RSTICK","RSHIFT"},
+            {"HOME","HOME"}, {"CAPTURE","SNAPSHOT"},
             {"LSTICK_UP","W"}, {"LSTICK_DOWN","S"},
             {"LSTICK_LEFT","A"}, {"LSTICK_RIGHT","D"},
             {"RSTICK_UP","I"}, {"RSTICK_DOWN","K"},
@@ -195,6 +196,7 @@ struct KeyBindings {
                 {"F1", VK_F1}, {"F2", VK_F2}, {"F3", VK_F3}, {"F4", VK_F4},
                 {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8},
                 {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
+                {"HOME", VK_HOME}, {"SNAPSHOT", VK_SNAPSHOT},
             };
             for (auto& km : kmap)
                 if (name == km.n) return GetAsyncKeyState(km.vk) & 0x8000;
@@ -221,6 +223,8 @@ struct KeyBindings {
         k = get_key("PLUS");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_PLUS;
         k = get_key("LSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_LSTICK;
         k = get_key("RSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_RSTICK;
+        k = get_key("HOME");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_HOME;
+        k = get_key("CAPTURE"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_CAPTURE;
 
         // D-Pad
         bool up = false, down = false, left = false, right = false;

@@ -7,7 +7,7 @@
 ///
 /// Build:
 ///   clang++ -std=c++17 -ObjC++ \
-///           -framework GameController -framework Foundation \
+///           -framework GameController -framework Foundation -framework CoreGraphics \
 ///           ns-gamepad.mm -o ns-gamepad
 ///
 /// Usage:
@@ -224,10 +224,11 @@ struct KeyBindings {
 
     static std::unordered_map<std::string, std::string> defaults() {
         return {
-            {"Y","Z"}, {"B","X"}, {"A","C"}, {"X","V"},
+            {"Y","Z"}, {"B","X"}, {"A","V"}, {"X","C"},
             {"L","Q"}, {"R","E"}, {"ZL","1"}, {"ZR","2"},
             {"MINUS","3"}, {"PLUS","4"},
             {"LSTICK","LSHIFT"}, {"RSTICK","RSHIFT"},
+            {"HOME","HOME"}, {"CAPTURE","SNAPSHOT"},
             {"LSTICK_UP","W"}, {"LSTICK_DOWN","S"},
             {"LSTICK_LEFT","A"}, {"LSTICK_RIGHT","D"},
             {"RSTICK_UP","I"}, {"RSTICK_DOWN","K"},
@@ -329,6 +330,7 @@ struct KeyBindings {
                 {"F1",0x7A}, {"F2",0x78}, {"F3",0x63}, {"F4",0x76},
                 {"F5",0x60}, {"F6",0x61}, {"F7",0x62}, {"F8",0x64},
                 {"F9",0x65}, {"F10",0x6D}, {"F11",0x67}, {"F12",0x6F},
+                {"HOME",0x73}, {"SNAPSHOT",0x69},
             };
             for (auto& km : kmap)
                 if (name == km.n) return CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, km.code);
@@ -354,6 +356,8 @@ struct KeyBindings {
         k = get_key("PLUS");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_PLUS;
         k = get_key("LSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_LSTICK;
         k = get_key("RSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_RSTICK;
+        k = get_key("HOME");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_HOME;
+        k = get_key("CAPTURE"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_CAPTURE;
 
         bool up = false, down = false, left = false, right = false;
         k = get_key("DPAD_UP");    if (!k.empty()) up    = is_down(k);
