@@ -90,7 +90,7 @@ int name_to_linux_key(std::string name) {
     if (name.length() == 1 && name[0] >= 'A' && name[0] <= 'Z') return KEY_A + (name[0] - 'A');
     if (name.length() == 1 && name[0] >= '1' && name[0] <= '9') return KEY_1 + (name[0] - '1');
     if (name == "0") return KEY_0;
-
+    
     if (name == "UP") return KEY_UP;
     if (name == "DOWN") return KEY_DOWN;
     if (name == "LEFT") return KEY_LEFT;
@@ -108,9 +108,10 @@ int name_to_linux_key(std::string name) {
     if (name == "BACKSPACE") return KEY_BACKSPACE;
     if (name == "HOME") return KEY_HOME;
     if (name == "PRINT" || name == "SNAPSHOT" || name == "PRINTSCREEN") return KEY_SYSRQ;
-
+    
     return KEY_RESERVED;
 }
+
 
 // ── Logic State ──
 enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
@@ -163,10 +164,10 @@ static void save_config(const std::string& ip, int mode) {
     if (g_mkdir_with_parents(dir.c_str(), 0755) != 0) return;
     std::string path = dir + "/config";
     FILE* f = fopen(path.c_str(), "w");
-    if (f) {
+    if (f) { 
         fprintf(f, "IP=%s\nKB_MODE=%d\n", ip.c_str(), mode);
         for (auto& [k, v] : g_keyBindings) fprintf(f, "BIND_%s=%s\n", k.c_str(), v.c_str());
-        fclose(f);
+        fclose(f); 
     }
 }
 
@@ -175,7 +176,7 @@ static GtkWidget* connectBtn = nullptr;
 static GtkWidget* statusLabel = nullptr;
 static GtkWidget* kbCombo = nullptr;
 static GtkWidget* bindingsBtn = nullptr;
-static GtkWidget* ctrlLabels[4];
+static GtkWidget* ctrlLabels[4]; 
 
 static std::atomic<bool> g_connected{false};
 static std::atomic<bool> g_senderRunning{false};
@@ -332,14 +333,14 @@ static void SenderThread(std::string host, uint16_t port) {
         while (std::chrono::steady_clock::now() < next_tick) std::atomic_thread_fence(std::memory_order_relaxed);
         scan_for_gamepads();
 
-        ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet));
+        ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet)); 
         pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::PROTO_VERSION;
         pkt.flags = ns::FLAG_NONE; pkt.seq = seq++; pkt.ts_us = ns::now_us();
-        pkt.report.reset();
+        pkt.report.reset(); 
 
         ns::HIDReport* out_reports[4] = { &pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4 };
         int active_count = 0; bool c1=false, c2=false, c3=false, c4=false;
-
+        
         for (int i = 0; i < 4; ++i) {
             bool is_conn = false; read_pad(i, *out_reports[i], is_conn);
             if (is_conn) { active_count++; if (i==0) c1=true; else if (i==1) c2=true; else if (i==2) c3=true; else if (i==3) c4=true; }
@@ -393,7 +394,8 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
     g_connected = true;
 
     for (int i=0; i<4; ++i) { g_hw_names[i][0] = '\0'; g_pads[i] = nullptr; }
-
+    
+    // Check permission context immediately upon connection
     init_global_keyboard();
     if (g_keyboardMode.load() != KB_OFF && g_kb_fds.empty() && !g_kb_permission_warning_shown) {
         GtkWidget *dialog = gtk_message_dialog_new(nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
@@ -427,13 +429,13 @@ extern "C" gboolean on_dialog_key_press(GtkWidget* widget, GdkEventKey* event, g
     } else {
         const char* name = gdk_keyval_name(event->keyval);
         if (name) {
-            for (auto& [k, v] : g_editBindings) { if (v == name) v = ""; }
+            for (auto& [k, v] : g_editBindings) { if (v == name) v = ""; } 
             g_editBindings[g_listeningKey] = name;
             gtk_button_set_label(GTK_BUTTON(g_listeningBtn), name);
         }
     }
     g_listeningBtn = nullptr; g_listeningKey = "";
-    return TRUE;
+    return TRUE; 
 }
 
 extern "C" void on_bind_btn_clicked(GtkWidget* btn, gpointer data) {
@@ -472,29 +474,30 @@ extern "C" void on_bindings_clicked(GtkWidget*, gpointer parent_window) {
 extern "C" gboolean on_timer(gpointer) {
     std::lock_guard<std::mutex> lock(g_hw_mtx);
     int km = g_keyboardMode.load();
-
+    
     if (!g_connected) scan_for_gamepads();
-
+    
     for (int i = 0; i < 4; ++i) {
         char lbl[128];
         if (km == KB_SINGLE) {
             if (i == 0) {
-                snprintf(lbl, sizeof(lbl), "P1: Keyboard");
+                snprintf(lbl, sizeof(lbl), "🎮 P1: Keyboard");
             } else {
-                int phys_i = i - 1;
-                if (g_hw_names[phys_i][0] != '\0') snprintf(lbl, sizeof(lbl), "P%d: %s", i + 1, g_hw_names[phys_i]);
+                int phys_i = i - 1; 
+                // Physical slot 0 goes to P2, etc.
+                if (g_hw_names[phys_i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[phys_i]);
                 else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
             }
         } else if (km == KB_OVERRIDE) {
             if (i == 0) {
-                if (g_hw_names[0][0] != '\0') snprintf(lbl, sizeof(lbl), "P1: %s / Keyboard", g_hw_names[0]);
-                else snprintf(lbl, sizeof(lbl), "P1: Idle / Keyboard");
+                if (g_hw_names[0][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P1: %s / Keyboard", g_hw_names[0]);
+                else snprintf(lbl, sizeof(lbl), "🎮 P1: Idle / Keyboard");
             } else {
-                if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "P%d: %s", i + 1, g_hw_names[i]);
+                if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[i]);
                 else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
             }
         } else {
-            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "P%d: %s", i + 1, g_hw_names[i]);
+            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[i]);
             else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
         }
         gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), lbl);

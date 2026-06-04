@@ -64,7 +64,7 @@ void init_global_keyboard() {
                 if (test_bit(EV_KEY, evbit)) {
                     unsigned long keybit[NLONGS(KEY_MAX)];
                     ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit);
-                    if (test_bit(KEY_A, keybit)) {
+                    if (test_bit(KEY_A, keybit)) { // If it has 'A', it's likely a keyboard
                         g_kb_fds.push_back(fd);
                     } else close(fd);
                 } else close(fd);
@@ -90,7 +90,7 @@ int name_to_linux_key(std::string name) {
     if (name.length() == 1 && name[0] >= 'A' && name[0] <= 'Z') return KEY_A + (name[0] - 'A');
     if (name.length() == 1 && name[0] >= '1' && name[0] <= '9') return KEY_1 + (name[0] - '1');
     if (name == "0") return KEY_0;
-
+    
     if (name == "UP") return KEY_UP;
     if (name == "DOWN") return KEY_DOWN;
     if (name == "LEFT") return KEY_LEFT;
@@ -108,7 +108,7 @@ int name_to_linux_key(std::string name) {
     if (name == "BACKSPACE") return KEY_BACKSPACE;
     if (name == "HOME") return KEY_HOME;
     if (name == "PRINT" || name == "SNAPSHOT" || name == "PRINTSCREEN") return KEY_SYSRQ;
-
+    
     return KEY_RESERVED;
 }
 
@@ -128,7 +128,7 @@ void scan_for_gamepads() {
     if (now - last_scan < 1'000'000) return;
     last_scan = now;
     static bool no_controllers_printed = false;
-
+    
     int num = SDL_NumJoysticks();
     for (int i = 0; i < num; ++i) {
         if (!SDL_IsGameController(i)) continue;
@@ -189,25 +189,25 @@ void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK))  rep.buttons |= ns::BTN_LSTICK;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) rep.buttons |= ns::BTN_RSTICK;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_GUIDE))   rep.buttons |= ns::BTN_HOME;
-
+    
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) {
         rep.buttons |= ns::BTN_HOME; rep.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK);
     }
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)) {
         rep.buttons |= ns::BTN_CAPTURE; rep.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);
     }
-
+    
     bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
     bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
     bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
     bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-
+    
     rep.hat = ns::HAT_NEUTRAL;
     if (up && right) rep.hat = ns::HAT_NE; else if (up && left) rep.hat = ns::HAT_NW;
     else if (down && right) rep.hat = ns::HAT_SE; else if (down && left) rep.hat = ns::HAT_SW;
     else if (up) rep.hat = ns::HAT_N; else if (down) rep.hat = ns::HAT_S;
     else if (left) rep.hat = ns::HAT_W; else if (right) rep.hat = ns::HAT_E;
-
+    
     rep.lx = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), false);
     rep.ly = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY), false);
     rep.rx = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX), false);
@@ -217,7 +217,7 @@ void read_pad(int index, ns::HIDReport& rep, bool& conn) {
 // ── Keyboard Support ──
 struct KeyBindings {
     std::unordered_map<std::string, std::string> map;
-    int mode = 0;
+    int mode = 0; 
     static std::unordered_map<std::string, std::string> defaults() {
         return {
             {"Y","Z"}, {"B","X"}, {"A","V"}, {"X","C"},
@@ -364,7 +364,7 @@ int main(int argc, char** argv) {
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET; hints.ai_socktype = SOCK_DGRAM;
     char port_str[8]; snprintf(port_str, sizeof(port_str), "%d", port);
-
+    
     if (getaddrinfo(host.c_str(), port_str, &hints, &res) != 0 || !res) return 1;
     sockaddr_in dest{}; std::memcpy(&dest, res->ai_addr, sizeof(dest)); freeaddrinfo(res);
 
@@ -379,14 +379,14 @@ int main(int argc, char** argv) {
 
     while (g_running.load(std::memory_order_relaxed)) {
         while (std::chrono::steady_clock::now() < next_tick) std::atomic_thread_fence(std::memory_order_relaxed);
-
+        
         SDL_Event e; while (SDL_PollEvent(&e)) {}
         scan_for_gamepads();
 
-        ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet));
+        ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet)); 
         pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::PROTO_VERSION;
         pkt.flags = ns::FLAG_NONE; pkt.seq = seq++; pkt.ts_us = ns::now_us();
-        pkt.report.reset();
+        pkt.report.reset(); 
 
         ns::HIDReport* out_reports[4] = { &pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4 };
         int active_count = 0; bool c1 = false, c2 = false, c3 = false, c4 = false;
@@ -417,7 +417,7 @@ int main(int argc, char** argv) {
         hmac_sha256(hmac_key, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
         memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
         sendto(sock, (const char*)&pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));
-
+        
         if (active_count > 0) next_tick += std::chrono::milliseconds(4);
         else next_tick += std::chrono::milliseconds(500);
     }
