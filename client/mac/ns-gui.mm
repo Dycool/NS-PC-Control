@@ -749,7 +749,7 @@ static void apply_keyboard_to_report_mac(ns::HIDReport& rep, const std::unordere
     [bindingsBtn setBezelStyle:NSBezelStyleRounded];
     [bindingsBtn setTarget:self];
     [bindingsBtn setAction:@selector(openBindingsEditor)];
-    [bindingsBtn setEnabled:NO];
+    [bindingsBtn setEnabled:(keyboardMode.load() != KB_OFF)];
     [view addSubview:bindingsBtn];
 
     connectBtn = [[NSButton alloc] initWithFrame:NSMakeRect(125, 215, 120, 32)];
