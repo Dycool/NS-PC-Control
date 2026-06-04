@@ -38,7 +38,7 @@ On Windows, the CLI tool is built using MinGW (GCC), while the GUI application i
 2. Open the **MSYS2 UCRT64** terminal and navigate to `client/windows/`.
 3. Build the CLI client:
 ```bash
-g++.exe -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxinput -lwinmm
+g++ -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxinput -lwinmm -luser32
 ```
 
 **To build the GUI (MSVC):**
@@ -74,18 +74,6 @@ g++ -O3 -std=c++17 ns-gamepad.cpp -o ns-gamepad -lpthread -lSDL2
 g++ -O3 -std=c++17 ns-gui.cpp -o ns-gui $(pkg-config --cflags --libs gtk+-3.0) -lpthread -lSDL2
 ```
 
-### ⚠️ Background Keyboard Permission (Linux)
-
-Both clients now read hardware keyboard input directly from `/dev/input/` for reliable background detection — no window focus required.
-
-To use keyboard mode, **add your user to the `input` group**, then **log out and log back in** (or reboot):
-
-```bash
-sudo usermod -aG input $USER
-```
-
-If you skip this step, a warning will be shown at startup and keyboard mode will not function.
-
 ---
 
 ### 🍎 macOS
@@ -100,9 +88,7 @@ Navigate to `client/mac/` and run the following depending on what you want to bu
 
 **Build the CLI:**
 ```bash
-clang++ -std=c++17 -ObjC++ \
-        -framework GameController -framework Foundation \
-        ns-gamepad.mm -o ns-gamepad
+clang++ -std=c++17 -ObjC++ -framework GameController -framework Foundation -framework CoreGraphics ns-gamepad.mm -o ns-gamepad
 ```
 *(Note: On macOS 10.15+, Bluetooth controllers may require you to grant **Input Monitoring** permission to your terminal app in System Settings).*
 
