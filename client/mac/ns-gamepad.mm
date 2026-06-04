@@ -30,6 +30,12 @@
 #include <cmath>
 #include <cstring>
 #include <signal.h>
+#include <vector>
+#include <unordered_map>
+#include <cstdio>
+
+#include <mach-o/dyld.h>
+#include <CoreGraphics/CoreGraphics.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -211,6 +217,189 @@ static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
     return r;
 }
 
+// ── Keyboard Binding Support ──────────────────────────────────────────────
+struct KeyBindings {
+    std::unordered_map<std::string, std::string> map;
+    int mode = 0; // 0=off, 1=single, 2=override
+
+    static std::unordered_map<std::string, std::string> defaults() {
+        return {
+            {"Y","Z"}, {"B","X"}, {"A","C"}, {"X","V"},
+            {"L","Q"}, {"R","E"}, {"ZL","1"}, {"ZR","2"},
+            {"MINUS","3"}, {"PLUS","4"},
+            {"LSTICK","LSHIFT"}, {"RSTICK","RSHIFT"},
+            {"LSTICK_UP","W"}, {"LSTICK_DOWN","S"},
+            {"LSTICK_LEFT","A"}, {"LSTICK_RIGHT","D"},
+            {"RSTICK_UP","I"}, {"RSTICK_DOWN","K"},
+            {"RSTICK_LEFT","J"}, {"RSTICK_RIGHT","L"},
+            {"DPAD_UP","UP"}, {"DPAD_DOWN","DOWN"},
+            {"DPAD_LEFT","LEFT"}, {"DPAD_RIGHT","RIGHT"}
+        };
+    }
+
+    std::string get_bindings_path() const {
+        char buf[1024];
+        uint32_t size = sizeof(buf);
+        if (_NSGetExecutablePath(buf, &size) == 0) {
+            std::string p(buf);
+            size_t pos = p.find_last_of('/');
+            return (pos != std::string::npos ? p.substr(0, pos) : ".") + "/bindings.json";
+        }
+        return "./bindings.json";
+    }
+
+    void load_or_create() {
+        std::string path = get_bindings_path();
+        FILE* f = fopen(path.c_str(), "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long len = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (len > 0) {
+                std::string content((size_t)len, '\0');
+                fread(&content[0], 1, (size_t)len, f);
+                size_t pos = 0;
+                while ((pos = content.find('"', pos)) != std::string::npos) {
+                    size_t ks = pos + 1, ke = content.find('"', ks);
+                    if (ke == std::string::npos) break;
+                    std::string k = content.substr(ks, ke - ks);
+                    pos = content.find('"', ke + 1);
+                    if (pos == std::string::npos) break;
+                    size_t vs = pos + 1, ve = content.find('"', vs);
+                    if (ve == std::string::npos) break;
+                    map[k] = content.substr(vs, ve - vs);
+                    pos = ve + 1;
+                }
+            }
+            fclose(f);
+        }
+        if (map.empty()) {
+            map = defaults();
+            f = fopen(path.c_str(), "w");
+            if (f) {
+                std::string json = "{\n";
+                size_t i = 0;
+                for (auto& [k, v] : map) {
+                    json += "    \"" + k + "\": \"" + v + "\"";
+                    if (++i < map.size()) json += ",";
+                    json += "\n";
+                }
+                json += "}\n";
+                fputs(json.c_str(), f);
+                fclose(f);
+            }
+            std::cout << "Created default bindings: " << path << "\n";
+        }
+    }
+
+    CGEventSourceRef src;
+
+    KeyBindings() {
+        src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    }
+
+    ~KeyBindings() {
+        if (src) CFRelease(src);
+    }
+
+    // Poll keyboard via CoreGraphics and fill HIDReport for player 1
+    void apply(ns::HIDReport& rep) const {
+        if (!src) return;
+
+        auto is_down = [this](const std::string& name) -> bool {
+            // Map key names to CGKeyCode
+            struct KeyMap { const char* n; CGKeyCode code; };
+            static const KeyMap kmap[] = {
+                {"A",0x00}, {"B",0x0B}, {"C",0x08}, {"D",0x02},
+                {"E",0x0E}, {"F",0x03}, {"G",0x05}, {"H",0x04},
+                {"I",0x22}, {"J",0x26}, {"K",0x28}, {"L",0x25},
+                {"M",0x2E}, {"N",0x2D}, {"O",0x1F}, {"P",0x23},
+                {"Q",0x0C}, {"R",0x0F}, {"S",0x01}, {"T",0x11},
+                {"U",0x20}, {"V",0x09}, {"W",0x0D}, {"X",0x07},
+                {"Y",0x10}, {"Z",0x06},
+                {"0",0x1D}, {"1",0x12}, {"2",0x13}, {"3",0x14},
+                {"4",0x15}, {"5",0x17}, {"6",0x16}, {"7",0x1A},
+                {"8",0x1C}, {"9",0x19},
+                {"UP",0x7E}, {"DOWN",0x7D}, {"LEFT",0x7B}, {"RIGHT",0x7C},
+                {"LSHIFT",0x38}, {"RSHIFT",0x3C},
+                {"LCTRL",0x3B}, {"RCTRL",0x3E},
+                {"LALT",0x3A}, {"RALT",0x3D},
+                {"SPACE",0x31}, {"ENTER",0x24}, {"TAB",0x30},
+                {"ESC",0x35}, {"BACKSPACE",0x33},
+                {"F1",0x7A}, {"F2",0x78}, {"F3",0x63}, {"F4",0x76},
+                {"F5",0x60}, {"F6",0x61}, {"F7",0x62}, {"F8",0x64},
+                {"F9",0x65}, {"F10",0x6D}, {"F11",0x67}, {"F12",0x6F},
+            };
+            for (auto& km : kmap)
+                if (name == km.n) return CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, km.code);
+            return false;
+        };
+
+        auto get_key = [&](const std::string& btn) -> std::string {
+            auto it = map.find(btn);
+            return it != map.end() ? it->second : "";
+        };
+
+        std::string k;
+
+        k = get_key("Y");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_Y;
+        k = get_key("B");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_B;
+        k = get_key("A");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_A;
+        k = get_key("X");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_X;
+        k = get_key("L");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_L;
+        k = get_key("R");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_R;
+        k = get_key("ZL");     if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_ZL;
+        k = get_key("ZR");     if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_ZR;
+        k = get_key("MINUS");  if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_MINUS;
+        k = get_key("PLUS");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_PLUS;
+        k = get_key("LSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_LSTICK;
+        k = get_key("RSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_RSTICK;
+
+        bool up = false, down = false, left = false, right = false;
+        k = get_key("DPAD_UP");    if (!k.empty()) up    = is_down(k);
+        k = get_key("DPAD_DOWN");  if (!k.empty()) down  = is_down(k);
+        k = get_key("DPAD_LEFT");  if (!k.empty()) left  = is_down(k);
+        k = get_key("DPAD_RIGHT"); if (!k.empty()) right = is_down(k);
+
+        if (up && right) rep.hat = ns::HAT_NE;
+        else if (up && left) rep.hat = ns::HAT_NW;
+        else if (down && right) rep.hat = ns::HAT_SE;
+        else if (down && left) rep.hat = ns::HAT_SW;
+        else if (up) rep.hat = ns::HAT_N;
+        else if (down) rep.hat = ns::HAT_S;
+        else if (left) rep.hat = ns::HAT_W;
+        else if (right) rep.hat = ns::HAT_E;
+
+        // Left stick axes (only center in single mode)
+        auto lsu = get_key("LSTICK_UP"), lsd = get_key("LSTICK_DOWN");
+        auto lsl = get_key("LSTICK_LEFT"), lsr = get_key("LSTICK_RIGHT");
+        bool lsu_dn = !lsu.empty() && is_down(lsu);
+        bool lsd_dn = !lsd.empty() && is_down(lsd);
+        bool lsl_dn = !lsl.empty() && is_down(lsl);
+        bool lsr_dn = !lsr.empty() && is_down(lsr);
+        if (lsl_dn && !lsr_dn) rep.lx = 0;
+        else if (lsr_dn && !lsl_dn) rep.lx = 255;
+        else if (mode != 2) rep.lx = 128;
+        if (lsu_dn && !lsd_dn) rep.ly = 0;
+        else if (lsd_dn && !lsu_dn) rep.ly = 255;
+        else if (mode != 2) rep.ly = 128;
+
+        // Right stick axes (only center in single mode)
+        auto rsu = get_key("RSTICK_UP"), rsd = get_key("RSTICK_DOWN");
+        auto rsl = get_key("RSTICK_LEFT"), rsr = get_key("RSTICK_RIGHT");
+        bool rsu_dn = !rsu.empty() && is_down(rsu);
+        bool rsd_dn = !rsd.empty() && is_down(rsd);
+        bool rsl_dn = !rsl.empty() && is_down(rsl);
+        bool rsr_dn = !rsr.empty() && is_down(rsr);
+        if (rsl_dn && !rsr_dn) rep.rx = 0;
+        else if (rsr_dn && !rsl_dn) rep.rx = 255;
+        else if (mode != 2) rep.rx = 128;
+        if (rsu_dn && !rsd_dn) rep.ry = 0;
+        else if (rsd_dn && !rsu_dn) rep.ry = 255;
+        else if (mode != 2) rep.ry = 128;
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -223,21 +412,43 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]>\n";
+    int keyboard_mode = 0;
+    std::string host;
+    int port = ns::DEFAULT_PORT;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-k") == 0) {
+            keyboard_mode = 1;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                if (strcmp(argv[i+1], "override") == 0) keyboard_mode = 2;
+                i++;
+            }
+        } else if (host.empty()) {
+            host = argv[i];
+            size_t colon = host.find(':');
+            if (colon != std::string::npos) {
+                port = std::atoi(host.c_str() + colon + 1);
+                if (port < 1 || port > 65535) {
+                    std::cerr << "Invalid port: " << port << " (must be 1–65535)\n";
+                    close(lock_fd); return 1;
+                }
+                host.resize(colon);
+            }
+        }
+    }
+
+    if (host.empty()) {
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]> [-k [single|override]]\n";
+        std::cerr << "  -k  Enable keyboard mode (default: single)\n";
         return 1;
     }
 
-    std::string host = argv[1];
-    int port = ns::DEFAULT_PORT;
-    size_t colon = host.find(':');
-    if (colon != std::string::npos) {
-        port = std::atoi(host.c_str() + colon + 1);
-        if (port < 1 || port > 65535) {
-            std::cerr << "Invalid port: " << port << " (must be 1–65535)\n";
-            close(lock_fd); return 1;
-        }
-        host.resize(colon);
+    KeyBindings kb;
+    if (keyboard_mode) {
+        kb.load_or_create();
+        kb.mode = keyboard_mode;
+        std::cout << "Keyboard mode enabled (" << (keyboard_mode == 1 ? "single" : "override") << ") — ";
+        std::cout << (keyboard_mode == 1 ? "replaces" : "augments") << " Player 1\n";
     }
 
     uint8_t hmac_key[32];
@@ -288,14 +499,30 @@ int main(int argc, char** argv) {
             ns::HIDReport* out_reports[4] = { &pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4 };
             int active_count = 0;
 
+            bool c1 = false, c2 = false, c3 = false, c4 = false;
             for (int i = 0; i < MAX_SLOTS; ++i) {
-                // FIX 1: Read the atomic flag instead of the bare ObjC pointer.
                 if (!g_slot_active[i].load(std::memory_order_relaxed)) continue;
-
-                // FIX 2: Use slot index i directly so P2's data goes to report.p2,
-                // not remapped to p1 just because p1 is empty.
                 *out_reports[i] = map_gc_to_switch(g_states[i]);
                 active_count++;
+                if (i == 0) c1 = true;
+                else if (i == 1) c2 = true;
+                else if (i == 2) c3 = true;
+                else if (i == 3) c4 = true;
+            }
+
+            // Keyboard overrides Player 1
+            if (kb.mode == 1) {
+                if (c1) {
+                    if (!c2) { *out_reports[1] = *out_reports[0]; c2 = true; active_count++; }
+                    else if (!c3) { *out_reports[2] = *out_reports[0]; c3 = true; active_count++; }
+                    else if (!c4) { *out_reports[3] = *out_reports[0]; c4 = true; active_count++; }
+                }
+                out_reports[0]->reset();
+                kb.apply(*out_reports[0]);
+                active_count = std::max(active_count, 1);
+            } else if (kb.mode == 2) {
+                kb.apply(*out_reports[0]);
+                active_count = std::max(active_count, 1);
             }
 
             {

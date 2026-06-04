@@ -1,6 +1,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
 
 #include <windows.h>           
 #include <mmsystem.h>          
@@ -15,6 +18,9 @@
 #include <thread>              
 #include <algorithm>           
 #include <string>
+#include <vector>
+#include <unordered_map>
+#include <cstdio>
 #include "../../server/rpi/include/sha256.h"
 
 // Import external protocol structures
@@ -96,24 +102,217 @@ void fetch_pad_throttled(DWORD index, ns::HIDReport& rep, bool& conn) {
     rep = map_xinput_to_switch(state.Gamepad);
 }
 
+// ── Keyboard Binding Support ──────────────────────────────────────────────
+struct KeyBindings {
+    std::unordered_map<std::string, std::string> map;
+    int mode = 0; // 0=off, 1=single, 2=override
+
+    static std::unordered_map<std::string, std::string> defaults() {
+        return {
+            {"Y","Z"}, {"B","X"}, {"A","C"}, {"X","V"},
+            {"L","Q"}, {"R","E"}, {"ZL","1"}, {"ZR","2"},
+            {"MINUS","3"}, {"PLUS","4"},
+            {"LSTICK","LSHIFT"}, {"RSTICK","RSHIFT"},
+            {"LSTICK_UP","W"}, {"LSTICK_DOWN","S"},
+            {"LSTICK_LEFT","A"}, {"LSTICK_RIGHT","D"},
+            {"RSTICK_UP","I"}, {"RSTICK_DOWN","K"},
+            {"RSTICK_LEFT","J"}, {"RSTICK_RIGHT","L"},
+            {"DPAD_UP","UP"}, {"DPAD_DOWN","DOWN"},
+            {"DPAD_LEFT","LEFT"}, {"DPAD_RIGHT","RIGHT"}
+        };
+    }
+
+    std::string get_bindings_path() const {
+        char path[MAX_PATH];
+        GetModuleFileNameA(nullptr, path, MAX_PATH);
+        std::string p(path);
+        size_t pos = p.find_last_of("\\/");
+        return (pos != std::string::npos ? p.substr(0, pos) : ".") + "\\bindings.json";
+    }
+
+    void load_or_create() {
+        std::string path = get_bindings_path();
+        FILE* f = fopen(path.c_str(), "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long len = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (len > 0) {
+                std::string content((size_t)len, '\0');
+                fread(&content[0], 1, (size_t)len, f);
+                size_t pos = 0;
+                while ((pos = content.find('"', pos)) != std::string::npos) {
+                    size_t ks = pos + 1, ke = content.find('"', ks);
+                    if (ke == std::string::npos) break;
+                    std::string k = content.substr(ks, ke - ks);
+                    pos = content.find('"', ke + 1);
+                    if (pos == std::string::npos) break;
+                    size_t vs = pos + 1, ve = content.find('"', vs);
+                    if (ve == std::string::npos) break;
+                    map[k] = content.substr(vs, ve - vs);
+                    pos = ve + 1;
+                }
+            }
+            fclose(f);
+        }
+        if (map.empty()) {
+            map = defaults();
+            f = fopen(path.c_str(), "w");
+            if (f) {
+                std::string json = "{\n";
+                size_t i = 0;
+                for (auto& [k, v] : map) {
+                    json += "    \"" + k + "\": \"" + v + "\"";
+                    if (++i < map.size()) json += ",";
+                    json += "\n";
+                }
+                json += "}\n";
+                fputs(json.c_str(), f);
+                fclose(f);
+            }
+            std::cout << "Created default bindings: " << path << "\n";
+        }
+    }
+
+    // Poll keyboard and fill HIDReport for player 1
+    void apply(ns::HIDReport& rep) const {
+        // Helper: check if a named key is pressed
+        auto is_down = [](const std::string& name) -> bool {
+            // Letter keys
+            if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z')
+                return GetAsyncKeyState(name[0]) & 0x8000;
+            if (name.size() == 1 && name[0] >= '0' && name[0] <= '9')
+                return GetAsyncKeyState(name[0]) & 0x8000;
+            // Named keys
+            struct KeyMap { const char* n; int vk; };
+            static const KeyMap kmap[] = {
+                {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
+                {"LSHIFT", VK_LSHIFT}, {"RSHIFT", VK_RSHIFT},
+                {"LCTRL", VK_LCONTROL}, {"RCTRL", VK_RCONTROL},
+                {"LALT", VK_LMENU}, {"RALT", VK_RMENU},
+                {"SPACE", VK_SPACE}, {"ENTER", VK_RETURN}, {"TAB", VK_TAB},
+                {"ESC", VK_ESCAPE}, {"BACKSPACE", VK_BACK},
+                {"F1", VK_F1}, {"F2", VK_F2}, {"F3", VK_F3}, {"F4", VK_F4},
+                {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8},
+                {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
+            };
+            for (auto& km : kmap)
+                if (name == km.n) return GetAsyncKeyState(km.vk) & 0x8000;
+            // Number key alternative: '0'..'9'  
+            return false;
+        };
+
+        auto get_key = [&](const std::string& btn) -> std::string {
+            auto it = map.find(btn);
+            return it != map.end() ? it->second : "";
+        };
+
+        std::string k;
+
+        k = get_key("Y");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_Y;
+        k = get_key("B");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_B;
+        k = get_key("A");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_A;
+        k = get_key("X");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_X;
+        k = get_key("L");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_L;
+        k = get_key("R");      if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_R;
+        k = get_key("ZL");     if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_ZL;
+        k = get_key("ZR");     if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_ZR;
+        k = get_key("MINUS");  if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_MINUS;
+        k = get_key("PLUS");   if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_PLUS;
+        k = get_key("LSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_LSTICK;
+        k = get_key("RSTICK"); if (!k.empty() && is_down(k)) rep.buttons |= ns::BTN_RSTICK;
+
+        // D-Pad
+        bool up = false, down = false, left = false, right = false;
+        k = get_key("DPAD_UP");    if (!k.empty()) up    = is_down(k);
+        k = get_key("DPAD_DOWN");  if (!k.empty()) down  = is_down(k);
+        k = get_key("DPAD_LEFT");  if (!k.empty()) left  = is_down(k);
+        k = get_key("DPAD_RIGHT"); if (!k.empty()) right = is_down(k);
+
+        if (up && right) rep.hat = ns::HAT_NE;
+        else if (up && left) rep.hat = ns::HAT_NW;
+        else if (down && right) rep.hat = ns::HAT_SE;
+        else if (down && left) rep.hat = ns::HAT_SW;
+        else if (up) rep.hat = ns::HAT_N;
+        else if (down) rep.hat = ns::HAT_S;
+        else if (left) rep.hat = ns::HAT_W;
+        else if (right) rep.hat = ns::HAT_E;
+
+        // Left stick axes (only center in single mode)
+        auto lsu = get_key("LSTICK_UP"), lsd = get_key("LSTICK_DOWN");
+        auto lsl = get_key("LSTICK_LEFT"), lsr = get_key("LSTICK_RIGHT");
+        bool lsu_dn = !lsu.empty() && is_down(lsu);
+        bool lsd_dn = !lsd.empty() && is_down(lsd);
+        bool lsl_dn = !lsl.empty() && is_down(lsl);
+        bool lsr_dn = !lsr.empty() && is_down(lsr);
+        if (lsl_dn && !lsr_dn) rep.lx = 0;
+        else if (lsr_dn && !lsl_dn) rep.lx = 255;
+        else if (mode != 2) rep.lx = 128;
+        if (lsu_dn && !lsd_dn) rep.ly = 0;
+        else if (lsd_dn && !lsu_dn) rep.ly = 255;
+        else if (mode != 2) rep.ly = 128;
+
+        // Right stick axes (only center in single mode)
+        auto rsu = get_key("RSTICK_UP"), rsd = get_key("RSTICK_DOWN");
+        auto rsl = get_key("RSTICK_LEFT"), rsr = get_key("RSTICK_RIGHT");
+        bool rsu_dn = !rsu.empty() && is_down(rsu);
+        bool rsd_dn = !rsd.empty() && is_down(rsd);
+        bool rsl_dn = !rsl.empty() && is_down(rsl);
+        bool rsr_dn = !rsr.empty() && is_down(rsr);
+        if (rsl_dn && !rsr_dn) rep.rx = 0;
+        else if (rsr_dn && !rsl_dn) rep.rx = 255;
+        else if (mode != 2) rep.rx = 128;
+        if (rsu_dn && !rsd_dn) rep.ry = 0;
+        else if (rsd_dn && !rsu_dn) rep.ry = 255;
+        else if (mode != 2) rep.ry = 128;
+    }
+};
+
 int main(int argc, char** argv) {
     timeBeginPeriod(1);
 
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]>\n";
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]> [-k [single|override]]\n";
+        std::cerr << "  -k  Enable keyboard mode (default: single)\n";
         timeEndPeriod(1); return 1;
     }
 
-    std::string host = argv[1];
+    int keyboard_mode = 0;
+    std::string host;
     int port = ns::DEFAULT_PORT;
-    size_t colon = host.find(':');
-    if (colon != std::string::npos) {
-        port = std::atoi(host.c_str() + colon + 1);
-        if (port < 1 || port > 65535) {
-            std::cerr << "Invalid port: " << port << " (must be 1–65535)\n";
-            timeEndPeriod(1); return 1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-k") == 0) {
+            keyboard_mode = 1;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                if (strcmp(argv[i+1], "override") == 0) keyboard_mode = 2;
+                i++;
+            }
+        } else if (host.empty()) {
+            host = argv[i];
+            size_t colon = host.find(':');
+            if (colon != std::string::npos) {
+                port = std::atoi(host.c_str() + colon + 1);
+                if (port < 1 || port > 65535) {
+                    std::cerr << "Invalid port: " << port << " (must be 1–65535)\n";
+                    timeEndPeriod(1); return 1;
+                }
+                host.resize(colon);
+            }
         }
-        host.resize(colon);
+    }
+
+    if (host.empty()) {
+        std::cerr << "Usage: " << argv[0] << " <RASPBERRY_PI_IP[:PORT]> [-k]\n";
+        timeEndPeriod(1); return 1;
+    }
+
+    KeyBindings kb;
+    if (keyboard_mode) {
+        kb.load_or_create();
+        kb.mode = keyboard_mode;
+        std::cout << "Keyboard mode enabled (" << (keyboard_mode == 1 ? "single" : "override") << ") — ";
+        std::cout << (keyboard_mode == 1 ? "replaces" : "augments") << " Player 1\n";
     }
 
     uint8_t hmac_key[32]; derive_key(ns::DEFAULT_SECRET, hmac_key);
@@ -156,6 +355,7 @@ int main(int argc, char** argv) {
         static bool no_controllers_printed = false;
         
         // Scan all 4 XInput slots and assign to fixed physical slot
+        bool c1 = false, c2 = false, c3 = false, c4 = false;
         for (DWORD i = 0; i < 4; ++i) {
             ns::HIDReport temp_rep;
             bool is_conn = false;
@@ -164,7 +364,26 @@ int main(int argc, char** argv) {
             if (is_conn) {
                 *out_reports[i] = temp_rep; // Slot matches physical controller
                 active_count++;
+                if (i == 0) c1 = true;
+                else if (i == 1) c2 = true;
+                else if (i == 2) c3 = true;
+                else if (i == 3) c4 = true;
             }
+        }
+
+        // Keyboard overrides Player 1
+        if (kb.mode == 1) {
+            if (c1) {
+                if (!c2) { *out_reports[1] = *out_reports[0]; c2 = true; active_count++; }
+                else if (!c3) { *out_reports[2] = *out_reports[0]; c3 = true; active_count++; }
+                else if (!c4) { *out_reports[3] = *out_reports[0]; c4 = true; active_count++; }
+            }
+            out_reports[0]->reset();
+            kb.apply(*out_reports[0]);
+            active_count = std::max(active_count, 1);
+        } else if (kb.mode == 2) {
+            kb.apply(*out_reports[0]);
+            active_count = std::max(active_count, 1);
         }
 
         // Sign packet
