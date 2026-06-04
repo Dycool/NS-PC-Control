@@ -46,10 +46,10 @@ static bool g_verbose = false;
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
 
-// Per-IP rate limiting (token bucket, 32-entry hash table)
+// Per-IP rate limiting (token bucket, 1024-entry hash table to prevent collisions)
 static constexpr uint64_t RATE_WINDOW_US = 1'000'000;  // 1 second
 static constexpr uint32_t RATE_MAX_PKT   = 2000;       // max packets/sec per IP
-static constexpr int      RATE_TABLE     = 32;
+static constexpr int      RATE_TABLE     = 1024;
 
 struct RateSlot {
     uint32_t ip;           // IP in network byte order, 0 = empty
@@ -93,10 +93,6 @@ static void writer_thread(int hz) {
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[4];
 
-    auto is_neutral = [](const HIDReport& r) {
-        return r.buttons == 0 && r.hat == 8 && r.lx == 128 && r.ly == 128 && r.rx == 128 && r.ry == 128;
-    };
-
     while (g_running.load(std::memory_order_relaxed)) {
         bool all_open = true;
         for(int i=0; i<4; ++i) {
@@ -134,7 +130,7 @@ static void writer_thread(int hz) {
                 for (int c = 0; c < MAX_CLIENTS; ++c) {
                     if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > WATCHDOG_MS * 1000ULL)) {
                         g_clients[c].active = false;
-                        if (g_verbose) std::printf("PC %d timed out and was disconnected.\n", c+1);
+                        if (g_verbose) std::printf("PC/Web %d timed out and was disconnected.\n", c+1);
                     }
                 }
 
@@ -148,12 +144,9 @@ static void writer_thread(int hz) {
                     }
                 }
 
-                // 3. Auto-assign unmapped active inputs to free hardware slots
+                // 3. Auto-assign unmapped active inputs to free hardware slots immediately
                 for (int c = 0; c < MAX_CLIENTS; ++c) {
                     if (!g_clients[c].active) continue;
-                    
-                    HIDReport* subs[4] = { &g_clients[c].report.p1, &g_clients[c].report.p2, 
-                                           &g_clients[c].report.p3, &g_clients[c].report.p4 };
                     
                     for (int s = 0; s < 4; ++s) {
                         bool mapped = false;
@@ -163,14 +156,13 @@ static void writer_thread(int hz) {
                             }
                         }
                         
-                        // If player pressed a button and doesn't have a physical port yet
-                        if (!mapped && !is_neutral(*subs[s])) {
+                        if (!mapped) {
                             for (int h = 0; h < 4; ++h) {
                                 if (hw_slots[h].client_idx == -1) {
                                     hw_slots[h].client_idx = c;
                                     hw_slots[h].sub_idx = s;
                                     if (g_verbose) 
-                                        std::printf("Map -> PC %d (Pad %d) took Switch Port %d\n", c+1, s+1, h+1);
+                                        std::printf("Map -> Slot %d (Pad %d) took Switch Port %d\n", c+1, s+1, h+1);
                                     break;
                                 }
                             }
@@ -304,8 +296,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .container{max-width:420px;width:100%;background:#fff;border-radius:8px;padding:24px 20px;box-shadow:0 2px 12px rgba(0,0,0,.15)}
 h1{font-size:22px;font-weight:700;color:#c00;margin:0 0 16px 0;text-align:center}
 .row{margin-bottom:10px;display:flex;align-items:center;gap:8px}
-.row label{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:14px}
-.row input[type=text]{flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;font-family:Consolas,monospace;background:#f9f9f9}
+.row label{display:flex;align-items:center;gap:6px;font-size:14px;min-width:110px;text-align:right}
+.row input[type=text], .row select{flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;font-family:Consolas,monospace;background:#f9f9f9}
 .row button{padding:6px 18px;border:none;border-radius:4px;cursor:pointer;font-size:14px;font-weight:600}
 .btn-primary{background:#c00;color:#fff;width:100%;padding:10px}
 .btn-primary.active{background:#2e7d32}
@@ -316,97 +308,185 @@ h1{font-size:22px;font-weight:700;color:#c00;margin:0 0 16px 0;text-align:center
 .player{font-size:13px;padding:6px 10px;background:#f5f5f5;border-radius:4px;border-left:3px solid #ccc}
 .player.active{border-left-color:#2e7d32;background:#e8f5e9}
 .pkt-info{font-size:12px;color:#999;text-align:center;margin-top:8px}
-/* Bindings Editor Modal */
 .modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);justify-content:center;align-items:center;z-index:100}
 .modal-box{background:#fff;border-radius:8px;padding:12px;box-shadow:0 4px 20px rgba(0,0,0,.3);max-height:90vh;overflow-y:auto;width:560px}
 .modal-box h2{font-size:16px;margin:0 0 8px 0;color:#c00}
 #edit-table{width:100%;border-collapse:collapse}
 #edit-table td{padding:2px 3px;font-size:12px}
-#edit-table td.el{text-align:center;font-weight:600;width:80px}
-#edit-table td.ek{font-family:Consolas,monospace;background:#f5f5f5;padding:2px 6px;border-radius:3px;width:120px;text-align:center}
+#edit-table td.el{text-align:center;font-weight:600;width:95px}
+#edit-table td.ek{font-family:Consolas,monospace;background:#f5f5f5;padding:2px 6px;border-radius:3px;width:115px;text-align:center}
 #edit-table td button{padding:1px 8px;font-size:11px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer}
 #edit-table td button:hover{background:#eee}
-.modal-buttons{display:flex;justify-content:center;gap:6px;margin-top:8px}
-.modal-buttons button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600}
+.modal-buttons{display:flex;justify-content:space-between;margin:8px 4px 0}
+.modal-buttons .group{display:flex;flex-direction:column;gap:6px}
+.modal-buttons button{padding:6px 20px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600}
 </style>
 </head>
 <body>
 <div class="container">
 <h1>NS PC Control</h1>
-<div class="row"><label style="min-width:110px;text-align:right">Raspberry Pi IP:</label><input type="text" id="ip" readonly></div>
-<div class="row"><label><input type="checkbox" id="kb-mode"> Keyboard Mode (overrides P1)</label><button id="bindings-btn" class="btn-secondary" disabled>Bindings...</button></div>
+<div class="row"><label>Server IP:</label><input type="text" id="ip" placeholder="Leave empty for auto"></div>
+<div class="row"><label>Keyboard Mode:</label><select id="kb-mode"><option value="0">OFF</option><option value="1">ON (single)</option><option value="2">ON (override)</option></select><button id="bindings-btn" class="btn-secondary" disabled>Bindings...</button></div>
 <div class="row"><button id="connect-btn" class="btn-primary">Connect</button></div>
-<span id="status">Web Server Active</span>
-<div class="player-grid"><div class="player" id="p1">P1: Waiting...</div><div class="player" id="p2">P2: Waiting...</div><div class="player" id="p3">P3: Waiting...</div><div class="player" id="p4">P4: Waiting...</div></div>
-<div class="pkt-info" id="pkt-info">Packets sent: 0</div>
+<span id="status">Disconnected</span>
+<div class="player-grid"><div class="player" id="p1">P1: Disconnected</div><div class="player" id="p2">P2: Disconnected</div><div class="player" id="p3">P3: Disconnected</div><div class="player" id="p4">P4: Disconnected</div></div>
+<div class="pkt-info" id="pkt-info">Packets rx by Pi: 0</div>
 </div>
 <div class="modal-overlay" id="edit-modal" tabindex="0">
 <div class="modal-box">
 <h2>Edit Key Bindings</h2>
 <table id="edit-table"><tbody></tbody></table>
-<div class="modal-buttons" style="display:flex;justify-content:space-between;margin:8px 4px 0">
-<div style="display:flex;flex-direction:column;gap:6px"><button onclick="saveEditor()" style="background:#c00;color:#fff;padding:6px 20px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600">Save</button><button onclick="closeEditor()" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600">Cancel</button></div>
-<div style="display:flex;flex-direction:column;gap:6px"><button onclick="startSetup()" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600">Setup</button><button onclick="resetEditor()" style="padding:6px 20px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600">Reset</button></div>
-</div>
-</div>
-</div>
+<div class="modal-buttons">
+<div class="group"><button onclick="saveEditor()" style="background:#c00;color:#fff;">Save</button><button onclick="closeEditor()" style="background:#e0e0e0;">Cancel</button></div>
+<div class="group"><button onclick="startSetup()" style="background:#e0e0e0;">Setup</button><button onclick="resetEditor()" style="background:#e0e0e0;">Reset</button></div>
+</div></div></div>
 <script>
-const WS_URL = `ws://${location.hostname}:${location.port}/`;
-let ws=null, connected=false, enabled=false, kbMode=false, pollId=null;
+let ws=null, connected=false, kbMode=0, pollId=null;
 let keys={}, kbdBindings={};
-try{const s=JSON.parse(localStorage.getItem('nsBindings'));if(s)kbdBindings=s}catch(e){}
-const DEF={Y:'KeyZ',B:'KeyX',A:'KeyC',X:'KeyV',L:'KeyQ',R:'KeyE',ZL:'Digit1',ZR:'Digit2',MINUS:'Digit3',PLUS:'Digit4',LSTICK:'ShiftLeft',RSTICK:'ShiftRight',DUP:'ArrowUp',DDOWN:'ArrowDown',DLEFT:'ArrowLeft',DRIGHT:'ArrowRight'};
-const BTN_BIT={Y:0,B:1,A:2,X:3,L:4,R:5,ZL:6,ZR:7,MINUS:8,PLUS:9,LSTICK:10,RSTICK:11};
-const DPAD={'ArrowUp':0,'ArrowUpRight':1,'ArrowRight':2,'ArrowDownRight':3,'ArrowDown':4,'ArrowDownLeft':5,'ArrowLeft':6,'ArrowUpLeft':7};
+const DEF={Y:'KeyZ',B:'KeyX',A:'KeyC',X:'KeyV',L:'KeyQ',R:'KeyE',ZL:'Digit1',ZR:'Digit2',MINUS:'Digit3',PLUS:'Digit4',LSTICK:'ShiftLeft',RSTICK:'ShiftRight',HOME:'Home',CAPTURE:'PrintScreen',LSTICK_UP:'KeyW',LSTICK_DOWN:'KeyS',LSTICK_LEFT:'KeyA',LSTICK_RIGHT:'KeyD',RSTICK_UP:'KeyI',RSTICK_DOWN:'KeyK',RSTICK_LEFT:'KeyJ',RSTICK_RIGHT:'KeyL',DPAD_UP:'ArrowUp',DPAD_DOWN:'ArrowDown',DPAD_LEFT:'ArrowLeft',DPAD_RIGHT:'ArrowRight'};
 Object.assign(kbdBindings,DEF);
-function buildButtonMap(){const m={};for(const[btn,code]of Object.entries(kbdBindings)){if(code&&code!=='---'&&BTN_BIT[btn]!==undefined)m[code]=1<<BTN_BIT[btn]}return m}
-// ── Bindings Editor ──
-let editBindings={};
-let listeningIdx=-1,setupMode=false;
-const BKEYS=['Y','B','A','X','L','R','ZL','ZR','MINUS','PLUS','LSTICK','RSTICK','DUP','DDOWN','DLEFT','DRIGHT'];
+try{
+    let sip=localStorage.getItem('nsLastIP'); if (sip) document.getElementById('ip').value = sip;
+    let skm=localStorage.getItem('nsKbMode'); if(skm){ kbMode=parseInt(skm); document.getElementById('kb-mode').value=skm; }
+    let sb=localStorage.getItem('nsBindings'); if(sb) Object.assign(kbdBindings, JSON.parse(sb));
+}catch(e){}
+let editBindings={}, listeningIdx=-1, setupMode=false;
+const BKEYS=['Y','B','A','X','L','R','ZL','ZR','MINUS','PLUS','LSTICK','RSTICK','HOME','CAPTURE','LSTICK_UP','LSTICK_DOWN','LSTICK_LEFT','LSTICK_RIGHT','RSTICK_UP','RSTICK_DOWN','RSTICK_LEFT','RSTICK_RIGHT','DPAD_UP','DPAD_DOWN','DPAD_LEFT','DPAD_RIGHT'];
 function openEditor(){
-editBindings=JSON.parse(JSON.stringify(kbdBindings));
-listeningIdx=-1;setupMode=false;
-const tb=document.getElementById('edit-table').tBodies[0];tb.innerHTML='';
-for(let i=0;i<12;i++){const li=i,ri=i+12;const tr=document.createElement('tr');
-tr.innerHTML='<td class="el">'+BKEYS[li]+'</td><td class="ek" id="ek-'+li+'">'+(editBindings[BKEYS[li]]||'')+'</td><td><button class="eb" data-idx="'+li+'">Ch</button></td>'+
-'<td class="el">'+BKEYS[ri]+'</td><td class="ek" id="ek-'+ri+'">'+(editBindings[BKEYS[ri]]||'')+'</td><td><button class="eb" data-idx="'+ri+'">Ch</button></td>';
-tr.querySelectorAll('.eb')[0].onclick=function(){setupMode=false;listeningIdx=parseInt(this.dataset.idx);document.getElementById('ek-'+listeningIdx).textContent='...';document.getElementById('edit-modal').focus()};
-tr.querySelectorAll('.eb')[1].onclick=function(){setupMode=false;listeningIdx=parseInt(this.dataset.idx);document.getElementById('ek-'+listeningIdx).textContent='...';document.getElementById('edit-modal').focus()};
-tb.appendChild(tr)}
-document.getElementById('edit-modal').style.display='flex';document.getElementById('edit-modal').focus()}
-function closeEditor(){document.getElementById('edit-modal').style.display='none';listeningIdx=-1;setupMode=false}
+    editBindings=JSON.parse(JSON.stringify(kbdBindings)); listeningIdx=-1; setupMode=false;
+    const tb=document.getElementById('edit-table').tBodies[0]; tb.innerHTML='';
+    let half = Math.ceil(BKEYS.length/2);
+    for(let i=0;i<half;i++){
+        let li=i, ri=i+half;
+        let tr=document.createElement('tr');
+        let r_html = ri<BKEYS.length ? `<td class="el">${BKEYS[ri]}</td><td class="ek" id="ek-${ri}">${editBindings[BKEYS[ri]]||''}</td><td><button class="eb" data-idx="${ri}">Ch</button></td>` : `<td colspan="3"></td>`;
+        tr.innerHTML=`<td class="el">${BKEYS[li]}</td><td class="ek" id="ek-${li}">${editBindings[BKEYS[li]]||''}</td><td><button class="eb" data-idx="${li}">Ch</button></td>` + r_html;
+        tb.appendChild(tr);
+    }
+    document.querySelectorAll('.eb').forEach(b=>{
+        b.onclick=function(){setupMode=false;listeningIdx=parseInt(this.dataset.idx);document.getElementById('ek-'+listeningIdx).textContent='...';document.getElementById('edit-modal').focus();}
+    });
+    document.getElementById('edit-modal').style.display='flex'; document.getElementById('edit-modal').focus();
+}
+function closeEditor(){document.getElementById('edit-modal').style.display='none';listeningIdx=-1;setupMode=false;}
 function saveEditor(){kbdBindings=JSON.parse(JSON.stringify(editBindings));try{localStorage.setItem('nsBindings',JSON.stringify(kbdBindings))}catch(e){}closeEditor()}
-function resetEditor(){for(let i=0;i<BKEYS.length;i++){editBindings[BKEYS[i]]=DEF[BKEYS[i]];document.getElementById('ek-'+i).textContent=DEF[BKEYS[i]]}}
-function startSetup(){
-setupMode=true;
-for(let i=0;i<BKEYS.length;i++){editBindings[BKEYS[i]]='';document.getElementById('ek-'+i).textContent=i===0?'...':''}
-listeningIdx=0;document.getElementById('edit-modal').focus()}
-document.addEventListener('keydown',function(e){
-if(listeningIdx<0||document.getElementById('edit-modal').style.display!=='flex')return;
-e.preventDefault();const k=BKEYS[listeningIdx];
-if(e.code==='Escape'){
-editBindings[k]='';document.getElementById('ek-'+listeningIdx).textContent='';
-if(setupMode){listeningIdx++;if(listeningIdx<BKEYS.length){document.getElementById('ek-'+listeningIdx).textContent='...';return}}
-listeningIdx=-1;setupMode=false;return}
-// In setup mode, skip already-bound keys
-if(setupMode){let ab=false;for(let i=0;i<BKEYS.length;i++){if(i!==listeningIdx&&editBindings[BKEYS[i]]===e.code){ab=true;break}}if(ab)return}
-// Remove this key from any other binding
-for(let i=0;i<BKEYS.length;i++){if(i!==listeningIdx&&editBindings[BKEYS[i]]===e.code){editBindings[BKEYS[i]]='';document.getElementById('ek-'+i).textContent=''}}
-editBindings[k]=e.code;document.getElementById('ek-'+listeningIdx).textContent=e.code;
-if(setupMode){listeningIdx++;if(listeningIdx<BKEYS.length){document.getElementById('ek-'+listeningIdx).textContent='...';return}}
-listeningIdx=-1;setupMode=false});
-function sendR(){if(!ws||ws.readyState!==1||!enabled)return;let b=0,h=8,lx=128,ly=128,rx=128,ry=128;const gp=navigator.getGamepads();let used=false;for(const g of gp){if(g){b|=(g.buttons[0]?.pressed?1<<1:0);b|=(g.buttons[1]?.pressed?1<<2:0);b|=(g.buttons[2]?.pressed?1<<3:0);b|=(g.buttons[3]?.pressed?1<<0:0);b|=(g.buttons[4]?.pressed?1<<4:0);b|=(g.buttons[5]?.pressed?1<<5:0);b|=(g.buttons[6]?.pressed?1<<6:0);b|=(g.buttons[7]?.pressed?1<<7:0);b|=(g.buttons[8]?.pressed?1<<8:0);b|=(g.buttons[9]?.pressed?1<<9:0);b|=(g.buttons[10]?.pressed?1<<10:0);b|=(g.buttons[11]?.pressed?1<<11:0);const u=g.buttons[12]?.pressed,d=g.buttons[13]?.pressed,l=g.buttons[14]?.pressed,r=g.buttons[15]?.pressed;if(u&&r)h=1;else if(d&&r)h=3;else if(d&&l)h=5;else if(u&&l)h=7;else if(u)h=0;else if(r)h=2;else if(d)h=4;else if(l)h=6;lx=Math.round(((g.axes[0]??0)+1)*127.5);ly=Math.round(((g.axes[1]??0)+1)*127.5);rx=Math.round(((g.axes[2]??0)+1)*127.5);ry=Math.round(((g.axes[3]??0)+1)*127.5);used=true;break}}
-if(!used&&kbMode){const bm=buildButtonMap();for(const[code,bit]of Object.entries(bm)){if(keys[code])b|=bit}const ku=keys['ArrowUp'],kd=keys['ArrowDown'],kl=keys['ArrowLeft'],kr=keys['ArrowRight'];if(ku&&kr)h=1;else if(kd&&kr)h=3;else if(kd&&kl)h=5;else if(ku&&kl)h=7;else if(ku)h=0;else if(kr)h=2;else if(kd)h=4;else if(kl)h=6}
-const dv=new DataView(new ArrayBuffer(8));dv.setUint16(0,b,1);dv.setUint8(2,h);dv.setUint8(3,lx);dv.setUint8(4,ly);dv.setUint8(5,rx);dv.setUint8(6,ry);dv.setUint8(7,0);ws.send(dv.buffer)}
-function conn(){ws=new WebSocket(WS_URL);ws.onopen=()=>{connected=true;ui();pollId=setInterval(sendR,4)};ws.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='status'&&d.clients){for(let i=0;i<4;i++){const el=document.getElementById(`p${i+1}`),c=d.clients[i];if(c&&c.active){el.textContent=`P${i+1}: Connected`;el.className='player active'}else{el.textContent=`P${i+1}: Not connected`;el.className='player'}}if(d.pkts_rx!==undefined)document.getElementById('pkt-info').textContent=`Packets sent: ${d.pkts_rx}`}}catch(e){}};ws.onclose=()=>{connected=false;enabled=false;if(pollId){clearInterval(pollId);pollId=null}ui();setTimeout(conn,2000)};ws.onerror=()=>{}}
-function ui(){const b=document.getElementById('connect-btn');if(enabled){b.textContent='Disconnect';b.className='btn-primary active'}else{b.textContent='Connect';b.className='btn-primary'}document.getElementById('status').textContent=connected?(enabled?'Connected':'Web Server Active'):'Connecting...'}
-document.getElementById('connect-btn').onclick=()=>{if(!connected)return;enabled=!enabled;if(!enabled){const dv=new DataView(new ArrayBuffer(8));for(let i=0;i<8;i++)dv.setUint8(i,i<2?0:128);ws.send(dv.buffer)}ui()};
-document.getElementById('kb-mode').onchange=e=>{kbMode=e.target.checked;const bb=document.getElementById('bindings-btn');bb.disabled=!kbMode;if(kbMode)bb.onclick=openEditor;else bb.onclick=null};
-document.addEventListener('keydown',e=>{if(!kbMode||!enabled||listeningIdx>=0)return;keys[e.code]=true;e.preventDefault()});
-document.addEventListener('keyup',e=>{if(!kbMode)return;keys[e.code]=false;e.preventDefault()});
-window.addEventListener('beforeunload',()=>{if(ws&&ws.readyState===1){ws.close()}});
-document.getElementById('ip').value=location.hostname;conn();
+function resetEditor(){for(let i=0;i<BKEYS.length;i++){editBindings[BKEYS[i]]=DEF[BKEYS[i]];document.getElementById('ek-'+i).textContent=DEF[BKEYS[i]];}}
+function startSetup(){setupMode=true;for(let i=0;i<BKEYS.length;i++){editBindings[BKEYS[i]]='';document.getElementById('ek-'+i).textContent=i===0?'...':'';} listeningIdx=0; document.getElementById('edit-modal').focus();}
+window.addEventListener('keydown',function(e){
+    if(listeningIdx<0||document.getElementById('edit-modal').style.display!=='flex')return;
+    e.preventDefault(); const k=BKEYS[listeningIdx];
+    if(e.code==='Escape'){
+        editBindings[k]=''; document.getElementById('ek-'+listeningIdx).textContent='';
+        if(setupMode){listeningIdx++;if(listeningIdx<BKEYS.length){document.getElementById('ek-'+listeningIdx).textContent='...';return;}}
+        listeningIdx=-1;setupMode=false;return;
+    }
+    if(setupMode){let ab=false;for(let i=0;i<BKEYS.length;i++){if(i!==listeningIdx&&editBindings[BKEYS[i]]===e.code){ab=true;break;}}if(ab)return;}
+    for(let i=0;i<BKEYS.length;i++){if(i!==listeningIdx&&editBindings[BKEYS[i]]===e.code){editBindings[BKEYS[i]]='';document.getElementById('ek-'+i).textContent='';}}
+    editBindings[k]=e.code; document.getElementById('ek-'+listeningIdx).textContent=e.code;
+    if(setupMode){listeningIdx++;if(listeningIdx<BKEYS.length){document.getElementById('ek-'+listeningIdx).textContent='...';return;}}
+    listeningIdx=-1;setupMode=false;
+});
+function applyKB(rep, override){
+    const k=(b)=>keys[kbdBindings[b]];
+    if(k('Y'))rep.b|=1<<0;if(k('B'))rep.b|=1<<1;if(k('A'))rep.b|=1<<2;if(k('X'))rep.b|=1<<3;
+    if(k('L'))rep.b|=1<<4;if(k('R'))rep.b|=1<<5;if(k('ZL'))rep.b|=1<<6;if(k('ZR'))rep.b|=1<<7;
+    if(k('MINUS'))rep.b|=1<<8;if(k('PLUS'))rep.b|=1<<9;if(k('LSTICK'))rep.b|=1<<10;if(k('RSTICK'))rep.b|=1<<11;
+    if(k('HOME'))rep.b|=1<<12;if(k('CAPTURE'))rep.b|=1<<13;
+    let u=k('DPAD_UP'),d=k('DPAD_DOWN'),l=k('DPAD_LEFT'),r=k('DPAD_RIGHT');
+    if(u&&r)rep.h=1;else if(u&&l)rep.h=7;else if(d&&r)rep.h=3;else if(d&&l)rep.h=5;else if(u)rep.h=0;else if(d)rep.h=4;else if(l)rep.h=6;else if(r)rep.h=2;
+    let lsu=k('LSTICK_UP'),lsd=k('LSTICK_DOWN'),lsl=k('LSTICK_LEFT'),lsr=k('LSTICK_RIGHT');
+    if(lsl&&!lsr)rep.lx=0;else if(lsr&&!lsl)rep.lx=255;else if(!override)rep.lx=128;
+    if(lsu&&!lsd)rep.ly=0;else if(lsd&&!lsu)rep.ly=255;else if(!override)rep.ly=128;
+    let rsu=k('RSTICK_UP'),rsd=k('RSTICK_DOWN'),rsl=k('RSTICK_LEFT'),rsr=k('RSTICK_RIGHT');
+    if(rsl&&!rsr)rep.rx=0;else if(rsr&&!rsl)rep.rx=255;else if(!override)rep.rx=128;
+    if(rsu&&!rsd)rep.ry=0;else if(rsd&&!rsu)rep.ry=255;else if(!override)rep.ry=128;
+}
+function sendR(){
+    if(!ws||ws.readyState!==1||!connected)return;
+    let pads=[null,null,null,null], gps=navigator.getGamepads?navigator.getGamepads():[];
+    for(let i=0;i<gps.length;i++)if(gps[i]&&gps[i].connected)pads[i]=gps[i];
+    let reps=[{b:0,h:8,lx:128,ly:128,rx:128,ry:128},{b:0,h:8,lx:128,ly:128,rx:128,ry:128},{b:0,h:8,lx:128,ly:128,rx:128,ry:128},{b:0,h:8,lx:128,ly:128,rx:128,ry:128}];
+    let aPad=(p,r)=>{
+        if(!p)return false; let b=0;
+        if(p.buttons[0]?.pressed)b|=1<<1;if(p.buttons[1]?.pressed)b|=1<<2;if(p.buttons[2]?.pressed)b|=1<<0;if(p.buttons[3]?.pressed)b|=1<<3;
+        if(p.buttons[4]?.pressed)b|=1<<4;if(p.buttons[5]?.pressed)b|=1<<5;if(p.buttons[6]?.pressed)b|=1<<6;if(p.buttons[7]?.pressed)b|=1<<7;
+        if(p.buttons[8]?.pressed)b|=1<<8;if(p.buttons[9]?.pressed)b|=1<<9;if(p.buttons[10]?.pressed)b|=1<<10;if(p.buttons[11]?.pressed)b|=1<<11;if(p.buttons[16]?.pressed)b|=1<<12;
+        let u=p.buttons[12]?.pressed,d=p.buttons[13]?.pressed,l=p.buttons[14]?.pressed,rt=p.buttons[15]?.pressed,h=8;
+        if(u&&rt)h=1;else if(u&&l)h=7;else if(d&&rt)h=3;else if(d&&l)h=5;else if(u)h=0;else if(d)h=4;else if(l)h=6;else if(rt)h=2;
+        r.b=b; r.h=h;
+        r.lx=Math.round(((p.axes[0]??0)+1)*127.5);r.ly=Math.round(((p.axes[1]??0)+1)*127.5);
+        r.rx=Math.round(((p.axes[2]??0)+1)*127.5);r.ry=Math.round(((p.axes[3]??0)+1)*127.5);
+        return true;
+    };
+    let c1=aPad(pads[0],reps[0]),c2=aPad(pads[1],reps[1]),c3=aPad(pads[2],reps[2]),c4=aPad(pads[3],reps[3]);
+    let ac=c1||c2||c3||c4;
+    if(kbMode===1){
+        if(c1){if(!c2){reps[1]=Object.assign({},reps[0]);c2=true;}else if(!c3){reps[2]=Object.assign({},reps[0]);c3=true;}else if(!c4){reps[3]=Object.assign({},reps[0]);c4=true;}}
+        reps[0]={b:0,h:8,lx:128,ly:128,rx:128,ry:128}; applyKB(reps[0],false); ac=true;
+    }else if(kbMode===2){applyKB(reps[0],true); ac=true;}
+    const dv=new DataView(new ArrayBuffer(32));
+    for(let i=0;i<4;i++){let o=i*8;dv.setUint16(o,reps[i].b,true);dv.setUint8(o+2,reps[i].h);dv.setUint8(o+3,reps[i].lx);dv.setUint8(o+4,reps[i].ly);dv.setUint8(o+5,reps[i].rx);dv.setUint8(o+6,reps[i].ry);dv.setUint8(o+7,0);}
+    ws.send(dv.buffer);
+}
+function conn(url){
+    ws=new WebSocket(url);
+    ws.onopen=()=>{connected=true;ui();pollId=setInterval(sendR,4);};
+    ws.onmessage=e=>{try{
+        const d=JSON.parse(e.data);
+        if(d.type==='status'&&d.clients){
+            for(let i=0;i<4;i++){const el=document.getElementById(`p${i+1}`),c=d.clients[i];if(c&&c.active){el.textContent=`P${i+1}: Connected`;el.className='player active'}else{el.textContent=`P${i+1}: Idle`;el.className='player'}}
+            if(d.pkts_rx!==undefined)document.getElementById('pkt-info').textContent=`Packets rx by Pi: ${d.pkts_rx}`;
+        }
+    }catch(err){}};
+    ws.onclose=()=>{connected=false;if(pollId){clearInterval(pollId);pollId=null;}ui();};
+    ws.onerror=()=>{};
+}
+function ui(){
+    const b=document.getElementById('connect-btn');
+    b.textContent=connected?'Disconnect':'Connect'; b.className=connected?'btn-primary active':'btn-primary';
+    document.getElementById('status').textContent=connected?'Connected':'Disconnected';
+    document.getElementById('ip').disabled=connected; document.getElementById('kb-mode').disabled=connected;
+    document.getElementById('bindings-btn').disabled=(connected||kbMode===0);
+}
+document.getElementById('connect-btn').onclick=()=>{
+    if(!connected){
+        let inputIp=document.getElementById('ip').value;
+        try{localStorage.setItem('nsLastIP',inputIp)}catch(e){}
+        
+        let targetHost = inputIp ? inputIp : location.host;
+        let wsProto = location.protocol === "https:" ? "wss://" : "ws://";
+        
+        // If they provided a raw IP/domain without a port, and not on HTTPS, default to 7331
+        if (inputIp && !inputIp.includes(':') && location.protocol !== "https:") {
+            targetHost += ":7331";
+        }
+        
+        conn(`${wsProto}${targetHost}/`);
+    }else{ws.close();}
+};
+document.getElementById('kb-mode').onchange=e=>{
+    kbMode=parseInt(e.target.value);
+    try{localStorage.setItem('nsKbMode',kbMode)}catch(err){}
+    const bb=document.getElementById('bindings-btn'); bb.disabled=(kbMode===0);
+    bb.onclick=kbMode!==0?openEditor:null;
+};
+if(kbMode!==0)document.getElementById('bindings-btn').onclick=openEditor;
+document.getElementById('bindings-btn').disabled=(kbMode===0);
+
+window.addEventListener('keydown',e=>{
+    if(kbMode===0||!connected||listeningIdx>=0)return;
+    if(e.target.tagName==='INPUT' || e.target.tagName==='SELECT') return; // Do not steal keys from inputs
+    keys[e.code]=true;
+    if(!e.code.startsWith('F'))e.preventDefault();
+});
+window.addEventListener('keyup',e=>{
+    if(kbMode===0)return;
+    if(e.target.tagName==='INPUT' || e.target.tagName==='SELECT') return;
+    keys[e.code]=false;
+    if(!e.code.startsWith('F'))e.preventDefault();
+});
+window.addEventListener('beforeunload',()=>{if(ws&&ws.readyState===1)ws.close();});
+ui();
 </script>
 </body>
 </html>)html";
@@ -502,11 +582,19 @@ static std::string ws_accept_key(const std::string& key) {
     return b64enc(hash, 20);
 }
 
+// ── FIXED: read_fully tolerates EAGAIN correctly ──
 static bool read_fully(int fd, void* buf, size_t len) {
     uint8_t* p = (uint8_t*)buf;
     while (len > 0) {
         ssize_t n = read(fd, p, len);
-        if (n <= 0) return false;
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            return false;
+        }
+        if (n == 0) return false;
         p += n; len -= (size_t)n;
     }
     return true;
@@ -549,8 +637,8 @@ static int ws_recv_frame(int fd, uint8_t* buf, size_t cap) {
     if (mask) for (uint64_t i = 0; i < len; ++i) buf[i] ^= mk[i & 3];
     if ((hdr[0] & 0x0F) == 0x8) return -2; // Close
     if ((hdr[0] & 0x0F) == 0x9) { // Ping -> Pong
-        uint8_t resp[2] = {0x8A, (uint8_t)len};
-        write(fd, resp, 2); if (len) write(fd, buf, (size_t)len);
+        // ── FIXED: Proper Pong generation ──
+        ws_send_frame(fd, buf, (size_t)len, 0xA);
         return 0;
     }
     if ((hdr[0] & 0x0F) == 0xA) return 0; // Pong
@@ -568,7 +656,8 @@ static void webserver_thread(int port) {
     if (listen(sock, 8) < 0) { perror("web listen"); close(sock); return; }
     std::printf("Web server listening on TCP %d\n", port);
 
-    struct Client { int fd; bool ws; };
+    // ── FIXED: Add an HTTP buffer per client to withstand chunked headers ──
+    struct Client { int fd; bool ws; std::string http_buf; };
     std::vector<Client> clients;
     uint64_t last_status = 0;
 
@@ -588,7 +677,7 @@ static void webserver_thread(int port) {
             if (cfd >= 0) {
                 int fl = fcntl(cfd, F_GETFL, 0);
                 fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
-                clients.push_back({cfd, false});
+                clients.push_back({cfd, false, ""});
             }
         }
 
@@ -601,11 +690,21 @@ static void webserver_thread(int port) {
 
             int fd = clients[i].fd;
             if (clients[i].ws) {
-                uint8_t buf[8];
+                uint8_t buf[256]; 
                 int r = ws_recv_frame(fd, buf, sizeof(buf));
                 if (r == -2 || r == -1) { dead.push_back((int)i); continue; }
                 if (r == 0) continue; // control frame
-                if (r >= 8) {
+                
+                if (g_verbose) std::printf("WS frame received: %d bytes\n", r);
+
+                if (r >= (int)sizeof(MultiReport)) {
+                    MultiReport report;
+                    memcpy(&report, buf, sizeof(MultiReport));
+                    std::lock_guard<std::mutex> lk(g_mtx);
+                    g_clients[WEB_CLIENT_IDX].active = true;
+                    g_clients[WEB_CLIENT_IDX].report = report;
+                    g_clients[WEB_CLIENT_IDX].last_rx_us = now_us();
+                } else if (r >= (int)sizeof(HIDReport)) {
                     HIDReport report;
                     memcpy(&report, buf, sizeof(HIDReport));
                     std::lock_guard<std::mutex> lk(g_mtx);
@@ -620,18 +719,26 @@ static void webserver_thread(int port) {
                 uint8_t rbuf[4096];
                 ssize_t nr = read(fd, rbuf, sizeof(rbuf)-1);
                 if (nr <= 0) { dead.push_back((int)i); continue; }
-                rbuf[nr] = 0;
-                std::string req((const char*)rbuf, nr);
+                
+                // ── FIXED: Buffering HTTP headers and parsing case-insensitively ──
+                clients[i].http_buf.append((const char*)rbuf, nr);
+                
+                if (clients[i].http_buf.find("\r\n\r\n") == std::string::npos) {
+                    continue; // Wait until full header block arrives
+                }
 
-                if (req.find("Upgrade: websocket") != std::string::npos ||
-                    req.find("upgrade: websocket") != std::string::npos) {
-                    auto kp = req.find("Sec-WebSocket-Key:");
-                    if (kp == std::string::npos) kp = req.find("sec-websocket-key:");
+                std::string req = clients[i].http_buf;
+                std::string req_lower = req;
+                std::transform(req_lower.begin(), req_lower.end(), req_lower.begin(), ::tolower);
+
+                if (req_lower.find("upgrade: websocket") != std::string::npos) {
+                    auto kp = req_lower.find("sec-websocket-key:");
                     if (kp != std::string::npos) {
-                        kp = req.find(':', kp) + 1;
-                        while (kp < req.size() && req[kp] == ' ') ++kp;
-                        auto ke = req.find("\r\n", kp);
+                        kp = req_lower.find(':', kp) + 1;
+                        while (kp < req_lower.size() && req_lower[kp] == ' ') ++kp;
+                        auto ke = req_lower.find("\r\n", kp);
                         if (ke != std::string::npos) {
+                            // Extract key from the ORIGINAL casing (since base64 is case sensitive)
                             std::string key = req.substr(kp, ke - kp);
                             std::string accept = ws_accept_key(key);
                             std::string resp =
@@ -641,6 +748,7 @@ static void webserver_thread(int port) {
                                 "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
                             write(fd, resp.data(), resp.size());
                             clients[i].ws = true;
+                            clients[i].http_buf.clear(); // Clean up memory
                         } else { dead.push_back((int)i); }
                     } else { dead.push_back((int)i); }
                 } else if (req.find("GET ") == 0) {
@@ -680,12 +788,19 @@ static void webserver_thread(int port) {
         uint64_t now = now_us();
         if (now - last_status > 100000) { // Every 100ms
             last_status = now;
-            std::string json = "{\"type\":\"status\",\"clients\":[";
-            for (int i = 0; i < MAX_CLIENTS; ++i) {
-                if (i > 0) json += ",";
-                json += "{\"active\":" + std::string(g_clients[i].active ? "true" : "false") + "}";
+            std::string json;
+            
+            // ── FIXED: Thread-safe generation of the status payload ──
+            {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                json = "{\"type\":\"status\",\"clients\":[";
+                for (int i = 0; i < MAX_CLIENTS; ++i) {
+                    if (i > 0) json += ",";
+                    json += "{\"active\":" + std::string(g_clients[i].active ? "true" : "false") + "}";
+                }
+                json += "],\"pkts_rx\":" + std::to_string(g_pkts_rx.load()) + "}";
             }
-            json += "],\"pkts_rx\":" + std::to_string(g_pkts_rx.load()) + "}";
+
             for (auto& c : clients) {
                 if (c.ws) ws_send_frame(c.fd, json.data(), json.size(), 1);
             }
@@ -775,71 +890,71 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // ── 3. Find Client Session or Pin new IP ──────────────────────────────────
-        int client_idx = -1;
-        uint64_t now = now_us();
-
-        // Web client slot (index 4) is reserved; only UDP clients search slots 0-3
-        static constexpr int UDP_SLOTS = MAX_CLIENTS - 1;
-        
-        for (int i = 0; i < UDP_SLOTS; ++i) {
-            if (g_clients[i].active &&
-                g_clients[i].addr.sin_addr.s_addr == src_ip &&
-                g_clients[i].addr.sin_port == sender.sin_port) {
-                client_idx = i;
-                break;
-            }
-        }
-
-        // If not found, assign to a free/timed-out slot
-        if (client_idx == -1) {
-            for (int i = 0; i < UDP_SLOTS; ++i) {
-                if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
-                    client_idx = i;
-                    g_clients[i].active = true;
-                    g_clients[i].addr = sender;
-                    g_clients[i].first_pkt = true;
-                    g_clients[i].report.reset();
-                    if (g_verbose) std::printf("New PC accepted into Server Slot %d/4\n", i+1);
-                    break;
-                }
-            }
-        }
-
-        // If all 4 slots are taken by active PCs, drop the packet
-        if (client_idx == -1) {
-            if (g_verbose) puts("server is full (4 PCs already active), dropped");
-            continue;
-        }
-
-        // ── 4. HMAC authentication ────────────────────────────────────────────────
+        // ── 3. HMAC authentication ────────────────────────────────────────────────
         if (hmac_verify(g_hmac_key, 32, (const uint8_t *)&pkt, PACKET_AUTH_SIZE, pkt.hmac, HMAC_TAG_SIZE) != 0) {
             if (g_verbose) puts("bad HMAC, dropped");
             continue;
         }
 
-        // ── 5. Sequence counter (Anti-Replay) ─────────────────────────────────────
+        int client_idx = -1;
+        uint64_t now = now_us();
         bool is_reset = (pkt.flags & FLAG_RESET);
-        bool sequence_jump = (g_clients[client_idx].expected_seq > pkt.seq) && ((g_clients[client_idx].expected_seq - pkt.seq) > 100);
 
-        if (!g_clients[client_idx].first_pkt && pkt.seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
-            if (g_verbose)
-                std::printf("PC %d out-of-order seq=%u, dropped\n", client_idx+1, pkt.seq);
-            continue;
-        }
-        g_clients[client_idx].first_pkt = false;
-        g_clients[client_idx].expected_seq = pkt.seq + 1;
-
-        // ── 6. Apply to shared state ──────────────────────────────────────────────
+        // ── FIXED: Complete Thread-safety around g_clients structure ──
         {
             std::lock_guard<std::mutex> lk(g_mtx);
-            if (is_reset) {
-                g_clients[client_idx].report.reset();
-            } else {
-                g_clients[client_idx].report = pkt.report;
+            static constexpr int UDP_SLOTS = MAX_CLIENTS - 1;
+            
+            // Find existing Session
+            for (int i = 0; i < UDP_SLOTS; ++i) {
+                if (g_clients[i].active &&
+                    g_clients[i].addr.sin_addr.s_addr == src_ip &&
+                    g_clients[i].addr.sin_port == sender.sin_port) {
+                    client_idx = i;
+                    break;
+                }
             }
-            g_clients[client_idx].last_rx_us = now_us();
+
+            // Assign new Session if full
+            if (client_idx == -1) {
+                for (int i = 0; i < UDP_SLOTS; ++i) {
+                    if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
+                        client_idx = i;
+                        g_clients[i].active = true;
+                        g_clients[i].addr = sender;
+                        g_clients[i].first_pkt = true;
+                        g_clients[i].report.reset();
+                        if (g_verbose) std::printf("New PC accepted into Server Slot %d/4\n", i+1);
+                        break;
+                    }
+                }
+            }
+
+            // Apply payload sequence + update
+            if (client_idx != -1) {
+                bool sequence_jump = (g_clients[client_idx].expected_seq > pkt.seq) && ((g_clients[client_idx].expected_seq - pkt.seq) > 100);
+
+                if (!g_clients[client_idx].first_pkt && pkt.seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
+                    if (g_verbose)
+                        std::printf("PC %d out-of-order seq=%u, dropped\n", client_idx+1, pkt.seq);
+                } else {
+                    g_clients[client_idx].first_pkt = false;
+                    g_clients[client_idx].expected_seq = pkt.seq + 1;
+                    if (is_reset) {
+                        g_clients[client_idx].report.reset();
+                    } else {
+                        g_clients[client_idx].report = pkt.report;
+                    }
+                    g_clients[client_idx].last_rx_us = now;
+                }
+            }
+        } // lock released
+
+        if (client_idx == -1) {
+            if (g_verbose) puts("server is full (4 PCs already active), dropped");
+            continue;
         }
+
         ++g_pkts_rx;
     }
 
