@@ -1,9 +1,5 @@
 /// ns-gui.cpp  —  GTK3 GUI frontend for the Switch wireless gamepad bridge
 ///
-/// Features Smart Discovery: Automatically scans js0-js15, ignores mice,
-/// and natively supports up to 4 local controllers packed into a single UDP stream.
-/// Now features fully mappable Keyboard modes integrated cleanly into GTK.
-///
 /// Build:
 ///   g++ -O3 -std=c++17 ns-gui.cpp -o ns-gui \
 ///       $(pkg-config --cflags --libs gtk+-3.0) -lpthread -lSDL2
@@ -38,36 +34,105 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <sys/resource.h>
+#include <linux/input.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/ioctl.h>
 
 #include "../../server/rpi/include/sha256.h"
-
-// Import external protocol structures (Version 4 with MultiReport)
 #include "../../server/rpi/include/protocol.hpp"
 
-// ── Keyboard Binding Logic ──
+// ── Background Keyboard Hardware Polling (/dev/input/) ──
+#define BITS_PER_LONG (sizeof(long) * 8)
+#define NLONGS(x) (((x) + BITS_PER_LONG - 1) / BITS_PER_LONG)
+#define test_bit(bit, array) ((array[(bit) / BITS_PER_LONG] >> ((bit) % BITS_PER_LONG)) & 1)
+
+static std::vector<int> g_kb_fds;
+static bool g_kb_permission_warning_shown = false;
+
+void init_global_keyboard() {
+    g_kb_fds.clear();
+    DIR* dir = opendir("/dev/input");
+    if (!dir) return;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (strncmp(ent->d_name, "event", 5) == 0) {
+            char path[256]; snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+            int fd = open(path, O_RDONLY | O_NONBLOCK);
+            if (fd >= 0) {
+                unsigned long evbit[NLONGS(EV_MAX)];
+                ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit);
+                if (test_bit(EV_KEY, evbit)) {
+                    unsigned long keybit[NLONGS(KEY_MAX)];
+                    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit);
+                    if (test_bit(KEY_A, keybit)) g_kb_fds.push_back(fd);
+                    else close(fd);
+                } else close(fd);
+            }
+        }
+    }
+    closedir(dir);
+}
+
+bool is_key_down_global(int linux_key_code) {
+    if (linux_key_code == KEY_RESERVED) return false;
+    for (int fd : g_kb_fds) {
+        unsigned long keystate[NLONGS(KEY_MAX)] = {0};
+        if (ioctl(fd, EVIOCGKEY(sizeof(keystate)), keystate) != -1) {
+            if (test_bit(linux_key_code, keystate)) return true;
+        }
+    }
+    return false;
+}
+
+int name_to_linux_key(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(), ::toupper);
+    if (name.length() == 1 && name[0] >= 'A' && name[0] <= 'Z') return KEY_A + (name[0] - 'A');
+    if (name.length() == 1 && name[0] >= '1' && name[0] <= '9') return KEY_1 + (name[0] - '1');
+    if (name == "0") return KEY_0;
+
+    if (name == "UP") return KEY_UP;
+    if (name == "DOWN") return KEY_DOWN;
+    if (name == "LEFT") return KEY_LEFT;
+    if (name == "RIGHT") return KEY_RIGHT;
+    if (name == "SHIFT_L" || name == "LSHIFT" || name == "LEFT SHIFT") return KEY_LEFTSHIFT;
+    if (name == "SHIFT_R" || name == "RSHIFT" || name == "RIGHT SHIFT") return KEY_RIGHTSHIFT;
+    if (name == "CONTROL_L" || name == "LCTRL") return KEY_LEFTCTRL;
+    if (name == "CONTROL_R" || name == "RCTRL") return KEY_RIGHTCTRL;
+    if (name == "ALT_L" || name == "LALT") return KEY_LEFTALT;
+    if (name == "ALT_R" || name == "RALT") return KEY_RIGHTALT;
+    if (name == "SPACE") return KEY_SPACE;
+    if (name == "RETURN" || name == "ENTER") return KEY_ENTER;
+    if (name == "TAB") return KEY_TAB;
+    if (name == "ESCAPE" || name == "ESC") return KEY_ESC;
+    if (name == "BACKSPACE") return KEY_BACKSPACE;
+    if (name == "HOME") return KEY_HOME;
+    if (name == "PRINT" || name == "SNAPSHOT" || name == "PRINTSCREEN") return KEY_SYSRQ;
+
+    return KEY_RESERVED;
+}
+
+// ── Logic State ──
 enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
 static std::atomic<int> g_keyboardMode{KB_OFF};
 static std::unordered_map<std::string, std::string> g_keyBindings;
-static std::unordered_map<guint, bool> g_keyState; // Tracks pressed GTK keys
-static std::mutex g_keyStateMtx;
 
 static std::unordered_map<std::string, std::string> default_key_bindings() {
     return {
-        {"Y","z"}, {"B","x"}, {"A","v"}, {"X","c"},
-        {"L","q"}, {"R","e"}, {"ZL","1"}, {"ZR","2"},
+        {"Y","Z"}, {"B","X"}, {"A","V"}, {"X","C"},
+        {"L","Q"}, {"R","E"}, {"ZL","1"}, {"ZR","2"},
         {"MINUS","3"}, {"PLUS","4"},
         {"LSTICK","Shift_L"}, {"RSTICK","Shift_R"},
         {"HOME","Home"}, {"CAPTURE","Print"},
-        {"LSTICK_UP","w"}, {"LSTICK_DOWN","s"},
-        {"LSTICK_LEFT","a"}, {"LSTICK_RIGHT","d"},
-        {"RSTICK_UP","i"}, {"RSTICK_DOWN","k"},
-        {"RSTICK_LEFT","j"}, {"RSTICK_RIGHT","l"},
+        {"LSTICK_UP","W"}, {"LSTICK_DOWN","S"},
+        {"LSTICK_LEFT","A"}, {"LSTICK_RIGHT","D"},
+        {"RSTICK_UP","I"}, {"RSTICK_DOWN","K"},
+        {"RSTICK_LEFT","J"}, {"RSTICK_RIGHT","L"},
         {"DPAD_UP","Up"}, {"DPAD_DOWN","Down"},
         {"DPAD_LEFT","Left"}, {"DPAD_RIGHT","Right"}
     };
 }
 
-// ── Config path helpers ──
 static std::string get_config_dir() {
     const char* home = getenv("HOME");
     if (!home) return ".";
@@ -75,22 +140,16 @@ static std::string get_config_dir() {
 }
 
 static void load_saved_config(std::string& ip, int& mode) {
-    ip = "192.168.1.100";
-    mode = 0;
-    g_keyBindings = default_key_bindings();
-
+    ip = "192.168.1.100"; mode = 0; g_keyBindings = default_key_bindings();
     std::string path = get_config_dir() + "/config";
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) return;
-
+    FILE* f = fopen(path.c_str(), "r"); if (!f) return;
     char buf[256];
     while (fgets(buf, sizeof(buf), f)) {
         std::string line(buf);
         line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
         size_t eq = line.find('=');
         if (eq != std::string::npos) {
-            std::string k = line.substr(0, eq);
-            std::string v = line.substr(eq + 1);
+            std::string k = line.substr(0, eq), v = line.substr(eq + 1);
             if (k == "IP") ip = v;
             else if (k == "KB_MODE") mode = std::atoi(v.c_str());
             else if (k.find("BIND_") == 0) g_keyBindings[k.substr(5)] = v;
@@ -104,23 +163,19 @@ static void save_config(const std::string& ip, int mode) {
     if (g_mkdir_with_parents(dir.c_str(), 0755) != 0) return;
     std::string path = dir + "/config";
     FILE* f = fopen(path.c_str(), "w");
-    if (f) { 
-        fprintf(f, "IP=%s\n", ip.c_str());
-        fprintf(f, "KB_MODE=%d\n", mode);
-        for (auto& [k, v] : g_keyBindings) {
-            fprintf(f, "BIND_%s=%s\n", k.c_str(), v.c_str());
-        }
-        fclose(f); 
+    if (f) {
+        fprintf(f, "IP=%s\nKB_MODE=%d\n", ip.c_str(), mode);
+        for (auto& [k, v] : g_keyBindings) fprintf(f, "BIND_%s=%s\n", k.c_str(), v.c_str());
+        fclose(f);
     }
 }
 
-// ── Global state ──
 static GtkWidget* ipEntry = nullptr;
 static GtkWidget* connectBtn = nullptr;
 static GtkWidget* statusLabel = nullptr;
 static GtkWidget* kbCombo = nullptr;
 static GtkWidget* bindingsBtn = nullptr;
-static GtkWidget* ctrlLabels[4]; 
+static GtkWidget* ctrlLabels[4];
 
 static std::atomic<bool> g_connected{false};
 static std::atomic<bool> g_senderRunning{false};
@@ -133,9 +188,8 @@ static std::mutex   g_hw_mtx;
 
 static uint8_t apply_deadzone(int16_t val, bool invert = false, int deadzone = 8000) {
     if (val > -deadzone && val < deadzone) return 128;
-    int scaled;
-    if (val >= deadzone) scaled = 128 + ((val - deadzone) * 127) / (32767 - deadzone);
-    else scaled = 128 - ((std::abs(val) - deadzone) * 128) / (32768 - deadzone);
+    int scaled = (val >= deadzone) ? (128 + ((val - deadzone) * 127) / (32767 - deadzone))
+                                   : (128 - ((std::abs(val) - deadzone) * 128) / (32768 - deadzone));
     scaled = std::clamp(scaled, 0, 255);
     return (uint8_t)(invert ? (255 - scaled) : scaled);
 }
@@ -164,12 +218,10 @@ static void scan_for_gamepads() {
             if (!g_pads[p]) {
                 SDL_GameController* pad = SDL_GameControllerOpen(i);
                 if (!pad) break;
-                {
-                    std::lock_guard<std::mutex> lock(g_hw_mtx);
-                    g_pads[p] = pad;
-                    const char* name = SDL_GameControllerName(pad);
-                    strncpy(g_hw_names[p], name ? name : "Unknown", sizeof(g_hw_names[p]) - 1);
-                }
+                std::lock_guard<std::mutex> lock(g_hw_mtx);
+                g_pads[p] = pad;
+                const char* name = SDL_GameControllerName(pad);
+                strncpy(g_hw_names[p], name ? name : "Unknown", sizeof(g_hw_names[p]) - 1);
                 break;
             }
         }
@@ -184,10 +236,8 @@ static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     if (!SDL_GameControllerGetAttached(pad)) {
         std::lock_guard<std::mutex> lock(g_hw_mtx);
         SDL_GameControllerClose(pad);
-        g_pads[index] = nullptr;
-        g_hw_names[index][0] = '\0';
-        conn = false;
-        return;
+        g_pads[index] = nullptr; g_hw_names[index][0] = '\0';
+        conn = false; return;
     }
 
     conn = true;
@@ -212,9 +262,9 @@ static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
         rep.buttons |= ns::BTN_CAPTURE; rep.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);
     }
 
-    bool up    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
-    bool down  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-    bool left  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    bool up = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
+    bool down = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    bool left = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
     bool right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
 
     rep.hat = ns::HAT_NEUTRAL;
@@ -223,23 +273,17 @@ static void read_pad(int index, ns::HIDReport& rep, bool& conn) {
     else if (up) rep.hat = ns::HAT_N; else if (down) rep.hat = ns::HAT_S;
     else if (left) rep.hat = ns::HAT_W; else if (right) rep.hat = ns::HAT_E;
 
-    int16_t lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
-    int16_t ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-    int16_t rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
-    int16_t ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
-
-    rep.lx = apply_deadzone(lx, false); rep.ly = apply_deadzone(ly, false);
-    rep.rx = apply_deadzone(rx, false); rep.ry = apply_deadzone(ry, false);
+    rep.lx = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), false);
+    rep.ly = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY), false);
+    rep.rx = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX), false);
+    rep.ry = apply_deadzone(SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY), false);
 }
 
 static void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
-    std::lock_guard<std::mutex> lock(g_keyStateMtx);
-
     auto is_down = [&](const std::string& btn) -> bool {
         auto it = g_keyBindings.find(btn);
         if (it == g_keyBindings.end() || it->second.empty()) return false;
-        guint val = gdk_keyval_from_name(it->second.c_str());
-        return g_keyState[val];
+        return is_key_down_global(name_to_linux_key(it->second));
     };
 
     if (is_down("Y")) rep.buttons |= ns::BTN_Y;
@@ -276,48 +320,29 @@ static void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
 }
 
 static void SenderThread(std::string host, uint16_t port) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) return;
-
-    struct addrinfo hints{}, *res;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
+    int sock = socket(AF_INET, SOCK_DGRAM, 0); if (sock < 0) return;
+    struct addrinfo hints{}, *res; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_DGRAM;
     char port_str[8]; snprintf(port_str, sizeof(port_str), "%u", port);
-
     if (getaddrinfo(host.c_str(), port_str, &hints, &res) != 0) { close(sock); return; }
 
-    struct sockaddr_in dest{};
-    memcpy(&dest, res->ai_addr, sizeof(dest));
-    freeaddrinfo(res);
-
-    uint32_t seq = 0;
-    auto next_tick = std::chrono::steady_clock::now();
+    struct sockaddr_in dest{}; memcpy(&dest, res->ai_addr, sizeof(dest)); freeaddrinfo(res);
+    uint32_t seq = 0; auto next_tick = std::chrono::steady_clock::now();
 
     while (g_senderRunning.load()) {
-        while (std::chrono::steady_clock::now() < next_tick)
-            std::atomic_thread_fence(std::memory_order_relaxed);
-
+        while (std::chrono::steady_clock::now() < next_tick) std::atomic_thread_fence(std::memory_order_relaxed);
         scan_for_gamepads();
 
-        ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet)); 
-        pkt.magic         = ns::PROTO_MAGIC;
-        pkt.version       = ns::PROTO_VERSION;
-        pkt.flags         = ns::FLAG_NONE;
-        pkt.seq           = seq++;
-        pkt.ts_us         = ns::now_us();
-        pkt.report.reset(); 
+        ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet));
+        pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::PROTO_VERSION;
+        pkt.flags = ns::FLAG_NONE; pkt.seq = seq++; pkt.ts_us = ns::now_us();
+        pkt.report.reset();
 
         ns::HIDReport* out_reports[4] = { &pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4 };
-        int active_count = 0;
+        int active_count = 0; bool c1=false, c2=false, c3=false, c4=false;
 
-        bool c1=false, c2=false, c3=false, c4=false;
         for (int i = 0; i < 4; ++i) {
-            bool is_conn = false;
-            read_pad(i, *out_reports[i], is_conn);
-            if (is_conn) {
-                active_count++;
-                if (i==0) c1=true; else if (i==1) c2=true; else if (i==2) c3=true; else if (i==3) c4=true;
-            }
+            bool is_conn = false; read_pad(i, *out_reports[i], is_conn);
+            if (is_conn) { active_count++; if (i==0) c1=true; else if (i==1) c2=true; else if (i==2) c3=true; else if (i==3) c4=true; }
         }
 
         int km = g_keyboardMode.load();
@@ -327,8 +352,7 @@ static void SenderThread(std::string host, uint16_t port) {
                 else if (!c3) { pkt.report.p3 = pkt.report.p1; c3 = true; }
                 else if (!c4) { pkt.report.p4 = pkt.report.p1; c4 = true; }
             }
-            pkt.report.p1.reset();
-            apply_keyboard_to_report(pkt.report.p1, false);
+            pkt.report.p1.reset(); apply_keyboard_to_report(pkt.report.p1, false);
             active_count = std::max(active_count, 1);
         } else if (km == KB_OVERRIDE) {
             apply_keyboard_to_report(pkt.report.p1, true);
@@ -337,49 +361,31 @@ static void SenderThread(std::string host, uint16_t port) {
 
         if (active_count == 0) pkt.report.reset();
 
-        {
-            uint8_t full_hmac[32];
-            hmac_sha256(g_hmacKey, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
-            memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-        }
-
+        uint8_t full_hmac[32]; hmac_sha256(g_hmacKey, 32, (const uint8_t*)&pkt, ns::PACKET_AUTH_SIZE, full_hmac);
+        memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
         sendto(sock, (const char*)&pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));
-        if (active_count > 0) next_tick += std::chrono::milliseconds(4);
-        else next_tick += std::chrono::milliseconds(500);
+        if (active_count > 0) next_tick += std::chrono::milliseconds(4); else next_tick += std::chrono::milliseconds(500);
     }
-
-    for (int i = 0; i < 4; ++i) {
-        if (g_pads[i]) { SDL_GameControllerClose(g_pads[i]); g_pads[i] = nullptr; g_hw_names[i][0] = '\0'; }
-    }
+    for (int i = 0; i < 4; ++i) { if (g_pads[i]) { SDL_GameControllerClose(g_pads[i]); g_pads[i] = nullptr; g_hw_names[i][0] = '\0'; } }
     close(sock);
 }
 
 // ── GTK Callbacks ──
 extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
     if (g_connected) {
-        g_connected = false;
-        g_senderRunning = false;
+        g_connected = false; g_senderRunning = false;
         if (g_senderThread.joinable()) g_senderThread.join();
-        
         gtk_button_set_label(GTK_BUTTON(connectBtn), "Connect");
-        gtk_widget_set_sensitive(ipEntry, TRUE);
-        gtk_widget_set_sensitive(kbCombo, TRUE);
+        gtk_widget_set_sensitive(ipEntry, TRUE); gtk_widget_set_sensitive(kbCombo, TRUE);
         if (g_keyboardMode != KB_OFF) gtk_widget_set_sensitive(bindingsBtn, TRUE);
         gtk_label_set_text(GTK_LABEL(statusLabel), "Disconnected");
-        
-        for (int i = 0; i < 4; ++i) {
-            char buf[64]; snprintf(buf, sizeof(buf), "P%d: Waiting...", i + 1);
-            gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), buf);
-        }
+        for (int i = 0; i < 4; ++i) gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), "Waiting...");
         return;
     }
 
-    const char* ipStr = gtk_entry_get_text(GTK_ENTRY(ipEntry));
-    if (strlen(ipStr) == 0) return;
-
+    const char* ipStr = gtk_entry_get_text(GTK_ENTRY(ipEntry)); if (strlen(ipStr) == 0) return;
     char ipBuf[64]; strncpy(ipBuf, ipStr, sizeof(ipBuf) - 1); ipBuf[sizeof(ipBuf) - 1] = '\0';
-    int port = ns::DEFAULT_PORT;
-    char* colon = strchr(ipBuf, ':');
+    int port = ns::DEFAULT_PORT; char* colon = strchr(ipBuf, ':');
     if (colon) { *colon = '\0'; port = atoi(colon + 1); if (port <= 0 || port > 65535) port = ns::DEFAULT_PORT; }
 
     save_config(ipStr, g_keyboardMode.load());
@@ -388,14 +394,17 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
 
     for (int i=0; i<4; ++i) { g_hw_names[i][0] = '\0'; g_pads[i] = nullptr; }
 
-    g_senderRunning = true;
-    g_senderThread = std::thread(SenderThread, std::string(ipBuf), (uint16_t)port);
+    init_global_keyboard();
+    if (g_keyboardMode.load() != KB_OFF && g_kb_fds.empty() && !g_kb_permission_warning_shown) {
+        GtkWidget *dialog = gtk_message_dialog_new(nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+            "Cannot access background keyboard!\n\nTo use background input on Linux, run this in your terminal and log out/in:\n\nsudo usermod -aG input $USER");
+        gtk_dialog_run(GTK_DIALOG(dialog)); gtk_widget_destroy(dialog);
+        g_kb_permission_warning_shown = true;
+    }
 
+    g_senderRunning = true; g_senderThread = std::thread(SenderThread, std::string(ipBuf), (uint16_t)port);
     gtk_button_set_label(GTK_BUTTON(connectBtn), "Disconnect");
-    gtk_widget_set_sensitive(ipEntry, FALSE);
-    gtk_widget_set_sensitive(kbCombo, FALSE);
-    gtk_widget_set_sensitive(bindingsBtn, FALSE);
-
+    gtk_widget_set_sensitive(ipEntry, FALSE); gtk_widget_set_sensitive(kbCombo, FALSE); gtk_widget_set_sensitive(bindingsBtn, FALSE);
     char status[128]; snprintf(status, sizeof(status), "Connected to %s:%d", ipBuf, port);
     gtk_label_set_text(GTK_LABEL(statusLabel), status);
 }
@@ -403,8 +412,7 @@ extern "C" void on_connect_clicked(GtkWidget*, gpointer) {
 extern "C" void on_kb_combo_changed(GtkComboBox* widget, gpointer) {
     g_keyboardMode = gtk_combo_box_get_active(widget);
     gtk_widget_set_sensitive(bindingsBtn, g_keyboardMode != KB_OFF);
-    const char* ipStr = gtk_entry_get_text(GTK_ENTRY(ipEntry));
-    save_config(ipStr, g_keyboardMode.load());
+    save_config(gtk_entry_get_text(GTK_ENTRY(ipEntry)), g_keyboardMode.load());
 }
 
 // ── Bindings Editor Dialog ──
@@ -414,225 +422,135 @@ static std::unordered_map<std::string, std::string> g_editBindings;
 
 extern "C" gboolean on_dialog_key_press(GtkWidget* widget, GdkEventKey* event, gpointer user_data) {
     if (!g_listeningBtn || g_listeningKey.empty()) return FALSE;
-    
     if (event->keyval == GDK_KEY_Escape) {
-        g_editBindings[g_listeningKey] = "";
-        gtk_button_set_label(GTK_BUTTON(g_listeningBtn), "");
+        g_editBindings[g_listeningKey] = ""; gtk_button_set_label(GTK_BUTTON(g_listeningBtn), "");
     } else {
         const char* name = gdk_keyval_name(event->keyval);
         if (name) {
-            for (auto& [k, v] : g_editBindings) { if (v == name) v = ""; } // Unbind duplicates
+            for (auto& [k, v] : g_editBindings) { if (v == name) v = ""; }
             g_editBindings[g_listeningKey] = name;
             gtk_button_set_label(GTK_BUTTON(g_listeningBtn), name);
         }
     }
-    
-    g_listeningBtn = nullptr;
-    g_listeningKey = "";
-    return TRUE; // Stop propagation
+    g_listeningBtn = nullptr; g_listeningKey = "";
+    return TRUE;
 }
 
 extern "C" void on_bind_btn_clicked(GtkWidget* btn, gpointer data) {
-    const char* key = (const char*)data;
-    g_listeningBtn = btn;
-    g_listeningKey = key;
+    g_listeningBtn = btn; g_listeningKey = (const char*)data;
     gtk_button_set_label(GTK_BUTTON(btn), "Press Key...");
 }
 
 extern "C" void on_bindings_clicked(GtkWidget*, gpointer parent_window) {
-    GtkWidget* dialog = gtk_dialog_new_with_buttons("Edit Bindings", GTK_WINDOW(parent_window),
-                                                    GTK_DIALOG_MODAL, "Cancel", GTK_RESPONSE_CANCEL,
-                                                    "Save", GTK_RESPONSE_ACCEPT, nullptr);
+    GtkWidget* dialog = gtk_dialog_new_with_buttons("Edit Bindings", GTK_WINDOW(parent_window), GTK_DIALOG_MODAL, "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, nullptr);
     gtk_window_set_default_size(GTK_WINDOW(dialog), 400, 400);
     g_signal_connect(dialog, "key-press-event", G_CALLBACK(on_dialog_key_press), nullptr);
 
     GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
-    GtkWidget* grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
-    gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
-    gtk_container_add(GTK_CONTAINER(content), grid);
+    GtkWidget* grid = gtk_grid_new(); gtk_grid_set_row_spacing(GTK_GRID(grid), 4); gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 10); gtk_container_add(GTK_CONTAINER(content), grid);
 
     g_editBindings = g_keyBindings;
-    
-    std::vector<std::string> order = {
-        "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "MINUS", "PLUS",
-        "LSTICK", "RSTICK", "HOME", "CAPTURE",
-        "LSTICK_UP", "LSTICK_DOWN", "LSTICK_LEFT", "LSTICK_RIGHT",
-        "RSTICK_UP", "RSTICK_DOWN", "RSTICK_LEFT", "RSTICK_RIGHT",
-        "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"
-    };
-
+    std::vector<std::string> order = { "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "MINUS", "PLUS", "LSTICK", "RSTICK", "HOME", "CAPTURE", "LSTICK_UP", "LSTICK_DOWN", "LSTICK_LEFT", "LSTICK_RIGHT", "RSTICK_UP", "RSTICK_DOWN", "RSTICK_LEFT", "RSTICK_RIGHT", "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT" };
     int row = 0, col = 0;
     for (size_t i = 0; i < order.size(); i++) {
-        GtkWidget* lbl = gtk_label_new(order[i].c_str());
-        gtk_widget_set_halign(lbl, GTK_ALIGN_END);
+        GtkWidget* lbl = gtk_label_new(order[i].c_str()); gtk_widget_set_halign(lbl, GTK_ALIGN_END);
         gtk_grid_attach(GTK_GRID(grid), lbl, col, row, 1, 1);
-
-        GtkWidget* btn = gtk_button_new_with_label(g_editBindings[order[i]].c_str());
-        gtk_widget_set_size_request(btn, 100, -1);
+        GtkWidget* btn = gtk_button_new_with_label(g_editBindings[order[i]].c_str()); gtk_widget_set_size_request(btn, 100, -1);
         g_signal_connect(btn, "clicked", G_CALLBACK(on_bind_btn_clicked), (gpointer)order[i].c_str());
         gtk_grid_attach(GTK_GRID(grid), btn, col + 1, row, 1, 1);
-
-        row++;
-        if (row >= 13) { row = 0; col += 2; }
+        row++; if (row >= 13) { row = 0; col += 2; }
     }
-
     gtk_widget_show_all(dialog);
-    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
-    if (response == GTK_RESPONSE_ACCEPT) {
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         g_keyBindings = g_editBindings;
-        const char* ipStr = gtk_entry_get_text(GTK_ENTRY(ipEntry));
-        save_config(ipStr, g_keyboardMode.load());
+        save_config(gtk_entry_get_text(GTK_ENTRY(ipEntry)), g_keyboardMode.load());
     }
-    g_listeningBtn = nullptr;
-    gtk_widget_destroy(dialog);
+    g_listeningBtn = nullptr; gtk_widget_destroy(dialog);
 }
 
 extern "C" gboolean on_timer(gpointer) {
-    if (g_connected) {
-        std::lock_guard<std::mutex> lock(g_hw_mtx);
-        int km = g_keyboardMode.load();
-        for (int i = 0; i < 4; ++i) {
-            char lbl[128];
-            if (i == 0 && km != KB_OFF) {
-                if (km == KB_SINGLE) snprintf(lbl, sizeof(lbl), "🎮 P1: Keyboard");
-                else snprintf(lbl, sizeof(lbl), "🎮 P1: %s / Keyboard", g_hw_names[0][0] != '\0' ? g_hw_names[0] : "Idle");
+    std::lock_guard<std::mutex> lock(g_hw_mtx);
+    int km = g_keyboardMode.load();
+
+    if (!g_connected) scan_for_gamepads();
+
+    for (int i = 0; i < 4; ++i) {
+        char lbl[128];
+        if (km == KB_SINGLE) {
+            if (i == 0) {
+                snprintf(lbl, sizeof(lbl), "P1: Keyboard");
             } else {
-                if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[i]);
+                int phys_i = i - 1;
+                if (g_hw_names[phys_i][0] != '\0') snprintf(lbl, sizeof(lbl), "P%d: %s", i + 1, g_hw_names[phys_i]);
                 else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
             }
-            gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), lbl);
-        }
-    } else {
-        scan_for_gamepads();
-        std::lock_guard<std::mutex> lock(g_hw_mtx);
-        for (int i = 0; i < 4; ++i) {
-            char lbl[128];
-            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[i]);
+        } else if (km == KB_OVERRIDE) {
+            if (i == 0) {
+                if (g_hw_names[0][0] != '\0') snprintf(lbl, sizeof(lbl), "P1: %s / Keyboard", g_hw_names[0]);
+                else snprintf(lbl, sizeof(lbl), "P1: Idle / Keyboard");
+            } else {
+                if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "P%d: %s", i + 1, g_hw_names[i]);
+                else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
+            }
+        } else {
+            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "P%d: %s", i + 1, g_hw_names[i]);
             else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
-            gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), lbl);
         }
+        gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), lbl);
     }
     return G_SOURCE_CONTINUE;
 }
 
-extern "C" gboolean on_main_key_press(GtkWidget*, GdkEventKey* event, gpointer) {
-    std::lock_guard<std::mutex> lock(g_keyStateMtx);
-    g_keyState[event->keyval] = true;
-    return FALSE;
-}
-
-extern "C" gboolean on_main_key_release(GtkWidget*, GdkEventKey* event, gpointer) {
-    std::lock_guard<std::mutex> lock(g_keyStateMtx);
-    g_keyState[event->keyval] = false;
-    return FALSE;
-}
-
 static std::string get_exe_dir() {
     char buf[1024]; ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len > 0) {
-        buf[len] = '\0'; std::string exe(buf);
-        size_t pos = exe.find_last_of("/");
-        if (pos != std::string::npos) return exe.substr(0, pos);
-    }
+    if (len > 0) { buf[len] = '\0'; std::string exe(buf); size_t pos = exe.find_last_of("/"); if (pos != std::string::npos) return exe.substr(0, pos); }
     return ".";
 }
 
 extern "C" void on_window_destroy(GtkWidget*, gpointer) {
     if (g_connected) { g_senderRunning = false; if (g_senderThread.joinable()) g_senderThread.join(); }
+    for (int fd : g_kb_fds) close(fd);
     gtk_main_quit();
 }
 
-// ── Entry point ──
 int main(int argc, char* argv[]) {
     setpriority(PRIO_PROCESS, 0, -20);
-
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    if (SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
-        std::cerr << "Failed to initialise SDL2: " << SDL_GetError() << "\n";
-        return 1;
-    }
+    if (SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) return 1;
 
     gtk_init(&argc, &argv);
-
     GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "NS PC Control");
-    gtk_window_set_default_size(GTK_WINDOW(window), 420, 320);
-    gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
-    
+    gtk_window_set_title(GTK_WINDOW(window), "NS PC Control"); gtk_window_set_default_size(GTK_WINDOW(window), 420, 320); gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
     g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), nullptr);
-    g_signal_connect(window, "key-press-event", G_CALLBACK(on_main_key_press), nullptr);
-    g_signal_connect(window, "key-release-event", G_CALLBACK(on_main_key_release), nullptr);
-    
     gtk_window_set_icon_from_file(GTK_WINDOW(window), (get_exe_dir() + "/icon.png").c_str(), nullptr);
 
-    GtkWidget* grid = gtk_grid_new();
-    gtk_container_add(GTK_CONTAINER(window), grid);
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
-    gtk_container_set_border_width(GTK_CONTAINER(grid), 16);
+    GtkWidget* grid = gtk_grid_new(); gtk_container_add(GTK_CONTAINER(window), grid);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 8); gtk_grid_set_column_spacing(GTK_GRID(grid), 10); gtk_container_set_border_width(GTK_CONTAINER(grid), 16);
 
-    std::string savedIp;
-    int savedMode;
-    load_saved_config(savedIp, savedMode);
-    g_keyboardMode = savedMode;
+    std::string savedIp; int savedMode; load_saved_config(savedIp, savedMode); g_keyboardMode = savedMode;
 
-    // Row 0: IP
-    GtkWidget* ipLabel = gtk_label_new("Raspberry Pi IP:");
-    gtk_widget_set_halign(ipLabel, GTK_ALIGN_END);
-    gtk_grid_attach(GTK_GRID(grid), ipLabel, 0, 0, 1, 1);
+    GtkWidget* ipLabel = gtk_label_new("Raspberry Pi IP:"); gtk_widget_set_halign(ipLabel, GTK_ALIGN_END); gtk_grid_attach(GTK_GRID(grid), ipLabel, 0, 0, 1, 1);
+    ipEntry = gtk_entry_new(); gtk_entry_set_text(GTK_ENTRY(ipEntry), savedIp.c_str()); gtk_grid_attach(GTK_GRID(grid), ipEntry, 1, 0, 2, 1);
 
-    ipEntry = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(ipEntry), savedIp.c_str());
-    gtk_grid_attach(GTK_GRID(grid), ipEntry, 1, 0, 2, 1);
+    GtkWidget* kbLabel = gtk_label_new("Keyboard Mode:"); gtk_widget_set_halign(kbLabel, GTK_ALIGN_END); gtk_grid_attach(GTK_GRID(grid), kbLabel, 0, 1, 1, 1);
+    kbCombo = gtk_combo_box_text_new(); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(kbCombo), "OFF"); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(kbCombo), "ON (single)"); gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(kbCombo), "ON (override)");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(kbCombo), savedMode); g_signal_connect(kbCombo, "changed", G_CALLBACK(on_kb_combo_changed), nullptr); gtk_grid_attach(GTK_GRID(grid), kbCombo, 1, 1, 1, 1);
 
-    // Row 1: Keyboard Mode
-    GtkWidget* kbLabel = gtk_label_new("Keyboard Mode:");
-    gtk_widget_set_halign(kbLabel, GTK_ALIGN_END);
-    gtk_grid_attach(GTK_GRID(grid), kbLabel, 0, 1, 1, 1);
+    bindingsBtn = gtk_button_new_with_label("Bindings..."); gtk_widget_set_sensitive(bindingsBtn, savedMode != KB_OFF); g_signal_connect(bindingsBtn, "clicked", G_CALLBACK(on_bindings_clicked), window); gtk_grid_attach(GTK_GRID(grid), bindingsBtn, 2, 1, 1, 1);
 
-    kbCombo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(kbCombo), "OFF");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(kbCombo), "ON (single)");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(kbCombo), "ON (override)");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(kbCombo), savedMode);
-    g_signal_connect(kbCombo, "changed", G_CALLBACK(on_kb_combo_changed), nullptr);
-    gtk_grid_attach(GTK_GRID(grid), kbCombo, 1, 1, 1, 1);
+    connectBtn = gtk_button_new_with_label("Connect"); g_signal_connect(connectBtn, "clicked", G_CALLBACK(on_connect_clicked), nullptr); gtk_grid_attach(GTK_GRID(grid), connectBtn, 1, 2, 2, 1);
+    GtkWidget* sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL); gtk_grid_attach(GTK_GRID(grid), sep, 0, 3, 3, 1);
+    statusLabel = gtk_label_new("Ready"); gtk_widget_set_halign(statusLabel, GTK_ALIGN_START); gtk_grid_attach(GTK_GRID(grid), statusLabel, 0, 4, 3, 1);
 
-    bindingsBtn = gtk_button_new_with_label("Bindings...");
-    gtk_widget_set_sensitive(bindingsBtn, savedMode != KB_OFF);
-    g_signal_connect(bindingsBtn, "clicked", G_CALLBACK(on_bindings_clicked), window);
-    gtk_grid_attach(GTK_GRID(grid), bindingsBtn, 2, 1, 1, 1);
-
-    // Row 2: Connect Button
-    connectBtn = gtk_button_new_with_label("Connect");
-    g_signal_connect(connectBtn, "clicked", G_CALLBACK(on_connect_clicked), nullptr);
-    gtk_grid_attach(GTK_GRID(grid), connectBtn, 1, 2, 2, 1);
-
-    // Row 3: Separator
-    GtkWidget* sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_grid_attach(GTK_GRID(grid), sep, 0, 3, 3, 1);
-
-    // Row 4: Status
-    statusLabel = gtk_label_new("Ready");
-    gtk_widget_set_halign(statusLabel, GTK_ALIGN_START);
-    gtk_grid_attach(GTK_GRID(grid), statusLabel, 0, 4, 3, 1);
-
-    // Rows 5-8: P1 to P4 Slots
     for (int i = 0; i < 4; ++i) {
         char buf[64]; snprintf(buf, sizeof(buf), "P%d: Waiting...", i + 1);
-        ctrlLabels[i] = gtk_label_new(buf);
-        gtk_widget_set_margin_start(ctrlLabels[i], 10);
-        gtk_widget_set_halign(ctrlLabels[i], GTK_ALIGN_START);
-        gtk_grid_attach(GTK_GRID(grid), ctrlLabels[i], 0, 5 + i, 3, 1);
+        ctrlLabels[i] = gtk_label_new(buf); gtk_widget_set_margin_start(ctrlLabels[i], 10); gtk_widget_set_halign(ctrlLabels[i], GTK_ALIGN_START); gtk_grid_attach(GTK_GRID(grid), ctrlLabels[i], 0, 5 + i, 3, 1);
     }
 
     g_timeout_add(100, on_timer, nullptr);
-
     gtk_widget_show_all(window);
     gtk_main();
 
-    SDL_Quit();
-    return 0;
+    SDL_Quit(); return 0;
 }

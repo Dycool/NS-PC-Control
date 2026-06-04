@@ -66,14 +66,25 @@ Navigate to `client/linux/` and run the following depending on what you want to 
 
 **Build the CLI:**
 ```bash
-g++ -O3 -pthread ns-gamepad.cpp -o ns-gamepad -lSDL2
+g++ -O3 -std=c++17 ns-gamepad.cpp -o ns-gamepad -lpthread -lSDL2
 ```
-*Tip: You may need to run with `sudo` or add your user to the `input` group if the application cannot access controller events.*
 
 **Build the GUI:**
 ```bash
-g++ -std=c++17 -O2 -Wall ns-gui.cpp -o ns-gui $(pkg-config --cflags --libs gtk+-3.0) -lpthread -lSDL2
+g++ -O3 -std=c++17 ns-gui.cpp -o ns-gui $(pkg-config --cflags --libs gtk+-3.0) -lpthread -lSDL2
 ```
+
+### ⚠️ Background Keyboard Permission (Linux)
+
+Both clients now read hardware keyboard input directly from `/dev/input/` for reliable background detection — no window focus required.
+
+To use keyboard mode, **add your user to the `input` group**, then **log out and log back in** (or reboot):
+
+```bash
+sudo usermod -aG input $USER
+```
+
+If you skip this step, a warning will be shown at startup and keyboard mode will not function.
 
 ---
 
