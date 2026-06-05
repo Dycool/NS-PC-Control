@@ -1058,6 +1058,7 @@ static void handle_web_client(int client_fd, uint16_t udp_port) {
     (void)udp_port;
     char buf[8192];
     if (!read_http_headers(client_fd, buf, sizeof(buf))) {
+        if (g_verbose) std::puts("[web] failed to read HTTP headers");
         close(client_fd);
         return;
     }
@@ -1065,10 +1066,14 @@ static void handle_web_client(int client_fd, uint16_t udp_port) {
     // Check if it's a WebSocket upgrade request (case-insensitive headers)
     if (has_header(buf, "upgrade: websocket") &&
         has_header(buf, "sec-websocket-key:")) {
-        if (ws_upgrade(client_fd, buf))
+        if (g_verbose) std::puts("[web] WebSocket upgrade request received");
+        if (ws_upgrade(client_fd, buf)) {
+            if (g_verbose) std::puts("[web] WebSocket upgrade successful");
             handle_ws_client(client_fd);
-        else
+        } else {
+            if (g_verbose) std::puts("[web] WebSocket upgrade failed");
             close(client_fd);
+        }
         return;
     }
 
