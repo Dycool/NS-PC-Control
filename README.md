@@ -12,6 +12,8 @@ This project was built from scratch in **C++** and uses **UDP** to get the lowes
 
 **⌨️ Keyboard Support** — Windows and mac support keyboard controls, either through overriding P1 or with it as one player.
 
+**🌐 Web App & Mobile Touch Controls** — The server includes an embedded web interface with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
+
 > **📦 Pre-compiled Binaries Available!**
 > You can download ready-to-use GUI/CLI clients and the Raspberry Pi server directly from the **[Releases](https://github.com/Dycool/NS-PC-Control/releases)** page.
 >
