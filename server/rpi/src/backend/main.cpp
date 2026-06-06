@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <dirent.h>
 #include <ctype.h>
 
 #ifdef USE_UPNP
@@ -41,12 +42,12 @@ using ms    = std::chrono::milliseconds;
 static std::atomic<bool> g_running{true};
 static bool g_verbose = false;
 
-// Optional self-healing gadget setup.  The backend can now call setup_gadget.sh
-// automatically when /dev/hidg0..3 are missing/unusable, instead of requiring
-// a manual setup step before every launch.
-static bool        g_auto_gadget_setup  = true;
-static bool        g_force_gadget_setup = false;
-static std::string g_gadget_setup_path;
+// Built-in USB gadget lifecycle.  ns-backend can now create/bind the
+// 4-interface Pro Controller gadget itself on startup and unbind/remove it
+// on shutdown, so setup_gadget.sh is no longer needed at runtime.
+static bool        g_auto_gadget_setup     = true;
+static bool        g_force_gadget_setup    = false;
+static bool        g_teardown_gadget_exit  = true;
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
@@ -558,6 +559,27 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
 
 
 
+static constexpr const char* GADGET_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl";
+static constexpr const char* CONFIG_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1";
+
+// Nintendo Switch Pro Controller descriptor, same 64-byte input/output report
+// descriptor previously written by setup_gadget.sh.
+static const uint8_t PRO_CONTROLLER_REPORT_DESC[] = {
+    0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x30, 0x05, 0x01, 0x05, 0x09, 0x19, 0x01,
+    0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0A, 0x55, 0x00, 0x65, 0x00, 0x81, 0x02,
+    0x05, 0x09, 0x19, 0x0B, 0x29, 0x0E, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02,
+    0x75, 0x01, 0x95, 0x02, 0x81, 0x03, 0x0B, 0x01, 0x00, 0x01, 0x00, 0xA1, 0x00, 0x0B, 0x30, 0x00,
+    0x01, 0x00, 0x0B, 0x31, 0x00, 0x01, 0x00, 0x0B, 0x32, 0x00, 0x01, 0x00, 0x0B, 0x35, 0x00, 0x01,
+    0x00, 0x15, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x04, 0x81, 0x02, 0xC0, 0x0B,
+    0x39, 0x00, 0x01, 0x00, 0x15, 0x00, 0x25, 0x07, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x65, 0x14, 0x75,
+    0x04, 0x95, 0x01, 0x81, 0x02, 0x05, 0x09, 0x19, 0x0F, 0x29, 0x12, 0x15, 0x00, 0x25, 0x01, 0x75,
+    0x01, 0x95, 0x04, 0x81, 0x02, 0x75, 0x08, 0x95, 0x34, 0x81, 0x03, 0x06, 0x00, 0xFF, 0x85, 0x21,
+    0x09, 0x01, 0x75, 0x08, 0x95, 0x3F, 0x81, 0x03, 0x85, 0x81, 0x09, 0x02, 0x75, 0x08, 0x95, 0x3F,
+    0x81, 0x03, 0x85, 0x01, 0x09, 0x03, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0x85, 0x10, 0x09, 0x04,
+    0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0x85, 0x80, 0x09, 0x05, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83,
+    0x85, 0x82, 0x09, 0x06, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0xC0
+};
+
 static bool hidg_nodes_ready() {
     for (int i = 0; i < 4; ++i) {
         char path[32];
@@ -568,65 +590,157 @@ static bool hidg_nodes_ready() {
     return true;
 }
 
-static std::string shell_quote(const std::string& in) {
-    std::string out = "'";
-    for (char c : in) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
+static bool dir_exists(const char* path) {
+    struct stat st{};
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool path_exists(const char* path) {
+    struct stat st{};
+    return stat(path, &st) == 0;
+}
+
+static bool mkdir_if_needed(const char* path) {
+    if (mkdir(path, 0755) == 0 || errno == EEXIST) return true;
+    std::fprintf(stderr, "[gadget] mkdir %s failed: %s\n", path, std::strerror(errno));
+    return false;
+}
+
+static bool write_all_fd(int fd, const void* data, size_t len, const char* path) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    while (len > 0) {
+        ssize_t w = write(fd, p, len);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            std::fprintf(stderr, "[gadget] write %s failed: %s\n", path, std::strerror(errno));
+            return false;
+        }
+        if (w == 0) {
+            std::fprintf(stderr, "[gadget] write %s wrote 0 bytes\n", path);
+            return false;
+        }
+        p += w;
+        len -= (size_t)w;
     }
-    out += "'";
+    return true;
+}
+
+static bool write_bytes_file(const char* path, const void* data, size_t len) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        std::fprintf(stderr, "[gadget] open %s failed: %s\n", path, std::strerror(errno));
+        return false;
+    }
+    bool ok = write_all_fd(fd, data, len, path);
+    close(fd);
+    return ok;
+}
+
+static bool write_text_file(const char* path, const char* text) {
+    return write_bytes_file(path, text, std::strlen(text));
+}
+
+static void remove_link_if_exists(const char* path) {
+    struct stat st{};
+    if (lstat(path, &st) == 0 && S_ISLNK(st.st_mode))
+        unlink(path);
+}
+
+static void rmdir_if_exists(const char* path) {
+    if (rmdir(path) != 0 && errno != ENOENT) {
+        if (g_verbose)
+            std::fprintf(stderr, "[gadget] rmdir %s failed: %s\n", path, std::strerror(errno));
+    }
+}
+
+static std::string join_path(const std::string& a, const std::string& b) {
+    if (a.empty() || a.back() == '/') return a + b;
+    return a + "/" + b;
+}
+
+static std::string first_udc_name() {
+    DIR* d = opendir("/sys/class/udc");
+    if (!d) return "";
+    std::string out;
+    while (dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        out = e->d_name;
+        break;
+    }
+    closedir(d);
     return out;
 }
 
-static bool regular_file_exists(const std::string& path) {
-    struct stat st{};
-    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-}
+static bool create_hid_function(int id) {
+    char func[256];
+    std::snprintf(func, sizeof(func), "%s/functions/hid.usb%d", GADGET_DIR, id);
+    if (!mkdir_if_needed(func)) return false;
 
-static std::string executable_dir() {
-    char buf[4096];
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n <= 0) return "";
-    buf[n] = '\0';
-    std::string p(buf);
-    size_t slash = p.find_last_of('/');
-    return slash == std::string::npos ? std::string() : p.substr(0, slash);
-}
+    char path[320];
+    std::snprintf(path, sizeof(path), "%s/protocol", func);
+    if (!write_text_file(path, "0")) return false;
 
-static std::string find_gadget_setup_script() {
-    if (!g_gadget_setup_path.empty() && regular_file_exists(g_gadget_setup_path))
-        return g_gadget_setup_path;
+    std::snprintf(path, sizeof(path), "%s/subclass", func);
+    if (!write_text_file(path, "0")) return false;
 
-    std::vector<std::string> candidates;
-    if (const char* env = std::getenv("NS_GADGET_SETUP"))
-        candidates.emplace_back(env);
+    std::snprintf(path, sizeof(path), "%s/report_length", func);
+    if (!write_text_file(path, "64")) return false;
 
-    candidates.emplace_back("./setup_gadget.sh");
-    candidates.emplace_back("./scripts/setup_gadget.sh");
+    std::snprintf(path, sizeof(path), "%s/report_desc", func);
+    if (!write_bytes_file(path, PRO_CONTROLLER_REPORT_DESC, sizeof(PRO_CONTROLLER_REPORT_DESC))) return false;
 
-    std::string exe_dir = executable_dir();
-    if (!exe_dir.empty()) {
-        candidates.emplace_back(exe_dir + "/setup_gadget.sh");
-        candidates.emplace_back(exe_dir + "/scripts/setup_gadget.sh");
+    char link_path[320];
+    std::snprintf(link_path, sizeof(link_path), "%s/hid.usb%d", CONFIG_DIR, id);
+    unlink(link_path);
+    if (symlink(func, link_path) != 0) {
+        std::fprintf(stderr, "[gadget] symlink %s -> %s failed: %s\n",
+                     link_path, func, std::strerror(errno));
+        return false;
     }
 
-    if (const char* home = std::getenv("HOME"))
-        candidates.emplace_back(std::string(home) + "/setup_gadget.sh");
-
-    candidates.emplace_back("/usr/local/bin/setup_gadget.sh");
-    candidates.emplace_back("/opt/ns-gamepad/setup_gadget.sh");
-
-    for (const auto& p : candidates) {
-        if (regular_file_exists(p))
-            return p;
-    }
-    return "";
+    return true;
 }
 
-static bool run_gadget_setup_if_needed(bool force, const char* reason) {
+static void teardown_gadget() {
+    if (!path_exists(GADGET_DIR)) return;
+
+    std::puts("[gadget] Closing USB gadget...");
+
+    // Unbind first.  This disconnects the virtual controllers from the Switch.
+    std::string udc_path = join_path(GADGET_DIR, "UDC");
+    write_text_file(udc_path.c_str(), "");
+
+    // Remove config links before removing functions, mirroring setup_gadget.sh.
+    for (int i = 0; i < 4; ++i) {
+        char link_path[320];
+        std::snprintf(link_path, sizeof(link_path), "%s/hid.usb%d", CONFIG_DIR, i);
+        remove_link_if_exists(link_path);
+    }
+
+    // Configfs object directories are removed with rmdir; their pseudo-attribute
+    // files must not be unlinked manually.
+    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409");
+    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1");
+
+    for (int i = 0; i < 4; ++i) {
+        char func[256];
+        std::snprintf(func, sizeof(func), "%s/functions/hid.usb%d", GADGET_DIR, i);
+        rmdir_if_exists(func);
+    }
+
+    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409");
+    rmdir_if_exists(GADGET_DIR);
+
+    std::puts("[gadget] USB gadget closed");
+}
+
+static bool setup_gadget_builtin(bool force, const char* reason) {
     if (!g_auto_gadget_setup && !force)
         return hidg_nodes_ready();
 
+    // Non-forced calls are still cheap/retry-safe for internal recovery paths,
+    // but startup passes force=true so the gadget is always torn down and
+    // recreated from a known-good state.
     if (!force && hidg_nodes_ready())
         return true;
 
@@ -635,34 +749,96 @@ static bool run_gadget_setup_if_needed(bool force, const char* reason) {
     if (force)
         g_gadget_setup_attempted.store(true);
 
-    std::string script = find_gadget_setup_script();
-    if (script.empty()) {
+    if (geteuid() != 0) {
         std::fprintf(stderr,
-            "[gadget] /dev/hidg0..3 are not ready and setup_gadget.sh was not found.\n"
-            "[gadget] Put setup_gadget.sh beside ns-backend, set NS_GADGET_SETUP,\n"
-            "[gadget] or pass --gadget-setup /path/to/setup_gadget.sh.\n");
+            "[gadget] /dev/hidg0..3 are not ready and built-in setup needs root.\n"
+            "[gadget] Run: sudo ./ns-backend ...\n");
         return false;
     }
 
-    std::printf("[gadget] %s; running %s\n", reason ? reason : "HID gadget not ready", script.c_str());
-    std::string cmd;
-    if (geteuid() == 0)
-        cmd = "/bin/bash " + shell_quote(script);
-    else
-        cmd = "sudo -n /bin/bash " + shell_quote(script);
+    std::printf("[gadget] %s; creating built-in 4-Pro-Controller gadget\n",
+                reason ? reason : "HID gadget not ready");
 
-    int rc = std::system(cmd.c_str());
-    if (rc != 0) {
+    // Try to load and mount configfs.  Ignore failures here because both may
+    // already be active on systems that previously used setup_gadget.sh.
+    std::system("modprobe libcomposite >/dev/null 2>&1 || true");
+    std::system("mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true");
+
+    if (!dir_exists("/sys/kernel/config/usb_gadget")) {
         std::fprintf(stderr,
-            "[gadget] setup command failed with status %d. Run ns-backend as root,\n"
-            "[gadget] allow passwordless sudo for setup_gadget.sh, or run it once manually.\n", rc);
-        return hidg_nodes_ready();
+            "[gadget] /sys/kernel/config/usb_gadget is unavailable.\n"
+            "[gadget] Check libcomposite/configfs and dtoverlay=dwc2.\n");
+        return false;
     }
 
-    // configfs may create /dev/hidg* just after the script exits.
-    for (int i = 0; i < 20; ++i) {
-        if (hidg_nodes_ready()) {
-            std::puts("[gadget] /dev/hidg0..3 ready");
+    // Always remove our previous gadget object before creating a new one when
+    // force=true.  This protects normal startup from stale configfs state left
+    // by crashes, kill -9, power loss, or older versions of setup_gadget.sh.
+    if (path_exists(GADGET_DIR)) {
+        if (force || !hidg_nodes_ready()) {
+            teardown_gadget();
+            std::this_thread::sleep_for(ms(300));
+        } else {
+            return true;
+        }
+    }
+
+    if (!mkdir_if_needed(GADGET_DIR)) return false;
+
+    std::string strings_dir = join_path(GADGET_DIR, "strings/0x409");
+    std::string configs_dir = join_path(GADGET_DIR, "configs/c.1");
+    std::string config_strings_dir = join_path(configs_dir, "strings/0x409");
+    std::string functions_dir = join_path(GADGET_DIR, "functions");
+
+    if (!mkdir_if_needed(join_path(GADGET_DIR, "strings").c_str())) return false;
+    if (!mkdir_if_needed(strings_dir.c_str())) return false;
+    if (!mkdir_if_needed(join_path(GADGET_DIR, "configs").c_str())) return false;
+    if (!mkdir_if_needed(configs_dir.c_str())) return false;
+    if (!mkdir_if_needed(join_path(configs_dir, "strings").c_str())) return false;
+    if (!mkdir_if_needed(config_strings_dir.c_str())) return false;
+    if (!mkdir_if_needed(functions_dir.c_str())) return false;
+
+    if (!write_text_file(join_path(GADGET_DIR, "bcdDevice").c_str(), "0x0200")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bcdUSB").c_str(), "0x0200")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "idVendor").c_str(), "0x057e")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "idProduct").c_str(), "0x2009")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceClass").c_str(), "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceSubClass").c_str(), "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceProtocol").c_str(), "0x00")) return false;
+
+    // USB descriptor serial belongs here, not in the controller SPI area.
+    if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), "NSGP26060660")) return false;
+    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "Nintendo Co., Ltd.")) return false;
+    if (!write_text_file(join_path(strings_dir, "product").c_str(), "Pro Controller")) return false;
+
+    if (!write_text_file(join_path(configs_dir, "MaxPower").c_str(), "500")) return false;
+    if (!write_text_file(join_path(config_strings_dir, "configuration").c_str(), "NS-PC-Control Pro Controller Hub")) return false;
+
+    for (int i = 0; i < 4; ++i) {
+        if (!create_hid_function(i)) return false;
+    }
+
+    std::string udc = first_udc_name();
+    if (udc.empty()) {
+        std::fprintf(stderr,
+            "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt.\n");
+        return false;
+    }
+
+    if (!write_text_file(join_path(GADGET_DIR, "UDC").c_str(), udc.c_str())) return false;
+    std::printf("[gadget] Bound to UDC: %s\n", udc.c_str());
+
+    // /dev/hidg* can appear shortly after binding.
+    for (int tries = 0; tries < 20; ++tries) {
+        bool all_seen = true;
+        for (int i = 0; i < 4; ++i) {
+            char path[32];
+            std::snprintf(path, sizeof(path), "/dev/hidg%d", i);
+            if (access(path, F_OK) != 0) all_seen = false;
+            chmod(path, 0666);
+        }
+        if (all_seen && hidg_nodes_ready()) {
+            std::puts("[gadget] Done. Exposed /dev/hidg0 to /dev/hidg3");
             return true;
         }
         std::this_thread::sleep_for(ms(100));
@@ -670,6 +846,10 @@ static bool run_gadget_setup_if_needed(bool force, const char* reason) {
 
     std::fprintf(stderr, "[gadget] setup finished, but /dev/hidg0..3 are still not ready.\n");
     return false;
+}
+
+static bool run_gadget_setup_if_needed(bool force, const char* reason) {
+    return setup_gadget_builtin(force, reason);
 }
 
 static void drain_hid_output_queue(int fd) {
@@ -1184,6 +1364,8 @@ static const char INDEX_HTML[] =
     "let loopId = null;\n"
     "let seqCounter = 0;\n"
     "let lastActivePads = [];\n"
+    "let motion = { enabled:false, ax:0, ay:0, az:0, gx:0, gy:0, gz:0 };\n"
+    "let motionListenerInstalled = false;\n"
     "const keysDown = new Set();\n"
     "const defaultBindings = {\n"
     "    'BTN_Y': 'KeyZ', 'BTN_B': 'KeyX', 'BTN_A': 'KeyV', 'BTN_X': 'KeyC',\n"
@@ -1302,6 +1484,29 @@ static const char INDEX_HTML[] =
     "    } catch(e) {}\n"
     "    if (navigator.vibrate && durationMs > 0 && (low || high)) navigator.vibrate(durationMs);\n"
     "}\n"
+    "function clamp16(v) { v = Math.round(v || 0); return Math.max(-32768, Math.min(32767, v)); }\n"
+    "async function enableMotion() {\n"
+    "    if (motionListenerInstalled) return;\n"
+    "    try {\n"
+    "        if (typeof DeviceMotionEvent === 'undefined') return;\n"
+    "        if (DeviceMotionEvent.requestPermission) {\n"
+    "            const r = await DeviceMotionEvent.requestPermission();\n"
+    "            if (r !== 'granted') return;\n"
+    "        }\n"
+    "        motionListenerInstalled = true;\n"
+    "        window.addEventListener('devicemotion', e => {\n"
+    "            const a = e.accelerationIncludingGravity || e.acceleration || {};\n"
+    "            const rr = e.rotationRate || {};\n"
+    "            motion.enabled = true;\n"
+    "            motion.ax = clamp16((a.x || 0) / 9.80665 * 4096);\n"
+    "            motion.ay = clamp16((a.y || 0) / 9.80665 * 4096);\n"
+    "            motion.az = clamp16((a.z || 0) / 9.80665 * 4096);\n"
+    "            motion.gx = clamp16((rr.beta  || 0) * 16);\n"
+    "            motion.gy = clamp16((rr.gamma || 0) * 16);\n"
+    "            motion.gz = clamp16((rr.alpha || 0) * 16);\n"
+    "        }, {passive:true});\n"
+    "    } catch(e) {}\n"
+    "}\n"
     "function handleRumbleMessage(data) {\n"
     "    if (!(data instanceof ArrayBuffer) || data.byteLength < 8) return;\n"
     "    const v = new DataView(data);\n"
@@ -1356,7 +1561,13 @@ static const char INDEX_HTML[] =
     "        view.setUint8(offset + 3, slotStates[p].lx); view.setUint8(offset + 4, slotStates[p].ly);\n"
     "        view.setUint8(offset + 5, slotStates[p].rx); view.setUint8(offset + 6, slotStates[p].ry);\n"
     "        view.setUint8(offset + 7, 0);\n"
-    "        for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(offset + k, 0);\n"
+    "        if (p === 0 && motion.enabled) {\n"
+    "            view.setInt16(offset + 8, motion.ax, true); view.setInt16(offset + 10, motion.ay, true); view.setInt16(offset + 12, motion.az, true);\n"
+    "            view.setInt16(offset + 14, motion.gx, true); view.setInt16(offset + 16, motion.gy, true); view.setInt16(offset + 18, motion.gz, true);\n"
+    "            view.setUint8(offset + 20, 1); view.setUint8(offset + 21, 0); view.setUint8(offset + 22, 0); view.setUint8(offset + 23, 0);\n"
+    "        } else {\n"
+    "            for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(offset + k, 0);\n"
+    "        }\n"
     "    }\n"
     "    ws.send(buffer);\n"
     "}\n"
@@ -1368,8 +1579,10 @@ static const char INDEX_HTML[] =
     "        document.getElementById('kbMode').disabled = false;\n"
     "        return;\n"
     "    }\n"
+    "    await enableMotion();\n"
     "    const wsUrl = window.location.protocol === 'https:' ? `wss://${window.location.host}` : `ws://${window.location.host}`;\n"
     "    ws = new WebSocket(wsUrl); ws.binaryType = \"arraybuffer\";\n"
+    "    ws.onmessage = (ev) => handleRumbleMessage(ev.data);\n"
     "    ws.onopen = () => {\n"
     "        isConnected = true;\n"
     "        document.getElementById('btnConnect').innerText = \"Disconnect\";\n"
@@ -2041,20 +2254,38 @@ static void legacy_multi_to_extended(const MultiReport& in, ExtendedMultiReport&
 
 static bool send_ws_binary_frame(WebClient* c, const uint8_t* payload, size_t len) {
     if (!c || c->state != WebClient::WS_ACTIVE || c->fd < 0) return false;
+    if (c->wbuf != nullptr) return false; // previous WS frame still draining
+    if (len >= 126) return false;
 
-    uint8_t frame[16 + sizeof(RumblePacket)] = {};
-    size_t hdr = 0;
-    frame[0] = 0x82; // FIN + binary
-    if (len < 126) {
-        frame[1] = (uint8_t)len;
-        hdr = 2;
-    } else {
-        return false;
+    const size_t hdr = 2;
+    const size_t total = hdr + len;
+    uint8_t small_frame[2 + sizeof(RumblePacket)] = {};
+    if (total > sizeof(small_frame)) return false;
+
+    small_frame[0] = 0x82; // FIN + binary
+    small_frame[1] = (uint8_t)len;
+    memcpy(small_frame + hdr, payload, len);
+
+    ssize_t w = write(c->fd, small_frame, total);
+    if (w == (ssize_t)total) return true;
+
+    size_t written = 0;
+    if (w < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return false;
+    } else if (w > 0) {
+        written = (size_t)w;
     }
-    memcpy(frame + hdr, payload, len);
-    ssize_t w = write(c->fd, frame, hdr + len);
-    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
-    return w == (ssize_t)(hdr + len);
+
+    // Non-blocking socket is full or only accepted part of the frame. Queue the
+    // remaining bytes and let the poll loop finish it before sending another
+    // rumble frame. This prevents silently dropping rumble on busy web/mobile clients.
+    c->wbuf = (uint8_t*)malloc(total);
+    if (!c->wbuf) return false;
+    memcpy(c->wbuf, small_frame, total);
+    c->wlen = total;
+    c->woff = written;
+    c->after_write = WebClient::WS_ACTIVE;
+    return true;
 }
 
 static void flush_rumble_to_ws(WebClient* c) {
@@ -2376,7 +2607,12 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
         // Update poll events based on client state (POLLOUT for write, POLLIN for read)
         for (int i = 0; i < n_clients; i++) {
             if (clients[i].state != WebClient::CLOSED) {
-                pfds[i+1].events = (clients[i].state == WebClient::WRITE_RESP) ? POLLOUT : POLLIN;
+                if (clients[i].state == WebClient::WRITE_RESP)
+                    pfds[i+1].events = POLLOUT;
+                else if (clients[i].state == WebClient::WS_ACTIVE && clients[i].wbuf != nullptr)
+                    pfds[i+1].events = POLLIN | POLLOUT;
+                else
+                    pfds[i+1].events = POLLIN;
                 pfds[i+1].revents = 0;
             }
         }
@@ -2434,7 +2670,7 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
             short rev = pfds[i+1].revents;
             if (rev & (POLLHUP | POLLERR)) { c->state = WebClient::CLOSED; continue; }
 
-            // ── WRITE_RESP: flush queued response ───────────────────────────
+            // ── WRITE_RESP: flush queued HTTP response ──────────────────────
             if (c->state == WebClient::WRITE_RESP && (rev & POLLOUT)) {
                 ssize_t n = write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
                 if (n < 0) {
@@ -2450,6 +2686,23 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
                     }
                 }
                 continue;
+            }
+
+            // ── WS_ACTIVE: flush queued server→browser binary frames ─────────
+            if (c->state == WebClient::WS_ACTIVE && c->wbuf != nullptr && (rev & POLLOUT)) {
+                ssize_t n = write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
+                if (n < 0) {
+                    if (!(errno == EAGAIN || errno == EWOULDBLOCK))
+                        c->state = WebClient::CLOSED;
+                } else {
+                    c->woff += n;
+                    if (c->woff >= c->wlen) {
+                        free(c->wbuf);
+                        c->wbuf = nullptr;
+                        c->wlen = c->woff = 0;
+                    }
+                }
+                if (c->state == WebClient::CLOSED) continue;
             }
 
             if (!(rev & POLLIN)) continue;
@@ -2621,7 +2874,7 @@ int main(int argc, char** argv) {
         else if (a == "--upnp")           do_upnp    = true;
         else if (a == "--no-auto-gadget") g_auto_gadget_setup = false;
         else if (a == "--force-gadget-setup") g_force_gadget_setup = true;
-        else if (a == "--gadget-setup" && i+1 < argc) g_gadget_setup_path = argv[++i];
+        else if (a == "--keep-gadget-on-exit") g_teardown_gadget_exit = false;
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
                 web_port = std::atoi(argv[++i]);
@@ -2630,15 +2883,19 @@ int main(int argc, char** argv) {
         }
         else if (a == "-h") {
             puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v]");
-            puts("            [--gadget-setup PATH] [--force-gadget-setup] [--no-auto-gadget]");
+            puts("            [--force-gadget-setup] [--no-auto-gadget] [--keep-gadget-on-exit]");
             return 0;
         }
     }
 
-    if (g_force_gadget_setup)
-        run_gadget_setup_if_needed(true, "forced gadget setup requested");
-    else if (g_auto_gadget_setup && !hidg_nodes_ready())
-        run_gadget_setup_if_needed(false, "/dev/hidg0..3 are missing/unusable");
+    // Always recreate the built-in gadget at process startup when auto-gadget
+    // mode is enabled.  This makes every launch self-healing: stale configfs
+    // state, leftover /dev/hidg* nodes, or a previous unclean shutdown are
+    // cleared before the backend starts talking to the Switch.
+    if (g_auto_gadget_setup || g_force_gadget_setup)
+        run_gadget_setup_if_needed(true,
+            g_force_gadget_setup ? "forced gadget setup requested"
+                                 : "startup gadget recreation requested");
 
     derive_key(DEFAULT_SECRET, g_hmac_key);
     signal(SIGINT,  on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
@@ -2780,5 +3037,9 @@ int main(int argc, char** argv) {
     close(ep); close(sock);
     wt.join(); st.join();
     if (web_thread.joinable()) web_thread.join();
+
+    if (g_teardown_gadget_exit)
+        teardown_gadget();
+
     return 0;
 }
