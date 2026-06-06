@@ -961,10 +961,21 @@ static void pump_udp_rumble(int sock, RumbleManager& rumble, const int controlle
 int main(int argc, char** argv) {
     std::string host;
     int port = ns::DEFAULT_PORT;
+    bool macro_mode = false;
+    std::string macro_path;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--legacy") == 0) {
             g_legacy_udp = true;
+        } else if ((std::strcmp(argv[i], "--macro") == 0 ||
+                    std::strcmp(argv[i], "--upload-macro") == 0 ||
+                    std::strcmp(argv[i], "--server-macro") == 0)) {
+            if (i + 1 >= argc) {
+                std::cerr << argv[i] << " requires a macro JSON/commands file path\n";
+                return 1;
+            }
+            macro_mode = true;
+            macro_path = argv[++i];
         } else if (host.empty()) {
             host = argv[i];
         } else {
