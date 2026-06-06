@@ -196,7 +196,11 @@ static void init_spi_flash(int ctrl) {
     uint8_t* flash = g_spi_flash[ctrl];
     memset(flash, 0xFF, SPI_FLASH_SIZE);
 
-    memcpy(flash + 0x6080, CTRL_SERIAL[ctrl], strlen(CTRL_SERIAL[ctrl]) + 1);
+    // Do NOT put the serial at 0x6080.  The Switch/Chromium/Linux init
+    // sequence reads 0x6080 as IMU horizontal offsets and 0x6086 as analog
+    // stick parameters.  The previous build wrote the ASCII serial there,
+    // which produced a huge bogus stick deadzone/range block and could make
+    // the left stick look completely dead even though reports contained lx/ly.
     flash[0x6012] = 0x03;
     flash[0x6013] = 0xA0;
     flash[0x601B] = 0x02;
@@ -241,6 +245,21 @@ static void init_spi_flash(int ctrl) {
     memcpy(flash + 0x8012, left_cal, sizeof(left_cal));
     flash[0x801B] = 0xB2; flash[0x801C] = 0xA1;
     memcpy(flash + 0x801D, right_cal, sizeof(right_cal));
+
+    // SPI 0x6080..0x6085: IMU horizontal offsets, 3 little-endian int16s.
+    // Zero is the neutral/safe value for a virtual controller.
+    memset(flash + 0x6080, 0x00, 6);
+
+    // SPI 0x6086..0x6097: analog stick parameters.  Known consumers unpack
+    // bytes 3..5 as two packed 12-bit values: deadzone and range ratio.
+    // Keep the deadzone small and explicit instead of leaving 0xFF or serial
+    // text here, because that can make real stick movement get snapped to
+    // center.
+    uint8_t stick_params[18] = {};
+    static constexpr uint16_t STICK_DEADZONE    = 0x0A0; // 160
+    static constexpr uint16_t STICK_RANGE_RATIO = 0x100;
+    pack_stick_cal_pair(stick_params + 3, STICK_DEADZONE, STICK_RANGE_RATIO);
+    memcpy(flash + 0x6086, stick_params, sizeof(stick_params));
 
     // Body/button colors. Slightly different shade per virtual pad avoids cached identity weirdness.
     uint8_t shade = (uint8_t)(0x20 + ctrl * 0x18);
@@ -317,12 +336,19 @@ static uint16_t axis8_to_12(uint8_t v) {
     return (uint16_t)raw;
 }
 
+static uint8_t invert_axis8_centered(uint8_t v) {
+    // 0 and 255 should swap, but keep the protocol's exact neutral value
+    // neutral.  A raw 255-v inversion turns 128 into 127, which creates a tiny
+    // permanent off-center Y value.
+    return v == 128 ? 128 : (uint8_t)(255 - v);
+}
+
 static void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8) {
-    // Browser/Gamepad API uses 0 = up/left and 255 = down/right after our
-    // frontend conversion. With the fixed Pro Controller calibration above,
-    // that maps correctly through the Switch calibration path.
+    // Input protocol uses 0 = up/left and 255 = down/right.  The Switch raw
+    // stick format has Y in the opposite direction, so invert Y once here for
+    // both sticks.
     uint16_t x = axis8_to_12(x8);
-    uint16_t y = axis8_to_12((uint8_t)(255 - y8));
+    uint16_t y = axis8_to_12(invert_axis8_centered(y8));
     out[0] = x & 0xFF;
     out[1] = ((x >> 8) & 0x0F) | ((y & 0x0F) << 4);
     out[2] = (y >> 4) & 0xFF;
@@ -388,6 +414,18 @@ static void build_standard_report(const ExtendedHIDReport& src, uint8_t timer, P
 
     pack_stick_12(out.left_stick,  in.lx, in.ly);
     pack_stick_12(out.right_stick, in.rx, in.ry);
+
+    if (g_verbose && !input_is_neutral(in)) {
+        static uint64_t last_log_us = 0;
+        uint64_t t = now_us();
+        if (t - last_log_us > 250000) {
+            last_log_us = t;
+            std::printf("[input] lx=%3u ly=%3u rx=%3u ry=%3u | L=%02X %02X %02X R=%02X %02X %02X\n",
+                        in.lx, in.ly, in.rx, in.ry,
+                        out.left_stick[0], out.left_stick[1], out.left_stick[2],
+                        out.right_stick[0], out.right_stick[1], out.right_stick[2]);
+        }
+    }
 
     MotionReport m = src.motion;
     if (!src.has_motion) m.reset();
