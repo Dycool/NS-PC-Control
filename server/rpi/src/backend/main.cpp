@@ -78,6 +78,11 @@ struct ClientSession {
     RumblePacket rumble[4]{};
     uint32_t    rumble_seq[4]{};
 
+    // Extended UDP clients can opt into server->client rumble by using the
+    // authenticated extended packet format. Legacy UDP clients remain input-only.
+    bool        udp_rumble_enabled = false;
+    uint32_t    udp_last_rumble_seq[4]{};
+
     // Web/mobile packets set this even when the pad is neutral.  Without it,
     // the Switch port only maps after a non-neutral input, so early rumble can
     // be dropped before the browser has a rumble target.
@@ -2597,6 +2602,85 @@ static void legacy_multi_to_extended(const MultiReport& in, ExtendedMultiReport&
     out.p4.input = in.p4;
 }
 
+// UDP extended packets keep the old UDP packet untouched, but add motion/gyro
+// and an opt-in rumble return path.  Layout is the same 20-byte header used by
+// Packet/WebSocket, followed by ExtendedMultiReport and a normal HMAC tag.
+// Old clients still send the legacy Packet size/version and are handled below.
+struct NS_LOCAL_PACKED ExtendedUdpPacket {
+    uint32_t magic;
+    uint8_t  version;
+    uint8_t  flags;
+    uint16_t reserved;
+    uint32_t seq;
+    uint64_t timestamp_us;
+    ExtendedMultiReport report;
+    uint8_t  hmac[HMAC_TAG_SIZE];
+};
+
+static constexpr size_t EXT_UDP_PACKET_AUTH_SIZE = 20 + sizeof(ExtendedMultiReport);
+static constexpr size_t EXT_UDP_PACKET_SIZE      = EXT_UDP_PACKET_AUTH_SIZE + HMAC_TAG_SIZE;
+static constexpr size_t UDP_RX_MAX_PACKET_SIZE   =
+    sizeof(ExtendedUdpPacket) > sizeof(Packet) ? sizeof(ExtendedUdpPacket) : sizeof(Packet);
+static_assert(sizeof(ExtendedUdpPacket) == EXT_UDP_PACKET_SIZE,
+              "ExtendedUdpPacket size must match its wire format");
+
+static bool extended_udp_packet_ok(const ExtendedUdpPacket& p) {
+    return p.magic == PROTO_MAGIC &&
+           (p.version == WEB_PROTO_VERSION || p.version == PROTO_VERSION);
+}
+
+static bool extended_report_pad_present(const ExtendedMultiReport& report, int subpad) {
+    if (subpad < 0 || subpad >= 4) return false;
+    const uint8_t* raw = reinterpret_cast<const uint8_t*>(&report);
+    return (raw[subpad * sizeof(ExtendedHIDReport) + 7] & 0x01) != 0;
+}
+
+static void clear_udp_rumble_state(ClientSession& c) {
+    c.udp_rumble_enabled = false;
+    for (int s = 0; s < 4; ++s)
+        c.udp_last_rumble_seq[s] = c.rumble_seq[s];
+}
+
+static void enable_udp_rumble_state(ClientSession& c) {
+    if (!c.udp_rumble_enabled) {
+        c.udp_rumble_enabled = true;
+        for (int s = 0; s < 4; ++s)
+            c.udp_last_rumble_seq[s] = c.rumble_seq[s];
+    }
+}
+
+static void flush_rumble_to_udp(int sock, int client_idx) {
+    if (sock < 0 || client_idx < 0 || client_idx >= MAX_CLIENTS) return;
+
+    sockaddr_in dest{};
+    RumblePacket pending[4]{};
+    bool has[4]{};
+
+    {
+        std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+        ClientSession& c = g_clients[client_idx];
+        if (!c.active || !c.udp_rumble_enabled) return;
+
+        dest = c.addr;
+        for (int s = 0; s < 4; ++s) {
+            uint32_t seq = c.rumble_seq[s];
+            if (seq != c.udp_last_rumble_seq[s]) {
+                pending[s] = c.rumble[s];
+                c.udp_last_rumble_seq[s] = seq;
+                has[s] = true;
+            }
+        }
+    }
+
+    for (int s = 0; s < 4; ++s) {
+        if (!has[s]) continue;
+        ssize_t sent = sendto(sock, &pending[s], sizeof(RumblePacket), 0,
+                              reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+        if (g_verbose && sent != (ssize_t)sizeof(RumblePacket))
+            std::fprintf(stderr, "[udp] failed to send rumble packet: %s\n", std::strerror(errno));
+    }
+}
+
 static bool send_ws_binary_frame(WebClient* c, const uint8_t* payload, size_t len) {
     if (!c || c->state != WebClient::WS_ACTIVE || c->fd < 0) return false;
     if (c->wbuf != nullptr) return false; // previous WS frame still draining
@@ -2785,6 +2869,7 @@ static size_t process_ws_frame(WebClient *c) {
                 g_clients[i].first_pkt = true;
                 g_clients[i].report.reset();
                 g_clients[i].uses_pad_presence = true;
+                clear_udp_rumble_state(g_clients[i]);
                 for (int s = 0; s < 4; ++s) {
                     g_clients[i].pad_present[s] = false;
                     g_clients[i].pad_last_present_us[s] = 0;
@@ -3265,6 +3350,7 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
                     g_clients[clients[i].ws_slot].active = false;
                     g_clients[clients[i].ws_slot].report.reset();
                     g_clients[clients[i].ws_slot].uses_pad_presence = false;
+                    clear_udp_rumble_state(g_clients[clients[i].ws_slot]);
                     for (int s = 0; s < 4; ++s) {
                         g_clients[clients[i].ws_slot].pad_present[s] = false;
                         g_clients[clients[i].ws_slot].pad_last_present_us[s] = 0;
@@ -3349,7 +3435,7 @@ int main(int argc, char** argv) {
 
     int ep = epoll_create1(0); epoll_event ev{}; ev.events = EPOLLIN; ev.data.fd = sock; epoll_ctl(ep, EPOLL_CTL_ADD, sock, &ev);
 
-    Packet pkt{};
+    uint8_t udp_rx[UDP_RX_MAX_PACKET_SIZE]{};
     epoll_event evs[4];
 
     while (g_running.load(std::memory_order_relaxed)) {
@@ -3360,101 +3446,193 @@ int main(int argc, char** argv) {
         socklen_t slen;
         ssize_t bytes;
 
-        // Drain all available packets from the kernel buffer
+        // Drain all available packets from the kernel buffer.
+        // Two UDP packet formats are accepted:
+        //   1) legacy Packet: input only, unchanged, authenticated with HMAC.
+        //   2) ExtendedUdpPacket: ExtendedMultiReport with motion/gyro, authenticated
+        //      with HMAC, and opted into UDP rumble replies.
         while (g_running.load(std::memory_order_relaxed)) {
             slen = sizeof(sender);
-            bytes = recvfrom(sock, &pkt, sizeof(pkt), 0, (sockaddr*)&sender, &slen);
+            bytes = recvfrom(sock, udp_rx, sizeof(udp_rx), 0, (sockaddr*)&sender, &slen);
             if (bytes <= 0) break; // EAGAIN or error — ring is drained
 
-            if (bytes != (ssize_t)PACKET_SIZE) continue;
+            bool is_extended_udp = false;
+            Packet pkt{};
+            ExtendedUdpPacket ext_pkt{};
 
-        // ── 1. Per-IP rate limiter ────────────────────────────────────────────────
-        uint32_t src_ip = sender.sin_addr.s_addr;
-        if (!rate_allow(src_ip)) {
-            if (g_verbose) puts("rate limit exceeded, dropped");
-            continue;
-        }
-
-        // ── 2. Magic + version check ──────────────────────────────────────────────
-        if (!packet_ok(pkt)) {
-            if (g_verbose) puts("bad magic/version, dropped");
-            continue;
-        }
-
-        // ── 3. Find Client Session or Pin new IP ──────────────────────────────────
-        int client_idx = -1;
-        uint64_t now = now_us();
-
-        for (int i = 0; i < MAX_CLIENTS; ++i) {
-            std::lock_guard<std::mutex> lk(g_mtx[i]);
-            if (g_clients[i].active &&
-                g_clients[i].addr.sin_addr.s_addr == src_ip &&
-                g_clients[i].addr.sin_port == sender.sin_port) {
-                client_idx = i;
-                break;
+            if (bytes == (ssize_t)PACKET_SIZE) {
+                memcpy(&pkt, udp_rx, sizeof(pkt));
+            } else if (bytes == (ssize_t)EXT_UDP_PACKET_SIZE) {
+                memcpy(&ext_pkt, udp_rx, sizeof(ext_pkt));
+                is_extended_udp = true;
+            } else {
+                if (g_verbose) std::printf("[udp] unexpected packet size=%zd, dropped\n", bytes);
+                continue;
             }
-        }
 
-        // If not found, assign to a free/timed-out slot
-        if (client_idx == -1) {
+            // ── 1. Per-IP rate limiter ────────────────────────────────────────────
+            uint32_t src_ip = sender.sin_addr.s_addr;
+            if (!rate_allow(src_ip)) {
+                if (g_verbose) puts("rate limit exceeded, dropped");
+                continue;
+            }
+
+            // ── 2. Magic + version check ──────────────────────────────────────────
+            if (is_extended_udp) {
+                if (!extended_udp_packet_ok(ext_pkt)) {
+                    if (g_verbose) puts("bad extended UDP magic/version, dropped");
+                    continue;
+                }
+            } else if (!packet_ok(pkt)) {
+                if (g_verbose) puts("bad magic/version, dropped");
+                continue;
+            }
+
+            // ── 3. Find Client Session or Pin new IP:port ─────────────────────────
+            int client_idx = -1;
+            uint64_t now = now_us();
+
             for (int i = 0; i < MAX_CLIENTS; ++i) {
                 std::lock_guard<std::mutex> lk(g_mtx[i]);
-                if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
+                if (g_clients[i].active &&
+                    g_clients[i].addr.sin_addr.s_addr == src_ip &&
+                    g_clients[i].addr.sin_port == sender.sin_port) {
                     client_idx = i;
-                    g_clients[i].active = true;
-                    g_clients[i].addr = sender;
-                    g_clients[i].first_pkt = true;
-                    g_clients[i].report.reset();
-                    g_clients[i].uses_pad_presence = false;
-                    for (int s = 0; s < 4; ++s) {
-                        g_clients[i].pad_present[s] = false;
-                        g_clients[i].pad_last_present_us[s] = 0;
-                    }
-                    g_clients[i].last_rx_us = now;
-                    if (g_verbose) std::printf("New PC accepted into Server Slot %d/4\n", i+1);
                     break;
                 }
             }
-        }
 
-        // If all 4 slots are taken by active PCs, drop the packet
-        if (client_idx == -1) {
-            if (g_verbose) puts("server is full (4 PCs already active), dropped");
-            continue;
-        }
+            // If not found, assign to a free/timed-out slot.
+            if (client_idx == -1) {
+                for (int i = 0; i < MAX_CLIENTS; ++i) {
+                    std::lock_guard<std::mutex> lk(g_mtx[i]);
+                    if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
+                        client_idx = i;
+                        g_clients[i].active = true;
+                        g_clients[i].addr = sender;
+                        g_clients[i].first_pkt = true;
+                        g_clients[i].expected_seq = 0;
+                        g_clients[i].report.reset();
+                        g_clients[i].uses_pad_presence = false;
+                        clear_udp_rumble_state(g_clients[i]);
+                        for (int s = 0; s < 4; ++s) {
+                            g_clients[i].pad_present[s] = false;
+                            g_clients[i].pad_last_present_us[s] = 0;
+                        }
+                        g_clients[i].last_rx_us = now;
+                        if (g_verbose) std::printf("New UDP client accepted into Server Slot %d/4\n", i+1);
+                        break;
+                    }
+                }
+            }
 
-        // ── 4. HMAC authentication ────────────────────────────────────────────────
-        if (hmac_verify(g_hmac_key, 32, (const uint8_t *)&pkt, PACKET_AUTH_SIZE, pkt.hmac, HMAC_TAG_SIZE) != 0) {
-            if (g_verbose) puts("bad HMAC, dropped");
-            continue;
-        }
-
-        // ── 5. Re-validate + Sequence counter + Apply to shared state ─────────────
-        {
-            std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-
-            // Re-validate: writer may have deactivated the slot during HMAC
-            if (!g_clients[client_idx].active) continue;
-
-            bool is_reset = (pkt.flags & FLAG_RESET);
-            bool sequence_jump = (g_clients[client_idx].expected_seq > pkt.seq) && ((g_clients[client_idx].expected_seq - pkt.seq) > 100);
-
-            if (!g_clients[client_idx].first_pkt && pkt.seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
-                if (g_verbose)
-                    std::printf("PC %d out-of-order seq=%u, dropped\n", client_idx+1, pkt.seq);
+            // If all 4 slots are taken by active PCs, drop the packet.
+            if (client_idx == -1) {
+                if (g_verbose) puts("server is full (4 PCs already active), dropped");
                 continue;
             }
-            g_clients[client_idx].first_pkt = false;
-            g_clients[client_idx].expected_seq = pkt.seq + 1;
 
-            if (is_reset) {
-                g_clients[client_idx].report.reset();
+            // ── 4. HMAC authentication ────────────────────────────────────────────
+            int hmac_ok = 0;
+            if (is_extended_udp) {
+                hmac_ok = hmac_verify(g_hmac_key, 32,
+                                      reinterpret_cast<const uint8_t*>(&ext_pkt),
+                                      EXT_UDP_PACKET_AUTH_SIZE,
+                                      ext_pkt.hmac,
+                                      HMAC_TAG_SIZE);
             } else {
-                legacy_multi_to_extended(pkt.report, g_clients[client_idx].report);
+                hmac_ok = hmac_verify(g_hmac_key, 32,
+                                      reinterpret_cast<const uint8_t*>(&pkt),
+                                      PACKET_AUTH_SIZE,
+                                      pkt.hmac,
+                                      HMAC_TAG_SIZE);
             }
-            g_clients[client_idx].last_rx_us = now_us();
-        }
-        ++g_pkts_rx;
+            if (hmac_ok != 0) {
+                if (g_verbose) puts("bad HMAC, dropped");
+                continue;
+            }
+
+            // ── 5. Sequence counter + Apply to shared state ───────────────────────
+            bool accepted = false;
+            {
+                std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+
+                // Re-validate: writer may have deactivated the slot during HMAC.
+                if (!g_clients[client_idx].active) continue;
+
+                uint8_t flags = is_extended_udp ? ext_pkt.flags : pkt.flags;
+                uint32_t seq = is_extended_udp ? ext_pkt.seq : pkt.seq;
+                bool is_reset = (flags & FLAG_RESET);
+                bool sequence_jump = (g_clients[client_idx].expected_seq > seq) &&
+                                     ((g_clients[client_idx].expected_seq - seq) > 100);
+
+                if (!g_clients[client_idx].first_pkt && seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
+                    if (g_verbose)
+                        std::printf("UDP client %d out-of-order seq=%u, dropped\n", client_idx+1, seq);
+                    continue;
+                }
+                g_clients[client_idx].first_pkt = false;
+                g_clients[client_idx].expected_seq = seq + 1;
+
+                if (is_reset) {
+                    g_clients[client_idx].report.reset();
+                    for (int s = 0; s < 4; ++s) {
+                        g_clients[client_idx].pad_present[s] = false;
+                        g_clients[client_idx].pad_last_present_us[s] = 0;
+                    }
+                } else if (is_extended_udp) {
+                    // Extended UDP carries motion/gyro and pad-present flags, so
+                    // neutral-but-connected pads can still receive rumble.
+                    g_clients[client_idx].uses_pad_presence = true;
+                    enable_udp_rumble_state(g_clients[client_idx]);
+
+                    ExtendedHIDReport* dst_pads[4] = {
+                        &g_clients[client_idx].report.p1,
+                        &g_clients[client_idx].report.p2,
+                        &g_clients[client_idx].report.p3,
+                        &g_clients[client_idx].report.p4,
+                    };
+                    const ExtendedHIDReport* src_pads[4] = {
+                        &ext_pkt.report.p1, &ext_pkt.report.p2,
+                        &ext_pkt.report.p3, &ext_pkt.report.p4,
+                    };
+
+                    for (int s = 0; s < 4; ++s) {
+                        bool present = extended_report_pad_present(ext_pkt.report, s);
+                        if (present) {
+                            *dst_pads[s] = *src_pads[s];
+                            g_clients[client_idx].pad_present[s] = true;
+                            g_clients[client_idx].pad_last_present_us[s] = now;
+                        } else {
+                            g_clients[client_idx].pad_present[s] = false;
+                            uint64_t last_seen = g_clients[client_idx].pad_last_present_us[s];
+                            if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US)
+                                dst_pads[s]->reset();
+                        }
+                    }
+                } else {
+                    // Legacy UDP remains 100% compatible: input-only, no pad-present
+                    // tracking, no gyro, and no UDP rumble replies.
+                    g_clients[client_idx].uses_pad_presence = false;
+                    clear_udp_rumble_state(g_clients[client_idx]);
+                    for (int s = 0; s < 4; ++s) {
+                        g_clients[client_idx].pad_present[s] = false;
+                        g_clients[client_idx].pad_last_present_us[s] = 0;
+                    }
+                    legacy_multi_to_extended(pkt.report, g_clients[client_idx].report);
+                }
+
+                g_clients[client_idx].last_rx_us = now_us();
+                accepted = true;
+            }
+
+            if (!accepted) continue;
+            ++g_pkts_rx;
+
+            // Extended UDP clients opted into rumble by using the new packet
+            // format.  Legacy clients are not sent unexpected traffic.
+            if (is_extended_udp)
+                flush_rumble_to_udp(sock, client_idx);
         } // drain loop
     } // epoll loop
 
