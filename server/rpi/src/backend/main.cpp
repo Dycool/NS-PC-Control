@@ -23,6 +23,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <poll.h>
+#include <sys/time.h>
 #include <ctype.h>
 
 #ifdef USE_UPNP
@@ -67,7 +68,7 @@ struct ClientSession {
     MultiReport report{}; // The inputs coming from this specific PC
 };
 
-static std::mutex    g_mtx;
+static std::mutex    g_mtx[MAX_CLIENTS];
 static ClientSession g_clients[MAX_CLIENTS];
 
 // Diagnostics
@@ -122,77 +123,78 @@ static void writer_thread(int hz) {
             MultiReport r;
             r.reset(); // Base neutral state
 
-            {
-                std::lock_guard<std::mutex> lk(g_mtx);
-                uint64_t now_stamp = now_us();
+            // Per-slot snapshot (each slot locked independently)
+            uint64_t now_stamp = now_us();
+            bool active_snap[MAX_CLIENTS];
+            HIDReport report_snap[MAX_CLIENTS][4];
 
-                // 1. Clear timed-out clients (Watchdog)
-                for (int c = 0; c < MAX_CLIENTS; ++c) {
-                    if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > WATCHDOG_MS * 1000ULL)) {
-                        g_clients[c].active = false;
-                        if (g_verbose) std::printf("PC %d timed out and was disconnected.\n", c+1);
-                    }
+            for (int c = 0; c < MAX_CLIENTS; ++c) {
+                std::lock_guard<std::mutex> lk(g_mtx[c]);
+                if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > WATCHDOG_MS * 1000ULL)) {
+                    g_clients[c].active = false;
+                    if (g_verbose) std::printf("PC %d timed out and was disconnected.\n", c+1);
                 }
+                active_snap[c] = g_clients[c].active;
+                HIDReport* src[4] = { &g_clients[c].report.p1, &g_clients[c].report.p2,
+                                       &g_clients[c].report.p3, &g_clients[c].report.p4 };
+                for (int s = 0; s < 4; ++s)
+                    report_snap[c][s] = *src[s];
+            }
 
-                // 2. Free hardware slots mapped to inactive clients
-                for (int h = 0; h < 4; ++h) {
-                    if (hw_slots[h].client_idx != -1) {
-                        if (!g_clients[hw_slots[h].client_idx].active) {
-                            hw_slots[h].client_idx = -1;
-                            hw_slots[h].sub_idx = -1;
+            // 2. Free hardware slots mapped to inactive clients (snapshot, no lock needed)
+            for (int h = 0; h < 4; ++h) {
+                if (hw_slots[h].client_idx != -1 && !active_snap[hw_slots[h].client_idx]) {
+                    hw_slots[h].client_idx = -1;
+                    hw_slots[h].sub_idx = -1;
+                }
+            }
+
+            // 3. Auto-assign unmapped active inputs to free hardware slots
+            for (int c = 0; c < MAX_CLIENTS; ++c) {
+                if (!active_snap[c]) continue;
+
+                HIDReport* subs[4] = { &report_snap[c][0], &report_snap[c][1],
+                                        &report_snap[c][2], &report_snap[c][3] };
+
+                for (int s = 0; s < 4; ++s) {
+                    bool mapped = false;
+                    for (int h = 0; h < 4; ++h) {
+                        if (hw_slots[h].client_idx == c && hw_slots[h].sub_idx == s) {
+                            mapped = true; break;
                         }
                     }
-                }
 
-                // 3. Auto-assign unmapped active inputs to free hardware slots
-                for (int c = 0; c < MAX_CLIENTS; ++c) {
-                    if (!g_clients[c].active) continue;
-                    
-                    HIDReport* subs[4] = { &g_clients[c].report.p1, &g_clients[c].report.p2, 
-                                           &g_clients[c].report.p3, &g_clients[c].report.p4 };
-                    
-                    for (int s = 0; s < 4; ++s) {
-                        bool mapped = false;
+                    if (!mapped && !is_neutral(*subs[s])) {
                         for (int h = 0; h < 4; ++h) {
-                            if (hw_slots[h].client_idx == c && hw_slots[h].sub_idx == s) {
-                                mapped = true; break;
-                            }
-                        }
-                        
-                        // If player pressed a button and doesn't have a physical port yet
-                        if (!mapped && !is_neutral(*subs[s])) {
-                            for (int h = 0; h < 4; ++h) {
-                                if (hw_slots[h].client_idx == -1) {
-                                    hw_slots[h].client_idx = c;
-                                    hw_slots[h].sub_idx = s;
-                                    if (g_verbose) 
-                                        std::printf("Map -> PC %d (Pad %d) took Switch Port %d\n", c+1, s+1, h+1);
-                                    break;
-                                }
+                            if (hw_slots[h].client_idx == -1) {
+                                hw_slots[h].client_idx = c;
+                                hw_slots[h].sub_idx = s;
+                                if (g_verbose)
+                                    std::printf("Map -> PC %d (Pad %d) took Switch Port %d\n", c+1, s+1, h+1);
+                                break;
                             }
                         }
                     }
                 }
+            }
 
-                // 4. Construct the final mixed 4-player report
-                HIDReport* out_subs[4] = { &r.p1, &r.p2, &r.p3, &r.p4 };
-                for (int h = 0; h < 4; ++h) {
-                    if (hw_slots[h].client_idx != -1) {
-                        int c = hw_slots[h].client_idx;
-                        int s = hw_slots[h].sub_idx;
-                        HIDReport* src_subs[4] = { &g_clients[c].report.p1, &g_clients[c].report.p2, 
-                                                   &g_clients[c].report.p3, &g_clients[c].report.p4 };
-                        *out_subs[h] = *src_subs[s];
-                    }
+            // 4. Construct the final report from snapshot
+            HIDReport* out_subs[4] = { &r.p1, &r.p2, &r.p3, &r.p4 };
+            for (int h = 0; h < 4; ++h) {
+                if (hw_slots[h].client_idx != -1) {
+                    int c = hw_slots[h].client_idx;
+                    int s = hw_slots[h].sub_idx;
+                    *out_subs[h] = report_snap[c][s];
                 }
             }
 
             // 5. Send to physical USB gadget drivers efficiently
             bool ok = true;
-            if (r.p1 != prev.p1) { if(write(fds[0], &r.p1, 8) < 0 && errno != EAGAIN) ok = false; }
-            if (r.p2 != prev.p2) { if(write(fds[1], &r.p2, 8) < 0 && errno != EAGAIN) ok = false; }
-            if (r.p3 != prev.p3) { if(write(fds[2], &r.p3, 8) < 0 && errno != EAGAIN) ok = false; }
-            if (r.p4 != prev.p4) { if(write(fds[3], &r.p4, 8) < 0 && errno != EAGAIN) ok = false; }
+            static_assert(sizeof(HIDReport) == 8, "HIDReport size mismatch with HID gadget descriptor");
+            if (r.p1 != prev.p1) { if(write(fds[0], &r.p1, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
+            if (r.p2 != prev.p2) { if(write(fds[1], &r.p2, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
+            if (r.p3 != prev.p3) { if(write(fds[2], &r.p3, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
+            if (r.p4 != prev.p4) { if(write(fds[3], &r.p4, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
 
             if (!ok) {
                 if (!error_shown) { std::puts("Switch disconnected — waiting for reconnect..."); error_shown = true; }
@@ -207,15 +209,28 @@ static void writer_thread(int hz) {
     // Shutdown securely by neutralizing all ports
     MultiReport neutral{}; neutral.reset();
     for(int i=0; i<4; ++i) { 
-        if (fds[i] >= 0) { ssize_t _u = write(fds[i], &neutral.p1, 8); (void)_u; close(fds[i]); }
+        if (fds[i] >= 0) { ssize_t _u = write(fds[i], &neutral.p1, sizeof(HIDReport)); (void)_u; close(fds[i]); }
     }
 }
 
 
 // ── Stats thread ──────────────────────────────────────────────────────────────
 static void stats_thread() {
+    uint64_t last_cleanup = 0;
     while (g_running.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(ms(5000));
+
+        // Periodic rate limiter cleanup (every 60s)
+        uint64_t now = now_us();
+        if (now - last_cleanup > 60000000) {
+            last_cleanup = now;
+            for (int i = 0; i < RATE_TABLE; ++i) {
+                if (g_rate_table[i].ip != 0 &&
+                    now - g_rate_table[i].window_start > RATE_WINDOW_US * 2)
+                    g_rate_table[i].ip = 0;
+            }
+        }
+
         if (!g_verbose) continue;
         std::printf("pkts_rx=%-8llu  hid_writes=%-8llu\n",
             (unsigned long long)g_pkts_rx.load(),
@@ -234,17 +249,18 @@ static bool rate_allow(uint32_t ip) {
     if (now - s.window_start > RATE_WINDOW_US) {
         s.count = 1; s.window_start = now; return true;
     }
-    s.count++;
+    if (s.count < UINT32_MAX) s.count++;
     return s.count <= RATE_MAX_PKT;
 }
 
 
 #ifdef USE_UPNP
 // ── UPnP port forwarding ──
-static bool g_upnp_active = false;
+static bool     g_upnp_active = false;
+static uint16_t g_upnp_port   = 0;
 static UPNPUrls g_upnp_urls{};
 static IGDdatas g_upnp_data{};
-static char g_upnp_lan_addr[64]{};
+static char     g_upnp_lan_addr[64]{};
 
 static bool upnp_add_mapping(uint16_t port) {
     if (g_upnp_active) return false; 
@@ -255,7 +271,7 @@ static bool upnp_add_mapping(uint16_t port) {
     int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data, g_upnp_lan_addr, sizeof(g_upnp_lan_addr), nullptr, 0);
     freeUPNPDevlist(devlist);
     
-    if (igd != 1 && igd != 2) return false;
+    if (igd != 1 && igd != 2) { FreeUPNPUrls(&g_upnp_urls); return false; }
     
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", port);
@@ -265,6 +281,7 @@ static bool upnp_add_mapping(uint16_t port) {
     if (r != 0) { FreeUPNPUrls(&g_upnp_urls); return false; }
     
     g_upnp_active = true;
+    g_upnp_port = port;
     char external_ip[40];
     if (UPNP_GetExternalIPAddress(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, external_ip) == 0) {
         std::printf("UPnP: UDP port %u successfully forwarded!\n", port);
@@ -273,12 +290,12 @@ static bool upnp_add_mapping(uint16_t port) {
     return true;
 }
 
-static void upnp_remove_mapping(uint16_t port) {
+static void upnp_remove_mapping(uint16_t) {
     if (!g_upnp_active) return;
-    char port_str[8]; snprintf(port_str, sizeof(port_str), "%u", port);
+    char port_str[8]; snprintf(port_str, sizeof(port_str), "%u", g_upnp_port);
     UPNP_DeletePortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, port_str, "UDP", nullptr);
     std::puts("UPnP: port mapping removed cleanly");
-    FreeUPNPUrls(&g_upnp_urls); g_upnp_active = false;
+    FreeUPNPUrls(&g_upnp_urls); g_upnp_active = false; g_upnp_port = 0;
 }
 #else
 static bool upnp_add_mapping(uint16_t) { return false; }
@@ -958,9 +975,10 @@ static const char EDITOR_HTML[] =
     "    if(eb.style.display === 'none') { eb.style.display = 'flex'; tg.style.display = 'none'; }\n"
     "    else { eb.style.display = 'none'; tg.style.display = 'flex'; }\n"
     "}\n"
-    "let eb = document.getElementById('editor-bar'); let ebHead = document.getElementById('eb-header');\n"
+    "let eb = document.getElementById('editor-bar');\n"
     "let isDraggingMenu = false, menuDx, menuDy;\n"
-    "ebHead.addEventListener('touchstart', e => {\n"
+    "eb.addEventListener('touchstart', e => {\n"
+    "    if (e.target.closest('button, select, input')) return;\n"
     "    isDraggingMenu = true; let rect = eb.getBoundingClientRect();\n"
     "    menuDx = e.touches[0].clientX - (rect.left + rect.width/2);\n"
     "    menuDy = e.touches[0].clientY - (rect.top + rect.height/2);\n"
@@ -1099,6 +1117,161 @@ static void sha1_final(Sha1Ctx *ctx, uint8_t digest[20]) {
 }
 
 
+// ── Single-threaded WebSocket/HTTP client state ─────────────────────────────
+static constexpr int MAX_WS_CLIENTS = 32;
+
+struct WebClient {
+    int fd = -1;
+
+    // Read buffer
+    uint8_t buf[8192];
+    size_t fill = 0;
+
+    enum State : uint8_t {
+        READ_HTTP,   // reading HTTP request headers
+        WRITE_RESP,  // writing HTTP / WS upgrade response (POLLOUT)
+        WS_ACTIVE,   // WebSocket mode (frames)
+        CLOSED
+    } state = READ_HTTP;
+
+    // HTTP headers (null-terminated)
+    char http_buf[8192];
+    size_t http_len = 0;
+
+    // WS session
+    int      ws_slot = -1;
+    uint32_t ws_seq = 0;
+    bool     ws_first = true;
+    uint64_t ws_last_rx = 0;
+
+    // Async write queue (heap-allocated, freed after write completes or on cleanup)
+    uint8_t *wbuf = nullptr;
+    size_t   wlen = 0;
+    size_t   woff = 0;
+    State    after_write = CLOSED;
+};
+
+
+// ── Process one complete WebSocket frame from client buffer ──────────────────
+// Returns bytes consumed, or 0 if need more data.  Sets c->state = CLOSED on close/error.
+static size_t process_ws_frame(WebClient *c) {
+    uint8_t *buf = c->buf;
+    size_t len  = c->fill;
+    if (len < 2) return 0;
+
+    int      opcode  = buf[0] & 0x0F;
+    bool     masked  = buf[1] & 0x80;
+    uint64_t flen    = buf[1] & 0x7F;
+    size_t   hdr_sz  = 2;
+
+    if (flen == 126) {
+        if (len < 4) return 0;
+        flen   = ((uint64_t)buf[2] << 8) | buf[3];
+        hdr_sz = 4;
+    } else if (flen == 127) {
+        if (len < 10) return 0;
+        flen = 0;
+        for (int i = 0; i < 8; i++) flen = (flen << 8) | buf[2 + i];
+        hdr_sz = 10;
+    }
+
+    uint8_t mask[4] = {0};
+    if (masked) {
+        if (len < hdr_sz + 4) return 0;
+        memcpy(mask, buf + hdr_sz, 4);
+        hdr_sz += 4;
+    }
+
+    if (len < hdr_sz + flen) return 0;
+
+    uint8_t *payload = buf + hdr_sz;
+    size_t   total   = hdr_sz + flen;
+
+    // Control frames (ping / close) – handle before length validation
+    if (opcode == 9) { // ping → pong
+        if (masked)
+            for (uint64_t i = 0; i < flen; i++) payload[i] ^= mask[i & 3];
+        uint8_t pong[2] = {0x8A, 0x00};
+        ssize_t _u = write(c->fd, pong, 2); (void)_u;
+        return total;
+    }
+    if (opcode == 8) { // close
+        uint8_t close_frame[] = {0x88, 0x00};
+        ssize_t _u = write(c->fd, close_frame, 2); (void)_u;
+        c->state = WebClient::CLOSED;
+        return total;
+    }
+    if (opcode == 0) { // continuation frames not supported (all messages are single-frame at PACKET_SIZE)
+        c->state = WebClient::CLOSED;
+        return total;
+    }
+    if (opcode != 2) return total;          // skip non-binary
+    if (flen != PACKET_SIZE) {              // invalid binary frame → disconnect
+        c->state = WebClient::CLOSED;
+        return total;
+    }
+
+    // Unmask payload
+    if (masked)
+        for (uint64_t i = 0; i < flen; i++) payload[i] ^= mask[i & 3];
+
+    // ── Parse packet ──────────────────────────────────────────────────────
+    uint32_t magic; memcpy(&magic, payload, 4);
+    if (magic != PROTO_MAGIC) return total;
+    uint8_t ver; memcpy(&ver, payload + 4, 1);
+    if (ver != PROTO_VERSION) return total;
+    uint8_t flags; memcpy(&flags, payload + 5, 1);
+    bool is_reset = (flags & FLAG_RESET);
+    uint32_t seq; memcpy(&seq, payload + 8, 4);
+
+    // Sequence anti-replay (modular comparison handles uint32 wrap)
+    if (!c->ws_first && !is_reset && (int32_t)(seq - c->ws_seq) < 0) return total;
+    c->ws_first = false;
+    c->ws_seq = seq + 1;
+
+    // Decode report starting at byte 20
+    MultiReport report;
+    memcpy(&report, payload + 20, sizeof(MultiReport));
+    uint64_t now = now_us();
+
+    // Local watchdog (no shared state)
+    if (c->ws_slot >= 0 && (now - c->ws_last_rx > WATCHDOG_MS * 1000ULL))
+        c->ws_slot = -1;
+
+    // Verify existing slot is still active or find a free one
+    if (c->ws_slot >= 0) {
+        std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
+        if (!g_clients[c->ws_slot].active)
+            c->ws_slot = -1;
+    }
+    if (c->ws_slot < 0) {
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            std::lock_guard<std::mutex> lk(g_mtx[i]);
+            if (!g_clients[i].active) {
+                c->ws_slot = i;
+                g_clients[i].active = true;
+                g_clients[i].first_pkt = true;
+                g_clients[i].report.reset();
+                g_clients[i].last_rx_us = now;
+                break;
+            }
+        }
+    }
+    if (c->ws_slot >= 0) {
+        std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
+        if (is_reset)
+            g_clients[c->ws_slot].report.reset();
+        else
+            g_clients[c->ws_slot].report = report;
+        g_clients[c->ws_slot].last_rx_us = now;
+    }
+    c->ws_last_rx = now;
+    ++g_pkts_rx;
+
+    return total;
+}
+
+
 // ── Base64 encoding ──────────────────────────────────────────────────────────
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -1113,125 +1286,6 @@ static void base64_encode(const uint8_t *in, size_t len, char *out) {
         *out++ = (i+2 < len) ? B64[v & 0x3F] : '=';
     }
     *out = '\0';
-}
-
-
-// ── Read exactly N bytes from fd (returns false on error/close) ───────────────
-static bool read_exact(int fd, uint8_t *buf, size_t n) {
-    while (n > 0) {
-        ssize_t r;
-        do r = read(fd, buf, n);
-        while (r < 0 && errno == EINTR);
-        if (r <= 0) return false;
-        buf += r;
-        n -= r;
-    }
-    return true;
-}
-
-
-// ── Handle a single WebSocket client: read frames, write directly to state ───
-static void handle_ws_client(int fd) {
-    uint8_t buf[PACKET_SIZE];
-    int assigned_slot = -1;
-    uint32_t expected_seq = 0;
-    bool first_pkt = true;
-    uint64_t local_last_rx = now_us();
-
-    while (g_running.load(std::memory_order_relaxed)) {
-        uint8_t hdr[2];
-        if (!read_exact(fd, hdr, 2)) break;
-
-        int opcode = hdr[0] & 0x0F;
-        bool masked = hdr[1] & 0x80;
-        uint64_t len = hdr[1] & 0x7F;
-
-        if (len == 126) {
-            uint8_t ext[2];
-            if (!read_exact(fd, ext, 2)) break;
-            len = ((uint64_t)ext[0] << 8) | ext[1];
-        } else if (len == 127) {
-            uint8_t ext[8];
-            if (!read_exact(fd, ext, 8)) break;
-            len = 0;
-            for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
-        }
-
-        uint8_t mask[4] = {0};
-        if (masked && !read_exact(fd, mask, 4)) break;
-
-        if (len != PACKET_SIZE) break;
-        if (!read_exact(fd, buf, len)) break;
-
-        if (masked)
-            for (uint64_t i = 0; i < len; i++) buf[i] ^= mask[i & 3];
-
-        if (opcode == 8) break; // close
-        if (opcode == 9) {     // ping → pong
-            uint8_t pong[2] = {0x8A, 0x00};
-            ssize_t _u = write(fd, pong, 2); (void)_u;
-            continue;
-        }
-        if (opcode != 2) continue; // not binary
-
-        // ── Parse packet and write directly to shared state ─────────────
-        uint32_t magic; memcpy(&magic, buf, 4);
-        if (magic != PROTO_MAGIC) continue;
-        uint8_t ver; memcpy(&ver, buf + 4, 1);
-        if (ver != PROTO_VERSION) continue;
-        uint8_t flags; memcpy(&flags, buf + 5, 1);
-        bool is_reset = (flags & FLAG_RESET);
-        uint32_t seq; memcpy(&seq, buf + 8, 4);
-
-        // Sequence anti-replay
-        if (!first_pkt && seq < expected_seq && !is_reset) continue;
-        first_pkt = false;
-        expected_seq = seq + 1;
-
-        // Decode report starting at byte 20
-        MultiReport report;
-        memcpy(&report, buf + 20, sizeof(MultiReport));
-        uint64_t now = now_us();
-
-        // Apply to backend state
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-
-            if (assigned_slot >= 0 && (now - local_last_rx > WATCHDOG_MS * 1000ULL)) {
-                assigned_slot = -1; 
-            }
-
-            if (assigned_slot < 0 || !g_clients[assigned_slot].active) {
-                assigned_slot = -1;
-                
-                for (int i = 0; i < MAX_CLIENTS; ++i) {
-                    if (!g_clients[i].active) {
-                        assigned_slot = i;
-                        g_clients[i].active = true;
-                        g_clients[i].first_pkt = true;
-                        g_clients[i].report.reset();
-                        break;
-                    }
-                }
-            }
-            if (assigned_slot >= 0) {
-                if (is_reset)
-                    g_clients[assigned_slot].report.reset();
-                else
-                    g_clients[assigned_slot].report = report;
-                g_clients[assigned_slot].last_rx_us = now;
-            }
-        }
-        local_last_rx = now;
-        ++g_pkts_rx;
-    }
-
-    if (assigned_slot >= 0) {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        if (g_clients[assigned_slot].last_rx_us == local_last_rx)
-            g_clients[assigned_slot].active = false;
-    }
-    close(fd);
 }
 
 
@@ -1289,76 +1343,30 @@ static bool ws_upgrade(int fd, const char *key_line) {
         "Sec-WebSocket-Accept: %s\r\n"
         "\r\n", b64out);
 
-    return write(fd, resp, n) == n;
+    return write(fd, resp, n) == (ssize_t)n;
 }
 
 
-// ── Serve HTML via HTTP ────────────────────────────────────────────────
-// Reusable server functions
-static void serve_http_formatted(int fd, const char *fmt, const char *arg) {
-    // Combine format with argument
-    size_t full_len = strlen(fmt) + strlen(arg) + 1;
-    char* full_content = (char*)malloc(full_len);
-    snprintf(full_content, full_len, fmt, arg);
-
-    char hdr[512];
-    int nh = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-cache\r\n"
-        "\r\n", strlen(full_content));
-        
-    ssize_t _u1 = write(fd, hdr, nh); (void)_u1;
-    ssize_t _u2 = write(fd, full_content, strlen(full_content)); (void)_u2;
-    free(full_content);
-    close(fd);
-}
-
-static void serve_http(int fd, const char *html_content) {
-    char hdr[512];
-    int nh = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-cache\r\n"
-        "\r\n", strlen(html_content));
-    ssize_t _u1 = write(fd, hdr, nh); (void)_u1;
-    ssize_t _u2 = write(fd, html_content, strlen(html_content)); (void)_u2;
-    close(fd);
-}
-
-
-// ── HTTP 404 ─────────────────────────────────────────────────────────────────
-static void serve_404(int fd) {
-    const char *body = "Not Found";
-    char hdr[256];
-    int nh = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 404 Not Found\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "\r\n", strlen(body));
-    ssize_t _u1 = write(fd, hdr, nh); (void)_u1;
-    ssize_t _u2 = write(fd, body, strlen(body)); (void)_u2;
-    close(fd);
+// ── Format HTML body (heap-allocated, caller must free) ──────────────────────
+static char* html_format(const char *fmt, const char *arg, size_t *out_len) {
+    size_t len = strlen(fmt) + strlen(arg) + 1;
+    char *buf = (char*)malloc(len);
+    if (!buf) { *out_len = 0; return nullptr; }
+    int written = snprintf(buf, len, fmt, arg);
+    if (written < 0 || (size_t)written >= len) { free(buf); *out_len = 0; return nullptr; }
+    *out_len = written;
+    return buf;
 }
 
 
 // ── Case-insensitive substring check ─────────────────────────────────────────
 static bool has_header(const char *buf, const char *header) {
-    // Skip past "GET /... HTTP/1.1\r\n" to find header lines
+    size_t hlen = strlen(header);
     const char *p = buf;
     while (*p) {
-        // Compare prefix case-insensitively
-        const char *h = header;
-        const char *b = p;
-        while (*h && *b && (tolower((unsigned char)*b) == tolower((unsigned char)*h))) {
-            b++; h++;
-        }
-        if (!*h) return true; // full header name matched
-        // Advance to next line
+        if ((p == buf || p[-1] == '\n') &&
+            strncasecmp(p, header, hlen) == 0)
+            return true;
         p = strchr(p, '\n');
         if (!p) break;
         p++;
@@ -1367,69 +1375,9 @@ static bool has_header(const char *buf, const char *header) {
 }
 
 
-// ── Read until end of HTTP headers (\r\n\r\n) ───────────────────────────────
-// Returns true if headers were fully read, buf will be null-terminated
-static bool read_http_headers(int fd, char *buf, size_t size) {
-    size_t pos = 0;
-    while (pos < size - 1) {
-        ssize_t n = read(fd, buf + pos, 1);
-        if (n <= 0) return false;
-        pos++;
-        buf[pos] = '\0';
-        // Check for \r\n\r\n (end of headers)
-        if (pos >= 4 &&
-            buf[pos-1] == '\n' &&
-            buf[pos-2] == '\r' &&
-            buf[pos-3] == '\n' &&
-            buf[pos-4] == '\r')
-            return true;
-    }
-    return false; // buffer full without finding headers
-}
-
-
-// ── Accept and handle an HTTP/WS client connection ───────────────────────────
-static void handle_web_client(int client_fd, uint16_t udp_port) {
-    (void)udp_port;
-    char buf[8192];
-    if (!read_http_headers(client_fd, buf, sizeof(buf))) {
-        if (g_verbose) std::puts("[web] failed to read HTTP headers");
-        close(client_fd);
-        return;
-    }
-
-    // Check if it's a WebSocket upgrade request (case-insensitive headers)
-    if (has_header(buf, "upgrade: websocket") &&
-        has_header(buf, "sec-websocket-key:")) {
-        if (g_verbose) std::puts("[web] WebSocket upgrade request received");
-        if (ws_upgrade(client_fd, buf)) {
-            if (g_verbose) std::puts("[web] WebSocket upgrade successful");
-            handle_ws_client(client_fd);
-        } else {
-            if (g_verbose) std::puts("[web] WebSocket upgrade failed");
-            close(client_fd);
-        }
-        return;
-    }
-
-    // Otherwise serve HTTP
-    if (strstr(buf, "GET / ") != nullptr || strstr(buf, "GET /index.html ") != nullptr) {
-        serve_http(client_fd, INDEX_HTML);
-    } 
-    else if (strstr(buf, "GET /mobile ") != nullptr) {
-        serve_http_formatted(client_fd, MOBILE_HTML, MOBILE_STYLE_AND_DOM);
-    }
-    else if (strstr(buf, "GET /editor ") != nullptr) {
-        serve_http_formatted(client_fd, EDITOR_HTML, MOBILE_STYLE_AND_DOM);
-    }
-    else {
-        serve_404(client_fd);
-    }
-}
-
-
-// ── Web Server Thread ────────────────────────────────────────────────────────
+// ── Web Server Thread (single-threaded poll reactor, fully non-blocking) ─────
 static void web_server_thread(int web_port, uint16_t udp_port) {
+    (void)udp_port;
     int srv = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (srv < 0) { perror("web socket"); return; }
 
@@ -1446,24 +1394,221 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
 
     std::printf("[web] HTTP + WebSocket server listening on port %d\n", web_port);
 
-    std::vector<pollfd> pfds;
-    pfds.push_back({srv, POLLIN, 0});
+    struct pollfd pfds[1 + MAX_WS_CLIENTS];
+    WebClient     clients[MAX_WS_CLIENTS];
+    int           n_clients = 0;
+
+    pfds[0].fd = srv; pfds[0].events = POLLIN; pfds[0].revents = 0;
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) { pfds[i+1].fd = -1; }
 
     while (g_running.load(std::memory_order_relaxed)) {
-        int rc = poll(pfds.data(), pfds.size(), 200);
-        if (rc <= 0) continue;
+        // Idle WS client timeout (30s without data)
+        uint64_t now_ws = now_us();
+        for (int i = 0; i < n_clients; i++) {
+            if (clients[i].state == WebClient::WS_ACTIVE &&
+                now_ws - clients[i].ws_last_rx > 30000000)
+                clients[i].state = WebClient::CLOSED;
+        }
 
-        if (pfds[0].revents & POLLIN) {
-            int client = accept(srv, nullptr, nullptr);
-            if (client >= 0) {
-                // Accepted fd inherits O_NONBLOCK — make it blocking for read_http_headers
-                int fl = fcntl(client, F_GETFL);
-                if (fl != -1) fcntl(client, F_SETFL, fl & ~O_NONBLOCK);
-                std::thread(handle_web_client, client, udp_port).detach();
+        // Update poll events based on client state (POLLOUT for write, POLLIN for read)
+        for (int i = 0; i < n_clients; i++) {
+            if (clients[i].state != WebClient::CLOSED) {
+                pfds[i+1].events = (clients[i].state == WebClient::WRITE_RESP) ? POLLOUT : POLLIN;
+                pfds[i+1].revents = 0;
             }
         }
+
+        int rc = poll(pfds, 1 + n_clients, 200);
+        if (rc <= 0) continue;
+
+        // ── Accept new connections ─────────────────────────────────────────
+        if (pfds[0].revents & POLLIN) {
+            int fd = accept(srv, nullptr, nullptr);
+            if (fd >= 0) {
+                fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+                struct timeval tv = {10, 0};
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+                int slot = -1;
+                for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                    if (clients[i].state == WebClient::CLOSED) { slot = i; break; }
+                }
+                if (slot >= 0) {
+                    clients[slot] = WebClient{};
+                    clients[slot].fd = fd;
+                    clients[slot].state = WebClient::READ_HTTP;
+                    pfds[slot+1].fd = fd;
+                    if (slot >= n_clients) n_clients = slot + 1;
+                    if (g_verbose) std::printf("[web] client %d accepted (slot %d)\n", fd, slot);
+                } else {
+                    close(fd);
+                    if (g_verbose) std::puts("[web] rejected: all slots full");
+                }
+            }
+        }
+
+        // ── Service existing clients ───────────────────────────────────────
+        for (int i = 0; i < n_clients; i++) {
+            WebClient *c = &clients[i];
+            if (c->state == WebClient::CLOSED) continue;
+            short rev = pfds[i+1].revents;
+            if (rev & (POLLHUP | POLLERR)) { c->state = WebClient::CLOSED; continue; }
+
+            // ── WRITE_RESP: flush queued response ───────────────────────────
+            if (c->state == WebClient::WRITE_RESP && (rev & POLLOUT)) {
+                ssize_t n = write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
+                if (n < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        continue; // will retry on next poll cycle
+                    c->state = WebClient::CLOSED;
+                } else {
+                    c->woff += n;
+                    if (c->woff >= c->wlen) {
+                        free(c->wbuf);
+                        c->wbuf = nullptr;
+                        c->state = c->after_write;
+                    }
+                }
+                continue;
+            }
+
+            if (!(rev & POLLIN)) continue;
+
+            // Read available data (defensive: check for buffer full first)
+            if (c->fill >= sizeof(c->buf)) { c->state = WebClient::CLOSED; continue; }
+            ssize_t n = read(c->fd, c->buf + c->fill, sizeof(c->buf) - c->fill);
+            if (n <= 0) { c->state = WebClient::CLOSED; continue; }
+            c->fill += n;
+
+            // ── READ_HTTP: accumulate headers, then dispatch ────────────────
+            if (c->state == WebClient::READ_HTTP) {
+                size_t copy = std::min(sizeof(c->http_buf) - c->http_len, c->fill);
+                if (copy == 0) { c->state = WebClient::CLOSED; continue; }
+                memcpy(c->http_buf + c->http_len, c->buf, copy);
+                c->http_len += copy;
+                memmove(c->buf, c->buf + copy, c->fill - copy);
+                c->fill -= copy;
+                c->http_buf[c->http_len] = '\0';
+
+                if (c->http_len >= 4 &&
+                    c->http_buf[c->http_len-1] == '\n' &&
+                    c->http_buf[c->http_len-2] == '\r' &&
+                    c->http_buf[c->http_len-3] == '\n' &&
+                    c->http_buf[c->http_len-4] == '\r')
+                {
+                    bool is_ws = has_header(c->http_buf, "upgrade: websocket") &&
+                                 has_header(c->http_buf, "sec-websocket-key:");
+                    if (is_ws) {
+                        // WS upgrade response is tiny (~200 bytes) — write directly
+                        if (ws_upgrade(c->fd, c->http_buf)) {
+                            if (g_verbose) std::puts("[web] WS upgrade ok, entering WS_ACTIVE");
+                            c->state = WebClient::WS_ACTIVE;
+                            c->ws_first = true;
+                            c->ws_seq = 0;
+                            c->ws_slot = -1;
+                            c->ws_last_rx = now_us();
+                        } else {
+                            if (g_verbose) std::puts("[web] WS upgrade failed");
+                            c->state = WebClient::CLOSED;
+                        }
+                    } else {
+                        // Build HTTP response and queue it for non-blocking write
+                        const char *body = nullptr;
+                        size_t body_len = 0;
+                        char *free_body = nullptr;
+                        int status = 200;
+                        const char *status_str = "OK";
+
+                        if (strstr(c->http_buf, "GET / ") != nullptr ||
+                            strstr(c->http_buf, "GET /index.html ") != nullptr) {
+                            body = INDEX_HTML;
+                            body_len = strlen(INDEX_HTML);
+                        } else if (strstr(c->http_buf, "GET /mobile ") != nullptr) {
+                            free_body = html_format(MOBILE_HTML, MOBILE_STYLE_AND_DOM, &body_len);
+                            body = free_body;
+                        } else if (strstr(c->http_buf, "GET /editor ") != nullptr) {
+                            free_body = html_format(EDITOR_HTML, MOBILE_STYLE_AND_DOM, &body_len);
+                            body = free_body;
+                        } else {
+                            body = "Not Found";
+                            body_len = 9;
+                            status = 404;
+                            status_str = "Not Found";
+                        }
+
+                        if (!body) { c->state = WebClient::CLOSED; continue; }
+
+                        char hdr[512];
+                        int hdr_len = snprintf(hdr, sizeof(hdr),
+                            "HTTP/1.1 %d %s\r\n"
+                            "Content-Type: text/html; charset=utf-8\r\n"
+                            "Content-Length: %zu\r\n"
+                            "Connection: close\r\n"
+                            "Cache-Control: no-cache\r\n"
+                            "\r\n", status, status_str, body_len);
+
+                        c->wbuf = (uint8_t*)malloc(hdr_len + body_len);
+                        memcpy(c->wbuf, hdr, hdr_len);
+                        memcpy(c->wbuf + hdr_len, body, body_len);
+                        c->wlen = hdr_len + body_len;
+                        c->woff = 0;
+                        c->after_write = WebClient::CLOSED;
+                        c->state = WebClient::WRITE_RESP;
+
+                        free(free_body);
+                        if (g_verbose) std::printf("[web] HTTP %d queued (%zu bytes)\n", status, c->wlen);
+                    }
+                }
+                continue;
+            }
+
+            // ── WS_ACTIVE: process WebSocket frames ─────────────────────────
+            if (c->state == WebClient::WS_ACTIVE) {
+                size_t used;
+                do {
+                    used = process_ws_frame(c);
+                    if (used > 0) {
+                        memmove(c->buf, c->buf + used, c->fill - used);
+                        c->fill -= used;
+                    }
+                } while (used > 0 && c->state == WebClient::WS_ACTIVE);
+            }
+        }
+
+        // ── Cleanup closed clients ────────────────────────────────────────
+        for (int i = 0; i < n_clients; i++) {
+            if (clients[i].state == WebClient::CLOSED && clients[i].fd >= 0) {
+                free(clients[i].wbuf);
+                clients[i].wbuf = nullptr;
+                if (clients[i].ws_slot >= 0) {
+                    std::lock_guard<std::mutex> lk(g_mtx[clients[i].ws_slot]);
+                    if (g_clients[clients[i].ws_slot].last_rx_us == clients[i].ws_last_rx)
+                        g_clients[clients[i].ws_slot].active = false;
+                }
+                if (g_verbose) std::printf("[web] client %d closed\n", clients[i].fd);
+                close(clients[i].fd);
+                clients[i].fd = -1;
+                pfds[i+1].fd = -1;
+            }
+        }
+
+        // Shrink n_clients
+        while (n_clients > 0 && pfds[n_clients].fd == -1)
+            n_clients--;
     }
 
+    // Final cleanup
+    for (int i = 0; i < n_clients; i++) {
+        if (clients[i].fd >= 0) {
+            free(clients[i].wbuf);
+            if (clients[i].ws_slot >= 0) {
+                std::lock_guard<std::mutex> lk(g_mtx[clients[i].ws_slot]);
+                if (g_clients[clients[i].ws_slot].last_rx_us == clients[i].ws_last_rx)
+                    g_clients[clients[i].ws_slot].active = false;
+            }
+            close(clients[i].fd);
+        }
+    }
     close(srv);
     std::printf("[web] server stopped\n");
 }
@@ -1530,14 +1675,20 @@ int main(int argc, char** argv) {
     epoll_event evs[4];
 
     while (g_running.load(std::memory_order_relaxed)) {
-        int n = epoll_wait(ep, evs, 4, 200 /*ms timeout*/);
+        int n = epoll_wait(ep, evs, 4, 200);
         if (n <= 0) continue;
 
         sockaddr_in sender{};
-        socklen_t slen = sizeof(sender);
-        ssize_t bytes = recvfrom(sock, &pkt, sizeof(pkt), 0, (sockaddr*)&sender, &slen);
+        socklen_t slen;
+        ssize_t bytes;
 
-        if (bytes != (ssize_t)PACKET_SIZE) continue;
+        // Drain all available packets from the kernel buffer
+        while (g_running.load(std::memory_order_relaxed)) {
+            slen = sizeof(sender);
+            bytes = recvfrom(sock, &pkt, sizeof(pkt), 0, (sockaddr*)&sender, &slen);
+            if (bytes <= 0) break; // EAGAIN or error — ring is drained
+
+            if (bytes != (ssize_t)PACKET_SIZE) continue;
 
         // ── 1. Per-IP rate limiter ────────────────────────────────────────────────
         uint32_t src_ip = sender.sin_addr.s_addr;
@@ -1555,8 +1706,9 @@ int main(int argc, char** argv) {
         // ── 3. Find Client Session or Pin new IP ──────────────────────────────────
         int client_idx = -1;
         uint64_t now = now_us();
-        
+
         for (int i = 0; i < MAX_CLIENTS; ++i) {
+            std::lock_guard<std::mutex> lk(g_mtx[i]);
             if (g_clients[i].active &&
                 g_clients[i].addr.sin_addr.s_addr == src_ip &&
                 g_clients[i].addr.sin_port == sender.sin_port) {
@@ -1568,12 +1720,14 @@ int main(int argc, char** argv) {
         // If not found, assign to a free/timed-out slot
         if (client_idx == -1) {
             for (int i = 0; i < MAX_CLIENTS; ++i) {
+                std::lock_guard<std::mutex> lk(g_mtx[i]);
                 if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
                     client_idx = i;
                     g_clients[i].active = true;
                     g_clients[i].addr = sender;
                     g_clients[i].first_pkt = true;
                     g_clients[i].report.reset();
+                    g_clients[i].last_rx_us = now;
                     if (g_verbose) std::printf("New PC accepted into Server Slot %d/4\n", i+1);
                     break;
                 }
@@ -1592,21 +1746,24 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // ── 5. Sequence counter (Anti-Replay) ─────────────────────────────────────
-        bool is_reset = (pkt.flags & FLAG_RESET);
-        bool sequence_jump = (g_clients[client_idx].expected_seq > pkt.seq) && ((g_clients[client_idx].expected_seq - pkt.seq) > 100);
-
-        if (!g_clients[client_idx].first_pkt && pkt.seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
-            if (g_verbose)
-                std::printf("PC %d out-of-order seq=%u, dropped\n", client_idx+1, pkt.seq);
-            continue;
-        }
-        g_clients[client_idx].first_pkt = false;
-        g_clients[client_idx].expected_seq = pkt.seq + 1;
-
-        // ── 6. Apply to shared state ──────────────────────────────────────────────
+        // ── 5. Re-validate + Sequence counter + Apply to shared state ─────────────
         {
-            std::lock_guard<std::mutex> lk(g_mtx);
+            std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+
+            // Re-validate: writer may have deactivated the slot during HMAC
+            if (!g_clients[client_idx].active) continue;
+
+            bool is_reset = (pkt.flags & FLAG_RESET);
+            bool sequence_jump = (g_clients[client_idx].expected_seq > pkt.seq) && ((g_clients[client_idx].expected_seq - pkt.seq) > 100);
+
+            if (!g_clients[client_idx].first_pkt && pkt.seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
+                if (g_verbose)
+                    std::printf("PC %d out-of-order seq=%u, dropped\n", client_idx+1, pkt.seq);
+                continue;
+            }
+            g_clients[client_idx].first_pkt = false;
+            g_clients[client_idx].expected_seq = pkt.seq + 1;
+
             if (is_reset) {
                 g_clients[client_idx].report.reset();
             } else {
@@ -1615,7 +1772,8 @@ int main(int argc, char** argv) {
             g_clients[client_idx].last_rx_us = now_us();
         }
         ++g_pkts_rx;
-    }
+        } // drain loop
+    } // epoll loop
 
     puts("[backend] shutting down");
     upnp_remove_mapping(port);
