@@ -41,6 +41,14 @@ using ms    = std::chrono::milliseconds;
 static std::atomic<bool> g_running{true};
 static bool g_verbose = false;
 
+// Optional self-healing gadget setup.  The backend can now call setup_gadget.sh
+// automatically when /dev/hidg0..3 are missing/unusable, instead of requiring
+// a manual setup step before every launch.
+static bool        g_auto_gadget_setup  = true;
+static bool        g_force_gadget_setup = false;
+static std::string g_gadget_setup_path;
+static std::atomic<bool> g_gadget_setup_attempted{false};
+
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
 
@@ -140,15 +148,20 @@ struct NS_LOCAL_PACKED ProInputReport21 {
 };
 static_assert(sizeof(ProInputReport21) == PRO_REPORT_SIZE, "ProInputReport21 must be 64 bytes");
 
+// Fresh virtual identities.  The old build used 98:B6:E9:11:22:33..36
+// and matching serial strings; changing both forces the Switch to stop using
+// any cached calibration/association for the previous fake controllers.
+// 02 is a locally-administered unicast address, so these are intentionally
+// private/stable virtual MACs rather than pretending to be real hardware.
 static const uint8_t CTRL_MAC_BE[4][6] = {
-    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x33},
-    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x34},
-    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x35},
-    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x36},
+    {0x02, 0x4E, 0x53, 0x26, 0x06, 0x60},
+    {0x02, 0x4E, 0x53, 0x26, 0x06, 0x61},
+    {0x02, 0x4E, 0x53, 0x26, 0x06, 0x62},
+    {0x02, 0x4E, 0x53, 0x26, 0x06, 0x63},
 };
 
 static const char* CTRL_SERIAL[4] = {
-    "98B6E9112233", "98B6E9112234", "98B6E9112235", "98B6E9112236"
+    "NSGP26060660", "NSGP26060661", "NSGP26060662", "NSGP26060663"
 };
 
 static constexpr size_t SPI_FLASH_SIZE = 0x10000;
@@ -506,6 +519,121 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
 }
 
 
+
+static bool hidg_nodes_ready() {
+    for (int i = 0; i < 4; ++i) {
+        char path[32];
+        std::snprintf(path, sizeof(path), "/dev/hidg%d", i);
+        if (access(path, R_OK | W_OK) != 0)
+            return false;
+    }
+    return true;
+}
+
+static std::string shell_quote(const std::string& in) {
+    std::string out = "'";
+    for (char c : in) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+static bool regular_file_exists(const std::string& path) {
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static std::string executable_dir() {
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    std::string p(buf);
+    size_t slash = p.find_last_of('/');
+    return slash == std::string::npos ? std::string() : p.substr(0, slash);
+}
+
+static std::string find_gadget_setup_script() {
+    if (!g_gadget_setup_path.empty() && regular_file_exists(g_gadget_setup_path))
+        return g_gadget_setup_path;
+
+    std::vector<std::string> candidates;
+    if (const char* env = std::getenv("NS_GADGET_SETUP"))
+        candidates.emplace_back(env);
+
+    candidates.emplace_back("./setup_gadget.sh");
+    candidates.emplace_back("./scripts/setup_gadget.sh");
+
+    std::string exe_dir = executable_dir();
+    if (!exe_dir.empty()) {
+        candidates.emplace_back(exe_dir + "/setup_gadget.sh");
+        candidates.emplace_back(exe_dir + "/scripts/setup_gadget.sh");
+    }
+
+    if (const char* home = std::getenv("HOME"))
+        candidates.emplace_back(std::string(home) + "/setup_gadget.sh");
+
+    candidates.emplace_back("/usr/local/bin/setup_gadget.sh");
+    candidates.emplace_back("/opt/ns-gamepad/setup_gadget.sh");
+
+    for (const auto& p : candidates) {
+        if (regular_file_exists(p))
+            return p;
+    }
+    return "";
+}
+
+static bool run_gadget_setup_if_needed(bool force, const char* reason) {
+    if (!g_auto_gadget_setup && !force)
+        return hidg_nodes_ready();
+
+    if (!force && hidg_nodes_ready())
+        return true;
+
+    if (!force && g_gadget_setup_attempted.exchange(true))
+        return hidg_nodes_ready();
+    if (force)
+        g_gadget_setup_attempted.store(true);
+
+    std::string script = find_gadget_setup_script();
+    if (script.empty()) {
+        std::fprintf(stderr,
+            "[gadget] /dev/hidg0..3 are not ready and setup_gadget.sh was not found.\n"
+            "[gadget] Put setup_gadget.sh beside ns-backend, set NS_GADGET_SETUP,\n"
+            "[gadget] or pass --gadget-setup /path/to/setup_gadget.sh.\n");
+        return false;
+    }
+
+    std::printf("[gadget] %s; running %s\n", reason ? reason : "HID gadget not ready", script.c_str());
+    std::string cmd;
+    if (geteuid() == 0)
+        cmd = "/bin/bash " + shell_quote(script);
+    else
+        cmd = "sudo -n /bin/bash " + shell_quote(script);
+
+    int rc = std::system(cmd.c_str());
+    if (rc != 0) {
+        std::fprintf(stderr,
+            "[gadget] setup command failed with status %d. Run ns-backend as root,\n"
+            "[gadget] allow passwordless sudo for setup_gadget.sh, or run it once manually.\n", rc);
+        return hidg_nodes_ready();
+    }
+
+    // configfs may create /dev/hidg* just after the script exits.
+    for (int i = 0; i < 20; ++i) {
+        if (hidg_nodes_ready()) {
+            std::puts("[gadget] /dev/hidg0..3 ready");
+            return true;
+        }
+        std::this_thread::sleep_for(ms(100));
+    }
+
+    std::fprintf(stderr, "[gadget] setup finished, but /dev/hidg0..3 are still not ready.\n");
+    return false;
+}
+
 static void drain_hid_output_queue(int fd) {
     if (fd < 0) return;
 
@@ -552,6 +680,12 @@ static void writer_thread(int hz) {
         }
 
         if (!all_open) {
+            // Do not keep a partial set of opened endpoints around while the
+            // gadget is being recreated/rebound.  Retry with a clean fd set.
+            for (int i = 0; i < 4; ++i) {
+                if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
+            }
+            run_gadget_setup_if_needed(false, "/dev/hidg0..3 could not all be opened");
             std::this_thread::sleep_for(ms(500));
             continue;
         }
@@ -2447,6 +2581,9 @@ int main(int argc, char** argv) {
         else if (a == "-b" && i+1 < argc) bind_addr = argv[++i];
         else if (a == "-v")               g_verbose  = true;
         else if (a == "--upnp")           do_upnp    = true;
+        else if (a == "--no-auto-gadget") g_auto_gadget_setup = false;
+        else if (a == "--force-gadget-setup") g_force_gadget_setup = true;
+        else if (a == "--gadget-setup" && i+1 < argc) g_gadget_setup_path = argv[++i];
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
                 web_port = std::atoi(argv[++i]);
@@ -2455,9 +2592,15 @@ int main(int argc, char** argv) {
         }
         else if (a == "-h") {
             puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v]");
+            puts("            [--gadget-setup PATH] [--force-gadget-setup] [--no-auto-gadget]");
             return 0;
         }
     }
+
+    if (g_force_gadget_setup)
+        run_gadget_setup_if_needed(true, "forced gadget setup requested");
+    else if (g_auto_gadget_setup && !hidg_nodes_ready())
+        run_gadget_setup_if_needed(false, "/dev/hidg0..3 are missing/unusable");
 
     derive_key(DEFAULT_SECRET, g_hmac_key);
     signal(SIGINT,  on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
