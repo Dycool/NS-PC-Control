@@ -97,6 +97,11 @@ static constexpr int MAX_SLOTS = 4;
 static GamepadState  g_states[MAX_SLOTS];
 static GCController* g_controllers[MAX_SLOTS] = {};
 
+// CoreHaptics state for UDP rumble replies.  This CLI is built without ARC,
+// so players/engines are released explicitly in stop_haptics_for_controller_on_main().
+static CHHapticEngine* g_haptic_engines[MAX_SLOTS] = {};
+static id<CHHapticPatternPlayer> g_haptic_players[MAX_SLOTS] = {};
+
 // FIX 1: Separate atomic flags so the sender thread can safely check slot
 // occupancy without touching the ObjC pointer (which is not atomic-safe with ARC).
 // Only the main thread reads/writes g_controllers[]; the sender thread only
