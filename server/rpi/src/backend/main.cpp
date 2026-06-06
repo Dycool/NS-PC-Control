@@ -408,6 +408,39 @@ static void hat_to_pro_buttons(uint8_t hat, uint8_t buttons[3]) {
     if (left)  buttons[2] |= 0x08;
 }
 
+static void apply_input_controls_to_pro21(const ExtendedHIDReport& src, ProInputReport21& out) {
+    // Subcommand replies (report 0x21) contain the same button/stick snapshot
+    // fields as standard input reports.  Keep them in sync with the currently
+    // held web/UDP input; otherwise frequent Switch output/subcommand traffic
+    // injects neutral frames between normal 0x30 reports, which makes held
+    // buttons such as R/ZR flicker in-game.
+    out.conn_info = 0x8E;
+    memset(out.buttons, 0, sizeof(out.buttons));
+    out.vibrator = 0x00;
+
+    const HIDReport& in = src.input;
+    if (in.buttons & BTN_Y)       out.buttons[0] |= 0x01;
+    if (in.buttons & BTN_X)       out.buttons[0] |= 0x02;
+    if (in.buttons & BTN_B)       out.buttons[0] |= 0x04;
+    if (in.buttons & BTN_A)       out.buttons[0] |= 0x08;
+    if (in.buttons & BTN_R)       out.buttons[0] |= 0x40;
+    if (in.buttons & BTN_ZR)      out.buttons[0] |= 0x80;
+
+    if (in.buttons & BTN_MINUS)   out.buttons[1] |= 0x01;
+    if (in.buttons & BTN_PLUS)    out.buttons[1] |= 0x02;
+    if (in.buttons & BTN_RSTICK)  out.buttons[1] |= 0x04;
+    if (in.buttons & BTN_LSTICK)  out.buttons[1] |= 0x08;
+    if (in.buttons & BTN_HOME)    out.buttons[1] |= 0x10;
+    if (in.buttons & BTN_CAPTURE) out.buttons[1] |= 0x20;
+
+    hat_to_pro_buttons(in.hat, out.buttons);
+    if (in.buttons & BTN_L)       out.buttons[2] |= 0x40;
+    if (in.buttons & BTN_ZL)      out.buttons[2] |= 0x80;
+
+    pack_stick_12(out.left_stick,  in.lx, in.ly);
+    pack_stick_12(out.right_stick, in.rx, in.ry);
+}
+
 static void build_standard_report(const ExtendedHIDReport& src, uint8_t timer, ProInputReport30& out) {
     memset(&out, 0, sizeof(out));
     out.id = RID_INPUT_STANDARD;
@@ -1072,7 +1105,10 @@ static void writer_thread(int hz) {
                 if (rt[h].pending_subcmd_reply) {
                     rt[h].pending_reply.id = RID_INPUT_SUBCMD;
                     rt[h].pending_reply.timer = rt[h].timer++;
-                    fill_neutral_controls(rt[h].pending_reply);
+                    if (port_needed)
+                        apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);
+                    else
+                        fill_neutral_controls(rt[h].pending_reply);
                     memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
                     have_report_to_write = true;
                     wrote_subcmd_reply = true;
@@ -1419,6 +1455,8 @@ static const char INDEX_HTML[] =
     "let lastActivePads = [];\n"
     "let rumbleTargets = [null, null, null, null];\n"
     "let rumbleTargetIndexes = [-1, -1, -1, -1];\n"
+    "let rumbleDebounceTime = [0, 0, 0, 0];\n"
+    "let rumbleLastMag = ['', '', '', ''];\n"
     "let motion = { enabled:false, ax:0, ay:0, az:0, gx:0, gy:0, gz:0 };\n"
     "let motionListenerInstalled = false, orientationListenerInstalled = false, lastDeviceMotionMs = 0;\n"
     "const keysDown = new Set();\n"
@@ -1581,17 +1619,24 @@ static const char INDEX_HTML[] =
     "    return false;\n"
     "}\n"
     "async function triggerRumble(subpadIndex, low255, high255, duration10ms) {\n"
-    "    // 1. Fresh snapshot right now; never use a cached Gamepad object for rumble.\n"
+    "    // Fresh snapshot right now; never use a cached Gamepad object for rumble.\n"
     "    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];\n"
-    "\n"
-    "    // 2. C++ sends uint8_t 0..255. The Web Gamepad API requires 0.0..1.0.\n"
     "    const weakFloat = clamp01(low255 / 255.0);\n"
     "    const strongFloat = clamp01(high255 / 255.0);\n"
-    "    const durationMs = Math.max(0, (duration10ms || 0) * 10);\n"
-    "    if (durationMs <= 0 || (!low255 && !high255)) return false;\n"
+    "    const isNeutral = (!low255 && !high255);\n"
     "\n"
-    "    // Prefer the logical slot mapping, then the direct same-index pad, then\n"
-    "    // fall back to every connected pad so browser index quirks do not kill rumble.\n"
+    "    // Switch rumble packets can arrive at ~60Hz. Browser haptics dislike being\n"
+    "    // restarted every frame, so keep active rumble alive long enough to spin.\n"
+    "    // Neutral packets still pass through with zero magnitude to brake/stop it.\n"
+    "    const durationMs = isNeutral ? 10 : 250;\n"
+    "    const now = Date.now();\n"
+    "    const magKey = weakFloat + '_' + strongFloat;\n"
+    "    if (magKey === rumbleLastMag[subpadIndex] && (now - rumbleDebounceTime[subpadIndex] < 100)) {\n"
+    "        return true;\n"
+    "    }\n"
+    "    rumbleLastMag[subpadIndex] = magKey;\n"
+    "    rumbleDebounceTime[subpadIndex] = now;\n"
+    "\n"
     "    let ok = await rumbleOnePad(freshGamepadForSlot(subpadIndex, gamepads), weakFloat, strongFloat, durationMs);\n"
     "    if (!ok) {\n"
     "        const directPad = gamepads[subpadIndex];\n"
@@ -1602,10 +1647,49 @@ static const char INDEX_HTML[] =
     "            if (pad && await rumbleOnePad(pad, weakFloat, strongFloat, durationMs)) { ok = true; break; }\n"
     "        }\n"
     "    }\n"
-    "    if (!ok && navigator.vibrate) navigator.vibrate(durationMs);\n"
+    "    if (!ok && navigator.vibrate && !isNeutral) {\n"
+    "        try { navigator.vibrate(durationMs); } catch (err) { console.error('Browser blocked vibration fallback:', err); }\n"
+    "    }\n"
     "    return ok;\n"
     "}\n"
     "function clamp16(v) { v = Math.round(v || 0); return Math.max(-32768, Math.min(32767, v)); }\n"
+    "function firstVec3(...candidates) {\n"
+    "    for (const v of candidates) {\n"
+    "        if (!v) continue;\n"
+    "        if (Array.isArray(v) || ArrayBuffer.isView(v)) {\n"
+    "            if (v.length >= 3) return [Number(v[0]) || 0, Number(v[1]) || 0, Number(v[2]) || 0];\n"
+    "        } else if (typeof v === 'object') {\n"
+    "            const x = Number(v.x ?? v.beta ?? v.pitch ?? v[0]);\n"
+    "            const y = Number(v.y ?? v.gamma ?? v.yaw ?? v[1]);\n"
+    "            const z = Number(v.z ?? v.alpha ?? v.roll ?? v[2]);\n"
+    "            if (Number.isFinite(x) || Number.isFinite(y) || Number.isFinite(z)) return [x || 0, y || 0, z || 0];\n"
+    "        }\n"
+    "    }\n"
+    "    return null;\n"
+    "}\n"
+    "function motionFromGamepad(pad) {\n"
+    "    if (!pad) return null;\n"
+    "    // Standard Gamepad exposes buttons/axes/haptics only. Some browsers/devices\n"
+    "    // expose experimental pose/motion fields; use them when available.\n"
+    "    // DS4Windows' normal virtual Xbox/DS4 output may still hide gyro from web pages.\n"
+    "    const pose = pad.pose || pad.motion || pad.sensor || {};\n"
+    "    const acc = firstVec3(pose.linearAcceleration, pose.acceleration, pad.linearAcceleration, pad.acceleration);\n"
+    "    const gyro = firstVec3(pose.angularVelocity, pose.gyro, pose.rotationRate, pad.angularVelocity, pad.gyro, pad.rotationRate);\n"
+    "    if (!acc && !gyro) return null;\n"
+    "    const m = { enabled:true, ax:0, ay:0, az:0, gx:0, gy:0, gz:0 };\n"
+    "    if (acc) {\n"
+    "        m.ax = clamp16(acc[0] / 9.80665 * 4096);\n"
+    "        m.ay = clamp16(acc[1] / 9.80665 * 4096);\n"
+    "        m.az = clamp16(acc[2] / 9.80665 * 4096);\n"
+    "    }\n"
+    "    if (gyro) {\n"
+    "        const toSwitchGyro = 180 / Math.PI * 16;\n"
+    "        m.gx = clamp16(gyro[0] * toSwitchGyro);\n"
+    "        m.gy = clamp16(gyro[1] * toSwitchGyro);\n"
+    "        m.gz = clamp16(gyro[2] * toSwitchGyro);\n"
+    "    }\n"
+    "    return m;\n"
+    "}\n"
     "async function requestSensorPermission(apiName) {\n"
     "    const Api = window[apiName];\n"
     "    if (typeof Api === 'undefined') return 'unavailable';\n"
@@ -1673,6 +1757,7 @@ static const char INDEX_HTML[] =
     "    let nextRumbleTargets = [null, null, null, null];\n"
     "    let nextRumbleTargetIndexes = [-1, -1, -1, -1];\n"
     "    let slotPresent = [false, false, false, false];\n"
+    "    let slotMotion = [null, null, null, null];\n"
     "    if (mode === 0) {\n"
     "        for (let i = 0; i < 4; i++) {\n"
     "            let pad = activePads[i];\n"
@@ -1681,6 +1766,7 @@ static const char INDEX_HTML[] =
     "            nextRumbleTargets[i] = gp ? pad : null;\n"
     "            nextRumbleTargetIndexes[i] = gp ? pad.index : -1;\n"
     "            slotPresent[i] = !!gp;\n"
+    "            slotMotion[i] = gp ? motionFromGamepad(pad) : null;\n"
     "            uiText[i] = gp ? \"Connected\" : \"Not connected\";\n"
     "        }\n"
     "    } else if (mode === 1) {\n"
@@ -1692,6 +1778,7 @@ static const char INDEX_HTML[] =
     "            nextRumbleTargets[i] = gp ? pad : null;\n"
     "            nextRumbleTargetIndexes[i] = gp ? pad.index : -1;\n"
     "            slotPresent[i] = !!gp;\n"
+    "            slotMotion[i] = gp ? motionFromGamepad(pad) : null;\n"
     "            uiText[i] = gp ? \"Connected\" : \"Not connected\";\n"
     "        }\n"
     "    } else if (mode === 2) {\n"
@@ -1701,6 +1788,7 @@ static const char INDEX_HTML[] =
     "        nextRumbleTargets[0] = gp0 ? pad0 : null;\n"
     "        nextRumbleTargetIndexes[0] = gp0 ? pad0.index : -1;\n"
     "        slotPresent[0] = true;\n"
+    "        slotMotion[0] = gp0 ? motionFromGamepad(pad0) : null;\n"
     "        uiText[0] = `${gp0 ? \"Connected\" : \"Not connected\"} \\ Keyboard`;\n"
     "        for (let i = 1; i < 4; i++) {\n"
     "            let pad = activePads[i];\n"
@@ -1709,6 +1797,7 @@ static const char INDEX_HTML[] =
     "            nextRumbleTargets[i] = gp ? pad : null;\n"
     "            nextRumbleTargetIndexes[i] = gp ? pad.index : -1;\n"
     "            slotPresent[i] = !!gp;\n"
+    "            slotMotion[i] = gp ? motionFromGamepad(pad) : null;\n"
     "            uiText[i] = gp ? \"Connected\" : \"Not connected\";\n"
     "        }\n"
     "    }\n"
@@ -1726,9 +1815,10 @@ static const char INDEX_HTML[] =
     "        view.setUint8(offset + 3, slotStates[p].lx); view.setUint8(offset + 4, slotStates[p].ly);\n"
     "        view.setUint8(offset + 5, slotStates[p].rx); view.setUint8(offset + 6, slotStates[p].ry);\n"
     "        view.setUint8(offset + 7, slotPresent[p] ? PAD_PRESENT : 0);\n"
-    "        if (p === 0 && motion.enabled) {\n"
-    "            view.setInt16(offset + 8, motion.ax, true); view.setInt16(offset + 10, motion.ay, true); view.setInt16(offset + 12, motion.az, true);\n"
-    "            view.setInt16(offset + 14, motion.gx, true); view.setInt16(offset + 16, motion.gy, true); view.setInt16(offset + 18, motion.gz, true);\n"
+    "        const motionForSlot = slotMotion[p] || ((p === 0 && motion.enabled) ? motion : null);\n"
+    "        if (motionForSlot && motionForSlot.enabled) {\n"
+    "            view.setInt16(offset + 8, motionForSlot.ax, true); view.setInt16(offset + 10, motionForSlot.ay, true); view.setInt16(offset + 12, motionForSlot.az, true);\n"
+    "            view.setInt16(offset + 14, motionForSlot.gx, true); view.setInt16(offset + 16, motionForSlot.gy, true); view.setInt16(offset + 18, motionForSlot.gz, true);\n"
     "            view.setUint8(offset + 20, 1); view.setUint8(offset + 21, 0); view.setUint8(offset + 22, 0); view.setUint8(offset + 23, 0);\n"
     "        } else {\n"
     "            for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(offset + k, 0);\n"
@@ -1940,6 +2030,8 @@ static const char MOBILE_HTML[] =
     "let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };\n"
     "let motion = { enabled:false, ax:0, ay:0, az:0, gx:0, gy:0, gz:0 };\n"
     "let motionListenerInstalled = false, orientationListenerInstalled = false, lastDeviceMotionMs = 0;\n"
+    "let mobileRumbleDebounceTime = 0;\n"
+    "let mobileRumbleLastMag = '';\n"
     "const buttonControls = Array.from(document.querySelectorAll('.btn-map,.btn-dpad'));\n"
     "const activeTouchControls = new Map();\n"
     "const allTouchButtonBits = buttonControls\n"
@@ -2096,13 +2188,19 @@ static const char MOBILE_HTML[] =
     "function handleRumbleMessage(data) {\n"
     "    if (!(data instanceof ArrayBuffer) || data.byteLength < 8) return;\n"
     "    const v = new DataView(data); if (v.getUint32(0, true) !== RUMBLE_MAGIC) return;\n"
-    "    const low255 = v.getUint8(5), high255 = v.getUint8(6), dur10 = v.getUint8(7);\n"
+    "    const low255 = v.getUint8(5), high255 = v.getUint8(6);\n"
+    "    const isNeutral = (!low255 && !high255);\n"
     "    const weakFloat = clamp01(low255 / 255.0), strongFloat = clamp01(high255 / 255.0);\n"
-    "    const dur = Math.max(60, dur10 * 10);\n"
+    "    const dur = isNeutral ? 10 : 250;\n"
+    "    const now = Date.now();\n"
+    "    const magKey = weakFloat + '_' + strongFloat;\n"
+    "    if (magKey === mobileRumbleLastMag && (now - mobileRumbleDebounceTime < 100)) return;\n"
+    "    mobileRumbleLastMag = magKey; mobileRumbleDebounceTime = now;\n"
     "    const pulse = document.getElementById('rumblePulse');\n"
-    "    if (pulse) { pulse.style.display = (low255 || high255) ? 'block' : 'none'; pulse.classList.add('active'); setTimeout(() => pulse.classList.remove('active'), Math.max(60, Math.min(dur, 220))); }\n"
-    "    if (navigator.vibrate && dur > 0 && (weakFloat || strongFloat)) {\n"
-    "        try { navigator.vibrate([dur]); } catch (err) { console.error('Browser blocked mobile vibration:', err); }\n"
+    "    if (pulse) { pulse.style.display = isNeutral ? 'none' : 'block'; if (!isNeutral) { pulse.classList.add('active'); setTimeout(() => pulse.classList.remove('active'), 220); } }\n"
+    "    if (navigator.vibrate) {\n"
+    "        try { if (isNeutral) navigator.vibrate(0); else navigator.vibrate([dur]); }\n"
+    "        catch (err) { console.error('Browser blocked mobile vibration:', err); }\n"
     "    }\n"
     "}\n"
     "function makeWsUrl() {\n"
