@@ -42,9 +42,10 @@ enum Hat : uint8_t {
 };
 
 enum Flags : uint8_t {
-    FLAG_NONE     = 0x00,
-    FLAG_RESET    = 0x01,  // Backend should zero all inputs immediately
-    FLAG_AUTOFIRE = 0x02,  // Autofire mask is currently active
+    FLAG_NONE       = 0x00,
+    FLAG_RESET      = 0x01,  // Backend should zero all inputs immediately
+    FLAG_AUTOFIRE   = 0x02,  // Autofire mask is currently active
+    FLAG_SINGLE_PAD = 0x04,  // Web/mobile packet should only claim pad 1
 };
 
 

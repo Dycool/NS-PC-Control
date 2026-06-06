@@ -582,7 +582,13 @@ static void writer_thread(int hz) {
                     fill_neutral_controls(rt[h].pending_reply);
                     memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
                     rt[h].pending_subcmd_reply = false;
-                } else if (rt[h].full_report_enabled) {
+                } else if (rt[h].full_report_enabled || hw_slots[h].client_idx != -1) {
+                    // Normally the Switch enables 0x30 standard reports via init cmd 0x04
+                    // and/or subcmd 0x03.  In practice, if the backend starts after the
+                    // gadget has already enumerated, those output packets can be missed by
+                    // /dev/hidgX.  The web/UDP side may still be receiving real input, but
+                    // rt[h].full_report_enabled stays false, causing pro_hid_writes/sec=0.
+                    // Once a virtual pad is mapped to this hardware slot, stream 0x30 anyway.
                     ProInputReport30 std_in{};
                     build_standard_report(out_reports[h], rt[h].timer++, std_in);
                     memcpy(write_buf, &std_in, sizeof(ProInputReport30));
@@ -1247,6 +1253,7 @@ static const char MOBILE_HTML[] =
     "}\n"
     "applyLayout();\n"
     "const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 5, RUMBLE_MAGIC = 0x4E535652;\n"
+    "const FLAG_SINGLE_PAD = 0x04;\n"
     "const EXT_REPORT_SIZE = 24, PACKET_SIZE = 116;\n"
     "let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;\n"
     "let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };\n"
@@ -1382,7 +1389,7 @@ static const char MOBILE_HTML[] =
     "function sendPacket() {\n"
     "    if (!ws || ws.readyState !== WebSocket.OPEN) return;\n"
     "    const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);\n"
-    "    view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);\n"
+    "    view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, FLAG_SINGLE_PAD);\n"
     "    view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now()*1000), true);\n"
     "    let off = 20;\n"
     "    view.setUint16(off, state.buttons, true); view.setUint8(off+2, state.hat);\n"
@@ -1854,6 +1861,14 @@ static size_t process_ws_frame(WebClient *c) {
         legacy_multi_to_extended(legacy, report);
     } else if (ver == WEB_PROTO_VERSION && flen == WEB_PACKET_SIZE) {
         memcpy(&report, payload + 20, sizeof(ExtendedMultiReport));
+        if (flags & FLAG_SINGLE_PAD) {
+            // The mobile touch page is one virtual controller only.  Force the
+            // unused subpads to neutral so a malformed/old cached mobile packet
+            // cannot accidentally claim Switch ports 2-4.
+            report.p2.reset();
+            report.p3.reset();
+            report.p4.reset();
+        }
     } else {
         return total;
     }
