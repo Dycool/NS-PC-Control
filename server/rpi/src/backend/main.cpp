@@ -1219,7 +1219,7 @@ static void handle_ws_client(int fd) {
                     g_clients[assigned_slot].report.reset();
                 else
                     g_clients[assigned_slot].report = report;
-                g_clients[assigned_slot].last_rx_us = now_us();
+                g_clients[assigned_slot].last_rx_us = now;
             }
         }
         local_last_rx = now;
@@ -1228,7 +1228,8 @@ static void handle_ws_client(int fd) {
 
     if (assigned_slot >= 0) {
         std::lock_guard<std::mutex> lk(g_mtx);
-        g_clients[assigned_slot].active = false;
+        if (g_clients[assigned_slot].last_rx_us == local_last_rx)
+            g_clients[assigned_slot].active = false;
     }
     close(fd);
 }
