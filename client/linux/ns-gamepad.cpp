@@ -355,24 +355,114 @@ static bool macro_parse_one_command(const std::string& part, MacroStep& st, std:
 }
 
 static bool macro_validate_text(const std::string& raw_text, std::vector<MacroStep>& steps, std::vector<std::string>* normalized = nullptr) {
+    static constexpr size_t MACRO_EXPANDED_STEP_LIMIT = 1000000;
+
     g_macro_last_error.clear();
     steps.clear();
     if (normalized) normalized->clear();
+
     std::string text, err;
-    if (!macro_extract_commands_text(raw_text, text, err)) { macro_set_error(err); return false; }
-    for (char& c : text) if (c == '\n' || c == '\r') c = ';';
+    if (!macro_extract_commands_text(raw_text, text, err)) {
+        macro_set_error(err);
+        return false;
+    }
+
+    for (char& c : text) {
+        if (c == '\n' || c == '\r') c = ';';
+    }
+
+    std::vector<std::string> parts;
     size_t pos = 0;
     while (pos < text.size()) {
         size_t semi = text.find(';', pos);
-        std::string part = macro_trim(text.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos));
+        std::string part = macro_trim(text.substr(
+            pos,
+            semi == std::string::npos ? std::string::npos : semi - pos
+        ));
         pos = (semi == std::string::npos) ? text.size() : semi + 1;
-        if (part.empty()) continue;
-        MacroStep st;
-        if (!macro_parse_one_command(part, st, err)) { macro_set_error(err); return false; }
-        steps.push_back(st);
+
+        // Allow readable macro files with comments:
+        //   # drift wiggle
+        //   R+LSTICK_LEFT 450
+        if (part.empty() || part[0] == '#') continue;
+
+        parts.push_back(part);
         if (normalized) normalized->push_back(part);
     }
-    if (steps.empty()) { macro_set_error("no valid macro commands found"); return false; }
+
+    if (parts.empty()) {
+        macro_set_error("no valid macro commands found");
+        return false;
+    }
+
+    auto append_segment = [&](const std::vector<MacroStep>& segment, uint32_t repeat_count) -> bool {
+        if (segment.empty()) {
+            macro_set_error("LOOP has no commands to repeat");
+            return false;
+        }
+        if (repeat_count == 0) {
+            macro_set_error("LOOP count must be greater than zero");
+            return false;
+        }
+        if (segment.size() > 0 && repeat_count > MACRO_EXPANDED_STEP_LIMIT / segment.size()) {
+            macro_set_error("macro expands to too many steps");
+            return false;
+        }
+        if (steps.size() + segment.size() * (size_t)repeat_count > MACRO_EXPANDED_STEP_LIMIT) {
+            macro_set_error("macro expands to too many steps");
+            return false;
+        }
+        for (uint32_t r = 0; r < repeat_count; ++r) {
+            steps.insert(steps.end(), segment.begin(), segment.end());
+        }
+        return true;
+    };
+
+    std::vector<MacroStep> segment;
+    for (const std::string& part : parts) {
+        size_t last_space = part.find_last_of(" \t");
+        if (last_space == std::string::npos) {
+            macro_set_error("missing duration in command: " + part);
+            return false;
+        }
+
+        std::string cmd = macro_upper(macro_trim(part.substr(0, last_space)));
+        if (cmd == "LOOP") {
+            uint32_t repeat_count = 0;
+            std::string count_s = macro_trim(part.substr(last_space + 1));
+            if (!macro_parse_uint32_strict(count_s, repeat_count)) {
+                macro_set_error("invalid LOOP count in command: " + part);
+                return false;
+            }
+
+            // LOOP n repeats the block since the start or the previous LOOP,
+            // n total times. The block is then closed and the next command
+            // starts a new block.
+            if (!append_segment(segment, repeat_count)) return false;
+            segment.clear();
+            continue;
+        }
+
+        MacroStep st;
+        if (!macro_parse_one_command(part, st, err)) {
+            macro_set_error(err);
+            return false;
+        }
+        segment.push_back(st);
+    }
+
+    if (!segment.empty()) {
+        if (steps.size() + segment.size() > MACRO_EXPANDED_STEP_LIMIT) {
+            macro_set_error("macro expands to too many steps");
+            return false;
+        }
+        steps.insert(steps.end(), segment.begin(), segment.end());
+    }
+
+    if (steps.empty()) {
+        macro_set_error("no valid macro commands found");
+        return false;
+    }
     return true;
 }
 
@@ -1054,32 +1144,34 @@ int main(int argc, char** argv) {
     if (macro_mode) {
         std::string macro_raw = macro_read_file(macro_path);
         if (macro_raw.empty()) {
-            std::cerr << "Macro file is empty or cannot be read: " << macro_path << "\n";
-#ifdef _WIN32
-            closesocket(sock); WSACleanup(); timeEndPeriod(1);
-#else
+            std::cerr << "Macro file is empty or cannot be read: " << macro_path
+                      << " (" << macro_last_error() << ")\n";
             close(sock);
-#endif
+            SDL_Quit();
             return 1;
         }
+
         auto macro_steps_for_wait = macro_parse_text(macro_raw);
         if (macro_steps_for_wait.empty()) {
-            std::cerr << "Macro file has no usable commands: " << macro_path << "\n";
-#ifdef _WIN32
-            closesocket(sock); WSACleanup(); timeEndPeriod(1);
-#else
+            std::cerr << "Macro file has no usable commands: " << macro_path
+                      << " (" << macro_last_error() << ")\n";
             close(sock);
-#endif
+            SDL_Quit();
             return 1;
         }
+
         bool sent = send_macro_udp_packet(sock, dest, hmac_key, macro_raw, 0);
         std::cout << (sent ? "Uploaded server-side macro to P1.\n" : "Failed to upload server-side macro.\n");
-        std::this_thread::sleep_for(std::chrono::milliseconds((int)macro_total_ms(macro_steps_for_wait) + 180));
-#ifdef _WIN32
-        closesocket(sock); WSACleanup(); timeEndPeriod(1);
-#else
+
+        // Keep the CLI alive long enough for old/simple server macro runners,
+        // using the locally expanded duration. Modern servers keep playing the
+        // uploaded macro server-side even if the client exits after this wait.
+        uint64_t wait_ms = macro_total_ms(macro_steps_for_wait);
+        if (wait_ms > 600000ULL) wait_ms = 600000ULL; // avoid waiting forever on absurd macros
+        std::this_thread::sleep_for(std::chrono::milliseconds((int)wait_ms + 180));
+
         close(sock);
-#endif
+        SDL_Quit();
         return sent ? 0 : 1;
     }
 
@@ -1091,15 +1183,7 @@ int main(int argc, char** argv) {
     uint32_t seq = 0;
     auto next_tick = std::chrono::steady_clock::now();
     RumbleManager rumble;
-    std::vector<MacroStep> macro_steps;
-    uint64_t macro_start_us = 0;
-    bool macro_stop_after_send = false;
-    if (macro_mode) {
-        macro_steps = macro_load_file(macro_path);
-        if (macro_steps.empty()) { std::cerr << "Macro file has no usable commands: " << macro_path << "\n"; close(sock); SDL_Quit(); return 1; }
-        macro_start_us = ns::now_us();
-        std::cout << "Macro mode: executing " << macro_steps.size() << " steps on P1, then exiting.\n";
-    }
+
 
     // ── Main Loop (Input Polling & UDP Networking) ────────────────────────────
     while (g_running.load(std::memory_order_relaxed)) {
@@ -1136,7 +1220,7 @@ int main(int argc, char** argv) {
 
         // 3. Transmit to Server
         if (g_legacy_udp) {
-            ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet));
+            ns::Packet pkt{};
             pkt.magic   = ns::PROTO_MAGIC;
             pkt.version = ns::PROTO_VERSION;
             pkt.flags   = ns::FLAG_NONE;
@@ -1154,7 +1238,7 @@ int main(int argc, char** argv) {
 
             sendto(sock, (const char*)&pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));
         } else {
-            ExtendedUdpPacket pkt; memset(&pkt, 0, sizeof(pkt));
+            ExtendedUdpPacket pkt{};
             pkt.magic        = ns::PROTO_MAGIC;
             pkt.version      = ns::PROTO_VERSION;
             pkt.flags        = ns::FLAG_NONE;

@@ -364,15 +364,57 @@ static bool macro_validate_text(const std::string& raw_text, std::vector<MacroSt
     std::string text, err;
     if (!macro_extract_commands_text(raw_text, text, err)) { macro_set_error(err); return false; }
     for (char& c : text) if (c == '\n' || c == '\r') c = ';';
+
+    // LOOP n repeats the block since the start, or since the previous LOOP.
+    // Comments beginning with # are ignored. Keep normalized JSON compact while
+    // expanding steps only for local legacy fallback playback.
+    static constexpr size_t MACRO_EXPANDED_STEP_MAX = 1000000;
+    size_t loop_boundary = 0;
     size_t pos = 0;
     while (pos < text.size()) {
         size_t semi = text.find(';', pos);
         std::string part = macro_trim(text.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos));
         pos = (semi == std::string::npos) ? text.size() : semi + 1;
         if (part.empty()) continue;
+        if (!part.empty() && part[0] == '#') continue;
+
+        size_t last_space = part.find_last_of(" \t");
+        std::string cmd = last_space == std::string::npos ? part : macro_trim(part.substr(0, last_space));
+        std::string arg = last_space == std::string::npos ? "" : macro_trim(part.substr(last_space + 1));
+        if (macro_upper(cmd) == "LOOP") {
+            uint32_t repeat_count = 0;
+            if (!macro_parse_uint32_strict(arg, repeat_count)) {
+                macro_set_error("invalid LOOP count in command: " + part);
+                return false;
+            }
+            if (steps.size() == loop_boundary) {
+                macro_set_error("LOOP has no previous commands to repeat: " + part);
+                return false;
+            }
+            std::vector<MacroStep> block(steps.begin() + (ptrdiff_t)loop_boundary, steps.end());
+            size_t extra = block.size() * (size_t)(repeat_count - 1);
+            if (repeat_count > 1 && (block.empty() || extra / block.size() != (size_t)(repeat_count - 1))) {
+                macro_set_error("LOOP expansion is too large: " + part);
+                return false;
+            }
+            if (steps.size() + extra > MACRO_EXPANDED_STEP_MAX) {
+                macro_set_error("LOOP expansion exceeds the local 1,000,000 step safety limit: " + part);
+                return false;
+            }
+            for (uint32_t n = 1; n < repeat_count; ++n)
+                steps.insert(steps.end(), block.begin(), block.end());
+            loop_boundary = steps.size();
+            if (normalized) normalized->push_back(part);
+            continue;
+        }
+
         MacroStep st;
         if (!macro_parse_one_command(part, st, err)) { macro_set_error(err); return false; }
         steps.push_back(st);
+        if (steps.size() > MACRO_EXPANDED_STEP_MAX) {
+            macro_set_error("macro exceeds the local 1,000,000 step safety limit");
+            return false;
+        }
         if (normalized) normalized->push_back(part);
     }
     if (steps.empty()) { macro_set_error("no valid macro commands found"); return false; }
@@ -667,9 +709,87 @@ static uint64_t g_macro_start_us = 0;
 static std::string g_macro_text;
 static std::string g_macro_upload_pending;
 static std::string macros_file_path() { return get_config_dir() + "/macros.json"; }
-static void load_macro_text() { g_macro_text = macro_read_file(macros_file_path()); }
-static void save_macro_text(const std::string& txt) { std::string dir = get_config_dir(); g_mkdir_with_parents(dir.c_str(), 0755); FILE* f = fopen(macros_file_path().c_str(), "w"); if (f) { fwrite(txt.data(), 1, txt.size(), f); fclose(f); } g_macro_text = txt; }
-static void start_macro_text(const std::string& txt) { std::lock_guard<std::mutex> lk(g_macro_mtx); g_macro_upload_pending = txt; g_macro_steps = macro_parse_text(txt); g_macro_running = g_macro_steps.empty(); g_macro_start_us = ns::now_us(); }
+static void show_macro_error(GtkWindow* parent, const std::string& msg) {
+    GtkWidget* md = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING,
+                                           GTK_BUTTONS_OK, "%s", msg.c_str());
+    gtk_dialog_run(GTK_DIALOG(md));
+    gtk_widget_destroy(md);
+}
+static void load_macro_text() {
+    std::string path = macros_file_path();
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) { g_macro_text.clear(); return; }
+    std::streamoff len = f.tellg();
+    if (len < 0 || (uint64_t)len > MACRO_JSON_MAX_BYTES) { g_macro_text.clear(); return; }
+    f.seekg(0, std::ios::beg);
+    g_macro_text.assign((size_t)len, '\0');
+    if (len > 0) f.read(&g_macro_text[0], len);
+    if (!f && len > 0) g_macro_text.clear();
+}
+static bool clear_macro_text() {
+    std::lock_guard<std::mutex> lk(g_macro_mtx);
+    g_macro_steps.clear();
+    g_macro_running = false;
+    g_macro_upload_pending.clear();
+    g_macro_text.clear();
+    std::string dir = get_config_dir();
+    g_mkdir_with_parents(dir.c_str(), 0755);
+    FILE* f = fopen(macros_file_path().c_str(), "w");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+static bool save_macro_text(const std::string& txt, GtkWindow* parent = nullptr) {
+    if (macro_trim(txt).empty()) return clear_macro_text();
+    std::string pretty, err;
+    if (!macro_validate_to_pretty_json(txt, pretty, err, "Macro")) {
+        if (parent) show_macro_error(parent, "Invalid macro: " + err);
+        else std::cerr << "Invalid macro: " << err << "\n";
+        return false;
+    }
+    if (pretty.size() > MACRO_JSON_MAX_BYTES) {
+        if (parent) show_macro_error(parent, "Macro JSON exceeds the 50MB limit.");
+        else std::cerr << "Macro JSON exceeds the 50MB limit.\n";
+        return false;
+    }
+    std::string dir = get_config_dir();
+    g_mkdir_with_parents(dir.c_str(), 0755);
+    FILE* f = fopen(macros_file_path().c_str(), "w");
+    if (!f) {
+        if (parent) show_macro_error(parent, "Could not save macros.json.");
+        else std::cerr << "Could not save macros.json.\n";
+        return false;
+    }
+    fwrite(pretty.data(), 1, pretty.size(), f);
+    fclose(f);
+    g_macro_text = pretty;
+    return true;
+}
+static bool start_macro_text(const std::string& txt, GtkWindow* parent = nullptr) {
+    std::vector<MacroStep> parsed;
+    std::vector<std::string> normalized;
+    if (!macro_validate_text(txt, parsed, &normalized)) {
+        if (parent) show_macro_error(parent, "Invalid macro: " + macro_last_error());
+        else std::cerr << "Invalid macro: " << macro_last_error() << "\n";
+        return false;
+    }
+    std::string pretty = macro_pretty_json(txt, "Macro");
+    if (pretty.size() > MACRO_JSON_MAX_BYTES) {
+        if (parent) show_macro_error(parent, "Macro JSON exceeds the 50MB limit.");
+        else std::cerr << "Macro JSON exceeds the 50MB limit.\n";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_macro_mtx);
+        g_macro_upload_pending = pretty;
+        g_macro_steps = std::move(parsed);
+        // Modern servers execute macros server-side. Only use local playback as
+        // the explicit legacy fallback, otherwise inputs would be duplicated.
+        g_macro_running = g_legacy_udp;
+        g_macro_start_us = ns::now_us();
+    }
+    return true;
+}
 static bool g_macro_recording = false;
 static uint16_t g_macro_record_last_buttons = 0xFFFF;
 static uint64_t g_macro_record_last_change_us = 0;
@@ -729,10 +849,18 @@ static bool apply_macro_override(ns::HIDReport reports[4], bool present[4]) {
     uint64_t elapsed_ms = (ns::now_us() - g_macro_start_us) / 1000ULL;
     ns::HIDReport mr;
     bool active = macro_report_at(g_macro_steps, elapsed_ms, mr);
-    for (int i = 0; i < 4; ++i) { reports[i].reset(); present[i] = false; }
-    reports[0] = mr;
+    if (!active) {
+        if (elapsed_ms > macro_total_ms(g_macro_steps) + 120) g_macro_running = false;
+        return false;
+    }
+
+    // Local fallback merges with live P1 input instead of replacing it.
+    // Buttons are OR'd in; macro sticks/dpad override only while non-neutral.
+    reports[0].buttons |= mr.buttons;
+    if (mr.hat != ns::HAT_NEUTRAL) reports[0].hat = mr.hat;
+    if (mr.lx != 128 || mr.ly != 128) { reports[0].lx = mr.lx; reports[0].ly = mr.ly; }
+    if (mr.rx != 128 || mr.ry != 128) { reports[0].rx = mr.rx; reports[0].ry = mr.ry; }
     present[0] = true;
-    if (!active && elapsed_ms > macro_total_ms(g_macro_steps) + 120) g_macro_running = false;
     return true;
 }
 
@@ -1108,7 +1236,7 @@ static void SenderThread(std::string host, uint16_t port) {
         if (apply_macro_override(reports, present)) active_count = 1;
 
         if (g_legacy_udp) {
-            ns::Packet pkt; memset(&pkt, 0, sizeof(ns::Packet));
+            ns::Packet pkt{};
             pkt.magic         = ns::PROTO_MAGIC;
             pkt.version       = ns::PROTO_VERSION;
             pkt.flags         = ns::FLAG_NONE;
@@ -1126,7 +1254,7 @@ static void SenderThread(std::string host, uint16_t port) {
 
             sendto(sock, (const char*)&pkt, ns::PACKET_SIZE, 0, (struct sockaddr*)&dest, sizeof(dest));
         } else {
-            ExtendedUdpPacket pkt; memset(&pkt, 0, sizeof(pkt));
+            ExtendedUdpPacket pkt{};
             pkt.magic        = ns::PROTO_MAGIC;
             pkt.version      = ns::PROTO_VERSION;
             pkt.flags        = ns::FLAG_NONE;
@@ -1171,7 +1299,15 @@ static void SenderThread(std::string host, uint16_t port) {
 extern "C" void on_macros_clicked(GtkWidget*, gpointer) {
     load_macro_text();
     GtkWidget* dlg = gtk_dialog_new_with_buttons("Macros", nullptr, GTK_DIALOG_MODAL,
-        "Run", 1, "Save/Add JSON", 2, "Delete", 3, "Record", 4, "Stop Recording", 5, "Close", GTK_RESPONSE_CLOSE, nullptr);
+        "Run", 1,
+        "Save/Add JSON", 2,
+        "Delete", 3,
+        "Record", 4,
+        "Stop Recording", 5,
+        "Import JSON", 6,
+        "Export JSON", 7,
+        "Close", GTK_RESPONSE_CLOSE,
+        nullptr);
     GtkWidget* area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
     GtkWidget* label = gtk_label_new("Use JSON like {\"name\":\"Boost\",\"commands\":\"WAIT 200; A 100; B 100\"}, or record live P1 buttons while connected.");
     gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
@@ -1189,13 +1325,60 @@ extern "C" void on_macros_clicked(GtkWidget*, gpointer) {
         GtkTextIter a,b; gtk_text_buffer_get_bounds(buf, &a, &b);
         char* raw = gtk_text_buffer_get_text(buf, &a, &b, FALSE);
         std::string txt = raw ? raw : ""; if (raw) g_free(raw);
-        if (r == 1) start_macro_text(txt);
-        else if (r == 2) save_macro_text(txt);
-        else if (r == 3) save_macro_text("");
-        else if (r == 4) { start_macro_recording(); gtk_text_buffer_set_text(buf, "Recording... play on P1, then press Stop Recording.", -1); }
-        else if (r == 5) { std::string rec = stop_macro_recording(); save_macro_text(rec); gtk_text_buffer_set_text(buf, rec.c_str(), -1); }
-        else if (r == 6) { GtkWidget* fc = gtk_file_chooser_dialog_new("Import Macros JSON", nullptr, GTK_FILE_CHOOSER_ACTION_OPEN, "Cancel", GTK_RESPONSE_CANCEL, "Open", GTK_RESPONSE_ACCEPT, nullptr); if (gtk_dialog_run(GTK_DIALOG(fc)) == GTK_RESPONSE_ACCEPT) { char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(fc)); gchar* contents=nullptr; gsize len=0; if (g_file_get_contents(fn, &contents, &len, nullptr)) { save_macro_text(std::string(contents, len)); gtk_text_buffer_set_text(buf, contents, (gint)len); g_free(contents); } g_free(fn); } gtk_widget_destroy(fc); }
-        else if (r == 7) { GtkWidget* fc = gtk_file_chooser_dialog_new("Export Macros JSON", nullptr, GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, nullptr); gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(fc), "ns-macros.json"); if (gtk_dialog_run(GTK_DIALOG(fc)) == GTK_RESPONSE_ACCEPT) { char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(fc)); std::string pretty = macro_pretty_json(txt); g_file_set_contents(fn, pretty.c_str(), (gssize)pretty.size(), nullptr); g_free(fn); } gtk_widget_destroy(fc); }
+        if (r == 1) {
+            start_macro_text(txt, GTK_WINDOW(dlg));
+        }
+        else if (r == 2) {
+            if (save_macro_text(txt, GTK_WINDOW(dlg)))
+                gtk_text_buffer_set_text(buf, g_macro_text.c_str(), -1);
+        }
+        else if (r == 3) {
+            clear_macro_text();
+            gtk_text_buffer_set_text(buf, "", -1);
+        }
+        else if (r == 4) {
+            start_macro_recording();
+            gtk_text_buffer_set_text(buf, "Recording... play on P1, then press Stop Recording.", -1);
+        }
+        else if (r == 5) {
+            std::string rec = stop_macro_recording();
+            if (save_macro_text(rec, GTK_WINDOW(dlg)))
+                gtk_text_buffer_set_text(buf, g_macro_text.c_str(), -1);
+        }
+        else if (r == 6) {
+            GtkWidget* fc = gtk_file_chooser_dialog_new("Import Macros JSON", GTK_WINDOW(dlg), GTK_FILE_CHOOSER_ACTION_OPEN,
+                                                        "Cancel", GTK_RESPONSE_CANCEL, "Open", GTK_RESPONSE_ACCEPT, nullptr);
+            if (gtk_dialog_run(GTK_DIALOG(fc)) == GTK_RESPONSE_ACCEPT) {
+                char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(fc));
+                std::string imported = macro_read_file(fn ? fn : "");
+                if (imported.empty()) {
+                    show_macro_error(GTK_WINDOW(dlg), macro_last_error().empty() ? "Invalid or empty macro file." : macro_last_error());
+                } else if (save_macro_text(imported, GTK_WINDOW(dlg))) {
+                    gtk_text_buffer_set_text(buf, g_macro_text.c_str(), -1);
+                }
+                if (fn) g_free(fn);
+            }
+            gtk_widget_destroy(fc);
+        }
+        else if (r == 7) {
+            std::string pretty, err;
+            if (!macro_validate_to_pretty_json(txt, pretty, err, "Macro")) {
+                show_macro_error(GTK_WINDOW(dlg), "Invalid macro: " + err);
+            } else {
+                GtkWidget* fc = gtk_file_chooser_dialog_new("Export Macros JSON", GTK_WINDOW(dlg), GTK_FILE_CHOOSER_ACTION_SAVE,
+                                                            "Cancel", GTK_RESPONSE_CANCEL, "Save", GTK_RESPONSE_ACCEPT, nullptr);
+                gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(fc), "ns-macros.json");
+                if (gtk_dialog_run(GTK_DIALOG(fc)) == GTK_RESPONSE_ACCEPT) {
+                    char* fn = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(fc));
+                    if (fn) {
+                        if (!g_file_set_contents(fn, pretty.c_str(), (gssize)pretty.size(), nullptr))
+                            show_macro_error(GTK_WINDOW(dlg), "Could not export macro JSON.");
+                        g_free(fn);
+                    }
+                }
+                gtk_widget_destroy(fc);
+            }
+        }
         else break;
     }
     gtk_widget_destroy(dlg);
