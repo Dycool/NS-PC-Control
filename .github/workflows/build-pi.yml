@@ -50,8 +50,3 @@ jobs:
         with:
           name: pi-backend
           path: server/rpi/build/ns-backend
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: pi-setup-gadget
-          path: server/rpi/build/setup_gadget.sh

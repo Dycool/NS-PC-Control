@@ -55,8 +55,7 @@ jobs:
 
           # Pi
           zip -j _zips/ns-pc-control-raspberry-pi.zip \
-            artifacts/pi-backend/ns-backend \
-            artifacts/pi-setup-gadget/setup_gadget.sh
+            artifacts/pi-backend/ns-backend
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v2
