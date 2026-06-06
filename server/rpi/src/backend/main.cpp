@@ -84,6 +84,10 @@ static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); 
 
 // ── Nintendo Pro Controller USB protocol support ─────────────────────────────
 static constexpr size_t PRO_REPORT_SIZE = 64;
+static constexpr int PRO_ACTIVE_REPORT_HZ = 250;
+static constexpr int PRO_IDLE_REPORT_HZ = 30;
+static constexpr uint64_t PRO_IDLE_REPORT_INTERVAL_US = 1'000'000ULL / PRO_IDLE_REPORT_HZ;
+static constexpr uint64_t PRO_RELEASE_NEUTRAL_US = 250'000ULL;
 static constexpr uint8_t RID_INPUT_STANDARD = 0x30;
 static constexpr uint8_t RID_INPUT_SUBCMD   = 0x21;
 static constexpr uint8_t RID_OUTPUT_RUMBLE  = 0x10;
@@ -157,6 +161,8 @@ struct ControllerRuntime {
     uint8_t timer = 0;
     bool full_report_enabled = false;
     bool pending_subcmd_reply = false;
+    uint64_t last_idle_neutral_us = 0;
+    uint64_t neutral_burst_until_us = 0;
     ProInputReport21 pending_reply{};
 };
 
@@ -182,19 +188,27 @@ static void init_spi_flash(int ctrl) {
     flash[0x6013] = 0xA0;
     flash[0x601B] = 0x02;
 
+    // Factory stick calibration.  This must be packed as three 12-bit X/Y
+    // pairs.  The previous helper wrote overlapping bytes and produced invalid
+    // calibration, which can make the Switch accept buttons while ignoring
+    // analogue stick movement.
+    auto pack_stick_cal_pair = [](uint8_t* dst, uint16_t x, uint16_t y) {
+        x &= 0x0FFF;
+        y &= 0x0FFF;
+        dst[0] = x & 0xFF;
+        dst[1] = ((x >> 8) & 0x0F) | ((y & 0x0F) << 4);
+        dst[2] = (y >> 4) & 0xFF;
+    };
+
     uint8_t cal_left[9] = {};
-    pack12(0x800, cal_left[0], cal_left[1]);
-    pack12(0x800, cal_left[1], cal_left[2]);
-    pack12(0xF00, cal_left[3], cal_left[4]);
-    pack12(0xF00, cal_left[4], cal_left[5]);
-    cal_left[6] = 0x18;
+    pack_stick_cal_pair(cal_left + 0, 0x600, 0x600); // max-above-center range
+    pack_stick_cal_pair(cal_left + 3, 0x800, 0x800); // center
+    pack_stick_cal_pair(cal_left + 6, 0x600, 0x600); // min-below-center range
 
     uint8_t cal_right[9] = {};
-    pack12(0x800, cal_right[0], cal_right[1]);
-    pack12(0x800, cal_right[1], cal_right[2]);
-    pack12(0xF00, cal_right[3], cal_right[4]);
-    pack12(0xF00, cal_right[4], cal_right[5]);
-    cal_right[6] = 0x18;
+    pack_stick_cal_pair(cal_right + 0, 0x600, 0x600);
+    pack_stick_cal_pair(cal_right + 3, 0x800, 0x800);
+    pack_stick_cal_pair(cal_right + 6, 0x600, 0x600);
 
     memcpy(flash + 0x603D, cal_left, sizeof(cal_left));
     memcpy(flash + 0x6046, cal_right, sizeof(cal_right));
@@ -257,7 +271,21 @@ static void fill_neutral_controls(ProInputReport21& r) {
 }
 
 static uint16_t axis8_to_12(uint8_t v) {
-    return (uint16_t)((uint32_t)v * 4095u / 255u);
+    // Match the fake calibration above: center 0x800 with about ±0x600 range.
+    // Sending the full 0x000..0xFFF range can sit outside the advertised
+    // calibration and some Switch paths appear to flatten/ignore the stick.
+    if (v == 128) return 0x800;
+
+    int32_t delta = (int32_t)v - 128;
+    int32_t raw;
+    if (delta > 0)
+        raw = 0x800 + (delta * 0x600) / 127;
+    else
+        raw = 0x800 + (delta * 0x600) / 128;
+
+    if (raw < 0x200) raw = 0x200;
+    if (raw > 0xE00) raw = 0xE00;
+    return (uint16_t)raw;
 }
 
 static void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8) {
@@ -458,6 +486,19 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
     g_clients[client_idx].rumble_seq[sub_idx]++;
 }
 
+
+static void drain_hid_output_queue(int fd) {
+    if (fd < 0) return;
+
+    uint8_t discard[PRO_REPORT_SIZE];
+    for (int i = 0; i < 32; ++i) {
+        struct pollfd pfd = {fd, POLLIN, 0};
+        if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) break;
+        ssize_t r = read(fd, discard, sizeof(discard));
+        if (r <= 0) break;
+    }
+}
+
 // ── Smart Multiplexer HID Writer Thread ───────────────────────────────────────
 static void writer_thread(int hz) {
     for (int i = 0; i < 4; ++i) init_spi_flash(i);
@@ -476,12 +517,14 @@ static void writer_thread(int hz) {
         bool all_open = true;
         for (int i = 0; i < 4; ++i) {
             if (fds[i] < 0) {
-                fds[i] = open(devs[i].c_str(), O_RDWR | O_NONBLOCK);
+                fds[i] = open(devs[i].c_str(), O_RDWR);
                 if (fds[i] >= 0) {
                     rt[i].fd = fds[i];
                     rt[i].timer = 0;
                     rt[i].full_report_enabled = false;
                     rt[i].pending_subcmd_reply = false;
+                    rt[i].last_idle_neutral_us = 0;
+                    rt[i].neutral_burst_until_us = 0;
                     memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
                 } else {
                     all_open = false;
@@ -538,6 +581,13 @@ static void writer_thread(int hz) {
                 if (hw_slots[h].client_idx != -1 && !active_snap[hw_slots[h].client_idx]) {
                     hw_slots[h].client_idx = -1;
                     hw_slots[h].sub_idx = -1;
+
+                    // The USB interface stays alive so the Switch can keep talking to
+                    // it, but the player assignment is gone.  Send a short neutral
+                    // release burst to clear any held buttons, drain stale output, then
+                    // fall back to the low-rate idle heartbeat.
+                    rt[h].neutral_burst_until_us = now_stamp + PRO_RELEASE_NEUTRAL_US;
+                    drain_hid_output_queue(fds[h]);
                 }
             }
 
@@ -551,16 +601,31 @@ static void writer_thread(int hz) {
                             break;
                         }
                     }
-                    if (!mapped && !extended_is_neutral(report_snap[c][s])) {
+
+                    if (mapped || extended_is_neutral(report_snap[c][s])) continue;
+
+                    // Preserve logical pad order.  The previous "first free port" mapper
+                    // let Pad 2 steal Switch Port 1 whenever keyboard/mobile Pad 1 was
+                    // neutral, which made keyboard mode and mobile mode look broken.
+                    int chosen = -1;
+                    if (s >= 0 && s < 4 && hw_slots[s].client_idx == -1) {
+                        chosen = s;
+                    } else {
+                        // Fallback only for multi-client cases where the preferred port
+                        // is already occupied.
                         for (int h = 0; h < 4; ++h) {
                             if (hw_slots[h].client_idx == -1) {
-                                hw_slots[h].client_idx = c;
-                                hw_slots[h].sub_idx = s;
-                                if (g_verbose)
-                                    std::printf("Map -> PC %d (Pad %d) took Switch Pro Port %d\n", c + 1, s + 1, h + 1);
+                                chosen = h;
                                 break;
                             }
                         }
+                    }
+
+                    if (chosen != -1) {
+                        hw_slots[chosen].client_idx = c;
+                        hw_slots[chosen].sub_idx = s;
+                        if (g_verbose)
+                            std::printf("Map -> PC %d (Pad %d) took Switch Pro Port %d\n", c + 1, s + 1, chosen + 1);
                     }
                 }
             }
@@ -575,33 +640,75 @@ static void writer_thread(int hz) {
 
             bool ok = true;
             for (int h = 0; h < 4; ++h) {
+                const bool port_needed = (hw_slots[h].client_idx != -1);
+
                 uint8_t write_buf[PRO_REPORT_SIZE] = {};
+                bool have_report_to_write = false;
+                bool wrote_subcmd_reply = false;
+
                 if (rt[h].pending_subcmd_reply) {
                     rt[h].pending_reply.id = RID_INPUT_SUBCMD;
                     rt[h].pending_reply.timer = rt[h].timer++;
                     fill_neutral_controls(rt[h].pending_reply);
                     memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
-                    rt[h].pending_subcmd_reply = false;
+                    have_report_to_write = true;
+                    wrote_subcmd_reply = true;
                 } else if (rt[h].full_report_enabled) {
-                    ProInputReport30 std_in{};
-                    build_standard_report(out_reports[h], rt[h].timer++, std_in);
-                    memcpy(write_buf, &std_in, sizeof(ProInputReport30));
-                } else {
-                    continue;
+                    // Active/player-assigned ports run at the normal writer rate
+                    // (250 Hz).  Unassigned ports still send neutral keepalive reports,
+                    // but only at a low heartbeat rate so we do not spam neutral data.
+                    bool release_burst = rt[h].neutral_burst_until_us != 0 &&
+                                         now_stamp < rt[h].neutral_burst_until_us;
+                    if (rt[h].neutral_burst_until_us != 0 && now_stamp >= rt[h].neutral_burst_until_us)
+                        rt[h].neutral_burst_until_us = 0;
+
+                    bool idle_due = (rt[h].last_idle_neutral_us == 0) ||
+                                    (now_stamp - rt[h].last_idle_neutral_us >= PRO_IDLE_REPORT_INTERVAL_US);
+
+                    if (port_needed || release_burst || idle_due) {
+                        ExtendedHIDReport report_for_port;
+                        report_for_port.reset();
+                        if (port_needed) report_for_port = out_reports[h];
+
+                        ProInputReport30 std_in{};
+                        build_standard_report(report_for_port, rt[h].timer++, std_in);
+                        memcpy(write_buf, &std_in, sizeof(ProInputReport30));
+                        have_report_to_write = true;
+
+                        if (!port_needed && !release_burst)
+                            rt[h].last_idle_neutral_us = now_stamp;
+                    }
                 }
 
+                if (!have_report_to_write) continue;
+
                 ssize_t w = write(fds[h], write_buf, PRO_REPORT_SIZE);
-                if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
-                else if (w > 0) writes_this_second++;
+                if (w < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
+                    // If a subcommand reply could not be written, keep it pending.
+                    // Dropping it makes the Switch repeat commands such as 0x02 forever.
+                } else if (w == (ssize_t)PRO_REPORT_SIZE) {
+                    if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
+                    writes_this_second++;
+                } else if (w > 0) {
+                    // Partial HID report writes should not happen.  Treat as an error so
+                    // we reconnect cleanly rather than sending malformed controller data.
+                    ok = false;
+                }
             }
 
             for (int h = 0; h < 4; ++h) {
+                // Always serve the HID control/output side for every exposed Pro
+                // Controller interface.  HID gadgets are not lazily created: once
+                // setup_gadget.sh exposes hidg0..hidg3, the Switch may send init
+                // commands to any of them.  Ignoring those commands until a pad maps
+                // to the port breaks keyboard/mobile/web input and leaves stale output
+                // reports queued in /dev/hidgX.
                 struct pollfd pfd = {fds[h], POLLIN, 0};
                 uint8_t read_buf[PRO_REPORT_SIZE];
-                int guard = 0;
-                while (guard++ < 8 && poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
                     ssize_t r = read(fds[h], read_buf, PRO_REPORT_SIZE);
-                    if (r <= 0) break;
+                    if (r <= 0) continue;
 
                     uint8_t id = read_buf[0];
                     if (id == RID_OUTPUT_CMD) {
@@ -915,9 +1022,10 @@ static const char INDEX_HTML[] =
     "document.getElementById('kbMode').onchange = (e) => localStorage.setItem('nswc_mode', e.target.value);\n"
     "window.addEventListener('keydown', (e) => {\n"
     "    if (activeBindKey) { e.preventDefault(); remapKey(e.code); return; }\n"
+    "    if (!['INPUT','TEXTAREA','SELECT','BUTTON'].includes((e.target && e.target.tagName) || '')) e.preventDefault();\n"
     "    keysDown.add(e.code);\n"
     "});\n"
-    "window.addEventListener('keyup', (e) => keysDown.delete(e.code));\n"
+    "window.addEventListener('keyup', (e) => { e.preventDefault(); keysDown.delete(e.code); });\n"
     "function getNeutralState() { return { buttons: 0, hat: HAT_NEUTRAL, lx: 128, ly: 128, rx: 128, ry: 128 }; }\n"
     "function getKeyboardState() {\n"
     "    let buttons = 0, hat = HAT_NEUTRAL, lx = 128, ly = 128, rx = 128, ry = 128;\n"
@@ -977,8 +1085,10 @@ static const char INDEX_HTML[] =
     "    else if (pup) hat = HAT_N; else if (pdown) hat = HAT_S;\n"
     "    else if (pleft) hat = HAT_W; else if (pright) hat = HAT_E;\n"
     "    const applyDeadzone = (val) => { if (Math.abs(val) < 0.15) return 128; return Math.round(((val + 1) / 2) * 255); };\n"
-    "    if (pad.axes.length >= 4) {\n"
+    "    if (pad.axes.length >= 2) {\n"
     "        lx = applyDeadzone(pad.axes[0]); ly = applyDeadzone(pad.axes[1]);\n"
+    "    }\n"
+    "    if (pad.axes.length >= 4) {\n"
     "        rx = applyDeadzone(pad.axes[2]); ry = applyDeadzone(pad.axes[3]);\n"
     "    }\n"
     "    return { buttons, hat, lx, ly, rx, ry };\n"
@@ -1074,6 +1184,7 @@ static const char INDEX_HTML[] =
     "        document.getElementById('btnConnect').innerText = \"Disconnect\";\n"
     "        document.getElementById('kbMode').disabled = true;\n"
     "        document.getElementById('statusText').innerText = `Connected to Pi Proxy.`;\n"
+    "        try { window.focus(); document.body.focus(); } catch(e) {}\n"
     "        loopId = setInterval(buildAndSendPacket, 4);\n"
     "    };\n"
     "    ws.onerror = () => alert(\"Failed to connect to proxy!\");\n"
@@ -1247,6 +1358,7 @@ static const char MOBILE_HTML[] =
     "}\n"
     "applyLayout();\n"
     "const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 5, RUMBLE_MAGIC = 0x4E535652;\n"
+    "const FLAG_SINGLE_PAD = 0x04;\n"
     "const EXT_REPORT_SIZE = 24, PACKET_SIZE = 116;\n"
     "let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;\n"
     "let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };\n"
@@ -1382,7 +1494,7 @@ static const char MOBILE_HTML[] =
     "function sendPacket() {\n"
     "    if (!ws || ws.readyState !== WebSocket.OPEN) return;\n"
     "    const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);\n"
-    "    view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);\n"
+    "    view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, FLAG_SINGLE_PAD);\n"
     "    view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now()*1000), true);\n"
     "    let off = 20;\n"
     "    view.setUint16(off, state.buttons, true); view.setUint8(off+2, state.hat);\n"
@@ -1854,6 +1966,14 @@ static size_t process_ws_frame(WebClient *c) {
         legacy_multi_to_extended(legacy, report);
     } else if (ver == WEB_PROTO_VERSION && flen == WEB_PACKET_SIZE) {
         memcpy(&report, payload + 20, sizeof(ExtendedMultiReport));
+        if (flags & FLAG_SINGLE_PAD) {
+            // The mobile touch page is one virtual controller only.  Force the
+            // unused subpads to neutral so a malformed/old cached mobile packet
+            // cannot accidentally claim Switch ports 2-4.
+            report.p2.reset();
+            report.p3.reset();
+            report.p4.reset();
+        }
     } else {
         return total;
     }
