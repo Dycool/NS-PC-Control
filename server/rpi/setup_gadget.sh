@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-echo "[gadget] Building 4-Player Composite HORI Hub..."
+echo "[gadget] Building 4-Player Composite Nintendo Pro Controller Hub..."
 
 GADGET_DIR=/sys/kernel/config/usb_gadget/ns_ctrl
 CONFIG_DIR="$GADGET_DIR/configs/c.1"
@@ -33,35 +33,35 @@ mkdir -p "$CONFIG_DIR/strings/0x409"
 
 echo 0x0200 > "$GADGET_DIR/bcdDevice"
 echo 0x0200 > "$GADGET_DIR/bcdUSB"
-echo 0x0F0D > "$GADGET_DIR/idVendor"  # HORI
-echo 0x0092 > "$GADGET_DIR/idProduct" # Pokken Tournament Controller
-echo 0xFF   > "$GADGET_DIR/bDeviceClass"
-echo 0xFF   > "$GADGET_DIR/bDeviceSubClass"
-echo 0xFF   > "$GADGET_DIR/bDeviceProtocol"
+echo 0x057e > "$GADGET_DIR/idVendor"   # Nintendo
+echo 0x2009 > "$GADGET_DIR/idProduct"  # Pro Controller
+echo 0x00   > "$GADGET_DIR/bDeviceClass"
+echo 0x00   > "$GADGET_DIR/bDeviceSubClass"
+echo 0x00   > "$GADGET_DIR/bDeviceProtocol"
 
-echo "000000000001"   > "$GADGET_DIR/strings/0x409/serialnumber"
-echo "HORI CO., LTD." > "$GADGET_DIR/strings/0x409/manufacturer"
-echo "POKKEN CONTROLLER" > "$GADGET_DIR/strings/0x409/product"
+echo "98B6E9112233"     > "$GADGET_DIR/strings/0x409/serialnumber"
+echo "Nintendo Co., Ltd." > "$GADGET_DIR/strings/0x409/manufacturer"
+echo "Pro Controller"    > "$GADGET_DIR/strings/0x409/product"
 echo 500 > "$CONFIG_DIR/MaxPower"
-echo "Switch 4-Player Hub Config" > "$CONFIG_DIR/strings/0x409/configuration"
+echo "NS-PC-Control Pro Controller Hub" > "$CONFIG_DIR/strings/0x409/configuration"
 
-# Standard HORI descriptor (exactly 8 bytes)
-HORI_DESC='\x05\x01\x09\x05\xa1\x01\x15\x00\x25\x01\x35\x00\x45\x01\x75\x01\x95\x0d\x05\x09\x19\x01\x29\x0d\x81\x02\x95\x03\x81\x01\x05\x01\x25\x07\x46\x3b\x01\x75\x04\x95\x01\x65\x14\x09\x39\x81\x42\x65\x00\x95\x01\x81\x01\x26\xff\x00\x46\xff\x00\x09\x30\x09\x31\x09\x32\x09\x35\x75\x08\x95\x04\x81\x02\x06\x00\xff\x09\x20\x75\x08\x95\x01\x81\x02\xc0'
+# Nintendo Switch Pro Controller descriptor, 64-byte input/output reports.
+PRO_DESC='\x05\x01\x15\x00\x09\x04\xa1\x01\x85\x30\x05\x01\x05\x09\x19\x01\x29\x0a\x15\x00\x25\x01\x75\x01\x95\x0a\x55\x00\x65\x00\x81\x02\x05\x09\x19\x0b\x29\x0e\x15\x00\x25\x01\x75\x01\x95\x04\x81\x02\x75\x01\x95\x02\x81\x03\x0b\x01\x00\x01\x00\xa1\x00\x0b\x30\x00\x01\x00\x0b\x31\x00\x01\x00\x0b\x32\x00\x01\x00\x0b\x35\x00\x01\x00\x15\x00\x27\xff\xff\x00\x00\x75\x10\x95\x04\x81\x02\xc0\x0b\x39\x00\x01\x00\x15\x00\x25\x07\x35\x00\x46\x3b\x01\x65\x14\x75\x04\x95\x01\x81\x02\x05\x09\x19\x0f\x29\x12\x15\x00\x25\x01\x75\x01\x95\x04\x81\x02\x75\x08\x95\x34\x81\x03\x06\x00\xff\x85\x21\x09\x01\x75\x08\x95\x3f\x81\x03\x85\x81\x09\x02\x75\x08\x95\x3f\x81\x03\x85\x01\x09\x03\x75\x08\x95\x3f\x91\x83\x85\x10\x09\x04\x75\x08\x95\x3f\x91\x83\x85\x80\x09\x05\x75\x08\x95\x3f\x91\x83\x85\x82\x09\x06\x75\x08\x95\x3f\x91\x83\xc0'
 
 create_hid_function() {
     local id=$1
     local func="$GADGET_DIR/functions/hid.usb$id"
     mkdir -p "$func"
-    echo 0 > "$func/protocol"
-    echo 0 > "$func/subclass"
-    echo 8 > "$func/report_length"
-    echo -ne "$HORI_DESC" > "$func/report_desc"
+    echo 0  > "$func/protocol"
+    echo 0  > "$func/subclass"
+    echo 64 > "$func/report_length"
+    echo -ne "$PRO_DESC" > "$func/report_desc"
     ln -sf "$func" "$CONFIG_DIR/"
 }
 
-# ── Dynamic Interface Creation (Always 4 Ports) ───────────────
+# ── Always expose 4 Pro Controller interfaces ────────────────
 for i in {0..3}; do
-    create_hid_function $i
+    create_hid_function "$i"
 done
 
 # ── Bind ──────────────────────────────────────────────────────
@@ -74,9 +74,8 @@ fi
 echo "$UDC" > "$GADGET_DIR/UDC"
 echo "[gadget] Bound to UDC: $UDC"
 
-# Allow ns-backend to access HID devices without root
 sleep 0.5
 for i in {0..3}; do
     chmod 666 "/dev/hidg$i" 2>/dev/null || true
 done
-echo "[gadget] Done. Exposed 4 interfaces: /dev/hidg0 to /dev/hidg3 (world-readable)"
+echo "[gadget] Done. Exposed 4 Pro Controller interfaces: /dev/hidg0 to /dev/hidg3"

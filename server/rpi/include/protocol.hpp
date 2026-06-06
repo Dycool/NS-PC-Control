@@ -75,6 +75,55 @@ struct MultiReport {
 } NS_PACKED_ATTR;
 
 
+
+
+// Optional browser/WebSocket-only motion payload. The legacy UDP Packet below is
+// intentionally unchanged, so existing UDP clients keep sending only buttons and
+// sticks with PROTO_VERSION 4.
+struct MotionReport {
+    int16_t ax, ay, az;
+    int16_t gx, gy, gz;
+
+    void reset() noexcept {
+        ax = ay = az = 0;
+        gx = gy = gz = 0;
+    }
+} NS_PACKED_ATTR;
+
+struct ExtendedHIDReport {
+    HIDReport    input;
+    MotionReport motion;
+    uint8_t      has_motion;
+    uint8_t      reserved[3];
+
+    void reset() noexcept {
+        input.reset();
+        motion.reset();
+        has_motion = 0;
+        reserved[0] = reserved[1] = reserved[2] = 0;
+    }
+} NS_PACKED_ATTR;
+
+struct ExtendedMultiReport {
+    ExtendedHIDReport p1, p2, p3, p4;
+
+    void reset() noexcept {
+        p1.reset(); p2.reset(); p3.reset(); p4.reset();
+    }
+} NS_PACKED_ATTR;
+
+static constexpr uint8_t  WEB_PROTO_VERSION = 5; // WebSocket-only extended input + motion
+static constexpr uint32_t RUMBLE_MAGIC      = 0x4E535652u; // 'NSVR'
+static constexpr std::size_t WEB_PACKET_SIZE = 20 + sizeof(ExtendedMultiReport);
+
+struct RumblePacket {
+    uint32_t magic;       // RUMBLE_MAGIC
+    uint8_t  subpad;      // 0..3, browser pad index inside the WS client
+    uint8_t  low_freq;    // 0..255
+    uint8_t  high_freq;   // 0..255
+    uint8_t  duration_10ms;
+} NS_PACKED_ATTR;
+
 // ── UDP Wire Packet ───────────────────────────────────────────────────────────
 static constexpr const char* DEFAULT_SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY";
 static constexpr std::size_t HMAC_TAG_SIZE = 16;

@@ -65,7 +65,9 @@ struct ClientSession {
     uint64_t    last_rx_us = 0;
     uint32_t    expected_seq = 0;
     bool        first_pkt = true;
-    MultiReport report{}; // The inputs coming from this specific PC
+    ExtendedMultiReport report{}; // Inputs + optional motion coming from this specific PC/WebSocket
+    RumblePacket rumble[4]{};
+    uint32_t    rumble_seq[4]{};
 };
 
 static std::mutex    g_mtx[MAX_CLIENTS];
@@ -79,27 +81,411 @@ static std::atomic<uint64_t> g_hid_writes{0};
 static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); }
 
 
+
+// ── Nintendo Pro Controller USB protocol support ─────────────────────────────
+static constexpr size_t PRO_REPORT_SIZE = 64;
+static constexpr uint8_t RID_INPUT_STANDARD = 0x30;
+static constexpr uint8_t RID_INPUT_SUBCMD   = 0x21;
+static constexpr uint8_t RID_OUTPUT_RUMBLE  = 0x10;
+static constexpr uint8_t RID_OUTPUT_CMD     = 0x01;
+
+static constexpr uint8_t CMD_BT_MANUAL_PAIRING   = 0x01;
+static constexpr uint8_t CMD_GET_DEVICE_INFO     = 0x02;
+static constexpr uint8_t CMD_SET_DATA_FORMAT     = 0x03;
+static constexpr uint8_t CMD_TRIGGER_BUTTONS     = 0x04;
+static constexpr uint8_t CMD_SET_SHIP_MODE       = 0x08;
+static constexpr uint8_t CMD_SPI_FLASH_READ      = 0x10;
+static constexpr uint8_t CMD_SPI_FLASH_WRITE     = 0x11;
+static constexpr uint8_t CMD_SET_NFC_IR_CONFIG   = 0x21;
+static constexpr uint8_t CMD_SET_PLAYER_LIGHTS   = 0x30;
+static constexpr uint8_t CMD_ENABLE_IMU          = 0x40;
+static constexpr uint8_t CMD_SET_IMU_SENS        = 0x41;
+static constexpr uint8_t CMD_ENABLE_VIBRATION    = 0x48;
+
+#define NS_LOCAL_PACKED __attribute__((packed))
+
+struct NS_LOCAL_PACKED ProInputReport30 {
+    uint8_t id;
+    uint8_t timer;
+    uint8_t conn_info;
+    uint8_t buttons[3];
+    uint8_t left_stick[3];
+    uint8_t right_stick[3];
+    uint8_t vibrator;
+    int16_t accel_x_0, accel_y_0, accel_z_0;
+    int16_t gyro_x_0,  gyro_y_0,  gyro_z_0;
+    int16_t accel_x_1, accel_y_1, accel_z_1;
+    int16_t gyro_x_1,  gyro_y_1,  gyro_z_1;
+    int16_t accel_x_2, accel_y_2, accel_z_2;
+    int16_t gyro_x_2,  gyro_y_2,  gyro_z_2;
+    uint8_t vendor_rest[15];
+};
+static_assert(sizeof(ProInputReport30) == PRO_REPORT_SIZE, "ProInputReport30 must be 64 bytes");
+
+struct NS_LOCAL_PACKED ProInputReport21 {
+    uint8_t id;
+    uint8_t timer;
+    uint8_t conn_info;
+    uint8_t buttons[3];
+    uint8_t left_stick[3];
+    uint8_t right_stick[3];
+    uint8_t vibrator;
+    uint8_t ack;
+    uint8_t subcmd_id;
+    uint8_t reply_data[49];
+};
+static_assert(sizeof(ProInputReport21) == PRO_REPORT_SIZE, "ProInputReport21 must be 64 bytes");
+
+static const uint8_t CTRL_MAC_BE[4][6] = {
+    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x33},
+    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x34},
+    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x35},
+    {0x98, 0xB6, 0xE9, 0x11, 0x22, 0x36},
+};
+
+static const char* CTRL_SERIAL[4] = {
+    "98B6E9112233", "98B6E9112234", "98B6E9112235", "98B6E9112236"
+};
+
+static constexpr size_t SPI_FLASH_SIZE = 0x10000;
+static uint8_t g_spi_flash[4][SPI_FLASH_SIZE];
+static bool g_spi_initialized[4] = {};
+
+struct ControllerRuntime {
+    int fd = -1;
+    int ctrl = 0;
+    uint8_t timer = 0;
+    bool full_report_enabled = false;
+    bool pending_subcmd_reply = false;
+    ProInputReport21 pending_reply{};
+};
+
+static int16_t clamp_i16(int v) {
+    if (v < -32768) return -32768;
+    if (v >  32767) return  32767;
+    return (int16_t)v;
+}
+
+static void pack12(uint16_t val, uint8_t& b0, uint8_t& b1) {
+    b0 = val & 0xFF;
+    b1 = (b1 & 0xF0) | ((val >> 8) & 0x0F);
+}
+
+static void init_spi_flash(int ctrl) {
+    if (ctrl < 0 || ctrl >= 4 || g_spi_initialized[ctrl]) return;
+
+    uint8_t* flash = g_spi_flash[ctrl];
+    memset(flash, 0xFF, SPI_FLASH_SIZE);
+
+    memcpy(flash + 0x6080, CTRL_SERIAL[ctrl], strlen(CTRL_SERIAL[ctrl]) + 1);
+    flash[0x6012] = 0x03;
+    flash[0x6013] = 0xA0;
+    flash[0x601B] = 0x02;
+
+    uint8_t cal_left[9] = {};
+    pack12(0x800, cal_left[0], cal_left[1]);
+    pack12(0x800, cal_left[1], cal_left[2]);
+    pack12(0xF00, cal_left[3], cal_left[4]);
+    pack12(0xF00, cal_left[4], cal_left[5]);
+    cal_left[6] = 0x18;
+
+    uint8_t cal_right[9] = {};
+    pack12(0x800, cal_right[0], cal_right[1]);
+    pack12(0x800, cal_right[1], cal_right[2]);
+    pack12(0xF00, cal_right[3], cal_right[4]);
+    pack12(0xF00, cal_right[4], cal_right[5]);
+    cal_right[6] = 0x18;
+
+    memcpy(flash + 0x603D, cal_left, sizeof(cal_left));
+    memcpy(flash + 0x6046, cal_right, sizeof(cal_right));
+
+    // Body/button colors. Slightly different shade per virtual pad avoids cached identity weirdness.
+    uint8_t shade = (uint8_t)(0x20 + ctrl * 0x18);
+    flash[0x6050] = shade; flash[0x6051] = shade; flash[0x6052] = shade;
+    flash[0x6053] = 0xFF;  flash[0x6054] = 0xFF;  flash[0x6055] = 0xFF;
+    flash[0x6056] = shade; flash[0x6057] = shade; flash[0x6058] = shade;
+    flash[0x6059] = 0xFF;  flash[0x605A] = 0xFF;  flash[0x605B] = 0xFF;
+    flash[0x605C] = 0x00;
+
+    struct { int16_t val; uint16_t addr; } imu_cal[] = {
+        { 0,      0x6098 }, { 0,      0x609A }, { 0,      0x609C },
+        { 0,      0x609E }, { 0,      0x60A0 }, { 0,      0x60A2 },
+        { 0x1000, 0x60A4 }, { 0x1000, 0x60A6 }, { 0x1000, 0x60A8 },
+        { 0x2000, 0x60AA }, { 0x2000, 0x60AC }, { 0x2000, 0x60AE },
+    };
+    for (auto& c : imu_cal) {
+        flash[c.addr]     = c.val & 0xFF;
+        flash[c.addr + 1] = (c.val >> 8) & 0xFF;
+    }
+
+    g_spi_initialized[ctrl] = true;
+}
+
+static void set_identity_in_0x81(uint8_t* resp_81, int ctrl) {
+    const uint8_t* mac = CTRL_MAC_BE[ctrl];
+    resp_81[4] = mac[0]; resp_81[5] = mac[1]; resp_81[6] = mac[2];
+    resp_81[7] = mac[3]; resp_81[8] = mac[4]; resp_81[9] = mac[5];
+}
+
+static void build_get_device_info_response(uint8_t* out, int ctrl) {
+    memset(out, 0, 36);
+    out[0] = 0x03; // firmware major
+    out[1] = 0x48; // firmware minor
+    out[2] = 0x03; // Pro Controller
+    out[3] = 0x02; // hardware model
+
+    const uint8_t* mac = CTRL_MAC_BE[ctrl];
+    out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3];
+    out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
+
+    out[10] = 0x03;
+    out[11] = 0x01;
+}
+
+static void fill_neutral_controls(ProInputReport30& r) {
+    r.conn_info = 0x8E;
+    r.left_stick[0]  = 0x00; r.left_stick[1]  = 0x08; r.left_stick[2]  = 0x80;
+    r.right_stick[0] = 0x00; r.right_stick[1] = 0x08; r.right_stick[2] = 0x80;
+    r.vibrator = 0x00;
+}
+
+static void fill_neutral_controls(ProInputReport21& r) {
+    r.conn_info = 0x8E;
+    r.left_stick[0]  = 0x00; r.left_stick[1]  = 0x08; r.left_stick[2]  = 0x80;
+    r.right_stick[0] = 0x00; r.right_stick[1] = 0x08; r.right_stick[2] = 0x80;
+    r.vibrator = 0x00;
+}
+
+static uint16_t axis8_to_12(uint8_t v) {
+    return (uint16_t)((uint32_t)v * 4095u / 255u);
+}
+
+static void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8) {
+    uint16_t x = axis8_to_12(x8);
+    uint16_t y = axis8_to_12(y8);
+    out[0] = x & 0xFF;
+    out[1] = ((x >> 8) & 0x0F) | ((y & 0x0F) << 4);
+    out[2] = (y >> 4) & 0xFF;
+}
+
+static bool input_is_neutral(const HIDReport& r) {
+    return r.buttons == 0 && r.hat == HAT_NEUTRAL &&
+           r.lx == 128 && r.ly == 128 && r.rx == 128 && r.ry == 128;
+}
+
+static bool motion_is_neutral(const MotionReport& m) {
+    return std::abs((int)m.ax) < 64 && std::abs((int)m.ay) < 64 && std::abs((int)m.az) < 64 &&
+           std::abs((int)m.gx) < 64 && std::abs((int)m.gy) < 64 && std::abs((int)m.gz) < 64;
+}
+
+static bool extended_is_neutral(const ExtendedHIDReport& r) {
+    return input_is_neutral(r.input) && (!r.has_motion || motion_is_neutral(r.motion));
+}
+
+static void hat_to_pro_buttons(uint8_t hat, uint8_t buttons[3]) {
+    bool up = false, down = false, left = false, right = false;
+    switch (hat) {
+        case HAT_N:  up = true; break;
+        case HAT_NE: up = true; right = true; break;
+        case HAT_E:  right = true; break;
+        case HAT_SE: down = true; right = true; break;
+        case HAT_S:  down = true; break;
+        case HAT_SW: down = true; left = true; break;
+        case HAT_W:  left = true; break;
+        case HAT_NW: up = true; left = true; break;
+        default: break;
+    }
+    if (down)  buttons[2] |= 0x01;
+    if (up)    buttons[2] |= 0x02;
+    if (right) buttons[2] |= 0x04;
+    if (left)  buttons[2] |= 0x08;
+}
+
+static void build_standard_report(const ExtendedHIDReport& src, uint8_t timer, ProInputReport30& out) {
+    memset(&out, 0, sizeof(out));
+    out.id = RID_INPUT_STANDARD;
+    out.timer = timer;
+    fill_neutral_controls(out);
+
+    const HIDReport& in = src.input;
+    if (in.buttons & BTN_Y)       out.buttons[0] |= 0x01;
+    if (in.buttons & BTN_X)       out.buttons[0] |= 0x02;
+    if (in.buttons & BTN_B)       out.buttons[0] |= 0x04;
+    if (in.buttons & BTN_A)       out.buttons[0] |= 0x08;
+    if (in.buttons & BTN_R)       out.buttons[0] |= 0x40;
+    if (in.buttons & BTN_ZR)      out.buttons[0] |= 0x80;
+
+    if (in.buttons & BTN_MINUS)   out.buttons[1] |= 0x01;
+    if (in.buttons & BTN_PLUS)    out.buttons[1] |= 0x02;
+    if (in.buttons & BTN_RSTICK)  out.buttons[1] |= 0x04;
+    if (in.buttons & BTN_LSTICK)  out.buttons[1] |= 0x08;
+    if (in.buttons & BTN_HOME)    out.buttons[1] |= 0x10;
+    if (in.buttons & BTN_CAPTURE) out.buttons[1] |= 0x20;
+
+    hat_to_pro_buttons(in.hat, out.buttons);
+    if (in.buttons & BTN_L)       out.buttons[2] |= 0x40;
+    if (in.buttons & BTN_ZL)      out.buttons[2] |= 0x80;
+
+    pack_stick_12(out.left_stick,  in.lx, in.ly);
+    pack_stick_12(out.right_stick, in.rx, in.ry);
+
+    MotionReport m = src.motion;
+    if (!src.has_motion) m.reset();
+
+    out.accel_x_0 = m.ax; out.accel_y_0 = m.ay; out.accel_z_0 = m.az;
+    out.gyro_x_0  = m.gx; out.gyro_y_0  = m.gy; out.gyro_z_0  = m.gz;
+    out.accel_x_1 = m.ax; out.accel_y_1 = m.ay; out.accel_z_1 = m.az;
+    out.gyro_x_1  = m.gx; out.gyro_y_1  = m.gy; out.gyro_z_1  = m.gz;
+    out.accel_x_2 = m.ax; out.accel_y_2 = m.ay; out.accel_z_2 = m.az;
+    out.gyro_x_2  = m.gx; out.gyro_y_2  = m.gy; out.gyro_z_2  = m.gz;
+}
+
+static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply) {
+    memset(reply->reply_data, 0, sizeof(reply->reply_data));
+    reply->ack = 0x80;
+    reply->subcmd_id = subcmd;
+
+    switch (subcmd) {
+    case CMD_BT_MANUAL_PAIRING:
+        reply->ack = 0x81;
+        reply->reply_data[0] = 0x03;
+        reply->reply_data[1] = 0x01;
+        return 2;
+
+    case CMD_GET_DEVICE_INFO: {
+        uint8_t info[36];
+        build_get_device_info_response(info, rt.ctrl);
+        reply->ack = 0x82;
+        memcpy(reply->reply_data, info, 36);
+        return 36;
+    }
+
+    case CMD_SET_DATA_FORMAT:
+        rt.full_report_enabled = true;
+        reply->ack = 0x80;
+        reply->reply_data[0] = cmd_len > 0 ? cmd_data[0] : 0x30;
+        return 1;
+
+    case CMD_TRIGGER_BUTTONS:
+    case CMD_SET_SHIP_MODE:
+    case CMD_SPI_FLASH_WRITE:
+    case CMD_SET_IMU_SENS:
+        reply->ack = 0x80;
+        return 0;
+
+    case CMD_SPI_FLASH_READ: {
+        if (cmd_len < 5) {
+            reply->ack = 0x00;
+            return 0;
+        }
+        uint32_t addr = ((uint32_t)cmd_data[0]) |
+                        ((uint32_t)cmd_data[1] << 8) |
+                        ((uint32_t)cmd_data[2] << 16) |
+                        ((uint32_t)cmd_data[3] << 24);
+        uint8_t size = cmd_data[4];
+        if (size > 44) size = 44;
+
+        reply->ack = 0x90;
+        reply->reply_data[0] = cmd_data[0];
+        reply->reply_data[1] = cmd_data[1];
+        reply->reply_data[2] = cmd_data[2];
+        reply->reply_data[3] = cmd_data[3];
+        reply->reply_data[4] = size;
+
+        uint8_t* flash = g_spi_flash[rt.ctrl];
+        if (addr < SPI_FLASH_SIZE) {
+            size_t to_copy = std::min((size_t)size, (size_t)(SPI_FLASH_SIZE - addr));
+            memcpy(reply->reply_data + 5, flash + addr, to_copy);
+            if (to_copy < size) memset(reply->reply_data + 5 + to_copy, 0xFF, size - to_copy);
+        } else {
+            memset(reply->reply_data + 5, 0xFF, size);
+        }
+        if (g_verbose) std::printf("[pro%d] SPI read addr=0x%04X size=%u\n", rt.ctrl + 1, addr, size);
+        return 5 + size;
+    }
+
+    case CMD_SET_NFC_IR_CONFIG:
+        reply->ack = 0xA0;
+        reply->subcmd_id = 0x21;
+        reply->reply_data[0] = 0x01;
+        reply->reply_data[1] = 0x00;
+        reply->reply_data[2] = 0xFF;
+        reply->reply_data[3] = 0x00;
+        reply->reply_data[4] = 0x03;
+        reply->reply_data[5] = 0x00;
+        reply->reply_data[6] = 0x05;
+        reply->reply_data[7] = 0x01;
+        return 8;
+
+    case CMD_SET_PLAYER_LIGHTS:
+    case CMD_ENABLE_IMU:
+    case CMD_ENABLE_VIBRATION:
+        reply->ack = 0x80;
+        reply->reply_data[0] = cmd_len > 0 ? cmd_data[0] : 0;
+        return 1;
+
+    default:
+        reply->ack = 0x00;
+        return 0;
+    }
+}
+
+static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || len < 10)
+        return;
+
+    static const uint8_t neutral_rumble[8] = {0x00,0x01,0x40,0x40,0x00,0x01,0x40,0x40};
+    const uint8_t* rb = packet + 2;
+    bool all_zero = true;
+    for (int i = 0; i < 8; ++i) if (rb[i] != 0) { all_zero = false; break; }
+    bool neutral = all_zero || memcmp(rb, neutral_rumble, 8) == 0;
+
+    uint8_t low = 0, high = 0;
+    if (!neutral) {
+        for (int i = 0; i < 4; ++i) low  = std::max(low,  rb[i]);
+        for (int i = 4; i < 8; ++i) high = std::max(high, rb[i]);
+        low = std::max<uint8_t>(low, 80);
+        high = std::max<uint8_t>(high, 80);
+    }
+
+    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+    RumblePacket& ev = g_clients[client_idx].rumble[sub_idx];
+    ev.magic = RUMBLE_MAGIC;
+    ev.subpad = (uint8_t)sub_idx;
+    ev.low_freq = neutral ? 0 : low;
+    ev.high_freq = neutral ? 0 : high;
+    ev.duration_10ms = neutral ? 0 : 6;
+    g_clients[client_idx].rumble_seq[sub_idx]++;
+}
+
 // ── Smart Multiplexer HID Writer Thread ───────────────────────────────────────
 static void writer_thread(int hz) {
+    for (int i = 0; i < 4; ++i) init_spi_flash(i);
+
     const auto tick = us(1'000'000 / hz);
     int fds[4] = {-1, -1, -1, -1};
     std::string devs[4] = {"/dev/hidg0", "/dev/hidg1", "/dev/hidg2", "/dev/hidg3"};
     bool was_connected = false;
 
-    // Tracks which physical Switch port is claimed by which (Client, SubController)
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[4];
-
-    auto is_neutral = [](const HIDReport& r) {
-        return r.buttons == 0 && r.hat == 8 && r.lx == 128 && r.ly == 128 && r.rx == 128 && r.ry == 128;
-    };
+    ControllerRuntime rt[4];
+    for (int i = 0; i < 4; ++i) rt[i].ctrl = i;
 
     while (g_running.load(std::memory_order_relaxed)) {
         bool all_open = true;
-        for(int i=0; i<4; ++i) {
+        for (int i = 0; i < 4; ++i) {
             if (fds[i] < 0) {
-                fds[i] = open(devs[i].c_str(), O_WRONLY);
-                if (fds[i] < 0) all_open = false;
+                fds[i] = open(devs[i].c_str(), O_RDWR | O_NONBLOCK);
+                if (fds[i] >= 0) {
+                    rt[i].fd = fds[i];
+                    rt[i].timer = 0;
+                    rt[i].full_report_enabled = false;
+                    rt[i].pending_subcmd_reply = false;
+                    memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
+                } else {
+                    all_open = false;
+                }
             }
         }
 
@@ -107,47 +493,47 @@ static void writer_thread(int hz) {
             std::this_thread::sleep_for(ms(500));
             continue;
         }
-        
+
         if (g_verbose || !was_connected)
-            std::puts("4x /dev/hidg* opened");
+            std::puts("4x Pro Controller /dev/hidg* opened");
         was_connected = true;
 
         auto next = Clock::now() + tick;
-        MultiReport prev{}; prev.p1.buttons = 0xFFFF; // Force first write
         bool error_shown = false;
         bool timeout_printed[MAX_CLIENTS] = {};
+        uint64_t writes_this_second = 0;
+        auto last_rate_log = Clock::now();
 
         while (g_running.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_until(next);
-            auto now = Clock::now(); next = std::max(next + tick, now + tick);
+            auto now = Clock::now();
+            next = std::max(next + tick, now + tick);
 
-            MultiReport r;
-            r.reset(); // Base neutral state
-
-            // Per-slot snapshot (each slot locked independently)
             uint64_t now_stamp = now_us();
-            bool active_snap[MAX_CLIENTS];
-            HIDReport report_snap[MAX_CLIENTS][4];
+            bool active_snap[MAX_CLIENTS] = {};
+            ExtendedHIDReport report_snap[MAX_CLIENTS][4];
+            for (int c = 0; c < MAX_CLIENTS; ++c)
+                for (int s = 0; s < 4; ++s)
+                    report_snap[c][s].reset();
 
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 std::lock_guard<std::mutex> lk(g_mtx[c]);
                 if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > WATCHDOG_MS * 1000ULL)) {
                     g_clients[c].active = false;
                     if (g_verbose && !timeout_printed[c]) {
-                        std::printf("PC %d timed out and was disconnected.\n", c+1);
+                        std::printf("PC %d timed out and was disconnected.\n", c + 1);
                         timeout_printed[c] = true;
                     }
                 } else if (g_clients[c].active) {
-                    timeout_printed[c] = false; // reset flag if client recovers
+                    timeout_printed[c] = false;
                 }
                 active_snap[c] = g_clients[c].active;
-                HIDReport* src[4] = { &g_clients[c].report.p1, &g_clients[c].report.p2,
-                                       &g_clients[c].report.p3, &g_clients[c].report.p4 };
-                for (int s = 0; s < 4; ++s)
-                    report_snap[c][s] = *src[s];
+                report_snap[c][0] = g_clients[c].report.p1;
+                report_snap[c][1] = g_clients[c].report.p2;
+                report_snap[c][2] = g_clients[c].report.p3;
+                report_snap[c][3] = g_clients[c].report.p4;
             }
 
-            // 2. Free hardware slots mapped to inactive clients (snapshot, no lock needed)
             for (int h = 0; h < 4; ++h) {
                 if (hw_slots[h].client_idx != -1 && !active_snap[hw_slots[h].client_idx]) {
                     hw_slots[h].client_idx = -1;
@@ -155,28 +541,23 @@ static void writer_thread(int hz) {
                 }
             }
 
-            // 3. Auto-assign unmapped active inputs to free hardware slots
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!active_snap[c]) continue;
-
-                HIDReport* subs[4] = { &report_snap[c][0], &report_snap[c][1],
-                                        &report_snap[c][2], &report_snap[c][3] };
-
                 for (int s = 0; s < 4; ++s) {
                     bool mapped = false;
                     for (int h = 0; h < 4; ++h) {
                         if (hw_slots[h].client_idx == c && hw_slots[h].sub_idx == s) {
-                            mapped = true; break;
+                            mapped = true;
+                            break;
                         }
                     }
-
-                    if (!mapped && !is_neutral(*subs[s])) {
+                    if (!mapped && !extended_is_neutral(report_snap[c][s])) {
                         for (int h = 0; h < 4; ++h) {
                             if (hw_slots[h].client_idx == -1) {
                                 hw_slots[h].client_idx = c;
                                 hw_slots[h].sub_idx = s;
                                 if (g_verbose)
-                                    std::printf("Map -> PC %d (Pad %d) took Switch Port %d\n", c+1, s+1, h+1);
+                                    std::printf("Map -> PC %d (Pad %d) took Switch Pro Port %d\n", c + 1, s + 1, h + 1);
                                 break;
                             }
                         }
@@ -184,41 +565,107 @@ static void writer_thread(int hz) {
                 }
             }
 
-            // 4. Construct the final report from snapshot
-            HIDReport* out_subs[4] = { &r.p1, &r.p2, &r.p3, &r.p4 };
+            ExtendedHIDReport out_reports[4];
+            for (int h = 0; h < 4; ++h) out_reports[h].reset();
             for (int h = 0; h < 4; ++h) {
                 if (hw_slots[h].client_idx != -1) {
-                    int c = hw_slots[h].client_idx;
-                    int s = hw_slots[h].sub_idx;
-                    *out_subs[h] = report_snap[c][s];
+                    out_reports[h] = report_snap[hw_slots[h].client_idx][hw_slots[h].sub_idx];
                 }
             }
 
-            // 5. Send to physical USB gadget drivers efficiently
             bool ok = true;
-            static_assert(sizeof(HIDReport) == 8, "HIDReport size mismatch with HID gadget descriptor");
-            if (r.p1 != prev.p1) { if(write(fds[0], &r.p1, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
-            if (r.p2 != prev.p2) { if(write(fds[1], &r.p2, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
-            if (r.p3 != prev.p3) { if(write(fds[2], &r.p3, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
-            if (r.p4 != prev.p4) { if(write(fds[3], &r.p4, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
+            for (int h = 0; h < 4; ++h) {
+                uint8_t write_buf[PRO_REPORT_SIZE] = {};
+                if (rt[h].pending_subcmd_reply) {
+                    rt[h].pending_reply.id = RID_INPUT_SUBCMD;
+                    rt[h].pending_reply.timer = rt[h].timer++;
+                    fill_neutral_controls(rt[h].pending_reply);
+                    memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
+                    rt[h].pending_subcmd_reply = false;
+                } else if (rt[h].full_report_enabled) {
+                    ProInputReport30 std_in{};
+                    build_standard_report(out_reports[h], rt[h].timer++, std_in);
+                    memcpy(write_buf, &std_in, sizeof(ProInputReport30));
+                } else {
+                    continue;
+                }
+
+                ssize_t w = write(fds[h], write_buf, PRO_REPORT_SIZE);
+                if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
+                else if (w > 0) writes_this_second++;
+            }
+
+            for (int h = 0; h < 4; ++h) {
+                struct pollfd pfd = {fds[h], POLLIN, 0};
+                uint8_t read_buf[PRO_REPORT_SIZE];
+                int guard = 0;
+                while (guard++ < 8 && poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                    ssize_t r = read(fds[h], read_buf, PRO_REPORT_SIZE);
+                    if (r <= 0) break;
+
+                    uint8_t id = read_buf[0];
+                    if (id == RID_OUTPUT_CMD) {
+                        if (hw_slots[h].client_idx != -1)
+                            publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r);
+
+                        uint8_t subcmd_id = read_buf[10];
+                        size_t subcmd_data_len = r > 11 ? std::min((size_t)53, (size_t)(r - 11)) : 0;
+                        memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
+                        int reply_len = handle_subcommand(
+                            rt[h], subcmd_id,
+                            subcmd_data_len > 0 ? read_buf + 11 : nullptr,
+                            subcmd_data_len,
+                            &rt[h].pending_reply
+                        );
+                        rt[h].pending_subcmd_reply = (reply_len >= 0);
+                        if (g_verbose) {
+                            std::printf("[pro%d] subcmd 0x%02X reply=0x%02X 0x%02X\n",
+                                        h + 1, subcmd_id, rt[h].pending_reply.ack, rt[h].pending_reply.subcmd_id);
+                        }
+                    } else if (id == RID_OUTPUT_RUMBLE) {
+                        if (hw_slots[h].client_idx != -1)
+                            publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r);
+                    } else if (id == 0x80) {
+                        uint8_t resp_81[PRO_REPORT_SIZE] = {};
+                        resp_81[0] = 0x81;
+                        resp_81[1] = read_buf[1];
+                        resp_81[2] = 0x00;
+                        resp_81[3] = 0x03;
+                        set_identity_in_0x81(resp_81, h);
+                        if (read_buf[1] == 0x04) rt[h].full_report_enabled = true;
+                        if (read_buf[1] == 0x05) rt[h].full_report_enabled = false;
+                        ssize_t w = write(fds[h], resp_81, PRO_REPORT_SIZE);
+                        if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
+                        if (g_verbose)
+                            std::printf("[pro%d] init ACK cmd=0x%02X\n", h + 1, read_buf[1]);
+                    } else {
+                        if (g_verbose && id != 0x00)
+                            std::printf("[pro%d] unknown output report id=0x%02X len=%zd\n", h + 1, id, r);
+                    }
+                }
+            }
 
             if (!ok) {
                 if (!error_shown) { std::puts("Switch disconnected — waiting for reconnect..."); error_shown = true; }
-                for(int i=0; i<4; ++i) { close(fds[i]); fds[i] = -1; }
-                std::this_thread::sleep_for(ms(1000)); break;
+                for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
+                std::this_thread::sleep_for(ms(1000));
+                break;
             }
-            prev = r;
-            ++g_hid_writes;
+
+            auto now_log = Clock::now();
+            if (g_verbose && now_log - last_rate_log >= ms(1000)) {
+                std::printf("pro_hid_writes/sec=%llu\n", (unsigned long long)writes_this_second);
+                writes_this_second = 0;
+                last_rate_log = now_log;
+            }
+            if (writes_this_second) ++g_hid_writes;
         }
     }
-    
-    // Shutdown securely by neutralizing all ports
-    MultiReport neutral{}; neutral.reset();
-    for(int i=0; i<4; ++i) { 
-        if (fds[i] >= 0) { ssize_t _u = write(fds[i], &neutral.p1, sizeof(HIDReport)); (void)_u; close(fds[i]); }
+
+    for (int i = 0; i < 4; ++i) {
+        if (fds[i] >= 0) close(fds[i]);
     }
 }
-
 
 // ── Per-IP rate limiter ──────────────────────────────────────────────────────
 static std::mutex g_rate_mtx;
@@ -423,9 +870,11 @@ static const char INDEX_HTML[] =
     "    </div>\n"
     "<script>\n"
     "const PROTO_MAGIC = 0x4E535743;\n"
-    "const PROTO_VERSION = 4;\n"
+    "const PROTO_VERSION = 5;\n"
+    "const RUMBLE_MAGIC = 0x4E535652;\n"
     "const SECRET = \"nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY\";\n"
-    "const PACKET_SIZE = 68;\n"
+    "const EXT_REPORT_SIZE = 24;\n"
+    "const PACKET_SIZE = 116;\n"
     "const PACKET_AUTH_SIZE = 52;\n"
     "const BTN_Y = 1<<0, BTN_B = 1<<1, BTN_A = 1<<2, BTN_X = 1<<3;\n"
     "const BTN_L = 1<<4, BTN_R = 1<<5, BTN_ZL = 1<<6, BTN_ZR = 1<<7;\n"
@@ -436,6 +885,7 @@ static const char INDEX_HTML[] =
     "let isConnected = false;\n"
     "let loopId = null;\n"
     "let seqCounter = 0;\n"
+    "let lastActivePads = [];\n"
     "const keysDown = new Set();\n"
     "const defaultBindings = {\n"
     "    'BTN_Y': 'KeyZ', 'BTN_B': 'KeyX', 'BTN_A': 'KeyV', 'BTN_X': 'KeyC',\n"
@@ -539,11 +989,31 @@ static const char INDEX_HTML[] =
     "        lx: s1.lx !== 128 ? s1.lx : s2.lx, ly: s1.ly !== 128 ? s1.ly : s2.ly,\n"
     "        rx: s1.rx !== 128 ? s1.rx : s2.rx, ry: s1.ry !== 128 ? s1.ry : s2.ry };\n"
     "}\n"
+    "async function playRumble(index, low, high, durationMs) {\n"
+    "    const strong = Math.max(low, high) / 255;\n"
+    "    const weak = Math.min(low, high) / 255;\n"
+    "    const pad = lastActivePads[index];\n"
+    "    try {\n"
+    "        if (pad && pad.vibrationActuator && pad.vibrationActuator.playEffect) {\n"
+    "            await pad.vibrationActuator.playEffect('dual-rumble', { duration: durationMs, strongMagnitude: strong, weakMagnitude: weak });\n"
+    "            return;\n"
+    "        }\n"
+    "    } catch(e) {}\n"
+    "    if (navigator.vibrate && durationMs > 0 && (low || high)) navigator.vibrate(durationMs);\n"
+    "}\n"
+    "function handleRumbleMessage(data) {\n"
+    "    if (!(data instanceof ArrayBuffer) || data.byteLength < 8) return;\n"
+    "    const v = new DataView(data);\n"
+    "    if (v.getUint32(0, true) !== RUMBLE_MAGIC) return;\n"
+    "    const idx = v.getUint8(4), low = v.getUint8(5), high = v.getUint8(6), dur = v.getUint8(7) * 10;\n"
+    "    playRumble(idx, low, high, dur);\n"
+    "}\n"
     "function buildAndSendPacket() {\n"
     "    if (!ws || ws.readyState !== WebSocket.OPEN) return;\n"
     "    const rawGamepads = navigator.getGamepads ? navigator.getGamepads() : [];\n"
     "    const activePads = [];\n"
     "    for (let i = 0; i < rawGamepads.length; i++) if (rawGamepads[i]) activePads.push(rawGamepads[i]);\n"
+    "    lastActivePads = activePads;\n"
     "    const mode = parseInt(document.getElementById('kbMode').value);\n"
     "    const kbState = getKeyboardState();\n"
     "    let slotStates = [null, null, null, null];\n"
@@ -579,12 +1049,13 @@ static const char INDEX_HTML[] =
     "        let finalButtons = slotStates[p].buttons;\n"
     "        if (finalButtons & BTN_CAPTURE) finalButtons &= ~(BTN_PLUS | BTN_MINUS);\n"
     "        if (finalButtons & BTN_HOME) finalButtons &= ~(BTN_LSTICK | BTN_RSTICK);\n"
-    "        const offset = 20 + (p * 8);\n"
+    "        const offset = 20 + (p * EXT_REPORT_SIZE);\n"
     "        view.setUint16(offset, finalButtons, true);\n"
     "        view.setUint8(offset + 2, slotStates[p].hat);\n"
     "        view.setUint8(offset + 3, slotStates[p].lx); view.setUint8(offset + 4, slotStates[p].ly);\n"
     "        view.setUint8(offset + 5, slotStates[p].rx); view.setUint8(offset + 6, slotStates[p].ry);\n"
     "        view.setUint8(offset + 7, 0);\n"
+    "        for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(offset + k, 0);\n"
     "    }\n"
     "    ws.send(buffer);\n"
     "}\n"
@@ -775,9 +1246,11 @@ static const char MOBILE_HTML[] =
     "    }\n"
     "}\n"
     "applyLayout();\n"
-    "const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 4, PACKET_SIZE = 68;\n"
+    "const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 5, RUMBLE_MAGIC = 0x4E535652;\n"
+    "const EXT_REPORT_SIZE = 24, PACKET_SIZE = 116;\n"
     "let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;\n"
     "let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };\n"
+    "let motion = { enabled:false, ax:0, ay:0, az:0, gx:0, gy:0, gz:0 };\n"
     "const btnTouches = new Map();\n"
     "document.querySelectorAll('.btn-map').forEach(el => {\n"
     "    const bit = parseInt(el.dataset.btn);\n"
@@ -856,6 +1329,32 @@ static const char MOBILE_HTML[] =
     "        }\n"
     "    }, {passive:false});\n"
     "});\n"
+    "function clamp16(v) { v = Math.round(v || 0); return Math.max(-32768, Math.min(32767, v)); }\n"
+    "async function enableMotion() {\n"
+    "    try {\n"
+    "        if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission) {\n"
+    "            const r = await DeviceMotionEvent.requestPermission();\n"
+    "            if (r !== 'granted') return;\n"
+    "        }\n"
+    "        window.addEventListener('devicemotion', e => {\n"
+    "            const a = e.accelerationIncludingGravity || e.acceleration || {};\n"
+    "            const rr = e.rotationRate || {};\n"
+    "            motion.enabled = true;\n"
+    "            motion.ax = clamp16((a.x || 0) / 9.80665 * 4096);\n"
+    "            motion.ay = clamp16((a.y || 0) / 9.80665 * 4096);\n"
+    "            motion.az = clamp16((a.z || 0) / 9.80665 * 4096);\n"
+    "            motion.gx = clamp16((rr.beta  || 0) * 16);\n"
+    "            motion.gy = clamp16((rr.gamma || 0) * 16);\n"
+    "            motion.gz = clamp16((rr.alpha || 0) * 16);\n"
+    "        }, {passive:true});\n"
+    "    } catch(e) {}\n"
+    "}\n"
+    "function handleRumbleMessage(data) {\n"
+    "    if (!(data instanceof ArrayBuffer) || data.byteLength < 8) return;\n"
+    "    const v = new DataView(data); if (v.getUint32(0, true) !== RUMBLE_MAGIC) return;\n"
+    "    const low = v.getUint8(5), high = v.getUint8(6), dur = v.getUint8(7) * 10;\n"
+    "    if (navigator.vibrate && dur > 0 && (low || high)) navigator.vibrate(dur);\n"
+    "}\n"
     "function setupJoystick(baseId, knobId, axisX, axisY) {\n"
     "    const base = document.getElementById(baseId), knob = document.getElementById(knobId);\n"
     "    if(!base) return;\n"
@@ -885,19 +1384,26 @@ static const char MOBILE_HTML[] =
     "    const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);\n"
     "    view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);\n"
     "    view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now()*1000), true);\n"
-    "    view.setUint16(20, state.buttons, true); view.setUint8(22, state.hat);\n"
-    "    view.setUint8(23, state.lx); view.setUint8(24, state.ly); view.setUint8(25, state.rx); view.setUint8(26, state.ry);\n"
+    "    let off = 20;\n"
+    "    view.setUint16(off, state.buttons, true); view.setUint8(off+2, state.hat);\n"
+    "    view.setUint8(off+3, state.lx); view.setUint8(off+4, state.ly); view.setUint8(off+5, state.rx); view.setUint8(off+6, state.ry); view.setUint8(off+7, 0);\n"
+    "    view.setInt16(off+8, motion.ax, true); view.setInt16(off+10, motion.ay, true); view.setInt16(off+12, motion.az, true);\n"
+    "    view.setInt16(off+14, motion.gx, true); view.setInt16(off+16, motion.gy, true); view.setInt16(off+18, motion.gz, true);\n"
+    "    view.setUint8(off+20, motion.enabled ? 1 : 0); view.setUint8(off+21, 0); view.setUint8(off+22, 0); view.setUint8(off+23, 0);\n"
     "    for(let p=1; p<4; p++) {\n"
-    "        let off = 20 + (p*8); view.setUint16(off, 0, true); view.setUint8(off+2, 8);\n"
-    "        view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128);\n"
+    "        off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);\n"
+    "        view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);\n"
+    "        for(let k=8; k<EXT_REPORT_SIZE; k++) view.setUint8(off+k, 0);\n"
     "    }\n"
     "    ws.send(buffer);\n"
     "}\n"
-    "document.getElementById('btnConnect').onclick = () => {\n"
+    "document.getElementById('btnConnect').onclick = async () => {\n"
     "    if (isConnected) { ws.close(); return; }\n"
     "    if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen().catch(()=>{}); }\n"
+    "    await enableMotion();\n"
     "    const wsUrl = window.location.protocol === 'https:' ? `wss://${window.location.host}` : `ws://${window.location.host}`;\n"
     "    ws = new WebSocket(wsUrl); ws.binaryType = \"arraybuffer\";\n"
+    "    ws.onmessage = (ev) => handleRumbleMessage(ev.data);\n"
     "    ws.onopen = () => {\n"
     "        isConnected = true; const btn = document.getElementById('btnConnect');\n"
     "        btn.innerText = \"Connected\"; btn.classList.add('connected');\n"
@@ -1208,6 +1714,7 @@ struct WebClient {
     uint32_t ws_seq = 0;
     bool     ws_first = true;
     uint64_t ws_last_rx = 0;
+    uint32_t last_rumble_seq[4] = {};
 
     // Async write queue (heap-allocated, freed after write completes or on cleanup)
     uint8_t *wbuf = nullptr;
@@ -1215,6 +1722,58 @@ struct WebClient {
     size_t   woff = 0;
     State    after_write = CLOSED;
 };
+
+static void legacy_multi_to_extended(const MultiReport& in, ExtendedMultiReport& out) {
+    out.reset();
+    out.p1.input = in.p1;
+    out.p2.input = in.p2;
+    out.p3.input = in.p3;
+    out.p4.input = in.p4;
+}
+
+static bool send_ws_binary_frame(WebClient* c, const uint8_t* payload, size_t len) {
+    if (!c || c->state != WebClient::WS_ACTIVE || c->fd < 0) return false;
+
+    uint8_t frame[16 + sizeof(RumblePacket)] = {};
+    size_t hdr = 0;
+    frame[0] = 0x82; // FIN + binary
+    if (len < 126) {
+        frame[1] = (uint8_t)len;
+        hdr = 2;
+    } else {
+        return false;
+    }
+    memcpy(frame + hdr, payload, len);
+    ssize_t w = write(c->fd, frame, hdr + len);
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+    return w == (ssize_t)(hdr + len);
+}
+
+static void flush_rumble_to_ws(WebClient* c) {
+    if (!c || c->state != WebClient::WS_ACTIVE || c->ws_slot < 0) return;
+
+    RumblePacket pending[4]{};
+    uint32_t seqs[4]{};
+    bool has[4]{};
+
+    {
+        std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
+        for (int s = 0; s < 4; ++s) {
+            uint32_t seq = g_clients[c->ws_slot].rumble_seq[s];
+            if (seq != c->last_rumble_seq[s]) {
+                pending[s] = g_clients[c->ws_slot].rumble[s];
+                seqs[s] = seq;
+                has[s] = true;
+            }
+        }
+    }
+
+    for (int s = 0; s < 4; ++s) {
+        if (!has[s]) continue;
+        if (send_ws_binary_frame(c, (const uint8_t*)&pending[s], sizeof(RumblePacket)))
+            c->last_rumble_seq[s] = seqs[s];
+    }
+}
 
 
 // ── Process one complete WebSocket frame from client buffer ──────────────────
@@ -1252,7 +1811,6 @@ static size_t process_ws_frame(WebClient *c) {
     uint8_t *payload = buf + hdr_sz;
     size_t   total   = hdr_sz + flen;
 
-    // Control frames (ping / close) – handle before length validation
     if (opcode == 9) { // ping → pong
         if (masked)
             for (uint64_t i = 0; i < flen; i++) payload[i] ^= mask[i & 3];
@@ -1266,44 +1824,49 @@ static size_t process_ws_frame(WebClient *c) {
         c->state = WebClient::CLOSED;
         return total;
     }
-    if (opcode == 0) { // continuation frames not supported (all messages are single-frame at PACKET_SIZE)
+    if (opcode == 0) {
         c->state = WebClient::CLOSED;
         return total;
     }
-    if (opcode != 2) return total;          // skip non-binary
-    if (flen != PACKET_SIZE) {              // invalid binary frame → disconnect
+    if (opcode != 2) return total;
+
+    if (flen != PACKET_SIZE && flen != WEB_PACKET_SIZE) {
         c->state = WebClient::CLOSED;
         return total;
     }
 
-    // Unmask payload
     if (masked)
         for (uint64_t i = 0; i < flen; i++) payload[i] ^= mask[i & 3];
 
-    // ── Parse packet ──────────────────────────────────────────────────────
     uint32_t magic; memcpy(&magic, payload, 4);
     if (magic != PROTO_MAGIC) return total;
     uint8_t ver; memcpy(&ver, payload + 4, 1);
-    if (ver != PROTO_VERSION) return total;
     uint8_t flags; memcpy(&flags, payload + 5, 1);
     bool is_reset = (flags & FLAG_RESET);
     uint32_t seq; memcpy(&seq, payload + 8, 4);
 
-    // Sequence anti-replay (modular comparison handles uint32 wrap)
+    ExtendedMultiReport report;
+    report.reset();
+
+    if (ver == PROTO_VERSION && flen == PACKET_SIZE) {
+        MultiReport legacy;
+        memcpy(&legacy, payload + 20, sizeof(MultiReport));
+        legacy_multi_to_extended(legacy, report);
+    } else if (ver == WEB_PROTO_VERSION && flen == WEB_PACKET_SIZE) {
+        memcpy(&report, payload + 20, sizeof(ExtendedMultiReport));
+    } else {
+        return total;
+    }
+
     if (!c->ws_first && !is_reset && (int32_t)(seq - c->ws_seq) < 0) return total;
     c->ws_first = false;
     c->ws_seq = seq + 1;
 
-    // Decode report starting at byte 20
-    MultiReport report;
-    memcpy(&report, payload + 20, sizeof(MultiReport));
     uint64_t now = now_us();
 
-    // Local watchdog (no shared state)
     if (c->ws_slot >= 0 && (now - c->ws_last_rx > WATCHDOG_MS * 1000ULL))
         c->ws_slot = -1;
 
-    // Verify existing slot is still active or find a free one
     if (c->ws_slot >= 0) {
         std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
         if (!g_clients[c->ws_slot].active)
@@ -1318,6 +1881,8 @@ static size_t process_ws_frame(WebClient *c) {
                 g_clients[i].first_pkt = true;
                 g_clients[i].report.reset();
                 g_clients[i].last_rx_us = now;
+                for (int s = 0; s < 4; ++s)
+                    c->last_rumble_seq[s] = g_clients[i].rumble_seq[s];
                 break;
             }
         }
@@ -1475,6 +2040,11 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
     for (int i = 0; i < MAX_WS_CLIENTS; i++) { pfds[i+1].fd = -1; }
 
     while (g_running.load(std::memory_order_relaxed)) {
+        // Push pending Switch rumble events back to browser/mobile WebSocket clients.
+        for (int i = 0; i < n_clients; i++)
+            if (clients[i].state == WebClient::WS_ACTIVE)
+                flush_rumble_to_ws(&clients[i]);
+
         // Idle WS timeout (30s) and HTTP handshake timeout (5s)
         uint64_t now_ws = now_us();
         for (int i = 0; i < n_clients; i++) {
@@ -1872,7 +2442,7 @@ int main(int argc, char** argv) {
             if (is_reset) {
                 g_clients[client_idx].report.reset();
             } else {
-                g_clients[client_idx].report = pkt.report;
+                legacy_multi_to_extended(pkt.report, g_clients[client_idx].report);
             }
             g_clients[client_idx].last_rx_us = now_us();
         }

@@ -42,3 +42,7 @@ if(MINIUPNPC_FOUND)
     target_include_directories(ns-backend PRIVATE ${MINIUPNPC_INCLUDE_DIRS})
     target_link_libraries(ns-backend PRIVATE ${MINIUPNPC_LIBRARIES})
 endif()
+
+add_executable(test-probe src/probe/test_probe.cpp)
+target_link_libraries(test-probe PRIVATE pthread)
+target_compile_options(test-probe PRIVATE -O2 -Wall -Wextra)
