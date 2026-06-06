@@ -1136,6 +1136,7 @@ static void handle_ws_client(int fd) {
     int assigned_slot = -1;
     uint32_t expected_seq = 0;
     bool first_pkt = true;
+    uint64_t local_last_rx = now_us();
 
     while (g_running.load(std::memory_order_relaxed)) {
         uint8_t hdr[2];
@@ -1190,12 +1191,19 @@ static void handle_ws_client(int fd) {
         // Decode report starting at byte 20
         MultiReport report;
         memcpy(&report, buf + 20, sizeof(MultiReport));
+        uint64_t now = now_us();
 
         // Apply to backend state
         {
             std::lock_guard<std::mutex> lk(g_mtx);
+
+            if (assigned_slot >= 0 && (now - local_last_rx > WATCHDOG_MS * 1000ULL)) {
+                assigned_slot = -1; 
+            }
+
             if (assigned_slot < 0 || !g_clients[assigned_slot].active) {
                 assigned_slot = -1;
+                
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     if (!g_clients[i].active) {
                         assigned_slot = i;
@@ -1214,6 +1222,7 @@ static void handle_ws_client(int fd) {
                 g_clients[assigned_slot].last_rx_us = now_us();
             }
         }
+        local_last_rx = now;
         ++g_pkts_rx;
     }
 
