@@ -64,7 +64,7 @@ static std::string g_usb_serial = "NSBRIDGE000001";
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
-static constexpr int HID_PORT_COUNT = 1;
+static constexpr int HID_PORT_COUNT = 4;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
@@ -1937,8 +1937,8 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     // USB descriptor serial belongs here, not in the controller SPI area.
     if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), g_usb_serial.c_str())) return false;
-    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "Open HID Bridge")) return false;
-    if (!write_text_file(join_path(strings_dir, "product").c_str(), "HID Gamepad Bridge")) return false;
+    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "Nintendo Co., Ltd.")) return false;
+    if (!write_text_file(join_path(strings_dir, "product").c_str(), "Pro Controller")) return false;
 
     if (!write_text_file(join_path(configs_dir, "MaxPower").c_str(), "500")) return false;
     if (!write_text_file(join_path(configs_dir, "bmAttributes").c_str(), "0xA0")) return false;
