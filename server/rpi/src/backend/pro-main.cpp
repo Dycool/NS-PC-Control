@@ -1024,6 +1024,28 @@ static void init_spi_flash(int ctrl) {
     pack_stick_cal_pair(stick_params + 3, STICK_DEADZONE, STICK_RANGE_RATIO);
     memcpy(flash + 0x6086, stick_params, sizeof(stick_params));
 
+    // Factory IMU calibration block.
+    // Some Switch init paths read 0x6020 before/alongside 0x6098. Leaving this
+    // as 0xFF can make the console accept 0x30 reports but ignore or badly
+    // scale the IMU samples. Mirror a sane virtual calibration here too:
+    //   gyro offsets  = 0
+    //   accel offsets = 0
+    //   accel scale   = 0x1000
+    //   gyro scale    = 0x33D0
+    auto put_i16_le = [&](uint16_t addr, int16_t val) {
+        flash[addr]     = (uint8_t)(val & 0xFF);
+        flash[addr + 1] = (uint8_t)((val >> 8) & 0xFF);
+    };
+
+    const int16_t imu_vals[12] = {
+        0, 0, 0,
+        0, 0, 0,
+        0x1000, 0x1000, 0x1000,
+        0x33D0, 0x33D0, 0x33D0
+    };
+    for (int i = 0; i < 12; ++i)
+        put_i16_le((uint16_t)(0x6020 + i * 2), imu_vals[i]);
+
     // Body/grip colors per virtual Pro Controller:
     //   1 = red, 2 = yellow, 3 = blue, 4 = green.
     // Buttons stay white for readability in the Switch UI.
@@ -1040,16 +1062,8 @@ static void init_spi_flash(int ctrl) {
     flash[0x6059] = 0xFF;    flash[0x605A] = 0xFF;    flash[0x605B] = 0xFF;
     flash[0x605C] = 0x00;
 
-    struct { int16_t val; uint16_t addr; } imu_cal[] = {
-        { 0,      0x6098 }, { 0,      0x609A }, { 0,      0x609C },
-        { 0,      0x609E }, { 0,      0x60A0 }, { 0,      0x60A2 },
-        { 0x1000, 0x60A4 }, { 0x1000, 0x60A6 }, { 0x1000, 0x60A8 },
-        { 0x33D0, 0x60AA }, { 0x33D0, 0x60AC }, { 0x33D0, 0x60AE },
-    };
-    for (auto& c : imu_cal) {
-        flash[c.addr]     = c.val & 0xFF;
-        flash[c.addr + 1] = (c.val >> 8) & 0xFF;
-    }
+    for (int i = 0; i < 12; ++i)
+        put_i16_le((uint16_t)(0x6098 + i * 2), imu_vals[i]);
 
     g_spi_initialized[ctrl] = true;
 }
