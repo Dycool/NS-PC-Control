@@ -733,6 +733,56 @@ static void fill_extended_pad(ns::ExtendedHIDReport& dst,
 }
 
 
+// SDL/Windows can occasionally report a held digital button as released for a
+// single frame, especially while HIDAPI is also handling rumble/sensor traffic.
+// A tiny release grace avoids visible "tap cuts" such as Mario Kart drifting
+// dropping R while the physical shoulder is still held. Real releases are only
+// delayed by this many microseconds.
+static constexpr uint64_t SDL_DIGITAL_RELEASE_GRACE_US = 35000ULL;
+
+struct DigitalReleaseFilter {
+    uint64_t button_until[14]{};
+    uint8_t last_hat = ns::HAT_NEUTRAL;
+    uint64_t hat_until = 0;
+
+    void reset() {
+        memset(button_until, 0, sizeof(button_until));
+        last_hat = ns::HAT_NEUTRAL;
+        hat_until = 0;
+    }
+
+    void apply(ns::HIDReport& r, uint64_t now) {
+        static const uint16_t bits[14] = {
+            ns::BTN_Y, ns::BTN_B, ns::BTN_A, ns::BTN_X,
+            ns::BTN_L, ns::BTN_R, ns::BTN_ZL, ns::BTN_ZR,
+            ns::BTN_MINUS, ns::BTN_PLUS, ns::BTN_LSTICK, ns::BTN_RSTICK,
+            ns::BTN_HOME, ns::BTN_CAPTURE
+        };
+
+        for (int i = 0; i < 14; ++i) {
+            const uint16_t bit = bits[i];
+            if (r.buttons & bit) {
+                button_until[i] = now + SDL_DIGITAL_RELEASE_GRACE_US;
+            } else if (button_until[i] != 0 && now <= button_until[i]) {
+                r.buttons |= bit;
+            } else {
+                button_until[i] = 0;
+            }
+        }
+
+        if (r.hat != ns::HAT_NEUTRAL) {
+            last_hat = r.hat;
+            hat_until = now + SDL_DIGITAL_RELEASE_GRACE_US;
+        } else if (hat_until != 0 && now <= hat_until) {
+            r.hat = last_hat;
+        } else {
+            last_hat = ns::HAT_NEUTRAL;
+            hat_until = 0;
+        }
+    }
+};
+
+
 // ── SDL3 unified gamepad backend ────────────────────────────────────────────
 // One input path for the CLI client: buttons/sticks, rumble, and optional
 // accelerometer/gyro when SDL3 exposes those sensors for the controller.
@@ -774,6 +824,10 @@ public:
         SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_JOY_CONS", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX", "1");
         SDL_SetHint("SDL_JOYSTICK_ENHANCED_REPORTS", "1");
 
         if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_SENSOR | SDL_INIT_HAPTIC | SDL_INIT_EVENTS)) {
@@ -838,7 +892,29 @@ public:
         if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return;
         Device* d = device_for_slot_locked(sdl_slot);
         if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
-        SDL_RumbleGamepad(d->pad, motor_word(low), motor_word(high), duration_ms);
+
+        const Uint16 low_word = motor_word(low);
+        const Uint16 high_word = motor_word(high);
+        const bool stop = (low_word == 0 && high_word == 0) || duration_ms == 0;
+
+        // Main left/right rumble. This is the normal path for Xbox, Switch Pro,
+        // DualShock/DualSense, etc.  SDL returns false when the active backend or
+        // controller does not expose a usable rumble path, so do not assume that
+        // a connected pad can rumble.
+        bool ok_main = SDL_RumbleGamepad(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
+
+        // Xbox One/Series pads may also expose trigger rumble. It is not the same
+        // thing as normal body rumble, but it gives useful feedback if the normal
+        // path is unavailable or weak. Stopping both is harmless.
+        bool ok_trigger = true;
+        if (d->trigger_rumble_capable || !ok_main || stop) {
+            ok_trigger = SDL_RumbleGamepadTriggers(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
+        }
+
+        if (!stop && !ok_main && !ok_trigger) {
+            const char* e = SDL_GetError();
+            last_error = (e && *e) ? e : "SDL rumble failed";
+        }
     }
 
     void stop_all_rumble() {
@@ -858,6 +934,8 @@ private:
         int slot = -1;
         bool accel_enabled = false;
         bool gyro_enabled = false;
+        bool rumble_capable = false;
+        bool trigger_rumble_capable = false;
         std::string name;
         uint16_t vid = 0;
         uint16_t pid = 0;
@@ -1014,6 +1092,7 @@ private:
     void close_device_locked(Device& d) {
         if (d.pad) {
             SDL_RumbleGamepad(d.pad, 0, 0, 0);
+            SDL_RumbleGamepadTriggers(d.pad, 0, 0, 0);
             SDL_CloseGamepad(d.pad);
             d.pad = nullptr;
         }
@@ -1030,7 +1109,10 @@ private:
 
     void stop_all_rumble_locked() {
         for (auto& d : devices) {
-            if (d.pad) SDL_RumbleGamepad(d.pad, 0, 0, 0);
+            if (d.pad) {
+                SDL_RumbleGamepad(d.pad, 0, 0, 0);
+                SDL_RumbleGamepadTriggers(d.pad, 0, 0, 0);
+            }
         }
     }
 
@@ -1074,6 +1156,12 @@ private:
             d.vid = SDL_GetGamepadVendor(pad);
             d.pid = SDL_GetGamepadProduct(pad);
 
+            SDL_PropertiesID props = SDL_GetGamepadProperties(pad);
+            if (props) {
+                d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
+                d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
+            }
+
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) {
                 d.accel_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true);
             }
@@ -1084,6 +1172,8 @@ private:
             std::cout << "Mapped SDL3 controller to local slot P" << (slot + 1)
                       << ": " << d.name;
             if (d.gyro_enabled || d.accel_enabled) std::cout << " + motion";
+            if (d.rumble_capable) std::cout << " + rumble";
+            if (d.trigger_rumble_capable) std::cout << " + trigger-rumble";
             std::cout << "\n";
 
             devices.push_back(d);
@@ -1531,6 +1621,7 @@ int main(int argc, char** argv) {
     std::cout << "Started... Press Ctrl+C to stop\n";
     uint32_t seq = 0;
     RumbleManager rumble;
+    DigitalReleaseFilter sdl_filters[4];
     static bool no_controllers_printed = false;
 
     while (true) {
@@ -1550,9 +1641,14 @@ int main(int argc, char** argv) {
         int active_count = 0;
 
         auto sdl = g_sdlInput.snapshot();
+        const uint64_t filter_now = ns::now_us();
         for (int i = 0; i < 4; ++i) {
-            if (!sdl[i].connected) continue;
+            if (!sdl[i].connected) {
+                sdl_filters[i].reset();
+                continue;
+            }
             logical_reports[i] = sdl[i].input;
+            sdl_filters[i].apply(logical_reports[i], filter_now);
             logical_motion[i] = sdl[i].motion;
             present[i] = true;
             has_motion[i] = sdl[i].has_motion;
