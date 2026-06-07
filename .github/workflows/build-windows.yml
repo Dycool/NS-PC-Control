@@ -21,13 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build Terminal Client (MinGW)
-        shell: bash
-        run: |
-          cd client/windows/
-          g++ -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static \
-            -lws2_32 -lxinput -lwinmm -luser32 -lhid -lsetupapi
-
       - name: Setup MSVC
         uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
@@ -60,14 +53,14 @@ jobs:
 
           cmake --build _deps/SDL/build-static --config Release --target install --parallel
 
-      - name: Build GUI Client (MSVC + cached static SDL3)
+      - name: Build Windows Clients (MSVC + cached static SDL3)
         shell: pwsh
         run: |
           cd client/windows
 
           @'
           cmake_minimum_required(VERSION 3.20)
-          project(ns_gui_sdl3 LANGUAGES C CXX RC)
+          project(ns_windows_clients_sdl3 LANGUAGES C CXX RC)
 
           set(CMAKE_CXX_STANDARD 17)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,62 +75,68 @@ jobs:
             NO_DEFAULT_PATH
           )
 
+          add_executable(ns-gamepad
+            ns-gamepad.cpp
+          )
+
           add_executable(ns-gui WIN32
             ns-gui.cpp
             ns-gui.rc
           )
 
-          target_compile_definitions(ns-gui PRIVATE
-            UNICODE
-            _UNICODE
-            WIN32_LEAN_AND_MEAN
-            NOMINMAX
-            _CRT_SECURE_NO_WARNINGS
-            SDL_MAIN_HANDLED
-            NS_SDL3_STATIC
-            NS_LINK_SDL3_MANUALLY
-          )
+          foreach(target IN ITEMS ns-gamepad ns-gui)
+            target_compile_definitions(${target} PRIVATE
+              UNICODE
+              _UNICODE
+              WIN32_LEAN_AND_MEAN
+              NOMINMAX
+              _CRT_SECURE_NO_WARNINGS
+              SDL_MAIN_HANDLED
+              NS_SDL3_STATIC
+              NS_LINK_SDL3_MANUALLY
+            )
 
-          if(MSVC)
-            target_compile_options(ns-gui PRIVATE /W3 /O2 /EHsc)
-          endif()
+            if(MSVC)
+              target_compile_options(${target} PRIVATE /W3 /O2 /EHsc)
+            endif()
 
-          # SDL guarantees SDL3::SDL3 exists; with this install it aliases the static target.
-          target_link_libraries(ns-gui PRIVATE
-            SDL3::SDL3
-            ws2_32
-            comctl32
-            comdlg32
-            winmm
-            user32
-            kernel32
-            gdi32
-            advapi32
-            shell32
-            ole32
-            oleaut32
-            uuid
-            version
-            setupapi
-            imm32
-          )
+            target_link_libraries(${target} PRIVATE
+              SDL3::SDL3
+              ws2_32
+              comctl32
+              comdlg32
+              winmm
+              user32
+              kernel32
+              gdi32
+              advapi32
+              shell32
+              ole32
+              oleaut32
+              uuid
+              version
+              setupapi
+              imm32
+            )
 
-          set_target_properties(ns-gui PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_LIST_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_LIST_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_LIST_DIR}"
-          )
+            set_target_properties(${target} PROPERTIES
+              RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+              RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_LIST_DIR}"
+              RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_LIST_DIR}"
+              RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_LIST_DIR}"
+            )
+          endforeach()
           '@ | Set-Content -Encoding UTF8 CMakeLists.txt
 
           cmake -S . -B build-sdl3 -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
+          cmake --build build-sdl3 --config Release --target ns-gamepad --parallel
           cmake --build build-sdl3 --config Release --target ns-gui --parallel
 
           if (Test-Path ".\SDL3.dll") {
-            throw "SDL3.dll was produced next to ns-gui.exe; expected a single statically-linked exe."
+            throw "SDL3.dll was produced next to the clients; expected statically-linked exes."
           }
 
       - uses: actions/upload-artifact@v6
