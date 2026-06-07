@@ -67,13 +67,17 @@ static std::string g_usb_serial = "NSBRIDGE000001";
 // locally; the file must stay out of git. The loader applies only compatibility
 // calibration/model ranges and keeps generated per-controller MAC/serial IDs.
 static std::string g_spi_profile_path;
+// Default to faithful mode: copy the user's first 0x10000 SPI bytes exactly.
+// This is still public-safe because the repo contains no dump; users provide
+// their own local file. Runtime MAC/serial replies are still generated.
+static bool g_spi_profile_full_copy = true;
 
 // Built-in USB gadget lifecycle.  ns-backend can now create/bind the
 // USB gamepad gadget itself on startup and unbind/remove it
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
-static constexpr int HID_PORT_COUNT = 4;
+static constexpr int HID_PORT_COUNT = 1;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
@@ -1003,12 +1007,12 @@ struct NS_LOCAL_PACKED ProInputReport30 {
     uint8_t left_stick[3];
     uint8_t right_stick[3];
     uint8_t vibrator;
-    int16_t accel_y_0, accel_x_0, accel_z_0;
-    int16_t gyro_y_0,  gyro_x_0,  gyro_z_0;
-    int16_t accel_y_1, accel_x_1, accel_z_1;
-    int16_t gyro_y_1,  gyro_x_1,  gyro_z_1;
-    int16_t accel_y_2, accel_x_2, accel_z_2;
-    int16_t gyro_y_2,  gyro_x_2,  gyro_z_2;
+    int16_t accel_x_0, accel_y_0, accel_z_0;
+    int16_t gyro_x_0,  gyro_y_0,  gyro_z_0;
+    int16_t accel_x_1, accel_y_1, accel_z_1;
+    int16_t gyro_x_1,  gyro_y_1,  gyro_z_1;
+    int16_t accel_x_2, accel_y_2, accel_z_2;
+    int16_t gyro_x_2,  gyro_y_2,  gyro_z_2;
     uint8_t vendor_rest[15];
 };
 static_assert(sizeof(ProInputReport30) == PRO_REPORT_SIZE, "ProInputReport30 must be 64 bytes");
@@ -1174,10 +1178,31 @@ static bool read_file_bytes(const std::string& path, std::vector<uint8_t>& out) 
 static bool apply_spi_profile_overlay(uint8_t* flash, const std::vector<uint8_t>& src, int ctrl) {
     if (!flash || src.empty()) return false;
 
-    // Keep this range list intentionally small and boring. These are calibration,
-    // colour/model, and stick/IMU parameter blocks that improve compatibility.
-    // Do not blindly copy identity/pairing areas. Runtime identity is generated
-    // by CTRL_MAC_BE/g_usb_serial and reported via USB 0x81/subcmd 0x02.
+    if (src.size() < SPI_FLASH_SIZE) {
+        std::fprintf(stderr,
+                     "[spi-profile] source too small: got %zu, need at least %zu\n",
+                     src.size(), SPI_FLASH_SIZE);
+        return false;
+    }
+
+    if (g_spi_profile_full_copy) {
+        // Most compatible mode: use the user's SPI profile exactly for the
+        // virtual 0x0000..0xFFFF SPI region. This preserves subtle capability
+        // flags/model bytes that games may use before sending HD rumble.
+        //
+        // Important: visible runtime identity is NOT taken from SPI here.
+        // USB 0x81 and subcmd 0x02 still use generated CTRL_MAC_BE/serial.
+        std::memcpy(flash, src.data(), SPI_FLASH_SIZE);
+
+        if (g_verbose) {
+            std::printf("[spi-profile] full-copied first 0x%zX bytes to pad%d (%zu-byte source)\n",
+                        SPI_FLASH_SIZE, ctrl + 1, src.size());
+        }
+        return true;
+    }
+
+    // Conservative overlay mode. Useful for public synthetic fallback testing,
+    // but less compatible than full-copy because it can miss capability flags.
     static const SpiProfileRange ranges[] = {
         {0x6000, 0x20, "device-flags"},
         {0x6020, 0x18, "factory-imu-cal"},
@@ -1202,12 +1227,8 @@ static bool apply_spi_profile_overlay(uint8_t* flash, const std::vector<uint8_t>
         std::memcpy(flash + r.addr, src.data() + r.addr, r.len);
     }
 
-    // Per-controller visible identity remains generated. If a dumped profile has
-    // user/pairing data, it is not used for USB MAC replies or subcmd 0x02.
-    // Keep colours unique per virtual controller only when no profile was used;
-    // profile colours are preserved here because they are cosmetic.
     if (g_verbose) {
-        std::printf("[spi-profile] applied local profile overlay to pad%d (%zu-byte source)\n",
+        std::printf("[spi-profile] applied range overlay to pad%d (%zu-byte source)\n",
                     ctrl + 1, src.size());
     }
     return true;
@@ -4119,11 +4140,21 @@ static void flush_rumble_to_udp(int sock, int client_idx) {
 
     for (int s = 0; s < 4; ++s) {
         if (!has[s]) continue;
+
+        // HD/precision first. This is the primary path for the Windows client:
+        // it carries the original 8-byte console rumble frame plus decoded
+        // fallback magnitudes. A real Pro Controller / HD-capable client should
+        // consume this and preserve the console's rumble intent as closely as
+        // the client backend allows.
         ssize_t precision_sent = sendto(sock, &precision_pending[s], sizeof(PrecisionRumblePacket), 0,
                                         reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
         if (g_verbose && precision_sent != (ssize_t)sizeof(PrecisionRumblePacket))
             std::fprintf(stderr, "[udp] failed to send precision rumble packet: %s\n", std::strerror(errno));
 
+        // Classic fallback after precision. Older clients that do not know
+        // PrecisionRumblePacket can still use this RumblePacket. New clients
+        // should ignore this fallback when they already consumed the precision
+        // packet for the same rumble sequence/frame.
         ssize_t sent = sendto(sock, &pending[s], sizeof(RumblePacket), 0,
                               reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
         if (g_verbose && sent != (ssize_t)sizeof(RumblePacket))
@@ -4910,6 +4941,7 @@ int main(int argc, char** argv) {
         else if (a == "-v")               g_verbose  = true;
         else if (a == "--upnp")           do_upnp    = true;
         else if (a == "--spi-profile" && i+1 < argc) g_spi_profile_path = argv[++i];
+        else if (a == "--spi-profile-ranges-only") g_spi_profile_full_copy = false;
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
                 web_port = std::atoi(argv[++i]);
@@ -4922,7 +4954,10 @@ int main(int argc, char** argv) {
             puts("");
             puts("  --spi-profile FILE   Load a local user-provided controller SPI profile.");
             puts("                       Supports 65536-byte reduced profiles or 524288-byte full dumps.");
-            puts("                       Only calibration/model ranges are overlaid; MAC/serial stay generated.");
+            puts("                       Default: full-copy first 64KB for best rumble/gyro compatibility.");
+            puts("                       MAC/serial still stay generated by runtime replies.");
+            puts("  --spi-profile-ranges-only");
+            puts("                       Debug/public-test mode: only overlay selected calibration ranges.");
             return 0;
         }
     }
@@ -4930,7 +4965,9 @@ int main(int argc, char** argv) {
     randomize_controller_identity();
 
     if (!g_spi_profile_path.empty()) {
-        std::printf("[spi-profile] using local profile: %s\n", g_spi_profile_path.c_str());
+        std::printf("[spi-profile] using local profile: %s (%s)\n",
+                    g_spi_profile_path.c_str(),
+                    g_spi_profile_full_copy ? "full-copy first 64KB" : "ranges-only overlay");
     }
 
     // Always recreate the built-in gadget at process startup.  This makes every
