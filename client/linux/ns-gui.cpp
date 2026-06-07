@@ -1440,7 +1440,7 @@ extern "C" gboolean on_timer(gpointer) {
         std::lock_guard<std::mutex> lock(g_hw_mtx);
         for (int i = 0; i < 4; ++i) {
             char lbl[128];
-            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[i]);
+            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %.96s", i + 1, g_hw_names[i]);
             else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
             gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), lbl);
         }
@@ -1450,7 +1450,7 @@ extern "C" gboolean on_timer(gpointer) {
         std::lock_guard<std::mutex> lock(g_hw_mtx);
         for (int i = 0; i < 4; ++i) {
             char lbl[128];
-            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %s", i + 1, g_hw_names[i]);
+            if (g_hw_names[i][0] != '\0') snprintf(lbl, sizeof(lbl), "🎮 P%d: %.96s", i + 1, g_hw_names[i]);
             else snprintf(lbl, sizeof(lbl), "P%d: Waiting...", i + 1);
             gtk_label_set_text(GTK_LABEL(ctrlLabels[i]), lbl);
         }
