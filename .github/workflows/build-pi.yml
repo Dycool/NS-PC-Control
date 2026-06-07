@@ -19,7 +19,7 @@ jobs:
       - name: Install ARM Cross-Compiler and deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-aarch64-linux-gnu cmake zip wget
+          sudo apt-get install -y g++-aarch64-linux-gnu cmake wget
 
       - name: Cross-compile miniupnpc for aarch64
         run: |
@@ -46,10 +46,8 @@ jobs:
             -DBACKEND_SOURCE=src/backend/hori-main.cpp
           make -j$(nproc)
 
-          mkdir -p hori-server
-          cp ns-backend hori-server/ns-backend
-          cd hori-server
-          zip -r ../hori-server.zip .
+          mkdir -p artifact/hori-server
+          cp ns-backend artifact/hori-server/ns-backend
 
       - name: Build Pro Server
         run: |
@@ -62,17 +60,15 @@ jobs:
             -DBACKEND_SOURCE=src/backend/pro-main.cpp
           make -j$(nproc)
 
-          mkdir -p pro-server
-          cp ns-backend pro-server/ns-backend
-          cd pro-server
-          zip -r ../pro-server.zip .
+          mkdir -p artifact/pro-server
+          cp ns-backend artifact/pro-server/ns-backend
 
       - uses: actions/upload-artifact@v6
         with:
           name: hori-server
-          path: server/rpi/build-hori/hori-server.zip
+          path: server/rpi/build-hori/artifact/hori-server/
 
       - uses: actions/upload-artifact@v6
         with:
           name: pro-server
-          path: server/rpi/build-pro/pro-server.zip
+          path: server/rpi/build-pro/artifact/pro-server/

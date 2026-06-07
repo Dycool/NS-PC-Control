@@ -10,13 +10,34 @@ git clone https://github.com/Dycool/NS-PC-Control.git
 cd NS-PC-Control
 ```
 
-2. Compile the server:
+2. Install dependencies (miniupnpc for UPnP support is optional):
+```bash
+sudo apt-get update
+sudo apt-get install -y cmake g++ pkg-config
+# Optional: sudo apt-get install -y miniupnpc
+```
+
+3. Choose a backend and compile:
+
+**HORI mode** (legacy, 8-byte, fastest — no gyro/rumble):
 ```bash
 cd server/rpi
 mkdir build && cd build
-cmake ..
+cmake .. -DBACKEND_SOURCE=src/backend/hori-main.cpp
 make
 ```
+
+**Pro Controller mode** (modern, 64-byte — gyro + rumble + macros):
+```bash
+cd server/rpi
+mkdir build && cd build
+cmake .. -DBACKEND_SOURCE=src/backend/pro-main.cpp
+make
+```
+
+> The server includes **built-in USB gadget setup** — no external `setup_gadget.sh` script needed. It automatically creates and binds the HID gadget on startup and cleans up on exit.
+
+> **Note:** To disable UPnP support, add `-DUSE_UPNP=OFF` to the cmake command.
 
 ---
 
@@ -38,7 +59,7 @@ On Windows, the CLI tool is built using MinGW (GCC), while the GUI application i
 2. Open the **MSYS2 UCRT64** terminal and navigate to `client/windows/`.
 3. Build the CLI client:
 ```bash
-g++ -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxinput -lwinmm -luser32
+g++ -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxinput -lwinmm -luser32 -lhid -lsetupapi
 ```
 
 **To build the GUI (MSVC):**
@@ -48,8 +69,10 @@ g++ -std=c++17 -O2 -Wall ns-gamepad.cpp -o ns-gamepad.exe -static -lws2_32 -lxin
 4. Compile the resources and the GUI application:
 ```cmd
 rc /nologo ns-gui.rc
-cl /std:c++17 /O2 /EHsc /W3 ns-gui.cpp ns-gui.res /link ws2_32.lib xinput.lib setupapi.lib comctl32.lib user32.lib kernel32.lib gdi32.lib advapi32.lib winmm.lib /out:ns-gui.exe
+cl /std:c++17 /O2 /EHsc /W3 ns-gui.cpp ns-gui.res /link ws2_32.lib xinput.lib setupapi.lib hid.lib comctl32.lib user32.lib kernel32.lib gdi32.lib advapi32.lib winmm.lib /out:ns-gui.exe
 ```
+
+Alternatively, run `build.bat` which auto-detects MinGW or MSVC and builds both targets.
 
 ---
 
@@ -88,7 +111,7 @@ Navigate to `client/mac/` and run the following depending on what you want to bu
 
 **Build the CLI:**
 ```bash
-clang++ -std=c++17 -ObjC++ -framework GameController -framework Foundation -framework CoreGraphics ns-gamepad.mm -o ns-gamepad
+clang++ -std=c++17 -ObjC++ -framework GameController -framework Foundation -framework CoreGraphics -framework CoreHaptics ns-gamepad.mm -o ns-gamepad
 ```
 *(Note: On macOS 10.15+, Bluetooth controllers may require you to grant **Input Monitoring** permission to your terminal app in System Settings).*
 

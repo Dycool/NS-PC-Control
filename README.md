@@ -14,6 +14,8 @@ This project was built from scratch in **C++** and uses **UDP** to get the lowes
 
 **🌐 Web App & Mobile Touch Controls** — The server includes an embedded web interface with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
 
+**🎮 Gyroscope and Rumble** — PC clients with gyro-capable controllers (DS4, DualSense, Switch Pro Controller) can send motion data to the Switch and receive HD Rumble feedback. Requires the **Pro Controller** server backend.
+
 > **📦 Pre-compiled Binaries Available!**
 > You can download ready-to-use GUI/CLI clients and the Raspberry Pi server directly from the **[Releases](https://github.com/Dycool/NS-PC-Control/releases)** page.
 >
@@ -46,6 +48,20 @@ https://github.com/user-attachments/assets/aef8eb25-dd14-4335-a3f7-b1953800f856
 
 ---
 
+## 🎮 Controller Emulation Modes
+
+The Raspberry Pi server can emulate **two different controller types**, chosen at compile time:
+
+| Feature | HORI / Pokken (legacy) | Pro Controller (modern) |
+|---------|------------------------|------------------------|
+| HID report size | 8 bytes | 64 bytes |
+| **Latency** | **Fastest** | Slightly larger packets |
+| **Gyro / 6-axis IMU** | **No** | **Yes** |
+| **HD Rumble** | **No** | **Yes** (bidirectional, Switch → PC) |
+| **Macros** | **Yes** | **Yes** |
+
+---
+
 ## 🕹️ Controls & Shortcuts
 
 Any **XInput-compatible controller** connected to your PC (Xbox controllers and most standard PC gamepads).
@@ -63,6 +79,8 @@ Detailed guides and technical information are in our `docs/` folder:
 
 * **[Raspberry Pi System Setup](docs/raspberry-pi-setup.md)** — Enabling USB gadget mode and automating on boot.
 * **[Building from Source](docs/building-from-source.md)** — Compiling the client (Windows/Mac/Linux) and server from scratch.
+* **[Controller Modes](docs/controller-modes.md)** — HORI vs Pro Controller, gyro, rumble, and how to choose.
+* **[Macros](docs/macros.md)** — Recording and replaying button sequences for speedruns and TAS.
 * **[Architecture & Security](docs/architecture.md)** — Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Controls](docs/web-app.md)** — Using the embedded web interface and mobile touch controls.
 
@@ -78,12 +96,6 @@ Detailed guides and technical information are in our `docs/` folder:
 | **Raspberry Pi server** | [Linux USB Gadget (configfs / libcomposite)](https://www.kernel.org/doc/html/latest/usb/gadget_configfs.html) / UDP sockets |
 | **Cryptography** | [HMAC-SHA256](https://datatracker.ietf.org/doc/html/rfc4868) (standalone C++ implementation) |
 | **Protocol** | Custom UDP-based protocol with magic/version/sequence number guards |
-
----
-
-## 🚀 Planned Features
-
-* **Macros** — Record and replay button sequences for speedruns, TAS, or complex inputs.
 
 ---
 
