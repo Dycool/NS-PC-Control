@@ -3,9 +3,9 @@
 //  protocol.hpp  –  Shared between frontend clients and backend servers
 //
 //  Goals:
-//    - Keep legacy HORI/Pokken reports byte-compatible: HIDReport == 8 bytes.
+//    - Keep legacy 8-byte reports byte-compatible: HIDReport == 8 bytes.
 //    - Keep legacy UDP packets byte-compatible: Packet == 68 bytes.
-//    - Provide modern optional motion/rumble structs for Pro-controller servers
+//    - Provide modern optional motion/rumble structs for 64-byte report servers
 //      and upgraded UDP/WebSocket clients without breaking old clients.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -77,12 +77,12 @@ enum Flags : uint8_t {
 };
 
 // Extended clients set this in HIDReport::vendor inside ExtendedHIDReport.
-// HORI/pro server code should clear vendor before writing legacy HORI reports.
+// Server code should clear vendor before writing legacy 8-byte reports.
 static constexpr uint8_t EXT_PAD_PRESENT = 0x01;
 
 // ── Legacy input reports ─────────────────────────────────────────────────────
 // Exactly 8 bytes. This is the complete HID report written to the old
-// HORI/Pokken gadget endpoints.
+// legacy 8-byte gadget endpoints.
 struct HIDReport {
     uint16_t buttons = 0;
     uint8_t  hat = HAT_NEUTRAL;
@@ -179,7 +179,7 @@ static constexpr std::size_t WEB_PACKET_SIZE  = 20 + sizeof(ExtendedMultiReport)
 
 // ── Hard wire-layout checks ──────────────────────────────────────────────────
 static_assert(sizeof(HIDReport) == 8,
-              "HIDReport must stay 8 bytes for HORI/Pokken gadget reports");
+              "HIDReport must stay 8 bytes for legacy gadget reports");
 static_assert(sizeof(MultiReport) == 32,
               "MultiReport must be four 8-byte HID reports");
 static_assert(sizeof(MotionReport) == 12,

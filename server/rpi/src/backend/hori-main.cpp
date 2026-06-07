@@ -46,7 +46,7 @@ using ms    = std::chrono::milliseconds;
 static std::atomic<bool> g_running{true};
 static bool g_verbose = false;
 
-// Built-in USB gadget lifecycle for the old HORI/Pokken 4-port setup.
+// Built-in USB gadget lifecycle for the legacy 4-port setup.
 // This mirrors setup_gadget.sh: remove our old gadget first, recreate four
 // 8-byte HORI HID functions, bind them, chmod /dev/hidg0..3, and tear down
 // again on clean shutdown.
@@ -84,7 +84,7 @@ static ClientSession g_clients[MAX_CLIENTS];
 
 // Modern UDP clients can send an extended packet containing a 24-byte report
 // per pad (8-byte HIDReport + 12-byte motion + 4 bytes of flags/padding).
-// This HORI backend has no gyro/rumble path, so it only extracts the first
+// This legacy backend has no gyro/rumble path, so it only extracts the first
 // HIDReport from each extended pad and ignores the rest.
 static constexpr uint8_t MODERN_EXT_PROTO_VERSION = 5;
 static constexpr uint8_t MODERN_EXT_PAD_PRESENT = 0x01;
@@ -905,7 +905,7 @@ static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); 
 static constexpr const char* GADGET_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl";
 static constexpr const char* CONFIG_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1";
 
-// Standard HORI Pokken Tournament Controller descriptor from setup_gadget.sh.
+// Standard legacy 8-byte controller descriptor from setup_gadget.sh.
 static const uint8_t HORI_REPORT_DESC[] = {
     0x05,0x01,0x09,0x05,0xA1,0x01,0x15,0x00,0x25,0x01,0x35,0x00,0x45,0x01,0x75,0x01,
     0x95,0x0D,0x05,0x09,0x19,0x01,0x29,0x0D,0x81,0x02,0x95,0x03,0x81,0x01,0x05,0x01,
@@ -1149,7 +1149,7 @@ static bool setup_hori_gadget_builtin(bool force, const char* reason) {
             chmod(path, 0666);
         }
         if (all_seen && hidg_nodes_ready()) {
-            std::puts("[gadget] Done. Exposed /dev/hidg0 to /dev/hidg3 (HORI/Pokken)");
+            std::puts("[gadget] Done. Exposed /dev/hidg0 to /dev/hidg3 (legacy mode)");
             return true;
         }
         std::this_thread::sleep_for(ms(100));

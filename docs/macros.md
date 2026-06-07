@@ -1,6 +1,6 @@
 # Macros
 
-The Raspberry Pi server includes a built-in macro system for recording and replaying button sequences — useful for speedruns, TAS (tool-assisted speedruns), or executing complex inputs reliably. Macros are supported in **both** the HORI and Pro Controller backends.
+The Raspberry Pi server includes a built-in macro system for recording and replaying button sequences. Macros are supported in both the legacy and modern backends.
 
 Macros are parsed and executed **on the Raspberry Pi server**, so playback continues even if the PC client disconnects mid-sequence.
 
@@ -72,8 +72,8 @@ LOOP 10    ; repeats A+B block 10 times
 |-------|---------|
 | `MINUS` | `-` |
 | `PLUS` | `+` |
-| `HOME` | — |
-| `CAPTURE` | — |
+| `HOME` | `GUIDE` |
+| `CAPTURE` | `SHARE` |
 
 ### Analog Sticks
 
@@ -86,14 +86,14 @@ LOOP 10    ; repeats A+B block 10 times
 **Stick directions:**
 | Token | Aliases |
 |-------|---------|
-| `LSTICK_UP` | — |
-| `LSTICK_DOWN` | — |
-| `LSTICK_LEFT` | — |
-| `LSTICK_RIGHT` | — |
-| `RSTICK_UP` | — |
-| `RSTICK_DOWN` | — |
-| `RSTICK_LEFT` | — |
-| `RSTICK_RIGHT` | — |
+| `LSTICK_UP` | `LS_UP` |
+| `LSTICK_DOWN` | `LS_DOWN` |
+| `LSTICK_LEFT` | `LS_LEFT` |
+| `LSTICK_RIGHT` | `LS_RIGHT` |
+| `RSTICK_UP` | `RS_UP` |
+| `RSTICK_DOWN` | `RS_DOWN` |
+| `RSTICK_LEFT` | `RS_LEFT` |
+| `RSTICK_RIGHT` | `RS_RIGHT` |
 
 ### D-Pad
 
@@ -189,7 +189,7 @@ ns-gui -m mymacro.json
 
 ### Web Interface
 
-The web app includes a macro editor at the `/editor` endpoint — usable from any browser on the same network.
+The web app includes a macro editor at the `/editor` endpoint, usable from any browser on the same network.
 
 ---
 

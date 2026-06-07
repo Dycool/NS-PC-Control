@@ -1747,7 +1747,7 @@ int main(int argc, char** argv) {
         } else {
             ExtendedUdpPacket pkt{};
             pkt.magic = ns::PROTO_MAGIC;
-            pkt.version = ns::PROTO_VERSION;
+            pkt.version = ns::WEB_PROTO_VERSION;
             pkt.flags = ns::FLAG_NONE;
             pkt.seq = seq++;
             pkt.timestamp_us = ns::now_us();

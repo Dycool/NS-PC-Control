@@ -1,9 +1,10 @@
-# 🍓 Raspberry Pi Server Setup
+# Raspberry Pi Server Setup
 
-To use your Raspberry Pi as a controller emulator, you must configure it to act as a USB Gadget. 
+To use your Raspberry Pi as a controller emulator, configure it to act as a USB gadget.
 
-## ⚙️ Prerequisite: Enable USB Gadget Mode (Boot Settings)
-Before the Raspberry Pi can emulate a USB controller, you must enable the USB OTG drivers at the system level. Run the following commands in your Pi's terminal:
+## Prerequisite: Enable USB Gadget Mode (Boot Settings)
+
+Before the Raspberry Pi can emulate a USB controller, enable the USB OTG drivers at the system level. Run the following commands in your Pi's terminal:
 
 ```bash
 # 1. Enable the dwc2 driver in config.txt
@@ -16,36 +17,36 @@ sudo sed -i 's/rootwait/rootwait modules-load=dwc2,libcomposite/' /boot/firmware
 sudo reboot
 ```
 
-## 🔌 Connecting to the Switch
+## Connecting to the Console
 
-Connect the Raspberry Pi to the Switch dock via USB:
+Connect the Raspberry Pi to the console dock via USB:
 * **Raspberry Pi 4:** Use the USB-C port.
-* **Raspberry Pi Zero / Zero 2 W:** Use the Inner Micro-USB data port.
+* **Raspberry Pi Zero / Zero 2 W:** Use the inner Micro-USB data port.
 
 ---
 
-## 🚀 Running the Server (Manual Method)
+## Running the Server (Manual Method)
 
-The server handles USB gadget setup **automatically** on startup — no separate script needed. Just run:
+The server handles USB gadget setup **automatically** on startup - no separate script needed. Just run:
 
 ```bash
 sudo chrt -f 99 ./ns-backend
 ```
 
-> **Note:** The `chrt -f 99` gives the process maximum real-time priority for lowest possible latency.
+> **Note:** `chrt -f 99` gives the process maximum real-time priority for lowest possible latency.
 
 ---
 
-## 🔄 Automate on Boot (Optional Systemd Service)
+## Automate on Boot (Optional Systemd Service)
 
-If you want the Raspberry Pi to automatically set up the USB gadget and start the backend every time you turn it on (so you don't have to run the commands above manually), create a systemd service.
+If you want the Raspberry Pi to automatically set up the USB gadget and start the backend every time you turn it on, create a systemd service.
 
 1. Create a new service file:
 ```bash
 sudo nano /etc/systemd/system/ns-control.service
 ```
 
-2. Paste the following configuration. **Important:** Adjust the `/home/YOUR_USER/...` paths to match the exact location of your downloaded or cloned repository files!
+2. Paste the following configuration. Adjust the `/home/YOUR_USER/...` paths to match the exact location of your downloaded or cloned repository files.
 ```ini
 [Unit]
 Description=NS PC Control Backend

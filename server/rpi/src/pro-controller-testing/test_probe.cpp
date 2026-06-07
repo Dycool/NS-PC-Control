@@ -75,12 +75,12 @@ struct PACKED InputReport30 {
     uint8_t left_stick[3];
     uint8_t right_stick[3];
     uint8_t vibrator;
-    int16_t accel_x_0, accel_y_0, accel_z_0;
-    int16_t gyro_x_0,  gyro_y_0,  gyro_z_0;
-    int16_t accel_x_1, accel_y_1, accel_z_1;
-    int16_t gyro_x_1,  gyro_y_1,  gyro_z_1;
-    int16_t accel_x_2, accel_y_2, accel_z_2;
-    int16_t gyro_x_2,  gyro_y_2,  gyro_z_2;
+    int16_t accel_y_0, accel_x_0, accel_z_0;
+    int16_t gyro_y_0,  gyro_x_0,  gyro_z_0;
+    int16_t accel_y_1, accel_x_1, accel_z_1;
+    int16_t gyro_y_1,  gyro_x_1,  gyro_z_1;
+    int16_t accel_y_2, accel_x_2, accel_z_2;
+    int16_t gyro_y_2,  gyro_x_2,  gyro_z_2;
     uint8_t vendor_rest[15];
 };
 static_assert(sizeof(InputReport30) == 64, "InputReport30 must be 64 bytes");

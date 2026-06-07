@@ -130,7 +130,7 @@ static void SDL_GameControllerUpdate() { SDL_UpdateGamepads(); }
 
 #include "../../server/rpi/include/sha256.h"
 
-// Import external protocol structures (Version 4 with MultiReport + ExtendedMultiReport)
+// Import shared wire protocol structures.
 #include "../../server/rpi/include/protocol.hpp"
 #include <stdexcept>
 #include <limits>
@@ -1695,7 +1695,7 @@ static void SenderThread(std::string host, uint16_t port) {
         } else {
             ExtendedUdpPacket pkt{};
             pkt.magic        = ns::PROTO_MAGIC;
-            pkt.version      = ns::PROTO_VERSION;
+            pkt.version      = ns::WEB_PROTO_VERSION;
             pkt.flags        = ns::FLAG_NONE;
             pkt.seq          = seq++;
             pkt.timestamp_us = ns::now_us();

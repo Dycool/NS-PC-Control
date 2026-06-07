@@ -4186,7 +4186,7 @@ static size_t process_ws_frame(WebClient *c) {
         pad_present[1] = !extended_is_neutral(report.p2);
         pad_present[2] = !extended_is_neutral(report.p3);
         pad_present[3] = !extended_is_neutral(report.p4);
-    } else if (ver == WEB_PROTO_VERSION && flen == WEB_PACKET_SIZE) {
+    } else if ((ver == WEB_PROTO_VERSION || ver == PROTO_VERSION) && flen == WEB_PACKET_SIZE) {
         memcpy(&report, payload + 20, sizeof(ExtendedMultiReport));
         for (int s = 0; s < 4; ++s)
             pad_present[s] = (payload[20 + s * sizeof(ExtendedHIDReport) + 7] & 0x01) != 0;

@@ -68,75 +68,8 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ── Protocol ──
-namespace ns {
-static constexpr uint32_t PROTO_MAGIC   = 0x4E535743u;
-static constexpr uint8_t  PROTO_VERSION = 4;
-static constexpr uint8_t  WEB_PROTO_VERSION = 5;
-static constexpr uint16_t DEFAULT_PORT  = 7331;
-static constexpr const char* DEFAULT_SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY";
-static constexpr size_t HMAC_TAG_SIZE = 16;
-static constexpr uint32_t RUMBLE_MAGIC = 0x4E535652u;
-
-enum Button : uint16_t {
-    BTN_Y=1<<0, BTN_B=1<<1, BTN_A=1<<2, BTN_X=1<<3,
-    BTN_L=1<<4, BTN_R=1<<5, BTN_ZL=1<<6, BTN_ZR=1<<7,
-    BTN_MINUS=1<<8, BTN_PLUS=1<<9, BTN_LSTICK=1<<10, BTN_RSTICK=1<<11,
-    BTN_HOME=1<<12, BTN_CAPTURE=1<<13,
-};
-enum Hat : uint8_t { HAT_N=0, HAT_NE=1, HAT_E=2, HAT_SE=3, HAT_S=4, HAT_SW=5, HAT_W=6, HAT_NW=7, HAT_NEUTRAL=8 };
-enum Flags : uint8_t { FLAG_NONE=0x00, FLAG_RESET=0x01, FLAG_AUTOFIRE=0x02 };
-#pragma pack(push, 1)
-struct HIDReport {
-    uint16_t buttons = 0; uint8_t hat = HAT_NEUTRAL;
-    uint8_t lx=128, ly=128, rx=128, ry=128, vendor=0;
-    void reset() noexcept { *this = HIDReport{}; }
-};
-struct MultiReport {
-    HIDReport p1, p2, p3, p4;
-    void reset() noexcept { p1.reset(); p2.reset(); p3.reset(); p4.reset(); }
-};
-struct MotionReport {
-    int16_t ax=0, ay=0, az=0, gx=0, gy=0, gz=0;
-    void reset() noexcept { *this = MotionReport{}; }
-};
-struct ExtendedHIDReport {
-    HIDReport input{};          // input.vendor bit 0 = pad present, even when neutral
-    MotionReport motion{};
-    uint8_t has_motion = 0;
-    uint8_t reserved[3]{};
-    void reset() noexcept { input.reset(); motion.reset(); has_motion = 0; reserved[0] = reserved[1] = reserved[2] = 0; }
-};
-struct ExtendedMultiReport {
-    ExtendedHIDReport p1, p2, p3, p4;
-    void reset() noexcept { p1.reset(); p2.reset(); p3.reset(); p4.reset(); }
-};
-struct RumblePacket {
-    uint32_t magic;
-    uint8_t subpad;
-    uint8_t low_freq;
-    uint8_t high_freq;
-    uint8_t duration_10ms;
-};
-struct Packet {
-    uint32_t magic; uint8_t version; uint8_t flags; uint16_t autofire_mask;
-    uint32_t seq; uint64_t ts_us; MultiReport report; uint8_t hmac[HMAC_TAG_SIZE];
-};
-#pragma pack(pop)
-static constexpr size_t PACKET_SIZE = sizeof(Packet);
-static constexpr size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
-static constexpr size_t EXT_REPORT_SIZE = sizeof(ExtendedHIDReport);
-static constexpr size_t EXT_MULTI_SIZE = sizeof(ExtendedMultiReport);
-static_assert(sizeof(HIDReport) == 8, "HIDReport wire layout changed");
-static_assert(sizeof(MotionReport) == 12, "MotionReport wire layout changed");
-static_assert(sizeof(ExtendedHIDReport) == 24, "ExtendedHIDReport wire layout changed");
-inline uint64_t now_us() noexcept {
-    using namespace std::chrono;
-    return (uint64_t)duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
-}
-}
-
-
 #include "../../server/rpi/include/sha256.h"
+#include "../../server/rpi/include/protocol.hpp"
 #include <stdexcept>
 #include <limits>
 

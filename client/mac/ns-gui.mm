@@ -52,7 +52,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include "../../server/rpi/include/sha256.h"
 
-// Import external protocol structures (Version 4 with MultiReport)
+// Import shared wire protocol structures.
 #include "../../server/rpi/include/protocol.hpp"
 #include <stdexcept>
 #include <limits>
@@ -2861,7 +2861,7 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
             } else {
                 ExtendedUdpPacket pkt; memset(&pkt, 0, sizeof(pkt));
                 pkt.magic        = ns::PROTO_MAGIC;
-                pkt.version      = ns::PROTO_VERSION;
+                pkt.version      = ns::WEB_PROTO_VERSION;
                 pkt.flags        = first_packet ? ns::FLAG_RESET : ns::FLAG_NONE;
                 first_packet     = false;
                 pkt.seq          = seqCounter++;

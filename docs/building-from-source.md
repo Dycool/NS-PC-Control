@@ -1,8 +1,8 @@
-# 🛠️ Building from Source
+# Building from Source
 
 If you prefer to compile the binaries yourself rather than using the release zips, follow the instructions for your platform below.
 
-## 🍓 Raspberry Pi (Server)
+## Raspberry Pi (Server)
 
 1. Clone the repository:
 ```bash
@@ -19,7 +19,7 @@ sudo apt-get install -y cmake g++ pkg-config
 
 3. Choose a backend and compile:
 
-**HORI mode** (legacy, 8-byte, fastest — no gyro/rumble):
+**Legacy mode** (8-byte, fastest - no gyro/rumble):
 ```bash
 cd server/rpi
 mkdir build && cd build
@@ -27,7 +27,7 @@ cmake .. -DBACKEND_SOURCE=src/backend/hori-main.cpp
 make
 ```
 
-**Pro Controller mode** (modern, 64-byte — gyro + rumble + macros):
+**Modern mode** (64-byte - gyro + rumble + macros):
 ```bash
 cd server/rpi
 mkdir build && cd build
@@ -35,13 +35,13 @@ cmake .. -DBACKEND_SOURCE=src/backend/pro-main.cpp
 make
 ```
 
-> The server includes **built-in USB gadget setup** — no external `setup_gadget.sh` script needed. It automatically creates and binds the HID gadget on startup and cleans up on exit.
+> The server includes **built-in USB gadget setup** - no external `setup_gadget.sh` script needed. It automatically creates and binds the HID gadget on startup and cleans up on exit.
 
 > **Note:** To disable UPnP support, add `-DUSE_UPNP=OFF` to the cmake command.
 
 ---
 
-## 💻 PC Clients
+## PC Clients
 
 Clone the repository to your PC:
 ```bash
@@ -51,7 +51,8 @@ cd NS-PC-Control
 
 ---
 
-### 🪟 Windows
+### Windows
+
 On Windows, the CLI tool is built using MinGW (GCC), while the GUI application is built using Microsoft Visual C++ (MSVC).
 
 **To build the CLI (MinGW):**
@@ -76,7 +77,8 @@ Alternatively, run `build.bat` which auto-detects MinGW or MSVC and builds both 
 
 ---
 
-### 🐧 Linux (Ubuntu / Debian / SteamOS)
+### Linux (Ubuntu / Debian / SteamOS)
+
 To compile on Linux, you need a C++ compiler and the GTK3 development headers for the GUI.
 
 **Prerequisites:**
@@ -99,10 +101,11 @@ g++ -O3 -std=c++17 ns-gui.cpp -o ns-gui $(pkg-config --cflags --libs gtk+-3.0) -
 
 ---
 
-### 🍎 macOS
+### macOS
+
 The macOS client uses Apple's **GameController framework**.
 
-**Prerequisite:** Install Xcode Command Line Tools: 
+**Prerequisite:** Install Xcode Command Line Tools:
 ```bash
 xcode-select --install
 ```
@@ -113,10 +116,12 @@ Navigate to `client/mac/` and run the following depending on what you want to bu
 ```bash
 clang++ -std=c++17 -ObjC++ -framework GameController -framework Foundation -framework CoreGraphics -framework CoreHaptics ns-gamepad.mm -o ns-gamepad
 ```
-*(Note: On macOS 10.15+, Bluetooth controllers may require you to grant **Input Monitoring** permission to your terminal app in System Settings).*
+
+On macOS 10.15+, Bluetooth controllers may require you to grant **Input Monitoring** permission to your terminal app in System Settings.
 
 **Build the GUI App Bundle:**
-We have included a script that automatically compiles the GUI and packages it into a native `.app` bundle.
+
+The included script automatically compiles the GUI and packages it into a native `.app` bundle.
 ```bash
 bash build_gui.sh
 ```
