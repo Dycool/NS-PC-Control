@@ -512,7 +512,7 @@ static std::string macro_read_file(const std::string& path) {
     return s;
 }
 
-static std::vector<MacroStep> macro_load_file(const std::string& path) {
+[[maybe_unused]] static std::vector<MacroStep> macro_load_file(const std::string& path) {
     std::string txt = macro_read_file(path);
     if (txt.empty()) return {};
     return macro_parse_text(txt);
@@ -583,7 +583,7 @@ static bool macro_validate_to_pretty_json(const std::string& raw_text, std::stri
     return true;
 }
 
-static uint64_t macro_total_ms(const std::vector<MacroStep>& steps) {
+[[maybe_unused]] static uint64_t macro_total_ms(const std::vector<MacroStep>& steps) {
     uint64_t total = 0;
     for (const auto& s : steps) {
         if (UINT64_MAX - total < s.duration_ms) return UINT64_MAX;
@@ -592,7 +592,7 @@ static uint64_t macro_total_ms(const std::vector<MacroStep>& steps) {
     return total;
 }
 
-static bool macro_report_at(const std::vector<MacroStep>& steps, uint64_t elapsed_ms, ns::HIDReport& out) {
+[[maybe_unused]] static bool macro_report_at(const std::vector<MacroStep>& steps, uint64_t elapsed_ms, ns::HIDReport& out) {
     out.reset();
     uint64_t t = 0;
     for (const auto& s : steps) {
@@ -2052,7 +2052,11 @@ static void apply_keyboard_to_report_mac(ns::HIDReport& rep, const std::unordere
         if (SaveMacroHotkeyMac(hotkeyOut, keyBindings)) SaveMacroTextMac(rec);
     } else if (r == NSAlertThirdButtonReturn + 3) {
         NSOpenPanel* panel = [NSOpenPanel openPanel];
-        [panel setAllowedFileTypes:@[@"json"]];
+        if (@available(macOS 11.0, *)) {
+            Class UTTypeClass = NSClassFromString(@"UTType");
+            id jsonType = UTTypeClass ? [UTTypeClass valueForKey:@"JSON"] : nil;
+            if (jsonType) [panel setValue:@[jsonType] forKey:@"allowedContentTypes"];
+        }
         if ([panel runModal] == NSModalResponseOK) {
             std::string imported, err;
             if (!ReadMacroURLLimitedMac([panel URL], imported, err)) {
@@ -2160,7 +2164,6 @@ static void apply_keyboard_to_report_mac(ns::HIDReport& rep, const std::unordere
             }
 
             int active_count = 0;
-            bool c1 = false, c2 = false, c3 = false, c4 = false;
             for (int i = 0; i < 4; ++i) {
                 if (!self->slotActive[i].load(std::memory_order_relaxed)) continue;
                 logical_reports[i] = map_gc_to_switch(self->states[i]);
@@ -2171,10 +2174,6 @@ static void apply_keyboard_to_report_mac(ns::HIDReport& rep, const std::unordere
                     has_motion[i] = true;
                 }
                 active_count++;
-                if (i == 0) c1 = true;
-                else if (i == 1) c2 = true;
-                else if (i == 2) c3 = true;
-                else if (i == 3) c4 = true;
             }
 
             // Keyboard overrides Player 1
