@@ -3179,7 +3179,7 @@ static void SenderThread() {
         for (int i = 0; i < 4; ++i) {
             if (!raw[i].connected) continue;
             bool fresh = raw[i].last_input_us != 0 &&
-                         rawNow - raw[i].last_input_us <= RAW_INPUT_STALE_RELEASE_US;
+                         (rawNow - raw[i].last_input_us <= RAW_INPUT_STALE_RELEASE_US || raw[i].last_report_id == 0x3F);
             if (fresh)
                 logicalReports[i] = raw[i].input;
             else

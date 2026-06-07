@@ -1344,8 +1344,8 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
 
     uint8_t low = 0, high = 0;
     if (!neutral) {
-        low = std::max<uint8_t>(low, 80);
-        high = std::max<uint8_t>(high, 80);
+        low = std::max<uint8_t>(rb[1], 80);
+        high = std::max<uint8_t>(rb[5], 80);
     }
 
     std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
