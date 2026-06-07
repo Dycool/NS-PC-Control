@@ -46,152 +46,25 @@ using ms    = std::chrono::milliseconds;
 static std::atomic<bool> g_running{true};
 static bool g_verbose = false;
 
-// UDP clients on Windows can occasionally stall for a few seconds while the app
-// is still open (scheduler hiccup, controller rescan, window drag, debugger,
-// etc.).  Do not destroy/remap the whole PC session on a tiny UDP gap.  Instead
-// neutralize stale input quickly, and only disconnect after a longer watchdog.
-static uint64_t g_client_timeout_us = 30'000'000ULL;       // 30s hard disconnect
+// UDP clients can occasionally stall briefly while the app is still open.  Do
+// not destroy/remap the whole PC session on a tiny UDP gap.  Instead neutralize
+// stale input quickly, and only disconnect after a longer watchdog.
+static constexpr uint64_t CLIENT_TIMEOUT_US = 30'000'000ULL;       // 30s hard disconnect
 static constexpr uint64_t CLIENT_STALE_NEUTRAL_US = 350'000ULL; // 350ms release-to-neutral
 
-// Debug helpers.
-static bool g_log_neutral_rumble = false;   // show the neutral carrier in -v logs
-// Switch HD rumble packets can encode very small non-neutral pulses.  Do not
+// Precision rumble packets can encode very small non-neutral pulses.  Do not
 // clamp every real packet to 80..255; preserve low magnitudes so clients can
 // receive micro-rumble too.  all-zero per-motor frames are motor-off, not max.
-static uint8_t g_rumble_min_nonzero = 4;      // floor for a real non-neutral half-frame
-static int     g_rumble_gain_percent = 100;   // optional post-decode gain
-static bool g_test_rumble_on_connect = false; // send one synthetic rumble to UDP clients
-static bool g_random_identity = false;      // randomize USB serial + controller MACs before gadget creation
-static bool g_no_user_imu_cal = false;      // leave 0x8026 magic unset so host falls back to factory IMU cal
-static std::string g_usb_serial = "000000000001";
-
-enum class ImuMapMode {
-    Direct,
-    InvertX,
-    InvertY,
-    InvertZ,
-    SwapYZ,
-    Switch1,
-    Switch2,
-    Switch3,
-};
-
-static ImuMapMode g_imu_map = ImuMapMode::Direct;
-
-enum class ImuTestMode {
-    Off,
-    Roll,
-    Pitch,
-    Yaw,
-    Shake,
-    Gentle,
-};
-
-static ImuTestMode g_imu_test = ImuTestMode::Off;
-
-enum class ImuWireLayout {
-    AccelThenGyro, // bytes 13..24: ax ay az gx gy gz
-    GyroThenAccel, // bytes 13..24: gx gy gz ax ay az
-};
-
-static ImuWireLayout g_imu_layout = ImuWireLayout::AccelThenGyro;
-
-static const char* imu_layout_name(ImuWireLayout l) {
-    switch (l) {
-        case ImuWireLayout::AccelThenGyro: return "accel-gyro";
-        case ImuWireLayout::GyroThenAccel: return "gyro-accel";
-    }
-    return "accel-gyro";
-}
-
-static bool parse_imu_layout(const std::string& raw) {
-    std::string s = raw;
-    for (char& c : s) c = (char)std::tolower((unsigned char)c);
-    if (s == "accel-gyro" || s == "ag" || s == "default") {
-        g_imu_layout = ImuWireLayout::AccelThenGyro;
-        return true;
-    }
-    if (s == "gyro-accel" || s == "ga" || s == "gyro-first") {
-        g_imu_layout = ImuWireLayout::GyroThenAccel;
-        return true;
-    }
-    return false;
-}
-
-static const char* imu_test_name(ImuTestMode m) {
-    switch (m) {
-        case ImuTestMode::Off:   return "off";
-        case ImuTestMode::Roll:  return "roll";
-        case ImuTestMode::Pitch: return "pitch";
-        case ImuTestMode::Yaw:   return "yaw";
-        case ImuTestMode::Shake: return "shake";
-        case ImuTestMode::Gentle: return "gentle";
-    }
-    return "off";
-}
-
-static bool parse_u8_arg(const char* raw, uint8_t& out) {
-    if (!raw || !*raw) return false;
-    char* end = nullptr;
-    unsigned long v = std::strtoul(raw, &end, 0);
-    if (!end || *end != '\0' || v > 0xFFUL) return false;
-    out = (uint8_t)v;
-    return true;
-}
-
-static bool parse_imu_test(const std::string& raw) {
-    std::string s = raw;
-    for (char& c : s) c = (char)std::tolower((unsigned char)c);
-    if (s == "off" || s == "none") { g_imu_test = ImuTestMode::Off; return true; }
-    if (s == "roll")  { g_imu_test = ImuTestMode::Roll;  return true; }
-    if (s == "pitch") { g_imu_test = ImuTestMode::Pitch; return true; }
-    if (s == "yaw")   { g_imu_test = ImuTestMode::Yaw;   return true; }
-    if (s == "shake")  { g_imu_test = ImuTestMode::Shake;  return true; }
-    if (s == "gentle") { g_imu_test = ImuTestMode::Gentle; return true; }
-    return false;
-}
-
-static const char* imu_map_name(ImuMapMode m) {
-    switch (m) {
-        case ImuMapMode::Direct:  return "direct";
-        case ImuMapMode::InvertX: return "invert-x";
-        case ImuMapMode::InvertY: return "invert-y";
-        case ImuMapMode::InvertZ: return "invert-z";
-        case ImuMapMode::SwapYZ:  return "swap-yz";
-        case ImuMapMode::Switch1: return "switch1";
-        case ImuMapMode::Switch2: return "switch2";
-        case ImuMapMode::Switch3: return "switch3";
-    }
-    return "direct";
-}
-
-static bool parse_imu_map(const std::string& raw) {
-    std::string s = raw;
-    for (char& c : s) c = (char)std::tolower((unsigned char)c);
-    if (s == "direct")   { g_imu_map = ImuMapMode::Direct;  return true; }
-    if (s == "invert-x") { g_imu_map = ImuMapMode::InvertX; return true; }
-    if (s == "invert-y") { g_imu_map = ImuMapMode::InvertY; return true; }
-    if (s == "invert-z") { g_imu_map = ImuMapMode::InvertZ; return true; }
-    if (s == "swap-yz")  { g_imu_map = ImuMapMode::SwapYZ;  return true; }
-    if (s == "switch1")  { g_imu_map = ImuMapMode::Switch1; return true; }
-    if (s == "switch2")  { g_imu_map = ImuMapMode::Switch2; return true; }
-    if (s == "switch3")  { g_imu_map = ImuMapMode::Switch3; return true; }
-    return false;
-}
+static constexpr uint8_t RUMBLE_MIN_NONZERO = 4;      // floor for a real non-neutral half-frame
+static constexpr int     RUMBLE_GAIN_PERCENT = 100;
+static std::string g_usb_serial = "NSBRIDGE000001";
 
 // Built-in USB gadget lifecycle.  ns-backend can now create/bind the
-// 4-interface Pro Controller gadget itself on startup and unbind/remove it
+// USB gamepad gadget itself on startup and unbind/remove it
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
-static bool        g_auto_gadget_setup     = true;
-static bool        g_force_gadget_setup    = false;
-static bool        g_teardown_gadget_exit  = true;
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
-// For gyro debugging, default to a descriptor that matches a real single
-// Nintendo Pro Controller: one HID interface.  The old 4-interface composite
-// gadget is still available with --gadget-pads 4, but it does not match the
-// descriptor captured from real hardware and may be treated differently by HOS.
-static int g_hid_port_count = 1;
+static constexpr int HID_PORT_COUNT = 1;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
@@ -219,24 +92,23 @@ struct ClientSession {
     bool        first_pkt = true;
     ExtendedMultiReport report{}; // Inputs + optional motion coming from this specific PC/WebSocket
 
-    // Nintendo report 0x30 carries three IMU samples per input report.  Keep a
-    // tiny newest-first history per logical pad so the virtual Pro Controller
+    // Input report 0x30 carries three IMU samples per input report.  Keep a
+    // tiny newest-first history per logical pad so the virtual USB gamepad
     // looks like a real controller instead of repeating the same sample 3x.
     MotionReport motion_history[4][3]{};
     uint8_t      motion_history_count[4]{};
 
     RumblePacket rumble[4]{};
+    PrecisionRumblePacket precision_rumble[4]{};
     uint32_t    rumble_seq[4]{};
     bool        rumble_active[4]{};
-    bool        debug_rumble_sent[4]{};
-
     // Extended UDP clients can opt into server->client rumble by using the
     // authenticated extended packet format. Legacy UDP clients remain input-only.
     bool        udp_rumble_enabled = false;
     uint32_t    udp_last_rumble_seq[4]{};
 
     // Web/mobile packets set this even when the pad is neutral.  Without it,
-    // the Switch port only maps after a non-neutral input, so early rumble can
+    // the console port only maps after a non-neutral input, so early rumble can
     // be dropped before the browser has a rumble target.
     bool        pad_present[4]{};
     uint64_t    pad_last_present_us[4]{};
@@ -281,54 +153,6 @@ static void push_motion_history(ClientSession& c, int subpad, const MotionReport
     c.motion_history[subpad][1] = c.motion_history[subpad][0];
     c.motion_history[subpad][0] = motion;
     if (c.motion_history_count[subpad] < 3) c.motion_history_count[subpad]++;
-}
-
-static int16_t neg_i16_safe(int16_t v) {
-    return v == INT16_MIN ? INT16_MAX : (int16_t)-v;
-}
-
-static MotionReport remap_motion_for_switch(const MotionReport& in) {
-    MotionReport o = in;
-    switch (g_imu_map) {
-        case ImuMapMode::Direct:
-            break;
-
-        case ImuMapMode::InvertX:
-            o.ax = neg_i16_safe(in.ax); o.gx = neg_i16_safe(in.gx);
-            break;
-
-        case ImuMapMode::InvertY:
-            o.ay = neg_i16_safe(in.ay); o.gy = neg_i16_safe(in.gy);
-            break;
-
-        case ImuMapMode::InvertZ:
-            o.az = neg_i16_safe(in.az); o.gz = neg_i16_safe(in.gz);
-            break;
-
-        case ImuMapMode::SwapYZ:
-            o.ax = in.ax; o.ay = in.az; o.az = in.ay;
-            o.gx = in.gx; o.gy = in.gz; o.gz = in.gy;
-            break;
-
-        // These presets are intentionally simple right-handed rotations/sign
-        // flips around the SDL-standardized sensor axes.  They let you test the
-        // orientation the Switch/Mario Kart expects without recompiling.
-        case ImuMapMode::Switch1:
-            o.ax = in.ax;              o.ay = in.az;              o.az = neg_i16_safe(in.ay);
-            o.gx = in.gx;              o.gy = in.gz;              o.gz = neg_i16_safe(in.gy);
-            break;
-
-        case ImuMapMode::Switch2:
-            o.ax = in.ax;              o.ay = neg_i16_safe(in.az); o.az = in.ay;
-            o.gx = in.gx;              o.gy = neg_i16_safe(in.gz); o.gz = in.gy;
-            break;
-
-        case ImuMapMode::Switch3:
-            o.ax = in.az;              o.ay = in.ay;              o.az = neg_i16_safe(in.ax);
-            o.gx = in.gz;              o.gy = in.gy;              o.gz = neg_i16_safe(in.gx);
-            break;
-    }
-    return o;
 }
 
 // Diagnostics
@@ -891,7 +715,7 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
         for (int i = 0; i < MAX_CLIENTS; ++i) {
             std::lock_guard<std::mutex> lk(g_mtx[i]);
             repair_future_client_timestamp(g_clients[i], now);
-            if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, g_client_timeout_us)) {
+            if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
                 client_idx = i;
                 g_clients[i].active = true;
                 g_clients[i].addr = sender;
@@ -1086,84 +910,21 @@ static uint8_t pro_timer_from_us(uint64_t t_us) {
     return (uint8_t)((t_us / 5000ULL) & 0xFF);
 }
 
-static MotionReport synthetic_imu_sample(uint64_t t_us, int sample_index) {
-    // Deliberately large but valid Pro Controller-like IMU values.
-    // This is diagnostic: if --test-imu roll/pitch/yaw does not move anything
-    // in a motion-aware Switch screen/game, the issue is not SDL3 or axis maps;
-    // the console is not accepting/using IMU from this USB gadget.
-    const int phase = (int)(((t_us / 5000ULL) + (uint64_t)sample_index) & 0x3F);
-    const bool hi = (phase & 0x20) != 0;
-    const int s = hi ? 1 : -1;
-
-    MotionReport m{};
-    // Keep about 1g present so software that cares about gravity/orientation
-    // does not see a physically impossible zero-G controller.
-    m.ax = 0;
-    m.ay = 4096;
-    m.az = 0;
-
-    switch (g_imu_test) {
-        case ImuTestMode::Roll:
-            m.gx = (int16_t)(s * 9000);
-            m.ax = (int16_t)(s * 2800);
-            m.ay = 2800;
-            break;
-        case ImuTestMode::Pitch:
-            m.gy = (int16_t)(s * 9000);
-            m.az = (int16_t)(s * 2800);
-            m.ay = 2800;
-            break;
-        case ImuTestMode::Yaw:
-            m.gz = (int16_t)(s * 9000);
-            break;
-        case ImuTestMode::Shake:
-            m.gx = (int16_t)(s * 12000);
-            m.gy = (int16_t)(-s * 9000);
-            m.gz = (int16_t)(s * 6000);
-            m.ax = (int16_t)(s * 5000);
-            m.ay = (int16_t)(4096 + s * 1500);
-            m.az = (int16_t)(-s * 3500);
-            break;
-        case ImuTestMode::Gentle:
-            // More physically plausible than shake: steady gravity plus
-            // a moderate angular velocity. Some consumers reject absurd IMU.
-            m.ax = 0;
-            m.ay = 4096;
-            m.az = 0;
-            m.gx = (int16_t)(s * 1800);
-            m.gy = (int16_t)(-s * 900);
-            m.gz = (int16_t)(s * 450);
-            break;
-        case ImuTestMode::Off:
-            break;
-    }
-    return m;
-}
 
 
-
-// ── Nintendo Pro Controller USB protocol support ─────────────────────────────
+// ── Vendor USB gamepad USB protocol support ─────────────────────────────
 static constexpr size_t PRO_REPORT_SIZE = 64;
-// Real Nintendo full input reports are not spammed at the writer loop rate.
-// hid-nintendo documents Pro Controller USB report 0x30 at about every 15ms,
-// with 3 IMU samples spaced roughly 5ms apart.  Keep this configurable for
-// testing, but default to the real cadence instead of 250Hz.
-static uint64_t g_pro_report_interval_us = 15'000ULL;
-// Standard input byte 2 is "battery + connection info". The old value 0x8E
-// reports a low connection nibble with LSB 0. SDL/hid-nintendo notes that this
-// byte carries connection/USB status, so keep it configurable while defaulting
-// to a more normal wired/full battery style 0x81.
-static uint8_t  g_pro_bat_con = 0x81;
-// Byte 12 of report 0x30/0x21 is the controller's vibrator input/status byte.
-// Usually 0 is fine, but keep it configurable for exact-protocol experiments.
-static uint8_t  g_pro_vibrator_report = 0x0B;
-static bool     g_log_raw_30 = false;
+// Full input reports run at the common 15ms cadence, with 3 IMU samples spaced
+// roughly 5ms apart.
+static constexpr uint64_t PRO_REPORT_INTERVAL_US = 15'000ULL;
+static constexpr uint8_t  PRO_BAT_CON = 0x91;
+static constexpr uint8_t  PRO_VIBRATOR_REPORT = 0x0B;
 static constexpr int PRO_IDLE_REPORT_HZ = 30;
 static constexpr uint64_t PRO_IDLE_REPORT_INTERVAL_US = 1'000'000ULL / PRO_IDLE_REPORT_HZ;
 static constexpr uint64_t PRO_RELEASE_NEUTRAL_US = 250'000ULL;
 // Web/Gamepad APIs can occasionally report a connected pad as absent for one
 // frame (especially while another tab/client is closing).  Do not release the
-// Switch port instantly on a single absent sample, or held buttons like R get
+// console port instantly on a single absent sample, or held buttons like R get
 // chopped into tiny taps.
 static constexpr uint64_t WEB_PAD_ABSENT_RELEASE_US = 750'000ULL;
 static constexpr uint8_t RID_INPUT_STANDARD = 0x30;
@@ -1171,17 +932,11 @@ static constexpr uint8_t RID_INPUT_SUBCMD   = 0x21;
 static constexpr uint8_t RID_OUTPUT_RUMBLE  = 0x10;
 static constexpr uint8_t RID_OUTPUT_CMD     = 0x01;
 
-static constexpr uint8_t CMD_BT_MANUAL_PAIRING   = 0x01;
 static constexpr uint8_t CMD_GET_DEVICE_INFO     = 0x02;
 static constexpr uint8_t CMD_SET_DATA_FORMAT     = 0x03;
-static constexpr uint8_t CMD_TRIGGER_BUTTONS     = 0x04;
-static constexpr uint8_t CMD_SET_SHIP_MODE       = 0x08;
 static constexpr uint8_t CMD_SPI_FLASH_READ      = 0x10;
-static constexpr uint8_t CMD_SPI_FLASH_WRITE     = 0x11;
-static constexpr uint8_t CMD_SET_NFC_IR_CONFIG   = 0x21;
 static constexpr uint8_t CMD_SET_PLAYER_LIGHTS   = 0x30;
 static constexpr uint8_t CMD_ENABLE_IMU          = 0x40;
-static constexpr uint8_t CMD_SET_IMU_SENS        = 0x41;
 static constexpr uint8_t CMD_ENABLE_VIBRATION    = 0x48;
 
 #define NS_LOCAL_PACKED __attribute__((packed))
@@ -1194,12 +949,12 @@ struct NS_LOCAL_PACKED ProInputReport30 {
     uint8_t left_stick[3];
     uint8_t right_stick[3];
     uint8_t vibrator;
-    int16_t accel_x_0, accel_y_0, accel_z_0;
-    int16_t gyro_x_0,  gyro_y_0,  gyro_z_0;
-    int16_t accel_x_1, accel_y_1, accel_z_1;
-    int16_t gyro_x_1,  gyro_y_1,  gyro_z_1;
-    int16_t accel_x_2, accel_y_2, accel_z_2;
-    int16_t gyro_x_2,  gyro_y_2,  gyro_z_2;
+    int16_t accel_y_0, accel_x_0, accel_z_0;
+    int16_t gyro_y_0,  gyro_x_0,  gyro_z_0;
+    int16_t accel_y_1, accel_x_1, accel_z_1;
+    int16_t gyro_y_1,  gyro_x_1,  gyro_z_1;
+    int16_t accel_y_2, accel_x_2, accel_z_2;
+    int16_t gyro_y_2,  gyro_x_2,  gyro_z_2;
     uint8_t vendor_rest[15];
 };
 static_assert(sizeof(ProInputReport30) == PRO_REPORT_SIZE, "ProInputReport30 must be 64 bytes");
@@ -1218,11 +973,6 @@ struct NS_LOCAL_PACKED ProInputReport21 {
 };
 static_assert(sizeof(ProInputReport21) == PRO_REPORT_SIZE, "ProInputReport21 must be 64 bytes");
 
-// Fresh virtual identities.  The old build used 98:B6:E9:11:22:33..36
-// and matching serial strings; changing both forces the Switch to stop using
-// any cached calibration/association for the previous fake controllers.
-// 02 is a locally-administered unicast address, so these are intentionally
-// private/stable virtual MACs rather than pretending to be real hardware.
 static uint8_t CTRL_MAC_BE[4][6] = {
     {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA0},
     {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA1},
@@ -1262,8 +1012,8 @@ static void randomize_controller_identity() {
     read_random_bytes(rnd, sizeof(rnd));
 
     // Locally administered unicast MACs. Keep 02:4E:53 ("NS") as a stable
-    // virtual vendor prefix and randomize the low bytes so HOS cannot reuse
-    // cached calibration/association for the previous fake controller.
+    // virtual vendor prefix and randomize the low bytes so the host cannot
+    // reuse cached calibration/association for the previous virtual controller.
     for (int i = 0; i < 4; ++i) {
         CTRL_MAC_BE[i][0] = 0x02;
         CTRL_MAC_BE[i][1] = 0x4E;
@@ -1282,18 +1032,6 @@ static void randomize_controller_identity() {
     std::snprintf(usb_ser, sizeof(usb_ser), "%02X%02X%02X%02X%02X%02X",
                   rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5]);
     g_usb_serial = usb_ser;
-}
-
-static void print_controller_identity() {
-    if (!g_verbose) return;
-    std::printf("[identity] usb_serial=%s\n", g_usb_serial.c_str());
-    for (int i = 0; i < g_hid_port_count; ++i) {
-        std::printf("[identity] pad%d MAC=%02X:%02X:%02X:%02X:%02X:%02X serial=%s\n",
-                    i + 1,
-                    CTRL_MAC_BE[i][0], CTRL_MAC_BE[i][1], CTRL_MAC_BE[i][2],
-                    CTRL_MAC_BE[i][3], CTRL_MAC_BE[i][4], CTRL_MAC_BE[i][5],
-                    CTRL_SERIAL[i].c_str());
-    }
 }
 
 static constexpr size_t SPI_FLASH_SIZE = 0x10000;
@@ -1329,13 +1067,19 @@ struct ControllerRuntime {
     b1 = (b1 & 0xF0) | ((val >> 8) & 0x0F);
 }
 
+static void apply_private_controller_spi_profile(uint8_t* flash) {
+    (void)flash;
+    // Public build intentionally does not embed private controller SPI/profile data.
+    // Users may load their own device profile/dump locally where legally permitted.
+}
+
 static void init_spi_flash(int ctrl) {
     if (ctrl < 0 || ctrl >= 4 || g_spi_initialized[ctrl]) return;
 
     uint8_t* flash = g_spi_flash[ctrl];
     memset(flash, 0xFF, SPI_FLASH_SIZE);
 
-    // Do NOT put the serial at 0x6080.  The Switch/Chromium/Linux init
+    // Do NOT put the serial at 0x6080.  The host init
     // sequence reads 0x6080 as IMU horizontal offsets and 0x6086 as analog
     // stick parameters.  The previous build wrote the ASCII serial there,
     // which produced a huge bogus stick deadzone/range block and could make
@@ -1344,7 +1088,7 @@ static void init_spi_flash(int ctrl) {
     flash[0x6013] = 0xA0;
     flash[0x601B] = 0x02;
 
-    // Stick calibration must be valid for BOTH sticks.  The Switch reads
+    // Stick calibration must be valid for BOTH sticks.  The console reads
     // 9 bytes per stick.  Left and right use different field orders:
     //   left:  max-above-center, center, min-below-center
     //   right: center, min-below-center, max-above-center
@@ -1378,7 +1122,7 @@ static void init_spi_flash(int ctrl) {
     memcpy(flash + 0x603D, left_cal,  sizeof(left_cal));
     memcpy(flash + 0x6046, right_cal, sizeof(right_cal));
 
-    // User calibration magic + data.  The Switch/Linux driver checks 0xB2 0xA1
+    // User calibration magic + data.  The host driver checks 0xB2 0xA1
     // before using the user calibration block.
     flash[0x8010] = 0xB2; flash[0x8011] = 0xA1;
     memcpy(flash + 0x8012, left_cal, sizeof(left_cal));
@@ -1401,7 +1145,7 @@ static void init_spi_flash(int ctrl) {
     memcpy(flash + 0x6086, stick_params, sizeof(stick_params));
 
     // Factory IMU calibration block.
-    // Some Switch init paths read 0x6020 before/alongside 0x6098. Leaving this
+    // Some host init paths read 0x6020 before/alongside 0x6098. Leaving this
     // as 0xFF can make the console accept 0x30 reports but ignore or badly
     // scale the IMU samples. Mirror a sane virtual calibration here too:
     //   gyro offsets  = 0
@@ -1413,7 +1157,7 @@ static void init_spi_flash(int ctrl) {
         flash[addr + 1] = (uint8_t)((val >> 8) & 0xFF);
     };
 
-    // hid-nintendo parses the 24-byte IMU calibration block as:
+    // hid-Vendor parses the 24-byte IMU calibration block as:
     //   +0:  accel offsets XYZ
     //   +6:  accel scales  XYZ
     //   +12: gyro offsets  XYZ
@@ -1423,9 +1167,9 @@ static void init_spi_flash(int ctrl) {
     // belong, making accel scale read as zero and gyro offset read as 0x1000.
     // That is poison for any host that validates/calibrates IMU before using it.
     static constexpr int16_t IMU_ACCEL_OFFSET = 0;
-    static constexpr int16_t IMU_ACCEL_SCALE  = 16384; // hid-nintendo default, 0x4000
+    static constexpr int16_t IMU_ACCEL_SCALE  = 16384; // hid-Vendor default, 0x4000
     static constexpr int16_t IMU_GYRO_OFFSET  = 0;
-    static constexpr int16_t IMU_GYRO_SCALE   = 13371; // hid-nintendo default
+    static constexpr int16_t IMU_GYRO_SCALE   = 13371; // hid-Vendor default
 
     const int16_t imu_vals[12] = {
         IMU_ACCEL_OFFSET, IMU_ACCEL_OFFSET, IMU_ACCEL_OFFSET,
@@ -1436,9 +1180,9 @@ static void init_spi_flash(int ctrl) {
     for (int i = 0; i < 12; ++i)
         put_i16_le((uint16_t)(0x6020 + i * 2), imu_vals[i]);
 
-    // Body/grip colors per virtual Pro Controller:
+    // Body/grip colors per virtual USB gamepad:
     //   1 = red, 2 = yellow, 3 = blue, 4 = green.
-    // Buttons stay white for readability in the Switch UI.
+    // Buttons stay white for readability in the console UI.
     static const uint8_t BODY_RGB[4][3] = {
         {0xE6, 0x00, 0x12}, // red
         {0xFF, 0xCC, 0x00}, // yellow
@@ -1452,22 +1196,14 @@ static void init_spi_flash(int ctrl) {
     flash[0x6059] = 0xFF;    flash[0x605A] = 0xFF;    flash[0x605B] = 0xFF;
     flash[0x605C] = 0x00;
 
-    // Important: 0x6098 is NOT IMU calibration.  Joy-Con/Pro-controller
+    // Important: 0x6098 is NOT IMU calibration.  controller
     // tools read it as the second half of the 0x6086..0x60A9 stick-parameter
     // model block.  The previous test build mirrored IMU calibration here,
     // which made the console read nonsense stick-model parameters.  Keep it
     // neutral/sane instead.
     memset(flash + 0x6098, 0x00, 0x12);
 
-    // User IMU calibration lives at 0x8026/0x8028 according to hid-nintendo.
-    // Make it optional: if disabled, the magic stays non-matching and the host
-    // should fall back to factory IMU calibration at 0x6020.
-    if (!g_no_user_imu_cal) {
-        flash[0x8026] = 0xB2;
-        flash[0x8027] = 0xA1;
-        for (int i = 0; i < 12; ++i)
-            put_i16_le((uint16_t)(0x8028 + i * 2), imu_vals[i]);
-    }
+    apply_private_controller_spi_profile(flash);
 
     g_spi_initialized[ctrl] = true;
 }
@@ -1475,7 +1211,7 @@ static void init_spi_flash(int ctrl) {
 static void set_identity_in_0x81(uint8_t* resp_81, int ctrl) {
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
     // USB 0x81 MAC reply stores MAC little-endian in bytes 4..9, matching
-    // Chromium's MacAddressReport/UnpackSwitchMacAddress handling.
+    // Chromium's MacAddressReport/UnpackconsoleMacAddress handling.
     resp_81[4] = mac[5]; resp_81[5] = mac[4]; resp_81[6] = mac[3];
     resp_81[7] = mac[2]; resp_81[8] = mac[1]; resp_81[9] = mac[0];
 }
@@ -1487,7 +1223,7 @@ static size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
     switch (subtype) {
     case 0x01: // request MAC/address/device type
         out[2] = 0x00; // padding
-        out[3] = 0x03; // Pro Controller
+        out[3] = 0x03; // USB gamepad
         set_identity_in_0x81(out, ctrl);
         break;
     case 0x02: // USB handshake
@@ -1495,7 +1231,7 @@ static size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
     case 0x04: // disable USB timeout; real devices may not ACK, but an ACK is accepted
     case 0x05: // enable USB timeout
     default:
-        // Chromium and hid-nintendo only require report 0x81 subtype to advance
+        // Chromium and hid-Vendor only require report 0x81 subtype to advance
         // these USB-init steps. Keep remaining bytes zero, like a minimal ACK.
         break;
     }
@@ -1504,48 +1240,53 @@ static size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
 
 static void build_get_device_info_response(uint8_t* out, int ctrl) {
     memset(out, 0, 36);
-    out[0] = 0x03; // firmware major
-    out[1] = 0x48; // firmware minor
-    out[2] = 0x03; // Pro Controller
-    out[3] = 0x02; // hardware model
+
+    // Hardware-style subcmd 0x02 reply:
+    //   04 21 03 02 <MAC little-endian> 03 02
+    // Older fake builds used 03 48 ... 03 01; the console UI accepted that, but
+    // games did not enable the same gyro/rumble behavior.
+    out[0] = 0x04; // firmware major from capture
+    out[1] = 0x21; // firmware minor from capture
+    out[2] = 0x03; // USB gamepad
+    out[3] = 0x02; // hardware/model
 
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
     out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3];
     out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
 
     out[10] = 0x03;
-    out[11] = 0x01;
+    out[11] = 0x02;
 }
 
 static void fill_neutral_controls(ProInputReport30& r) {
-    r.conn_info = g_pro_bat_con;
-    // Real USB Pro Controller captures keep bit 0x80 set in the middle button byte
+    r.conn_info = PRO_BAT_CON;
+    // Real USB USB gamepad captures keep bit 0x80 set in the middle button byte
     // even at rest: neutral buttons are 00 80 00, not 00 00 00.  Keep this base
-    // bit in both 0x30 and 0x21 snapshots because some Switch/game paths appear
-    // to gate motion/HD-rumble capability on the complete controller state, not
+    // bit in both 0x30 and 0x21 snapshots because some console/game paths appear
+    // to gate motion/precision-rumble capability on the complete controller state, not
     // merely on the IMU bytes.
     r.buttons[0] = 0x00;
     r.buttons[1] = 0x80;
     r.buttons[2] = 0x00;
     r.left_stick[0]  = 0x00; r.left_stick[1]  = 0x08; r.left_stick[2]  = 0x80;
     r.right_stick[0] = 0x00; r.right_stick[1] = 0x08; r.right_stick[2] = 0x80;
-    r.vibrator = g_pro_vibrator_report;
+    r.vibrator = PRO_VIBRATOR_REPORT;
 }
 
 static void fill_neutral_controls(ProInputReport21& r) {
-    r.conn_info = g_pro_bat_con;
+    r.conn_info = PRO_BAT_CON;
     r.buttons[0] = 0x00;
     r.buttons[1] = 0x80;
     r.buttons[2] = 0x00;
     r.left_stick[0]  = 0x00; r.left_stick[1]  = 0x08; r.left_stick[2]  = 0x80;
     r.right_stick[0] = 0x00; r.right_stick[1] = 0x08; r.right_stick[2] = 0x80;
-    r.vibrator = g_pro_vibrator_report;
+    r.vibrator = PRO_VIBRATOR_REPORT;
 }
 
 static uint16_t axis8_to_12(uint8_t v) {
     // Match the fake calibration above: center 0x800 with about ±0x600 range.
     // Sending the full 0x000..0xFFF range can sit outside the advertised
-    // calibration and some Switch paths appear to flatten/ignore the stick.
+    // calibration and some console paths appear to flatten/ignore the stick.
     if (v == 128) return 0x800;
 
     int32_t delta = (int32_t)v - 128;
@@ -1568,7 +1309,7 @@ static uint8_t invert_axis8_centered(uint8_t v) {
 }
 
 static void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8) {
-    // Input protocol uses 0 = up/left and 255 = down/right.  The Switch raw
+    // Input protocol uses 0 = up/left and 255 = down/right.  The console raw
     // stick format has Y in the opposite direction, so invert Y once here for
     // both sticks.
     uint16_t x = axis8_to_12(x8);
@@ -1614,13 +1355,13 @@ static void hat_to_pro_buttons(uint8_t hat, uint8_t buttons[3]) {
 static void apply_input_controls_to_pro21(const ExtendedHIDReport& src, ProInputReport21& out) {
     // Subcommand replies (report 0x21) contain the same button/stick snapshot
     // fields as standard input reports.  Keep them in sync with the currently
-    // held web/UDP input; otherwise frequent Switch output/subcommand traffic
+    // held web/UDP input; otherwise frequent console output/subcommand traffic
     // injects neutral frames between normal 0x30 reports, which makes held
     // buttons such as R/ZR flicker in-game.
-    out.conn_info = g_pro_bat_con;
+    out.conn_info = PRO_BAT_CON;
     memset(out.buttons, 0, sizeof(out.buttons));
     out.buttons[1] = 0x80; // real neutral USB Pro state is 00 80 00
-    out.vibrator = g_pro_vibrator_report;
+    out.vibrator = PRO_VIBRATOR_REPORT;
 
     const HIDReport& in = src.input;
     if (in.buttons & BTN_Y)       out.buttons[0] |= 0x01;
@@ -1679,19 +1420,11 @@ static void build_standard_report(const ExtendedHIDReport& src,
     pack_stick_12(out.right_stick, in.rx, in.ry);
 
     MotionReport imu[3]{};
-    bool has_imu = false;
-    if (imu_enabled && g_imu_test != ImuTestMode::Off) {
-        has_imu = true;
-        uint64_t t = now_us();
-        for (int i = 0; i < 3; ++i)
-            imu[i] = remap_motion_for_switch(synthetic_imu_sample(t, i));
-    } else {
-        has_imu = imu_enabled && motion_history && motion_history_count > 0;
-        if (has_imu) {
-            for (int i = 0; i < 3; ++i) {
-                if (i < motion_history_count) imu[i] = remap_motion_for_switch(motion_history[i]);
-                else imu[i] = remap_motion_for_switch(motion_history[motion_history_count - 1]);
-            }
+    const bool has_imu = imu_enabled && motion_history && motion_history_count > 0;
+    if (has_imu) {
+        for (int i = 0; i < 3; ++i) {
+            if (i < motion_history_count) imu[i] = motion_history[i];
+            else imu[i] = motion_history[motion_history_count - 1];
         }
     }
 
@@ -1700,41 +1433,29 @@ static void build_standard_report(const ExtendedHIDReport& src,
         uint64_t t = now_us();
         if (t - last_log_us > 250000) {
             last_log_us = t;
-            std::printf("[input] lx=%3u ly=%3u rx=%3u ry=%3u | L=%02X %02X %02X R=%02X %02X %02X | imu=%s map=%s layout=%s test=%s samples=%u ax=%6d ay=%6d az=%6d gx=%6d gy=%6d gz=%6d\n",
+            std::printf("[input] lx=%3u ly=%3u rx=%3u ry=%3u | L=%02X %02X %02X R=%02X %02X %02X | motion=%s samples=%u ax=%6d ay=%6d az=%6d gx=%6d gy=%6d gz=%6d\n",
                         in.lx, in.ly, in.rx, in.ry,
                         out.left_stick[0], out.left_stick[1], out.left_stick[2],
                         out.right_stick[0], out.right_stick[1], out.right_stick[2],
                         has_imu ? "yes" : "no",
-                        imu_map_name(g_imu_map),
-                        imu_layout_name(g_imu_layout),
-                        imu_test_name(g_imu_test),
-                        (unsigned)(has_imu ? (g_imu_test != ImuTestMode::Off ? 3 : motion_history_count) : 0),
+                        (unsigned)(has_imu ? motion_history_count : 0),
                         (int)imu[0].ax, (int)imu[0].ay, (int)imu[0].az,
                         (int)imu[0].gx, (int)imu[0].gy, (int)imu[0].gz);
         }
     }
 
     auto store_imu_sample = [](ProInputReport30& dst, int idx, const MotionReport& m) {
-        int16_t first0, first1, first2, second0, second1, second2;
-        if (g_imu_layout == ImuWireLayout::AccelThenGyro) {
-            first0 = m.ax; first1 = m.ay; first2 = m.az;
-            second0 = m.gx; second1 = m.gy; second2 = m.gz;
-        } else {
-            first0 = m.gx; first1 = m.gy; first2 = m.gz;
-            second0 = m.ax; second1 = m.ay; second2 = m.az;
-        }
-
         // ProInputReport30 is packed, so GCC does not allow binding its fields
         // to int16_t&.  Assign fields directly instead.
         if (idx == 0) {
-            dst.accel_x_0 = first0;  dst.accel_y_0 = first1;  dst.accel_z_0 = first2;
-            dst.gyro_x_0  = second0; dst.gyro_y_0  = second1; dst.gyro_z_0  = second2;
+            dst.accel_y_0 = m.ay; dst.accel_x_0 = m.ax; dst.accel_z_0 = m.az;
+            dst.gyro_y_0  = m.gy; dst.gyro_x_0  = m.gx; dst.gyro_z_0  = m.gz;
         } else if (idx == 1) {
-            dst.accel_x_1 = first0;  dst.accel_y_1 = first1;  dst.accel_z_1 = first2;
-            dst.gyro_x_1  = second0; dst.gyro_y_1  = second1; dst.gyro_z_1  = second2;
+            dst.accel_y_1 = m.ay; dst.accel_x_1 = m.ax; dst.accel_z_1 = m.az;
+            dst.gyro_y_1  = m.gy; dst.gyro_x_1  = m.gx; dst.gyro_z_1  = m.gz;
         } else {
-            dst.accel_x_2 = first0;  dst.accel_y_2 = first1;  dst.accel_z_2 = first2;
-            dst.gyro_x_2  = second0; dst.gyro_y_2  = second1; dst.gyro_z_2  = second2;
+            dst.accel_y_2 = m.ay; dst.accel_x_2 = m.ax; dst.accel_z_2 = m.az;
+            dst.gyro_y_2  = m.gy; dst.gyro_x_2  = m.gx; dst.gyro_z_2  = m.gz;
         }
     };
 
@@ -1749,12 +1470,6 @@ static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_
     reply->subcmd_id = subcmd;
 
     switch (subcmd) {
-    case CMD_BT_MANUAL_PAIRING:
-        reply->ack = 0x81;
-        reply->reply_data[0] = 0x03;
-        reply->reply_data[1] = 0x01;
-        return 2;
-
     case CMD_GET_DEVICE_INFO: {
         uint8_t info[36];
         build_get_device_info_response(info, rt.ctrl);
@@ -1765,14 +1480,6 @@ static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_
 
     case CMD_SET_DATA_FORMAT:
         rt.full_report_enabled = true;
-        reply->ack = 0x80;
-        reply->reply_data[0] = cmd_len > 0 ? cmd_data[0] : 0x30;
-        return 1;
-
-    case CMD_TRIGGER_BUTTONS:
-    case CMD_SET_SHIP_MODE:
-    case CMD_SPI_FLASH_WRITE:
-    case CMD_SET_IMU_SENS:
         reply->ack = 0x80;
         return 0;
 
@@ -1815,43 +1522,25 @@ static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_
         return 5 + size;
     }
 
-    case CMD_SET_NFC_IR_CONFIG:
-        // The Switch may poll the NFC/IR MCU configuration even for a normal
-        // Pro Controller.  The previous fake data reply made some consoles keep
-        // repeating subcommand 0x21 forever, which flooded report 0x21 replies.
-        // A plain successful ACK is enough for a controller without NFC/IR and
-        // lets the console settle back to steady 0x30 input reports with IMU data.
+    case CMD_SET_PLAYER_LIGHTS:
         reply->ack = 0x80;
         return 0;
 
-    case CMD_SET_PLAYER_LIGHTS:
-        reply->ack = 0x80;
-        reply->reply_data[0] = cmd_len > 0 ? cmd_data[0] : 0;
-        return 1;
-
     case 0x33:
-        // Chromium sends this as an acknowledged no-op immediately after
-        // disabling the USB timeout. Real hardware accepts it as a normal
-        // subcommand; treating it as failure can stall init sequences.
         reply->ack = 0x80;
         return 0;
 
     case CMD_ENABLE_IMU:
         rt.imu_enabled = (cmd_len == 0) || cmd_data[0] != 0;
         reply->ack = 0x80;
-        reply->reply_data[0] = cmd_len > 0 ? cmd_data[0] : 1;
-        return 1;
+        return 0;
 
     case CMD_ENABLE_VIBRATION:
         rt.vibration_enabled = (cmd_len == 0) || cmd_data[0] != 0;
         reply->ack = 0x80;
-        reply->reply_data[0] = cmd_len > 0 ? cmd_data[0] : 1;
-        return 1;
+        return 0;
 
     default:
-        // Real controllers tend to ACK unknown-but-well-formed subcommands
-        // rather than poison the init state machine. Keep success ACK so the
-        // Switch can continue if it sends a harmless command we do not parse.
         reply->ack = 0x80;
         return 0;
     }
@@ -1865,13 +1554,51 @@ static bool rumble_half_is_neutral_carrier(const uint8_t* f) {
     return f[0] == 0x00 && f[1] == 0x01 && f[2] == 0x40 && f[3] == 0x40;
 }
 
+struct DecodedPrecisionRumbleHalf {
+    uint8_t low = 0;   // low-frequency/weak motor approximation
+    uint8_t high = 0;  // high-frequency/strong motor approximation
+};
+
+static uint8_t rumble_scale_capture_delta(int v) {
+    v = (v * RUMBLE_GAIN_PERCENT) / 100;
+    if (v > 0 && v < (int)RUMBLE_MIN_NONZERO) v = RUMBLE_MIN_NONZERO;
+    return (uint8_t)std::clamp(v, 0, 255);
+}
+
+static DecodedPrecisionRumbleHalf rumble_decode_half_precision_to_dual(const uint8_t* f) {
+    DecodedPrecisionRumbleHalf out{};
+    if (rumble_half_is_all_zero(f) || rumble_half_is_neutral_carrier(f))
+        return out;
+
+    // Precision rumble is not a simple dual-rumble packet: each 4-byte half
+    // carries one actuator with low/high frequency components.  For SDL/Web
+    // clients, preserve that split by decoding each half into weak+strong and
+    // later combining left/right actuators with max().
+    //
+    // This approximation is capture-derived and intentionally conservative:
+    // neutral carrier 00 01 40 40 maps to 0, but packets such as
+    // 26 09 81 5D / B3 2F AF 52 / BB 9D 2D 40 produce meaningful low/high
+    // values instead of being crushed into one generic strength.
+    int high_delta = std::abs((int)(f[1] & 0x7F) - 0x01);
+    int low_delta  = std::abs((int)(f[3] & 0x7F) - 0x40);
+
+    // The first and third bytes mainly move with frequency/envelope.  They are
+    // useful to keep tiny precision pulses alive after conversion to classic rumble.
+    int high_env = std::abs((int)f[0] - 0x00) / 3;
+    int low_env  = std::abs((int)(f[2] & 0x7F) - 0x40) / 2;
+
+    out.high = rumble_scale_capture_delta(high_delta * 3 + high_env);
+    out.low  = rumble_scale_capture_delta(low_delta  * 3 + low_env);
+    return out;
+}
+
 static uint8_t rumble_decode_half_to_u8(const uint8_t* f) {
     static const uint8_t neutral[4] = {0x00, 0x01, 0x40, 0x40};
 
     // Important: a 4-byte all-zero half-frame is an OFF motor half, not a
     // full-power rumble.  The old max-difference decoder turned 00 00 00 00
     // into 255 because it is far away from 00 01 40 40.  That made many
-    // asymmetric/tiny Switch rumble packets become fake huge pulses.
+    // asymmetric/tiny Precision rumble packets become fake huge pulses.
     if (rumble_half_is_all_zero(f) || rumble_half_is_neutral_carrier(f))
         return 0;
 
@@ -1883,13 +1610,13 @@ static uint8_t rumble_decode_half_to_u8(const uint8_t* f) {
         sum_diff += d;
     }
 
-    // This is still a compact HD-rumble -> classic dual-rumble approximation,
+    // This is still a compact precision-rumble -> classic dual-rumble approximation,
     // but it preserves low magnitudes instead of clamping everything to >=80.
-    // Low Switch pulses therefore get forwarded as low 1..79 values.
+    // Low console pulses therefore get forwarded as low 1..79 values.
     int strength = max_diff * 2 + sum_diff / 4;
-    strength = (strength * g_rumble_gain_percent) / 100;
-    if (strength > 0 && strength < (int)g_rumble_min_nonzero)
-        strength = g_rumble_min_nonzero;
+    strength = (strength * RUMBLE_GAIN_PERCENT) / 100;
+    if (strength > 0 && strength < (int)RUMBLE_MIN_NONZERO)
+        strength = RUMBLE_MIN_NONZERO;
     return (uint8_t)std::clamp(strength, 0, 255);
 }
 
@@ -1898,27 +1625,31 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
         return;
 
     const uint8_t* rb = packet + 2;
-    uint8_t low  = rumble_decode_half_to_u8(rb);
-    uint8_t high = rumble_decode_half_to_u8(rb + 4);
+    DecodedPrecisionRumbleHalf left  = rumble_decode_half_precision_to_dual(rb);
+    DecodedPrecisionRumbleHalf right = rumble_decode_half_precision_to_dual(rb + 4);
+
+    // Classic clients have only weak/strong motors, not left/right precision
+    // actuators. Combine both console Actuators by frequency band.
+    uint8_t low  = std::max(left.low,  right.low);
+    uint8_t high = std::max(left.high, right.high);
+
+    // Fallback for any odd non-neutral packet our precision split does not understand.
+    if (low == 0 && high == 0 &&
+        !(rumble_half_is_all_zero(rb) || rumble_half_is_neutral_carrier(rb)) &&
+        !(rumble_half_is_all_zero(rb + 4) || rumble_half_is_neutral_carrier(rb + 4))) {
+        low = rumble_decode_half_to_u8(rb);
+        high = rumble_decode_half_to_u8(rb + 4);
+    }
+
     bool neutral = (low == 0 && high == 0);
 
-    if (neutral && !publish_neutral && !g_log_neutral_rumble)
+    if (neutral && !publish_neutral)
         return;
 
     std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
     if (neutral && !g_clients[client_idx].rumble_active[sub_idx]) {
-        // The Switch sends the neutral carrier constantly. Forwarding every
-        // neutral frame creates haptic spam and hides real rumble debugging.
-        if (g_verbose && g_log_neutral_rumble) {
-            static uint64_t last_neutral_log_us[MAX_CLIENTS][4] = {};
-            uint64_t t = now_us();
-            if (t - last_neutral_log_us[client_idx][sub_idx] > 1'000'000ULL) {
-                last_neutral_log_us[client_idx][sub_idx] = t;
-                std::printf("[rumble-neutral] client=%d pad=%d raw=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                            client_idx + 1, sub_idx + 1,
-                            rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);
-            }
-        }
+        // The console sends the neutral carrier constantly. Forwarding every
+        // neutral frame creates haptic spam.
         return;
     }
 
@@ -1927,7 +1658,18 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
     ev.subpad = (uint8_t)sub_idx;
     ev.low_freq = neutral ? 0 : low;
     ev.high_freq = neutral ? 0 : high;
-    ev.duration_10ms = neutral ? 0 : 6;
+    // The working capture sends rumble at report cadence.  Keep pulses short so
+    // small precision packets do not smear into a long full-power buzz on classic clients.
+    ev.duration_10ms = neutral ? 0 : 3;
+
+    PrecisionRumblePacket& precision_ev = g_clients[client_idx].precision_rumble[sub_idx];
+    precision_ev.magic = PRECISION_RUMBLE_MAGIC;
+    precision_ev.subpad = (uint8_t)sub_idx;
+    precision_ev.low_freq = ev.low_freq;
+    precision_ev.high_freq = ev.high_freq;
+    precision_ev.duration_10ms = ev.duration_10ms;
+    memcpy(precision_ev.precision, rb, sizeof(precision_ev.precision));
+
     g_clients[client_idx].rumble_active[sub_idx] = !neutral;
     g_clients[client_idx].rumble_seq[sub_idx]++;
 
@@ -1939,35 +1681,10 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
     }
 }
 
-static void queue_debug_test_rumble_if_needed(int client_idx, int sub_idx) {
-    if (!g_test_rumble_on_connect) return;
-    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
-
-    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-    ClientSession& c = g_clients[client_idx];
-    if (!c.active || c.debug_rumble_sent[sub_idx]) return;
-
-    RumblePacket& ev = c.rumble[sub_idx];
-    ev.magic = RUMBLE_MAGIC;
-    ev.subpad = (uint8_t)sub_idx;
-    ev.low_freq = 180;
-    ev.high_freq = 220;
-    ev.duration_10ms = 25; // 250 ms
-    c.rumble_active[sub_idx] = true;
-    c.debug_rumble_sent[sub_idx] = true;
-    c.rumble_seq[sub_idx]++;
-
-    if (g_verbose)
-        std::printf("[rumble-test] queued client=%d pad=%d low=%u high=%u duration=%u\n",
-                    client_idx + 1, sub_idx + 1, ev.low_freq, ev.high_freq, ev.duration_10ms);
-}
-
-
-
 static constexpr const char* GADGET_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl";
 static constexpr const char* CONFIG_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1";
 
-// Nintendo Switch Pro Controller descriptor, same 64-byte input/output report
+// Vendor USB gamepad descriptor, same 64-byte input/output report
 // descriptor previously written by setup_gadget.sh.
 static const uint8_t PRO_CONTROLLER_REPORT_DESC[] = {
     0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x30, 0x05, 0x01, 0x05, 0x09, 0x19, 0x01,
@@ -1986,7 +1703,7 @@ static const uint8_t PRO_CONTROLLER_REPORT_DESC[] = {
 };
 
 static bool hidg_nodes_ready() {
-    for (int i = 0; i < g_hid_port_count; ++i) {
+    for (int i = 0; i < HID_PORT_COUNT; ++i) {
         char path[32];
         std::snprintf(path, sizeof(path), "/dev/hidg%d", i);
         if (access(path, R_OK | W_OK) != 0)
@@ -2116,7 +1833,7 @@ static void teardown_gadget() {
 
     std::puts("[gadget] Closing USB gadget...");
 
-    // Unbind first.  This disconnects the virtual controllers from the Switch.
+    // Unbind first.  This disconnects the virtual controllers from the console.
     std::string udc_path = join_path(GADGET_DIR, "UDC");
     write_text_file(udc_path.c_str(), "");
 
@@ -2150,9 +1867,6 @@ static int run_shell_best_effort(const char* cmd) {
 }
 
 static bool setup_gadget_builtin(bool force, const char* reason) {
-    if (!g_auto_gadget_setup && !force)
-        return hidg_nodes_ready();
-
     // Non-forced calls are still cheap/retry-safe for internal recovery paths,
     // but startup passes force=true so the gadget is always torn down and
     // recreated from a known-good state.
@@ -2171,8 +1885,8 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         return false;
     }
 
-    std::printf("[gadget] %s; creating built-in %d-Pro-Controller gadget\n",
-                reason ? reason : "HID gadget not ready", g_hid_port_count);
+    std::printf("[gadget] %s; creating built-in %d-interface USB gamepad gadget\n",
+                reason ? reason : "HID gadget not ready", HID_PORT_COUNT);
 
     // Try to load and mount configfs.  Ignore failures here because both may
     // already be active on systems that previously used setup_gadget.sh.
@@ -2209,7 +1923,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     if (!mkdir_if_needed(strings_dir.c_str())) return false;
     if (!mkdir_if_needed(join_path(GADGET_DIR, "configs").c_str())) return false;
     if (!mkdir_if_needed(configs_dir.c_str())) return false;
-    // Real Pro Controller descriptor has iConfiguration = 0, so do not create
+    // Real USB gamepad descriptor has iConfiguration = 0, so do not create
     // a configuration string in configs/c.1/strings.
     if (!mkdir_if_needed(functions_dir.c_str())) return false;
 
@@ -2223,13 +1937,13 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     // USB descriptor serial belongs here, not in the controller SPI area.
     if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), g_usb_serial.c_str())) return false;
-    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "Nintendo Co., Ltd.")) return false;
-    if (!write_text_file(join_path(strings_dir, "product").c_str(), "Pro Controller")) return false;
+    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "Open HID Bridge")) return false;
+    if (!write_text_file(join_path(strings_dir, "product").c_str(), "HID Gamepad Bridge")) return false;
 
     if (!write_text_file(join_path(configs_dir, "MaxPower").c_str(), "500")) return false;
     if (!write_text_file(join_path(configs_dir, "bmAttributes").c_str(), "0xA0")) return false;
 
-    for (int i = 0; i < g_hid_port_count; ++i) {
+    for (int i = 0; i < HID_PORT_COUNT; ++i) {
         if (!create_hid_function(i)) return false;
     }
 
@@ -2246,14 +1960,14 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     // /dev/hidg* can appear shortly after binding.
     for (int tries = 0; tries < 20; ++tries) {
         bool all_seen = true;
-        for (int i = 0; i < g_hid_port_count; ++i) {
+        for (int i = 0; i < HID_PORT_COUNT; ++i) {
             char path[32];
             std::snprintf(path, sizeof(path), "/dev/hidg%d", i);
             if (access(path, F_OK) != 0) all_seen = false;
             chmod(path, 0666);
         }
         if (all_seen && hidg_nodes_ready()) {
-            std::printf("[gadget] Done. Exposed %d Pro Controller HID interface(s) (/dev/hidg0..%d)\n", g_hid_port_count, g_hid_port_count - 1);
+            std::printf("[gadget] Done. Exposed %d USB gamepad HID interface(s) (/dev/hidg0..%d)\n", HID_PORT_COUNT, HID_PORT_COUNT - 1);
             return true;
         }
         std::this_thread::sleep_for(ms(100));
@@ -2281,7 +1995,7 @@ static void drain_hid_output_queue(int fd) {
 
 // ── Smart Multiplexer HID Writer Thread ───────────────────────────────────────
 static void writer_thread(int hz) {
-    for (int i = 0; i < g_hid_port_count; ++i) init_spi_flash(i);
+    for (int i = 0; i < HID_PORT_COUNT; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
     int fds[4] = {-1, -1, -1, -1};
@@ -2291,11 +2005,11 @@ static void writer_thread(int hz) {
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[4];
     ControllerRuntime rt[4];
-    for (int i = 0; i < g_hid_port_count; ++i) rt[i].ctrl = i;
+    for (int i = 0; i < HID_PORT_COUNT; ++i) rt[i].ctrl = i;
 
     while (g_running.load(std::memory_order_relaxed)) {
         bool all_open = true;
-        for (int i = 0; i < g_hid_port_count; ++i) {
+        for (int i = 0; i < HID_PORT_COUNT; ++i) {
             if (fds[i] < 0) {
                 fds[i] = open(devs[i].c_str(), O_RDWR);
                 if (fds[i] >= 0) {
@@ -2320,7 +2034,7 @@ static void writer_thread(int hz) {
         if (!all_open) {
             // Do not keep a partial set of opened endpoints around while the
             // gadget is being recreated/rebound.  Retry with a clean fd set.
-            for (int i = 0; i < g_hid_port_count; ++i) {
+            for (int i = 0; i < HID_PORT_COUNT; ++i) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
             }
             run_gadget_setup_if_needed(false, "requested /dev/hidg* nodes could not all be opened");
@@ -2329,7 +2043,7 @@ static void writer_thread(int hz) {
         }
 
         if (g_verbose || !was_connected)
-            std::printf("%dx Pro Controller /dev/hidg* opened\n", g_hid_port_count);
+            std::printf("%dx USB gamepad /dev/hidg* opened\n", HID_PORT_COUNT);
         was_connected = true;
 
         auto next = Clock::now() + tick;
@@ -2362,7 +2076,7 @@ static void writer_thread(int hz) {
                 std::lock_guard<std::mutex> lk(g_mtx[c]);
                 repair_future_client_timestamp(g_clients[c], now_stamp);
                 const uint64_t client_idle_us = elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us);
-                if (g_clients[c].active && g_clients[c].last_rx_us != 0 && client_idle_us > g_client_timeout_us && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
+                if (g_clients[c].active && g_clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
                     g_clients[c].active = false;
                     g_clients[c].report.reset();
                     clear_all_motion_history(g_clients[c]);
@@ -2370,7 +2084,6 @@ static void writer_thread(int hz) {
                     for (int s = 0; s < 4; ++s) {
                         g_clients[c].pad_present[s] = false;
                         g_clients[c].pad_last_present_us[s] = 0;
-                        g_clients[c].debug_rumble_sent[s] = false;
                     }
                     if (g_verbose && !timeout_printed[c]) {
                         std::printf("PC %d timed out after %.1fs without UDP input and was disconnected.\n",
@@ -2395,7 +2108,7 @@ static void writer_thread(int hz) {
                 if (input_stream_stale) {
                     // Keep the session/port alive through a short Windows UDP stall,
                     // but release all controls quickly so held R/ZR/sticks do not get
-                    // stuck.  A real disconnect is handled later by g_client_timeout_us.
+                    // stuck.  A real disconnect is handled later by CLIENT_TIMEOUT_US.
                     report_snap[c][0].reset();
                     report_snap[c][1].reset();
                     report_snap[c][2].reset();
@@ -2415,7 +2128,7 @@ static void writer_thread(int hz) {
                 }
             }
 
-            for (int h = 0; h < g_hid_port_count; ++h) {
+            for (int h = 0; h < HID_PORT_COUNT; ++h) {
                 if (hw_slots[h].client_idx == -1) continue;
 
                 int cidx = hw_slots[h].client_idx;
@@ -2431,7 +2144,7 @@ static void writer_thread(int hz) {
                     hw_slots[h].client_idx = -1;
                     hw_slots[h].sub_idx = -1;
 
-                    // The USB interface stays alive so the Switch can keep talking to
+                    // The USB interface stays alive so the console can keep talking to
                     // it, but the player assignment is gone.  Send a short neutral
                     // release burst to clear any held buttons, drain stale output, then
                     // fall back to the low-rate idle heartbeat.
@@ -2444,7 +2157,7 @@ static void writer_thread(int hz) {
                 if (!active_snap[c]) continue;
                 for (int s = 0; s < 4; ++s) {
                     bool mapped = false;
-                    for (int h = 0; h < g_hid_port_count; ++h) {
+                    for (int h = 0; h < HID_PORT_COUNT; ++h) {
                         if (hw_slots[h].client_idx == c && hw_slots[h].sub_idx == s) {
                             mapped = true;
                             break;
@@ -2452,7 +2165,7 @@ static void writer_thread(int hz) {
                     }
 
                     // A browser/mobile pad that is connected but currently neutral still
-                    // needs to claim its Switch port so rumble has a target immediately.
+                    // needs to claim its console port so rumble has a target immediately.
                     if (mapped) continue;
                     bool macro_active_for_pad = server_macro_running(c, s);
                     if (uses_presence_snap[c]) {
@@ -2462,15 +2175,15 @@ static void writer_thread(int hz) {
                     }
 
                     // Preserve logical pad order.  The previous "first free port" mapper
-                    // let Pad 2 steal Switch Port 1 whenever keyboard/mobile Pad 1 was
+                    // let Pad 2 steal console port 1 whenever keyboard/mobile Pad 1 was
                     // neutral, which made keyboard mode and mobile mode look broken.
                     int chosen = -1;
-                    if (s >= 0 && s < g_hid_port_count && hw_slots[s].client_idx == -1) {
+                    if (s >= 0 && s < HID_PORT_COUNT && hw_slots[s].client_idx == -1) {
                         chosen = s;
                     } else {
                         // Fallback only for multi-client cases where the preferred port
                         // is already occupied.
-                        for (int h = 0; h < g_hid_port_count; ++h) {
+                        for (int h = 0; h < HID_PORT_COUNT; ++h) {
                             if (hw_slots[h].client_idx == -1) {
                                 chosen = h;
                                 break;
@@ -2482,14 +2195,14 @@ static void writer_thread(int hz) {
                         hw_slots[chosen].client_idx = c;
                         hw_slots[chosen].sub_idx = s;
                         if (g_verbose)
-                            std::printf("Map -> PC %d (Pad %d) took Switch Pro Port %d\n", c + 1, s + 1, chosen + 1);
+                            std::printf("Map -> PC %d (Pad %d) took console Pro Port %d\n", c + 1, s + 1, chosen + 1);
                     }
                 }
             }
 
             ExtendedHIDReport out_reports[4];
-            for (int h = 0; h < g_hid_port_count; ++h) out_reports[h].reset();
-            for (int h = 0; h < g_hid_port_count; ++h) {
+            for (int h = 0; h < HID_PORT_COUNT; ++h) out_reports[h].reset();
+            for (int h = 0; h < HID_PORT_COUNT; ++h) {
                 if (hw_slots[h].client_idx != -1) {
                     out_reports[h] = report_snap[hw_slots[h].client_idx][hw_slots[h].sub_idx];
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
@@ -2497,7 +2210,7 @@ static void writer_thread(int hz) {
             }
 
             bool ok = true;
-            for (int h = 0; h < g_hid_port_count; ++h) {
+            for (int h = 0; h < HID_PORT_COUNT; ++h) {
                 const bool port_needed = (hw_slots[h].client_idx != -1);
 
                 uint8_t write_buf[PRO_REPORT_SIZE] = {};
@@ -2526,12 +2239,12 @@ static void writer_thread(int hz) {
                     bool idle_due = (rt[h].last_idle_neutral_us == 0) ||
                                     (elapsed_us_saturated(now_stamp, rt[h].last_idle_neutral_us) >= PRO_IDLE_REPORT_INTERVAL_US);
                     bool standard_due = (rt[h].last_standard_report_us == 0) ||
-                                        (elapsed_us_saturated(now_stamp, rt[h].last_standard_report_us) >= g_pro_report_interval_us);
+                                        (elapsed_us_saturated(now_stamp, rt[h].last_standard_report_us) >= PRO_REPORT_INTERVAL_US);
 
-                    // A real Pro Controller over USB emits full 0x30 input
+                    // A real USB gamepad over USB emits full 0x30 input
                     // reports roughly every 15ms.  Sending 0x30 at 125-250Hz
                     // makes the 3 IMU samples/timer cadence unrealistic and
-                    // some Switch software appears to ignore motion even though
+                    // some host software appears to ignore motion even though
                     // button/stick input still works.
                     bool should_write_standard = false;
                     if (port_needed || release_burst) should_write_standard = standard_due;
@@ -2559,16 +2272,6 @@ static void writer_thread(int hz) {
                                               pro_timer_from_us(now_stamp),
                                               std_in);
                         memcpy(write_buf, &std_in, sizeof(ProInputReport30));
-                        if (g_verbose && g_log_raw_30) {
-                            static uint64_t last_raw30_log_us = 0;
-                            if (last_raw30_log_us == 0 || elapsed_us_saturated(now_stamp, last_raw30_log_us) > 250000ULL) {
-                                last_raw30_log_us = now_stamp;
-                                std::printf("[raw30] ");
-                                for (int bi = 0; bi < PRO_REPORT_SIZE; ++bi)
-                                    std::printf("%02X%s", write_buf[bi], bi + 1 < PRO_REPORT_SIZE ? " " : "");
-                                std::printf("\n");
-                            }
-                        }
                         have_report_to_write = true;
 
                         if (port_needed || release_burst)
@@ -2584,7 +2287,7 @@ static void writer_thread(int hz) {
                 if (w < 0) {
                     if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                     // If a subcommand reply could not be written, keep it pending.
-                    // Dropping it makes the Switch repeat commands such as 0x02 forever.
+                    // Dropping it makes the console repeat commands such as 0x02 forever.
                 } else if (w == (ssize_t)PRO_REPORT_SIZE) {
                     if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                     writes_this_second++;
@@ -2595,10 +2298,10 @@ static void writer_thread(int hz) {
                 }
             }
 
-            for (int h = 0; h < g_hid_port_count; ++h) {
+            for (int h = 0; h < HID_PORT_COUNT; ++h) {
                 // Always serve the HID control/output side for every exposed Pro
                 // Controller interface.  HID gadgets are not lazily created: once
-                // setup_gadget.sh exposes hidg0..hidg3, the Switch may send init
+                // setup_gadget.sh exposes hidg0..hidg3, the the host may send init
                 // commands to any of them.  Ignoring those commands until a pad maps
                 // to the port breaks keyboard/mobile/web input and leaves stale output
                 // reports queued in /dev/hidgX.
@@ -2610,6 +2313,13 @@ static void writer_thread(int hz) {
 
                     ssize_t r = read(fds[h], read_buf, PRO_REPORT_SIZE);
                     if (r <= 0) continue;
+
+                    // USB gadget reads may occasionally return 2-byte 00 00
+                    // frames from /dev/hidg0. They are not valid controller output
+                    // reports and forwarding them to a real USB gamepad caused
+                    // WriteFile(ERROR_INVALID_PARAMETER).  Ignore them here too.
+                    if (r < 2 || (r == 2 && read_buf[0] == 0x00 && read_buf[1] == 0x00))
+                        continue;
 
                     uint8_t id = read_buf[0];
                     if (id == RID_OUTPUT_CMD) {
@@ -2630,7 +2340,7 @@ static void writer_thread(int hz) {
                             std::printf("[pro%d] subcmd 0x%02X reply=0x%02X 0x%02X",
                                         h + 1, subcmd_id, rt[h].pending_reply.ack, rt[h].pending_reply.subcmd_id);
                             if ((subcmd_id == CMD_SET_DATA_FORMAT || subcmd_id == CMD_ENABLE_IMU ||
-                                 subcmd_id == CMD_SET_IMU_SENS || subcmd_id == CMD_ENABLE_VIBRATION) &&
+                                 subcmd_id == CMD_ENABLE_VIBRATION) &&
                                 subcmd_data_len > 0) {
                                 std::printf(" data=");
                                 for (size_t bi = 0; bi < subcmd_data_len && bi < 8; ++bi)
@@ -2672,7 +2382,7 @@ static void writer_thread(int hz) {
             }
 
             if (!ok) {
-                if (!error_shown) { std::puts("Switch disconnected — waiting for reconnect..."); error_shown = true; }
+                if (!error_shown) { std::puts("Host disconnected — waiting for reconnect..."); error_shown = true; }
                 for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
                 std::this_thread::sleep_for(ms(1000));
                 break;
@@ -3101,7 +2811,7 @@ static const char INDEX_HTML[] =
     "    const strongFloat = clamp01(high255 / 255.0);\n"
     "    const isNeutral = (!low255 && !high255);\n"
     "\n"
-    "    // Switch rumble packets can arrive at ~60Hz. Browser haptics dislike being\n"
+    "    // Precision rumble packets can arrive at ~60Hz. Browser haptics dislike being\n"
     "    // restarted every frame, so keep active rumble alive long enough to spin.\n"
     "    // Neutral packets still pass through with zero magnitude to brake/stop it.\n"
     "    const durationMs = isNeutral ? 10 : Math.max(20, duration10ms * 10);\n"
@@ -3159,10 +2869,10 @@ static const char INDEX_HTML[] =
     "        m.az = clamp16(acc[2] / 9.80665 * 4096);\n"
     "    }\n"
     "    if (gyro) {\n"
-    "        const toSwitchGyro = 180 / Math.PI * 16;\n"
-    "        m.gx = clamp16(gyro[0] * toSwitchGyro);\n"
-    "        m.gy = clamp16(gyro[1] * toSwitchGyro);\n"
-    "        m.gz = clamp16(gyro[2] * toSwitchGyro);\n"
+    "        const toconsoleGyro = 180 / Math.PI * 16;\n"
+    "        m.gx = clamp16(gyro[0] * toconsoleGyro);\n"
+    "        m.gy = clamp16(gyro[1] * toconsoleGyro);\n"
+    "        m.gz = clamp16(gyro[2] * toconsoleGyro);\n"
     "    }\n"
     "    return m;\n"
     "}\n"
@@ -4226,6 +3936,7 @@ static void flush_rumble_to_udp(int sock, int client_idx) {
 
     sockaddr_in dest{};
     RumblePacket pending[4]{};
+    PrecisionRumblePacket precision_pending[4]{};
     bool has[4]{};
 
     {
@@ -4238,6 +3949,7 @@ static void flush_rumble_to_udp(int sock, int client_idx) {
             uint32_t seq = c.rumble_seq[s];
             if (seq != c.udp_last_rumble_seq[s]) {
                 pending[s] = c.rumble[s];
+                precision_pending[s] = c.precision_rumble[s];
                 c.udp_last_rumble_seq[s] = seq;
                 has[s] = true;
             }
@@ -4246,6 +3958,11 @@ static void flush_rumble_to_udp(int sock, int client_idx) {
 
     for (int s = 0; s < 4; ++s) {
         if (!has[s]) continue;
+        ssize_t precision_sent = sendto(sock, &precision_pending[s], sizeof(PrecisionRumblePacket), 0,
+                                        reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+        if (g_verbose && precision_sent != (ssize_t)sizeof(PrecisionRumblePacket))
+            std::fprintf(stderr, "[udp] failed to send precision rumble packet: %s\n", std::strerror(errno));
+
         ssize_t sent = sendto(sock, &pending[s], sizeof(RumblePacket), 0,
                               reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
         if (g_verbose && sent != (ssize_t)sizeof(RumblePacket))
@@ -4383,7 +4100,7 @@ static size_t process_ws_frame(WebClient *c) {
                         clear_all_motion_history(g_clients[i]);
                         g_clients[i].uses_pad_presence = true;
                         clear_udp_rumble_state(g_clients[i]);
-                        for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; g_clients[i].debug_rumble_sent[s] = false; }
+                        for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; }
                         g_clients[i].last_rx_us = now;
                         break;
                     }
@@ -4476,7 +4193,7 @@ static size_t process_ws_frame(WebClient *c) {
         if (flags & FLAG_SINGLE_PAD) {
             // The mobile touch page is one virtual controller only.  Force the
             // unused subpads to neutral so a malformed/old cached mobile packet
-            // cannot accidentally claim Switch ports 2-4.
+            // cannot accidentally claim console ports 2-4.
             report.p2.reset();
             report.p3.reset();
             report.p4.reset();
@@ -4497,7 +4214,7 @@ static size_t process_ws_frame(WebClient *c) {
 
     // Keep the WebSocket pinned to its backend session while that session is
     // still alive.  Dropping c->ws_slot here after a short receive gap can
-    // orphan the old session and remap the same browser to another Switch
+    // orphan the old session and remap the same browser to another console
     // port, which looks like held buttons flickering.
     if (c->ws_slot >= 0) {
         std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
@@ -4518,7 +4235,6 @@ static size_t process_ws_frame(WebClient *c) {
                 for (int s = 0; s < 4; ++s) {
                     g_clients[i].pad_present[s] = false;
                     g_clients[i].pad_last_present_us[s] = 0;
-                    g_clients[i].debug_rumble_sent[s] = false;
                 }
                 g_clients[i].last_rx_us = now;
                 for (int s = 0; s < 4; ++s)
@@ -4730,7 +4446,7 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
     for (int i = 0; i < MAX_WS_CLIENTS; i++) { pfds[i+1].fd = -1; }
 
     while (g_running.load(std::memory_order_relaxed)) {
-        // Push pending Switch rumble events back to browser/mobile WebSocket clients.
+        // Push pending Precision rumble events back to browser/mobile WebSocket clients.
         for (int i = 0; i < n_clients; i++)
             if (clients[i].state == WebClient::WS_ACTIVE)
                 flush_rumble_to_ws(&clients[i]);
@@ -5032,81 +4748,6 @@ int main(int argc, char** argv) {
         else if (a == "-b" && i+1 < argc) bind_addr = argv[++i];
         else if (a == "-v")               g_verbose  = true;
         else if (a == "--upnp")           do_upnp    = true;
-        else if (a == "--no-auto-gadget") g_auto_gadget_setup = false;
-        else if (a == "--force-gadget-setup") g_force_gadget_setup = true;
-        else if (a == "--keep-gadget-on-exit") g_teardown_gadget_exit = false;
-        else if (a == "--client-timeout-ms" && i+1 < argc) {
-            uint64_t ms_v = (uint64_t)std::strtoull(argv[++i], nullptr, 10);
-            if (ms_v < 1000) ms_v = 1000;
-            g_client_timeout_us = ms_v * 1000ULL;
-        }
-        else if (a == "--imu-map" && i+1 < argc) {
-            if (!parse_imu_map(argv[++i])) {
-                std::fprintf(stderr, "Unknown --imu-map. Use: direct, invert-x, invert-y, invert-z, swap-yz, switch1, switch2, switch3\n");
-                return 1;
-            }
-        }
-        else if (a == "--pro-report-us" && i+1 < argc) {
-            uint64_t us_v = (uint64_t)std::strtoull(argv[++i], nullptr, 10);
-            // Keep sane bounds. 15ms is the real USB Pro Controller cadence;
-            // 8ms is useful for experiments, but lower starts to look unlike
-            // the real device and can make IMU consumers unhappy.
-            if (us_v < 8000) us_v = 8000;
-            if (us_v > 50000) us_v = 50000;
-            g_pro_report_interval_us = us_v;
-        }
-        else if (a == "--test-imu" && i+1 < argc) {
-            if (!parse_imu_test(argv[++i])) {
-                std::fprintf(stderr, "Unknown --test-imu. Use: off, roll, pitch, yaw, shake, gentle\n");
-                return 1;
-            }
-        }
-        else if (a == "--imu-layout" && i+1 < argc) {
-            if (!parse_imu_layout(argv[++i])) {
-                std::fprintf(stderr, "Unknown --imu-layout. Use: accel-gyro or gyro-accel\n");
-                return 1;
-            }
-        }
-        else if (a == "--bat-con" && i+1 < argc) {
-            if (!parse_u8_arg(argv[++i], g_pro_bat_con)) {
-                std::fprintf(stderr, "Invalid --bat-con byte. Examples: 0x81, 0x91, 0x8E\n");
-                return 1;
-            }
-        }
-        else if ((a == "--vibrator-report" || a == "--vibrator-byte") && i+1 < argc) {
-            if (!parse_u8_arg(argv[++i], g_pro_vibrator_report)) {
-                std::fprintf(stderr, "Invalid --vibrator-report byte. Examples: 0x00, 0x80\n");
-                return 1;
-            }
-        }
-        else if (a == "--log-raw-30") g_log_raw_30 = true;
-        else if (a == "--rumble-min" && i+1 < argc) {
-            uint8_t v = 0;
-            if (!parse_u8_arg(argv[++i], v)) {
-                std::fprintf(stderr, "Invalid --rumble-min; expected 0..255\n");
-                return 1;
-            }
-            g_rumble_min_nonzero = v;
-        }
-        else if (a == "--rumble-gain" && i+1 < argc) {
-            char* end = nullptr;
-            long v = std::strtol(argv[++i], &end, 10);
-            if (!end || *end != '\0' || v < 1 || v > 500) {
-                std::fprintf(stderr, "Invalid --rumble-gain; expected 1..500 percent\n");
-                return 1;
-            }
-            g_rumble_gain_percent = (int)v;
-        }
-        else if (a == "--log-neutral-rumble") g_log_neutral_rumble = true;
-        else if (a == "--test-rumble") g_test_rumble_on_connect = true;
-        else if (a == "--random-identity") g_random_identity = true;
-        else if (a == "--no-user-imu-cal") g_no_user_imu_cal = true;
-        else if (a == "--gadget-pads" && i+1 < argc) {
-            int n = std::atoi(argv[++i]);
-            if (n < 1) n = 1;
-            if (n > 4) n = 4;
-            g_hid_port_count = n;
-        }
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
                 web_port = std::atoi(argv[++i]);
@@ -5115,40 +4756,19 @@ int main(int argc, char** argv) {
         }
         else if (a == "-h") {
             puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v]");
-            puts("            [--force-gadget-setup] [--no-auto-gadget] [--keep-gadget-on-exit] [--gadget-pads 1..4]");
-            puts("            [--random-identity]");
-            puts("            [--client-timeout-ms MS] [--imu-map direct|invert-x|invert-y|invert-z|swap-yz|switch1|switch2|switch3]");
-            puts("            [--pro-report-us US] [--test-imu off|roll|pitch|yaw|shake]");
-            puts("            [--rumble-min 0..255] [--rumble-gain 1..500]");
-            puts("            [--log-neutral-rumble] [--test-rumble] [--no-user-imu-cal]");
             return 0;
         }
     }
 
-    if (g_random_identity)
-        randomize_controller_identity();
-    print_controller_identity();
+    randomize_controller_identity();
 
-    // Always recreate the built-in gadget at process startup when auto-gadget
-    // mode is enabled.  This makes every launch self-healing: stale configfs
-    // state, leftover /dev/hidg* nodes, or a previous unclean shutdown are
-    // cleared before the backend starts talking to the Switch.
-    if (g_auto_gadget_setup || g_force_gadget_setup)
-        run_gadget_setup_if_needed(true,
-            g_force_gadget_setup ? "forced gadget setup requested"
-                                 : "startup gadget recreation requested");
+    // Always recreate the built-in gadget at process startup.  This makes every
+    // launch self-healing: stale configfs state, leftover /dev/hidg* nodes, or a
+    // previous unclean shutdown are cleared before the backend starts talking to
+    // the console.
+    run_gadget_setup_if_needed(true, "startup gadget recreation requested");
 
     derive_key(DEFAULT_SECRET, g_hmac_key);
-    if (g_verbose)
-        std::printf("[pro] report interval=%llu us, imu-map=%s, imu-layout=%s, imu-test=%s, bat_con=0x%02X, vibrator=0x%02X\n",
-                    (unsigned long long)g_pro_report_interval_us,
-                    imu_map_name(g_imu_map),
-                    imu_layout_name(g_imu_layout),
-                    imu_test_name(g_imu_test),
-                    g_pro_bat_con,
-                    g_pro_vibrator_report);
-        std::printf("[rumble-config] min_nonzero=%u gain=%d%% all-zero-half=off low-magnitude=forwarded\n",
-                    (unsigned)g_rumble_min_nonzero, g_rumble_gain_percent);
     signal(SIGINT,  on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
 
     if (do_upnp) upnp_add_mapping(port);
@@ -5173,18 +4793,6 @@ int main(int argc, char** argv) {
     
     std::printf("UDP %s:%u writer=%d Hz\n",
                 bind_addr.c_str(), port, WRITER_HZ);
-    if (g_verbose) {
-        std::printf("[config] client_timeout=%.1fs stale_neutral=%.0fms imu_map=%s gadget_pads=%d random_identity=%s neutral_rumble_log=%s test_rumble=%s no_user_imu_cal=%s\n",
-                    (double)g_client_timeout_us / 1000000.0,
-                    (double)CLIENT_STALE_NEUTRAL_US / 1000.0,
-                    imu_map_name(g_imu_map),
-                    g_hid_port_count,
-                    g_random_identity ? "yes" : "no",
-                    g_log_neutral_rumble ? "yes" : "no",
-                    g_test_rumble_on_connect ? "yes" : "no",
-                    g_no_user_imu_cal ? "yes" : "no");
-    }
-
     std::thread wt(writer_thread, WRITER_HZ);
     std::thread st(stats_thread);
 
@@ -5300,7 +4908,7 @@ int main(int argc, char** argv) {
             if (client_idx == -1) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_mtx[i]);
-                    if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, g_client_timeout_us)) {
+                    if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
                         client_idx = i;
                         g_clients[i].active = true;
                         g_clients[i].addr = sender;
@@ -5313,7 +4921,6 @@ int main(int argc, char** argv) {
                         for (int s = 0; s < 4; ++s) {
                             g_clients[i].pad_present[s] = false;
                             g_clients[i].pad_last_present_us[s] = 0;
-                            g_clients[i].debug_rumble_sent[s] = false;
                         }
                         g_clients[i].last_rx_us = now;
                         if (g_verbose) std::printf("New UDP client accepted into Server Slot %d/4\n", i+1);
@@ -5434,7 +5041,6 @@ int main(int argc, char** argv) {
             // Extended UDP clients opted into rumble by using the new packet
             // format.  Legacy clients are not sent unexpected traffic.
             if (is_extended_udp) {
-                queue_debug_test_rumble_if_needed(client_idx, 0);
                 flush_rumble_to_udp(sock, client_idx);
             }
         } // drain loop
@@ -5446,8 +5052,7 @@ int main(int argc, char** argv) {
     wt.join(); st.join();
     if (web_thread.joinable()) web_thread.join();
 
-    if (g_teardown_gadget_exit)
-        teardown_gadget();
+    teardown_gadget();
 
     return 0;
 }

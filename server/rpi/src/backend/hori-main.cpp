@@ -50,9 +50,6 @@ static bool g_verbose = false;
 // This mirrors setup_gadget.sh: remove our old gadget first, recreate four
 // 8-byte HORI HID functions, bind them, chmod /dev/hidg0..3, and tear down
 // again on clean shutdown.
-static bool g_auto_gadget_setup    = true;
-static bool g_teardown_gadget_exit = true;
-
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
 
@@ -1074,8 +1071,6 @@ static void run_shell_best_effort(const char* cmd) {
 }
 
 static bool setup_hori_gadget_builtin(bool force, const char* reason) {
-    if (!g_auto_gadget_setup) return hidg_nodes_ready();
-
     if (geteuid() != 0) {
         if (hidg_nodes_ready()) return true;
         std::fprintf(stderr,
@@ -1129,7 +1124,7 @@ static bool setup_hori_gadget_builtin(bool force, const char* reason) {
     if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "HORI CO., LTD.")) return false;
     if (!write_text_file(join_path(strings_dir, "product").c_str(), "POKKEN CONTROLLER")) return false;
     if (!write_text_file(join_path(configs_dir, "MaxPower").c_str(), "500")) return false;
-    if (!write_text_file(join_path(config_strings_dir, "configuration").c_str(), "Switch 4-Player Hub Config")) return false;
+    if (!write_text_file(join_path(config_strings_dir, "configuration").c_str(), "USB 4-Player Hub Config")) return false;
 
     for (int i = 0; i < 4; ++i) {
         if (!create_hori_hid_function(i)) return false;
@@ -1172,7 +1167,7 @@ static void writer_thread(int hz) {
     std::string devs[4] = {"/dev/hidg0", "/dev/hidg1", "/dev/hidg2", "/dev/hidg3"};
     bool was_connected = false;
 
-    // Tracks which physical Switch port is claimed by which (Client, SubController)
+    // Tracks which physical console port is claimed by which (Client, SubController)
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[4];
 
@@ -1262,7 +1257,7 @@ static void writer_thread(int hz) {
                                 hw_slots[h].client_idx = c;
                                 hw_slots[h].sub_idx = s;
                                 if (g_verbose)
-                                    std::printf("Map -> PC %d (Pad %d) took Switch Port %d\n", c+1, s+1, h+1);
+                                    std::printf("Map -> PC %d (Pad %d) took Console Port %d\n", c+1, s+1, h+1);
                                 break;
                             }
                         }
@@ -1290,7 +1285,7 @@ static void writer_thread(int hz) {
             if (r.p4 != prev.p4) { if(write(fds[3], &r.p4, sizeof(HIDReport)) < 0 && errno != EAGAIN) ok = false; }
 
             if (!ok) {
-                if (!error_shown) { std::puts("Switch disconnected — waiting for reconnect..."); error_shown = true; }
+                if (!error_shown) { std::puts("Console disconnected — waiting for reconnect..."); error_shown = true; }
                 for(int i=0; i<4; ++i) { close(fds[i]); fds[i] = -1; }
                 std::this_thread::sleep_for(ms(1000)); break;
             }
@@ -3007,8 +3002,6 @@ int main(int argc, char** argv) {
         else if (a == "-b" && i+1 < argc) bind_addr = argv[++i];
         else if (a == "-v")               g_verbose  = true;
         else if (a == "--upnp")           do_upnp    = true;
-        else if (a == "--no-gadget")      g_auto_gadget_setup = false;
-        else if (a == "--keep-gadget")    g_teardown_gadget_exit = false;
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
                 web_port = std::atoi(argv[++i]);
@@ -3016,7 +3009,7 @@ int main(int argc, char** argv) {
                 web_port = 8080;
         }
         else if (a == "-h") {
-            puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v] [--no-gadget] [--keep-gadget]");
+            puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v]");
             return 0;
         }
     }
@@ -3024,7 +3017,7 @@ int main(int argc, char** argv) {
     derive_key(DEFAULT_SECRET, g_hmac_key);
     signal(SIGINT,  on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
 
-    if (g_auto_gadget_setup && !setup_hori_gadget_builtin(true, "startup reset"))
+    if (!setup_hori_gadget_builtin(true, "startup reset"))
         return 1;
 
     if (do_upnp) upnp_add_mapping(port);
@@ -3234,7 +3227,6 @@ int main(int argc, char** argv) {
     close(ep); close(sock);
     wt.join(); st.join();
     if (web_thread.joinable()) web_thread.join();
-    if (g_auto_gadget_setup && g_teardown_gadget_exit)
-        teardown_gadget();
+    teardown_gadget();
     return 0;
 }

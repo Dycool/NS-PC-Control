@@ -1,7 +1,7 @@
-/// ns-gamepad.mm  —  macOS frontend for the Switch wireless gamepad bridge
+/// ns-gamepad.mm  —  macOS frontend for the USB gamepad bridge
 ///
 /// Uses Apple's GameController framework for controller input.
-/// Natively supports Xbox, PlayStation, MFi, and Switch Pro Controllers
+/// Natively supports Xbox, PlayStation, MFi, and compatible motion controllers
 /// (via Bluetooth or USB, depending on macOS version).
 /// Networking uses BSD sockets — identical API to the Linux version.
 ///
@@ -74,7 +74,7 @@ struct GamepadState {
     std::atomic<float> lx{0.0f}, ly{0.0f}, rx{0.0f}, ry{0.0f};
 
     // GameController motion values.  Accel is expressed in g-ish units, gyro in rad/s.
-    // The sender converts these to the backend's Switch-like int16 motion report.
+    // The sender converts these to the backend's console-style int16 motion report.
     std::atomic<bool>  has_motion{false};
     std::atomic<float> ax{0.0f}, ay{0.0f}, az{0.0f};
     std::atomic<float> gx{0.0f}, gy{0.0f}, gz{0.0f};
@@ -766,10 +766,10 @@ static int16_t clamp_i16_from_float(float v) {
     return (int16_t)std::lrintf(v);
 }
 
-static ns::MotionReport map_gc_motion_to_switch(const GamepadState& st) {
+static ns::MotionReport map_gc_motion_to_console(const GamepadState& st) {
     ns::MotionReport m; m.reset();
 
-    // Switch calibration in the backend uses 0x1000-ish accel units, so convert
+    // Backend calibration in the backend uses 0x1000-ish accel units, so convert
     // GameController gravity/userAcceleration units to roughly the same scale.
     m.ax = clamp_i16_from_float(st.ax.load(std::memory_order_relaxed) * 4096.0f);
     m.ay = clamp_i16_from_float(st.ay.load(std::memory_order_relaxed) * 4096.0f);
@@ -778,17 +778,17 @@ static ns::MotionReport map_gc_motion_to_switch(const GamepadState& st) {
     // GameController rotationRate is rad/s.  The backend just forwards int16
     // gyro samples, so this scale is intentionally conservative and tunable.
     constexpr float RAD_TO_DEG = 57.29577951308232f;
-    constexpr float SWITCH_GYRO_SCALE = RAD_TO_DEG * 16.0f;
-    m.gx = clamp_i16_from_float(st.gx.load(std::memory_order_relaxed) * SWITCH_GYRO_SCALE);
-    m.gy = clamp_i16_from_float(st.gy.load(std::memory_order_relaxed) * SWITCH_GYRO_SCALE);
-    m.gz = clamp_i16_from_float(st.gz.load(std::memory_order_relaxed) * SWITCH_GYRO_SCALE);
+    constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.0f;
+    m.gx = clamp_i16_from_float(st.gx.load(std::memory_order_relaxed) * CONSOLE_GYRO_SCALE);
+    m.gy = clamp_i16_from_float(st.gy.load(std::memory_order_relaxed) * CONSOLE_GYRO_SCALE);
+    m.gz = clamp_i16_from_float(st.gz.load(std::memory_order_relaxed) * CONSOLE_GYRO_SCALE);
     return m;
 }
 
 static void set_pad_present_flag(ns::ExtendedHIDReport& r, bool present) {
     // The backend/web protocol uses byte 7 of each ExtendedHIDReport as the
     // pad-present flag.  This lets neutral-but-connected UDP pads still claim
-    // a Switch slot and receive rumble.
+    // a console slot and receive rumble.
     uint8_t* raw = reinterpret_cast<uint8_t*>(&r);
     if (present) raw[7] |= EXT_PAD_PRESENT;
     else         raw[7] &= (uint8_t)~EXT_PAD_PRESENT;
@@ -908,8 +908,8 @@ static void attach_handlers(GCController* ctrl, GCExtendedGamepad* gp, GamepadSt
     }
 }
 
-/// Translate GameController state into a Switch Pro Controller HID report.
-static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
+/// Translate GameController state into a USB gamepad HID report.
+static ns::HIDReport map_gc_to_console(const GamepadState& st) {
     ns::HIDReport r; r.reset();
 
     if (st.btn_a.load(std::memory_order_relaxed)) r.buttons |= ns::BTN_B;
@@ -1231,6 +1231,17 @@ static void set_controller_rumble_async(int ctrl_idx, uint8_t low, uint8_t high,
 
 class RumbleManager {
 public:
+    void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
+        if (rp.subpad >= 4) return;
+        ns::RumblePacket fallback{};
+        fallback.magic = ns::RUMBLE_MAGIC;
+        fallback.subpad = rp.subpad;
+        fallback.low_freq = rp.low_freq;
+        fallback.high_freq = rp.high_freq;
+        fallback.duration_10ms = rp.duration_10ms;
+        apply_packet(fallback, controller_for_slot);
+    }
+
     void apply_packet(const ns::RumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
         const int slot = rp.subpad;
@@ -1292,7 +1303,12 @@ static void pump_udp_rumble(int sock, RumbleManager& rumble, const int controlle
                 std::cerr << "UDP receive error: " << strerror(errno) << "\n";
             break;
         }
-        if (n == (ssize_t)sizeof(ns::RumblePacket)) {
+        if (n == (ssize_t)sizeof(ns::PrecisionRumblePacket)) {
+            ns::PrecisionRumblePacket rp{};
+            memcpy(&rp, buf, sizeof(rp));
+            if (rp.magic == ns::PRECISION_RUMBLE_MAGIC)
+                rumble.apply_precision_packet(rp, controller_for_slot);
+        } else if (n == (ssize_t)sizeof(ns::RumblePacket)) {
             ns::RumblePacket rp{};
             memcpy(&rp, buf, sizeof(rp));
             if (rp.magic == ns::RUMBLE_MAGIC)
@@ -1460,11 +1476,11 @@ int main(int argc, char** argv) {
             bool c1 = false, c2 = false, c3 = false, c4 = false;
             for (int i = 0; i < MAX_SLOTS; ++i) {
                 if (!g_slot_active[i].load(std::memory_order_relaxed)) continue;
-                logical_reports[i] = map_gc_to_switch(g_states[i]);
+                logical_reports[i] = map_gc_to_console(g_states[i]);
                 present[i] = true;
                 controller_for_slot[i] = i;
                 if (g_states[i].has_motion.load(std::memory_order_relaxed)) {
-                    logical_motion[i] = map_gc_motion_to_switch(g_states[i]);
+                    logical_motion[i] = map_gc_motion_to_console(g_states[i]);
                     has_motion[i] = true;
                 }
                 active_count++;

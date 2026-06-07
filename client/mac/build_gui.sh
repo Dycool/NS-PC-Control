@@ -45,9 +45,9 @@ cat > ns-gui.app/Contents/Info.plist <<EOF
     <key>CFBundleExecutable</key>
     <string>ns-gui</string>
     <key>CFBundleIdentifier</key>
-    <string>com.nswitch.gui</string>
+    <string>com.nspccontrol.gui</string>
     <key>CFBundleName</key>
-    <string>Switch PC Control</string>
+    <string>NS PC Control</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundlePackageType</key>
@@ -59,7 +59,7 @@ cat > ns-gui.app/Contents/Info.plist <<EOF
     <!-- Required on macOS 14+ for GameController framework background access -->
     <key>NSGameControllerUsageDescription</key>
     <string>This app uses game controllers to send inputs to your NS.</string>
-    <!-- Required for Bluetooth controllers (wireless Xbox/PlayStation/Switch Pro) -->
+    <!-- Required for Bluetooth controllers (wireless Xbox/PlayStation/console Pro) -->
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>This app uses Bluetooth to communicate with wireless game controllers.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>

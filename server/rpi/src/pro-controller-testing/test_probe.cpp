@@ -1,14 +1,14 @@
-// test_probe_dual.cpp — Standalone Dual Pro Controller USB test probe
+// test_probe_dual.cpp — Standalone dual USB test probe
 // Build: g++ -O2 -std=c++17 -o test_probe test_probe_dual_instant.cpp -lpthread
 // Run:   sudo ./test_probe [-v]
 //
 // This version exposes TWO HID interfaces in the same USB gadget:
-//   /dev/hidg0 = virtual Pro Controller #1
-//   /dev/hidg1 = virtual Pro Controller #2
+//   /dev/hidg0 = virtual controller #1
+//   /dev/hidg1 = virtual controller #2
 //
 // Test mode:
-//   /dev/hidg0 = virtual Pro Controller #1: connects and sends neutral reports only.
-//   /dev/hidg1 = virtual Pro Controller #2: sends reports at 250 Hz with ultra-short
+//   /dev/hidg0 = virtual controller #1: connects and sends neutral reports only.
+//   /dev/hidg1 = virtual controller #2: sends reports at 250 Hz with ultra-short
 //                 alternating R pulses, so there are no long button holds.
 
 #include <cstdio>
@@ -45,7 +45,7 @@ static constexpr bool        RATE_LOGS = true;
 static std::atomic<bool> g_running{true};
 static bool g_verbose = false;
 
-// ── Pro Controller Protocol Constants ───────────────────────────────────────
+// ── Controller Protocol Constants ───────────────────────────────────────────
 static constexpr uint8_t RID_INPUT_STANDARD = 0x30;
 static constexpr uint8_t RID_INPUT_SUBCMD   = 0x21;
 static constexpr uint8_t RID_OUTPUT_RUMBLE  = 0x10;
@@ -66,7 +66,7 @@ static constexpr uint8_t CMD_ENABLE_VIBRATION    = 0x48;
 
 #define PACKED __attribute__((packed))
 
-// ── Pro Controller Report Layouts ──────────────────────────────────────────
+// ── Controller Report Layouts ───────────────────────────────────────────────
 struct PACKED InputReport30 {
     uint8_t id;
     uint8_t timer;
@@ -99,7 +99,7 @@ struct PACKED InputReport21 {
 };
 static_assert(sizeof(InputReport21) == 64, "InputReport21 must be 64 bytes");
 
-// ── Pro Controller HID Report Descriptor ────────────────────────────────────
+// ── Controller HID Report Descriptor ────────────────────────────────────────
 static const uint8_t PRO_CONTROLLER_HID_DESC[] = {
     0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xa1, 0x01,
     0x85, 0x30, 0x05, 0x01, 0x05, 0x09, 0x19, 0x01,
@@ -187,7 +187,7 @@ static void init_spi_flash(int ctrl) {
     memcpy(flash + 0x603D, cal_left, sizeof(cal_left));
     memcpy(flash + 0x6046, cal_right, sizeof(cal_right));
 
-    // Controller color area, read by the Switch at 0x6050.
+    // Controller color area read at 0x6050.
     // #1 black-ish, #2 slightly different so cached color/identity is not identical.
     if (ctrl == 0) {
         flash[0x6050] = 0x32; flash[0x6051] = 0x32; flash[0x6052] = 0x32;
@@ -261,7 +261,7 @@ static void build_get_device_info_response(uint8_t* out, int ctrl) {
     memset(out, 0, 36);
     out[0] = 0x03;  // Firmware Major
     out[1] = 0x48;  // Firmware Minor
-    out[2] = 0x03;  // Controller Type: 0x03 = Pro Controller
+    out[2] = 0x03;  // Controller type
     out[3] = 0x02;  // Hardware model
 
     // Device info uses the reverse byte order compared to the 0x81 init ACK.
@@ -472,8 +472,8 @@ static bool setup_gadget() {
     // USB device-level serial is shared by the composite device.
     // Per-controller identity is handled in HID replies and SPI.
     write_str((std::string(GADGET_DIR) + "/strings/0x409/serialnumber").c_str(), "98B6E9112233");
-    write_str((std::string(GADGET_DIR) + "/strings/0x409/manufacturer").c_str(), "Nintendo Co., Ltd.");
-    write_str((std::string(GADGET_DIR) + "/strings/0x409/product").c_str(),      "Pro Controller");
+    write_str((std::string(GADGET_DIR) + "/strings/0x409/manufacturer").c_str(), "NS PC Control");
+    write_str((std::string(GADGET_DIR) + "/strings/0x409/product").c_str(),      "USB Gamepad Probe");
 
     write_str((std::string(GADGET_DIR) + "/configs/c.1/MaxPower").c_str(), "500");
     write_str((std::string(GADGET_DIR) + "/configs/c.1/strings/0x409/configuration").c_str(), "Dual Probe Config");

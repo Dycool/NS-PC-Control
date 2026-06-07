@@ -1,4 +1,4 @@
-/// ns-gui.mm  —  macOS Cocoa GUI frontend for the Switch wireless gamepad bridge
+/// ns-gui.mm  —  macOS Cocoa GUI frontend for the USB gamepad bridge
 ///
 /// Features Smart Discovery: Automatically detects up to 4 local controllers
 /// via Apple's GameController framework and seamlessly packs them into the UDP stream.
@@ -811,26 +811,26 @@ static int16_t clamp_i16_from_float(float v) {
     return (int16_t)std::lrintf(v);
 }
 
-static ns::MotionReport map_gc_motion_to_switch(const GamepadState& st) {
+static ns::MotionReport map_gc_motion_to_console(const GamepadState& st) {
     ns::MotionReport m;
     m.reset();
 
     // Match the backend's virtual IMU scale roughly: accel around 0x1000 per g,
-    // gyro kept conservative so real pads do not saturate the Switch sample.
+    // gyro kept conservative so real pads do not saturate the console sample.
     m.ax = clamp_i16_from_float(st.ax.load(std::memory_order_relaxed) * 4096.0f);
     m.ay = clamp_i16_from_float(st.ay.load(std::memory_order_relaxed) * 4096.0f);
     m.az = clamp_i16_from_float(st.az.load(std::memory_order_relaxed) * 4096.0f);
     constexpr float RAD_TO_DEG = 57.29577951308232f;
-    constexpr float SWITCH_GYRO_SCALE = RAD_TO_DEG * 16.0f;
-    m.gx = clamp_i16_from_float(st.gx.load(std::memory_order_relaxed) * SWITCH_GYRO_SCALE);
-    m.gy = clamp_i16_from_float(st.gy.load(std::memory_order_relaxed) * SWITCH_GYRO_SCALE);
-    m.gz = clamp_i16_from_float(st.gz.load(std::memory_order_relaxed) * SWITCH_GYRO_SCALE);
+    constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.0f;
+    m.gx = clamp_i16_from_float(st.gx.load(std::memory_order_relaxed) * CONSOLE_GYRO_SCALE);
+    m.gy = clamp_i16_from_float(st.gy.load(std::memory_order_relaxed) * CONSOLE_GYRO_SCALE);
+    m.gz = clamp_i16_from_float(st.gz.load(std::memory_order_relaxed) * CONSOLE_GYRO_SCALE);
     return m;
 }
 
 static void set_pad_present_flag(ns::ExtendedHIDReport& r, bool present) {
     // Backend/web protocol uses byte 7 of ExtendedHIDReport as the pad-present flag.
-    // This lets neutral-but-connected UDP pads claim a Switch slot and receive rumble.
+    // This lets neutral-but-connected UDP pads claim a console slot and receive rumble.
     uint8_t* raw = reinterpret_cast<uint8_t*>(&r);
     if (present) raw[7] |= EXT_PAD_PRESENT;
     else         raw[7] &= (uint8_t)~EXT_PAD_PRESENT;
@@ -915,7 +915,7 @@ static void attach_handlers(GCController* ctrl, GCExtendedGamepad* gp, GamepadSt
     }
 }
 
-static ns::HIDReport map_gc_to_switch(const GamepadState& st) {
+static ns::HIDReport map_gc_to_console(const GamepadState& st) {
     ns::HIDReport r; r.reset();
 
     if (st.btn_a.load(std::memory_order_relaxed)) r.buttons |= ns::BTN_B;
@@ -1049,6 +1049,17 @@ static void set_controller_rumble_async(int ctrl_idx, uint8_t low, uint8_t high,
 
 class RumbleManager {
 public:
+    void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
+        if (rp.subpad >= 4) return;
+        ns::RumblePacket fallback{};
+        fallback.magic = ns::RUMBLE_MAGIC;
+        fallback.subpad = rp.subpad;
+        fallback.low_freq = rp.low_freq;
+        fallback.high_freq = rp.high_freq;
+        fallback.duration_10ms = rp.duration_10ms;
+        apply_packet(fallback, controller_for_slot);
+    }
+
     void apply_packet(const ns::RumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
         const int slot = rp.subpad;
@@ -1118,7 +1129,12 @@ static void pump_udp_rumble(int sock, RumbleManager& rumble, const int controlle
                 std::cerr << "UDP receive error: " << strerror(errno) << "\n";
             break;
         }
-        if (n == (ssize_t)sizeof(ns::RumblePacket)) {
+        if (n == (ssize_t)sizeof(ns::PrecisionRumblePacket)) {
+            ns::PrecisionRumblePacket rp{};
+            memcpy(&rp, buf, sizeof(rp));
+            if (rp.magic == ns::PRECISION_RUMBLE_MAGIC)
+                rumble.apply_precision_packet(rp, controller_for_slot);
+        } else if (n == (ssize_t)sizeof(ns::RumblePacket)) {
             ns::RumblePacket rp{};
             memcpy(&rp, buf, sizeof(rp));
             if (rp.magic == ns::RUMBLE_MAGIC)
@@ -2637,7 +2653,7 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
     ns::HIDReport report;
     report.reset();
     if (slotActive[0].load(std::memory_order_relaxed)) {
-        report = map_gc_to_switch(states[0]);
+        report = map_gc_to_console(states[0]);
     }
     int km = keyboardMode.load();
     if (km == KB_SINGLE) {
@@ -2782,11 +2798,11 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
             int active_count = 0;
             for (int i = 0; i < 4; ++i) {
                 if (!self->slotActive[i].load(std::memory_order_relaxed)) continue;
-                logical_reports[i] = map_gc_to_switch(self->states[i]);
+                logical_reports[i] = map_gc_to_console(self->states[i]);
                 present[i] = true;
                 controller_for_slot[i] = i;
                 if (self->states[i].has_motion.load(std::memory_order_relaxed)) {
-                    logical_motion[i] = map_gc_motion_to_switch(self->states[i]);
+                    logical_motion[i] = map_gc_motion_to_console(self->states[i]);
                     has_motion[i] = true;
                 }
                 active_count++;

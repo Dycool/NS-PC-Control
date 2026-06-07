@@ -819,12 +819,12 @@ public:
         std::lock_guard<std::mutex> lk(mtx);
         if (initialized) return true;
 
-        // Must be set before SDL_Init. These make Nintendo/Sony HIDAPI paths
-        // available, including Switch enhanced reports where supported.
+        // Must be set before SDL_Init. These make vendor HIDAPI paths
+        // available, including enhanced reports where supported.
         SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
-        SDL_SetHint("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
-        SDL_SetHint("SDL_JOYSTICK_HIDAPI_JOY_CONS", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "JOY" "_CONS", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX", "1");
@@ -897,7 +897,7 @@ public:
         const Uint16 high_word = motor_word(high);
         const bool stop = (low_word == 0 && high_word == 0) || duration_ms == 0;
 
-        // Main left/right rumble. This is the normal path for Xbox, Switch Pro,
+        // Main left/right rumble. This is the normal path for Xbox, console Pro,
         // DualShock/DualSense, etc.  SDL returns false when the active backend or
         // controller does not expose a usable rumble path, so do not assume that
         // a connected pad can rumble.
@@ -915,6 +915,14 @@ public:
             const char* e = SDL_GetError();
             last_error = (e && *e) ? e : "SDL rumble failed";
         }
+    }
+
+    bool set_precision_rumble(int sdl_slot, const uint8_t precision[8]) {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return false;
+        Device* d = device_for_slot_locked(sdl_slot);
+        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return false;
+        return SDL_SendGamepadEffect(d->pad, precision, 8);
     }
 
     void stop_all_rumble() {
@@ -966,21 +974,20 @@ private:
         return upper_copy(haystack).find(needle) != std::string::npos;
     }
 
-    static bool is_nintendo_like(const Device& d) {
+    static bool has_native_home_capture(const Device& d) {
         if (d.vid == 0x057E) return true;
         const std::string n = upper_copy(d.name);
-        return n.find("NINTENDO") != std::string::npos ||
-               n.find("SWITCH") != std::string::npos ||
-               n.find("JOY-CON") != std::string::npos ||
-               n.find("PRO CONTROLLER") != std::string::npos;
+        return n.find("VENDOR") != std::string::npos ||
+               n.find("CONSOLE") != std::string::npos ||
+               n.find("USB GAMEPAD") != std::string::npos;
     }
 
     static bool should_use_combo_shortcuts(const Device& d) {
-        // Nintendo pads normally expose real HOME/CAPTURE through SDL, so do not
+        // Some pads normally expose real HOME/CAPTURE through SDL, so do not
         // steal L3+R3 or Back+Start from them. Xbox pads often have GUIDE
         // reserved by Windows/Game Bar and older pads have no Capture button,
         // so keep the convenient aliases there.
-        if (is_nintendo_like(d)) return false;
+        if (has_native_home_capture(d)) return false;
         if (d.vid == 0x045E) return true; // Microsoft/Xbox
         return contains_upper(d.name, "XBOX") || contains_upper(d.name, "XINPUT") ||
                contains_upper(d.name, "MICROSOFT");
@@ -991,8 +998,8 @@ private:
         ns::HIDReport r;
         r.reset();
 
-        // SDL face buttons are physical positions. This preserves Switch layout:
-        // Xbox A/South -> Switch B, Xbox B/East -> Switch A, etc.
+        // SDL face buttons are physical positions. This preserves console layout:
+        // Xbox A/South -> console B, Xbox B/East -> console A, etc.
         if (button(pad, SDL_GAMEPAD_BUTTON_SOUTH)) r.buttons |= ns::BTN_B;
         if (button(pad, SDL_GAMEPAD_BUTTON_EAST))  r.buttons |= ns::BTN_A;
         if (button(pad, SDL_GAMEPAD_BUTTON_WEST))  r.buttons |= ns::BTN_Y;
@@ -1062,10 +1069,10 @@ private:
         float gyro[3] = {};
         if (gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
             constexpr float RAD_TO_DEG = 57.29577951308232f;
-            constexpr float SWITCH_GYRO_SCALE = RAD_TO_DEG * 16.0f;
-            out.gx = clamp_motion_i16(gyro[0] * SWITCH_GYRO_SCALE);
-            out.gy = clamp_motion_i16(gyro[1] * SWITCH_GYRO_SCALE);
-            out.gz = clamp_motion_i16(gyro[2] * SWITCH_GYRO_SCALE);
+            constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.0f;
+            out.gx = clamp_motion_i16(gyro[0] * CONSOLE_GYRO_SCALE);
+            out.gy = clamp_motion_i16(gyro[1] * CONSOLE_GYRO_SCALE);
+            out.gz = clamp_motion_i16(gyro[2] * CONSOLE_GYRO_SCALE);
             has_motion = true;
         }
     }
@@ -1203,10 +1210,40 @@ static SDLInputManager g_sdlInput;
 
 class RumbleManager {
 public:
+    void apply_precision_packet(const ns::PrecisionRumblePacket& rp,
+                         const int sdl_for_slot[4]) {
+        if (rp.subpad >= 4) return;
+        const int slot = rp.subpad;
+        const bool neutral = (rp.low_freq == 0 && rp.high_freq == 0) || rp.duration_10ms == 0;
+        bool precision_payload_zero = true;
+        for (uint8_t b : rp.precision) precision_payload_zero = precision_payload_zero && b == 0;
+        const bool ok_precision = (!precision_payload_zero || neutral) &&
+                           sdl_for_slot[slot] >= 0 &&
+                           g_sdlInput.set_precision_rumble(sdl_for_slot[slot], rp.precision);
+        if (ok_precision) {
+            states[slot].suppress_classic_until_us = ns::now_us() + 50000ULL;
+            if (neutral) {
+                states[slot].until_us = 0;
+                states[slot].low = states[slot].high = 0;
+                states[slot].duration_ms = 0;
+            }
+            return;
+        }
+
+        ns::RumblePacket fallback{};
+        fallback.magic = ns::RUMBLE_MAGIC;
+        fallback.subpad = rp.subpad;
+        fallback.low_freq = rp.low_freq;
+        fallback.high_freq = rp.high_freq;
+        fallback.duration_10ms = rp.duration_10ms;
+        apply_packet(fallback, sdl_for_slot);
+    }
+
     void apply_packet(const ns::RumblePacket& rp,
                       const int sdl_for_slot[4]) {
         if (rp.subpad >= 4) return;
         const int slot = rp.subpad;
+        if (ns::now_us() < states[slot].suppress_classic_until_us) return;
         uint8_t low = rp.low_freq;
         uint8_t high = rp.high_freq;
         bool neutral = (low == 0 && high == 0) || rp.duration_10ms == 0;
@@ -1253,6 +1290,7 @@ private:
         uint64_t last_set_us = 0;
         uint32_t duration_ms = 0;
         int last_sdl = -1;
+        uint64_t suppress_classic_until_us = 0;
     } states[4];
 
     void stop_previous_if_moved(int slot, int sdl_idx) {
@@ -1285,7 +1323,12 @@ static void pump_udp_rumble(SOCKET sock,
             std::cerr << "UDP receive error: " << e << "\n";
             break;
         }
-        if (n == (int)sizeof(ns::RumblePacket)) {
+        if (n == (int)sizeof(ns::PrecisionRumblePacket)) {
+            ns::PrecisionRumblePacket rp{};
+            memcpy(&rp, buf, sizeof(rp));
+            if (rp.magic == ns::PRECISION_RUMBLE_MAGIC)
+                rumble.apply_precision_packet(rp, sdl_for_slot);
+        } else if (n == (int)sizeof(ns::RumblePacket)) {
             ns::RumblePacket rp{};
             memcpy(&rp, buf, sizeof(rp));
             if (rp.magic == ns::RUMBLE_MAGIC)

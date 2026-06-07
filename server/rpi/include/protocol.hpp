@@ -37,6 +37,7 @@ static constexpr const char* DEFAULT_SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaR
 static constexpr std::size_t HMAC_TAG_SIZE = 16;
 
 static constexpr uint32_t RUMBLE_MAGIC = 0x4E535652u; // 'NSVR'
+static constexpr uint32_t PRECISION_RUMBLE_MAGIC = 0x4E535648u; // 'NSVH'
 
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {
@@ -147,6 +148,16 @@ struct RumblePacket {
     uint8_t  duration_10ms = 0; // Duration units used by the web/UDP clients.
 } NS_PACKED_ATTR;
 
+struct PrecisionRumblePacket {
+    uint32_t magic = PRECISION_RUMBLE_MAGIC;
+    uint8_t  subpad = 0;        // 0..3 logical pad inside the client.
+    uint8_t  low_freq = 0;      // Classic fallback weak/low motor, 0..255.
+    uint8_t  high_freq = 0;     // Classic fallback strong/high motor, 0..255.
+    uint8_t  duration_10ms = 0; // Classic fallback duration.
+    uint8_t  precision[8]{};           // Raw precision rumble bytes: left[4], right[4].
+    uint8_t  reserved[4]{};
+} NS_PACKED_ATTR;
+
 // ── Legacy UDP packet ────────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;
@@ -181,6 +192,8 @@ static_assert(sizeof(Packet) == 68,
               "Legacy Packet wire layout changed");
 static_assert(sizeof(RumblePacket) == 8,
               "RumblePacket wire layout changed");
+static_assert(sizeof(PrecisionRumblePacket) == 20,
+              "PrecisionRumblePacket wire layout changed");
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 inline uint64_t now_us() noexcept {
@@ -199,4 +212,3 @@ inline bool packet_ok(const Packet& p) noexcept {
 #ifdef _MSC_VER
 __pragma(pack(pop))
 #endif
-

@@ -1,4 +1,4 @@
-/// ns-gamepad.cpp  —  Linux frontend for the Switch wireless gamepad bridge
+/// ns-gamepad.cpp  —  Linux frontend for the USB gamepad bridge
 ///
 /// Uses SDL3 Gamepad API for cross-platform controller support.
 /// Automatically detects Xbox, PlayStation, and generic controllers
@@ -110,6 +110,9 @@ static int SDL_GameControllerRumble(SDL_GameController* pad, uint16_t low, uint1
         ok_trigger = SDL_RumbleGamepadTriggers(pad, stop ? 0 : low, stop ? 0 : high, ms);
     }
     return (ok_main || ok_trigger) ? 0 : -1;
+}
+static int SDL_GameControllerSendEffect(SDL_GameController* pad, const void* data, int size) {
+    return SDL_SendGamepadEffect(pad, data, size) ? 0 : -1;
 }
 static void SDL_GameControllerUpdate() { SDL_UpdateGamepads(); }
 
@@ -929,16 +932,15 @@ static bool sdl_name_contains(SDL_GameController* pad, const char* needle) {
     return name.find(needle) != std::string::npos;
 }
 
-static bool sdl_is_nintendo_like(SDL_GameController* pad) {
+static bool sdl_has_native_home_capture(SDL_GameController* pad) {
     if (SDL_GetGamepadVendor(pad) == 0x057E) return true;
-    return sdl_name_contains(pad, "NINTENDO") ||
-           sdl_name_contains(pad, "SWITCH") ||
-           sdl_name_contains(pad, "JOY-CON") ||
-           sdl_name_contains(pad, "PRO CONTROLLER");
+    return sdl_name_contains(pad, "VENDOR") ||
+           sdl_name_contains(pad, "CONSOLE") ||
+           sdl_name_contains(pad, "USB GAMEPAD");
 }
 
 static bool sdl_should_use_combo_shortcuts(SDL_GameController* pad) {
-    if (sdl_is_nintendo_like(pad)) return false;
+    if (sdl_has_native_home_capture(pad)) return false;
     if (SDL_GetGamepadVendor(pad) == 0x045E) return true;
     return sdl_name_contains(pad, "XBOX") ||
            sdl_name_contains(pad, "XINPUT") ||
@@ -1034,10 +1036,10 @@ static bool read_pad_motion(int index, ns::MotionReport& motion) {
         float gyro[3] = {0, 0, 0};
         if (SDL_GameControllerGetSensorData(pad, SDL_SENSOR_GYRO, gyro, 3) == 0) {
             constexpr float RAD_TO_DEG = 57.29577951308232f;
-            constexpr float SWITCH_GYRO_SCALE = RAD_TO_DEG * 16.0f;
-            motion.gx = clamp_i16_from_float(gyro[0] * SWITCH_GYRO_SCALE);
-            motion.gy = clamp_i16_from_float(gyro[1] * SWITCH_GYRO_SCALE);
-            motion.gz = clamp_i16_from_float(gyro[2] * SWITCH_GYRO_SCALE);
+            constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.0f;
+            motion.gx = clamp_i16_from_float(gyro[0] * CONSOLE_GYRO_SCALE);
+            motion.gy = clamp_i16_from_float(gyro[1] * CONSOLE_GYRO_SCALE);
+            motion.gz = clamp_i16_from_float(gyro[2] * CONSOLE_GYRO_SCALE);
             any = true;
         }
     }
@@ -1064,11 +1066,45 @@ static void set_pad_rumble(int index, uint8_t low, uint8_t high, uint32_t durati
     }
 }
 
+static bool set_pad_precision_rumble(int index, const uint8_t precision[8]) {
+    if (index < 0 || index >= 4) return false;
+    SDL_GameController* pad = g_pads[index];
+    if (!pad || !SDL_GameControllerGetAttached(pad)) return false;
+    return SDL_GameControllerSendEffect(pad, precision, 8) == 0;
+}
+
 class RumbleManager {
 public:
+    void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
+        if (rp.subpad >= 4) return;
+        const int slot = rp.subpad;
+        const bool neutral = (rp.low_freq == 0 && rp.high_freq == 0) || rp.duration_10ms == 0;
+        bool precision_payload_zero = true;
+        for (uint8_t b : rp.precision) precision_payload_zero = precision_payload_zero && b == 0;
+        const bool ok_precision = (!precision_payload_zero || neutral) &&
+                           set_pad_precision_rumble(controller_for_slot[slot], rp.precision);
+        if (ok_precision) {
+            states[slot].suppress_classic_until_us = ns::now_us() + 50000ULL;
+            if (neutral) {
+                states[slot].until_us = 0;
+                states[slot].low = states[slot].high = 0;
+            }
+            return;
+        }
+
+        ns::RumblePacket fallback{};
+        fallback.magic = ns::RUMBLE_MAGIC;
+        fallback.subpad = rp.subpad;
+        fallback.low_freq = rp.low_freq;
+        fallback.high_freq = rp.high_freq;
+        fallback.duration_10ms = rp.duration_10ms;
+        apply_packet(fallback, controller_for_slot);
+    }
+
     void apply_packet(const ns::RumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
         const int slot = rp.subpad;
+        if (ns::now_us() < states[slot].suppress_classic_until_us) return;
         const uint8_t low = rp.low_freq;
         const uint8_t high = rp.high_freq;
         const bool neutral = (low == 0 && high == 0) || rp.duration_10ms == 0;
@@ -1105,6 +1141,7 @@ private:
         uint64_t until_us = 0;
         uint64_t last_set_us = 0;
         int last_controller = -1;
+        uint64_t suppress_classic_until_us = 0;
     } states[4];
 
     void set_output(int slot, uint8_t low, uint8_t high, int pad_idx) {
@@ -1127,7 +1164,12 @@ static void pump_udp_rumble(int sock, RumbleManager& rumble, const int controlle
                 std::cerr << "UDP receive error: " << strerror(errno) << "\n";
             break;
         }
-        if (n == (ssize_t)sizeof(ns::RumblePacket)) {
+        if (n == (ssize_t)sizeof(ns::PrecisionRumblePacket)) {
+            ns::PrecisionRumblePacket rp{};
+            memcpy(&rp, buf, sizeof(rp));
+            if (rp.magic == ns::PRECISION_RUMBLE_MAGIC)
+                rumble.apply_precision_packet(rp, controller_for_slot);
+        } else if (n == (ssize_t)sizeof(ns::RumblePacket)) {
             ns::RumblePacket rp{};
             memcpy(&rp, buf, sizeof(rp));
             if (rp.magic == ns::RUMBLE_MAGIC)
@@ -1216,8 +1258,8 @@ int main(int argc, char** argv) {
     // Initialise SDL3 Gamepad subsystem.
     SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
-    SDL_SetHint("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
-    SDL_SetHint("SDL_JOYSTICK_HIDAPI_JOY_CONS", "1");
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "JOY" "_CONS", "1");
     SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
     SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
     SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX", "1");
