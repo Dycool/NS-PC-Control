@@ -1253,20 +1253,29 @@ private:
     }
 
     static bool parse_switch_pro(Device* d, const uint8_t* b, DWORD len, ns::HIDReport& r, ns::MotionReport& m, bool& has_motion) {
-        r.reset(); m.reset(); has_motion = false;
-        if (b[0] == 0x3F)
-            return parse_switch_simple(b, len, r);
+            r.reset(); m.reset(); has_motion = false;
+            if (b[0] == 0x3F)
+                return parse_switch_simple(b, len, r);
 
-        if ((b[0] == 0x21 || b[0] == 0x30 || b[0] == 0x31) && parse_switch_full_controls(d, b, len, r)) {
-            if ((b[0] == 0x30 || b[0] == 0x31) && len >= 25) {
-                m.ax = read_le16(b + 13); m.ay = read_le16(b + 15); m.az = read_le16(b + 17);
-                m.gx = read_le16(b + 19); m.gy = read_le16(b + 21); m.gz = read_le16(b + 23);
-                has_motion = true;
+            if ((b[0] == 0x21 || b[0] == 0x30 || b[0] == 0x31) && parse_switch_full_controls(d, b, len, r)) {
+                if ((b[0] == 0x30 || b[0] == 0x31) && len >= 25) {
+                    m.ax = read_le16(b + 13); m.ay = read_le16(b + 15); m.az = read_le16(b + 17);
+                    
+                    // Helper lambda to cancel out resting hardware noise
+                    auto apply_deadzone = [](int16_t v) -> int16_t {
+                        return (std::abs(v) < 70) ? 0 : v;
+                    };
+
+                    m.gx = apply_deadzone(read_le16(b + 19)); 
+                    m.gy = apply_deadzone(read_le16(b + 21)); 
+                    m.gz = apply_deadzone(read_le16(b + 23));
+                    
+                    has_motion = true;
+                }
+                return true;
             }
-            return true;
+            return false;
         }
-        return false;
-    }
 
     void read_loop(Device* d) {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
