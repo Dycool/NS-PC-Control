@@ -3193,9 +3193,11 @@ static void SenderThread() {
             activeCount++;
         }
 
-        // XInput fallback / Xbox controllers. If raw HID already claimed a slot,
-        // put XInput in the next free slot instead of overwriting gyro-capable input.
-        bool c1=false, c2=false, c3=false, c4=false;
+        // XInput fallback / Xbox controllers.
+        // Important: do NOT relocate XInput to the next free slot when the same
+        // index is already occupied by Raw HID. A lot of pads expose both APIs;
+        // relocating the XInput copy makes one physical controller look like two
+        // Switch controllers, which breaks slot mapping, rumble routing, and gyro.
         for (DWORD i = 0; i < 4; ++i) {
             ns::HIDReport temp{};
             bool conn = false;
@@ -3203,22 +3205,16 @@ static void SenderThread() {
             if (!conn) continue;
 
             int target = (int)i;
-            if (present[target]) {
-                target = -1;
-                for (int s = 0; s < 4; ++s) {
-                    if (!present[s]) { target = s; break; }
-                }
-            }
-            if (target < 0) continue;
+            if (target < 0 || target >= 4) continue;
+
+            // Slot already owned by Raw HID / keyboard / something else this frame.
+            // Leave it alone instead of duplicating this controller into another pad.
+            if (present[target]) continue;
 
             logicalReports[target] = temp;
             present[target] = true;
             xinputForSlot[target] = (int)i;
             activeCount++;
-            if (target == 0) c1 = true;
-            else if (target == 1) c2 = true;
-            else if (target == 2) c3 = true;
-            else if (target == 3) c4 = true;
         }
 
         // Generic WinMM fallback. This is input-only, but catches DirectInput-style pads.
@@ -3339,11 +3335,11 @@ static void UpdateControllerStatus() {
 
         XINPUT_CAPABILITIES caps{};
         bool xinputPresent = (XInputGetCapabilities(i, 0, &caps) == ERROR_SUCCESS);
-        if (g_connected && g_is_connected[i]) {
-            swprintf(buf, 128, L"P%d: XInput", i + 1);
-        } else if (raw[i].connected) {
+        if (raw[i].connected) {
             std::wstring name = widen(raw[i].name.empty() ? "Raw HID" : raw[i].name);
             swprintf(buf, 128, L"P%d: %ls", i + 1, name.c_str());
+        } else if (g_connected && g_is_connected[i]) {
+            swprintf(buf, 128, L"P%d: XInput", i + 1);
         } else if (generic[i].connected) {
             std::wstring name = widen(generic[i].name.empty() ? "Generic joystick" : generic[i].name);
             swprintf(buf, 128, L"P%d: %ls", i + 1, name.c_str());
