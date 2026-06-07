@@ -46,6 +46,58 @@ using ms    = std::chrono::milliseconds;
 static std::atomic<bool> g_running{true};
 static bool g_verbose = false;
 
+// UDP clients on Windows can occasionally stall for a few seconds while the app
+// is still open (scheduler hiccup, controller rescan, window drag, debugger,
+// etc.).  Do not destroy/remap the whole PC session on a tiny UDP gap.  Instead
+// neutralize stale input quickly, and only disconnect after a longer watchdog.
+static uint64_t g_client_timeout_us = 30'000'000ULL;       // 30s hard disconnect
+static constexpr uint64_t CLIENT_STALE_NEUTRAL_US = 350'000ULL; // 350ms release-to-neutral
+
+// Debug helpers.
+static bool g_log_neutral_rumble = false;   // show the neutral carrier in -v logs
+static bool g_test_rumble_on_connect = false; // send one synthetic rumble to UDP clients
+
+enum class ImuMapMode {
+    Direct,
+    InvertX,
+    InvertY,
+    InvertZ,
+    SwapYZ,
+    Switch1,
+    Switch2,
+    Switch3,
+};
+
+static ImuMapMode g_imu_map = ImuMapMode::Direct;
+
+static const char* imu_map_name(ImuMapMode m) {
+    switch (m) {
+        case ImuMapMode::Direct:  return "direct";
+        case ImuMapMode::InvertX: return "invert-x";
+        case ImuMapMode::InvertY: return "invert-y";
+        case ImuMapMode::InvertZ: return "invert-z";
+        case ImuMapMode::SwapYZ:  return "swap-yz";
+        case ImuMapMode::Switch1: return "switch1";
+        case ImuMapMode::Switch2: return "switch2";
+        case ImuMapMode::Switch3: return "switch3";
+    }
+    return "direct";
+}
+
+static bool parse_imu_map(const std::string& raw) {
+    std::string s = raw;
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    if (s == "direct")   { g_imu_map = ImuMapMode::Direct;  return true; }
+    if (s == "invert-x") { g_imu_map = ImuMapMode::InvertX; return true; }
+    if (s == "invert-y") { g_imu_map = ImuMapMode::InvertY; return true; }
+    if (s == "invert-z") { g_imu_map = ImuMapMode::InvertZ; return true; }
+    if (s == "swap-yz")  { g_imu_map = ImuMapMode::SwapYZ;  return true; }
+    if (s == "switch1")  { g_imu_map = ImuMapMode::Switch1; return true; }
+    if (s == "switch2")  { g_imu_map = ImuMapMode::Switch2; return true; }
+    if (s == "switch3")  { g_imu_map = ImuMapMode::Switch3; return true; }
+    return false;
+}
+
 // Built-in USB gadget lifecycle.  ns-backend can now create/bind the
 // 4-interface Pro Controller gadget itself on startup and unbind/remove it
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
@@ -89,6 +141,7 @@ struct ClientSession {
     RumblePacket rumble[4]{};
     uint32_t    rumble_seq[4]{};
     bool        rumble_active[4]{};
+    bool        debug_rumble_sent[4]{};
 
     // Extended UDP clients can opt into server->client rumble by using the
     // authenticated extended packet format. Legacy UDP clients remain input-only.
@@ -122,6 +175,54 @@ static void push_motion_history(ClientSession& c, int subpad, const MotionReport
     c.motion_history[subpad][1] = c.motion_history[subpad][0];
     c.motion_history[subpad][0] = motion;
     if (c.motion_history_count[subpad] < 3) c.motion_history_count[subpad]++;
+}
+
+static int16_t neg_i16_safe(int16_t v) {
+    return v == INT16_MIN ? INT16_MAX : (int16_t)-v;
+}
+
+static MotionReport remap_motion_for_switch(const MotionReport& in) {
+    MotionReport o = in;
+    switch (g_imu_map) {
+        case ImuMapMode::Direct:
+            break;
+
+        case ImuMapMode::InvertX:
+            o.ax = neg_i16_safe(in.ax); o.gx = neg_i16_safe(in.gx);
+            break;
+
+        case ImuMapMode::InvertY:
+            o.ay = neg_i16_safe(in.ay); o.gy = neg_i16_safe(in.gy);
+            break;
+
+        case ImuMapMode::InvertZ:
+            o.az = neg_i16_safe(in.az); o.gz = neg_i16_safe(in.gz);
+            break;
+
+        case ImuMapMode::SwapYZ:
+            o.ax = in.ax; o.ay = in.az; o.az = in.ay;
+            o.gx = in.gx; o.gy = in.gz; o.gz = in.gy;
+            break;
+
+        // These presets are intentionally simple right-handed rotations/sign
+        // flips around the SDL-standardized sensor axes.  They let you test the
+        // orientation the Switch/Mario Kart expects without recompiling.
+        case ImuMapMode::Switch1:
+            o.ax = in.ax;              o.ay = in.az;              o.az = neg_i16_safe(in.ay);
+            o.gx = in.gx;              o.gy = in.gz;              o.gz = neg_i16_safe(in.gy);
+            break;
+
+        case ImuMapMode::Switch2:
+            o.ax = in.ax;              o.ay = neg_i16_safe(in.az); o.az = in.ay;
+            o.gx = in.gx;              o.gy = neg_i16_safe(in.gz); o.gz = in.gy;
+            break;
+
+        case ImuMapMode::Switch3:
+            o.ax = in.az;              o.ay = in.ay;              o.az = neg_i16_safe(in.ax);
+            o.gx = in.gz;              o.gy = in.gy;              o.gz = neg_i16_safe(in.gx);
+            break;
+    }
+    return o;
 }
 
 // Diagnostics
@@ -683,7 +784,7 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
     if (client_idx == -1) {
         for (int i = 0; i < MAX_CLIENTS; ++i) {
             std::lock_guard<std::mutex> lk(g_mtx[i]);
-            if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
+            if (!g_clients[i].active || (now - g_clients[i].last_rx_us > g_client_timeout_us)) {
                 client_idx = i;
                 g_clients[i].active = true;
                 g_clients[i].addr = sender;
@@ -1269,8 +1370,8 @@ static void build_standard_report(const ExtendedHIDReport& src,
     bool has_imu = imu_enabled && motion_history && motion_history_count > 0;
     if (has_imu) {
         for (int i = 0; i < 3; ++i) {
-            if (i < motion_history_count) imu[i] = motion_history[i];
-            else imu[i] = motion_history[motion_history_count - 1];
+            if (i < motion_history_count) imu[i] = remap_motion_for_switch(motion_history[i]);
+            else imu[i] = remap_motion_for_switch(motion_history[motion_history_count - 1]);
         }
     }
 
@@ -1279,11 +1380,12 @@ static void build_standard_report(const ExtendedHIDReport& src,
         uint64_t t = now_us();
         if (t - last_log_us > 250000) {
             last_log_us = t;
-            std::printf("[input] lx=%3u ly=%3u rx=%3u ry=%3u | L=%02X %02X %02X R=%02X %02X %02X | imu=%s samples=%u ax=%6d ay=%6d az=%6d gx=%6d gy=%6d gz=%6d\n",
+            std::printf("[input] lx=%3u ly=%3u rx=%3u ry=%3u | L=%02X %02X %02X R=%02X %02X %02X | imu=%s map=%s samples=%u ax=%6d ay=%6d az=%6d gx=%6d gy=%6d gz=%6d\n",
                         in.lx, in.ly, in.rx, in.ry,
                         out.left_stick[0], out.left_stick[1], out.left_stick[2],
                         out.right_stick[0], out.right_stick[1], out.right_stick[2],
                         has_imu ? "yes" : "no",
+                        imu_map_name(g_imu_map),
                         (unsigned)(has_imu ? motion_history_count : 0),
                         (int)imu[0].ax, (int)imu[0].ay, (int)imu[0].az,
                         (int)imu[0].gx, (int)imu[0].gy, (int)imu[0].gz);
@@ -1403,7 +1505,7 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
     bool all_zero = true;
     for (int i = 0; i < 8; ++i) if (rb[i] != 0) { all_zero = false; break; }
     bool neutral = all_zero || memcmp(rb, neutral_rumble, 8) == 0;
-    if (neutral && !publish_neutral)
+    if (neutral && !publish_neutral && !g_log_neutral_rumble)
         return;
 
     uint8_t low = 0, high = 0;
@@ -1426,6 +1528,16 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
     if (neutral && !g_clients[client_idx].rumble_active[sub_idx]) {
         // The Switch sends the neutral carrier constantly. Forwarding every
         // neutral frame creates haptic spam and hides real rumble debugging.
+        if (g_verbose && g_log_neutral_rumble) {
+            static uint64_t last_neutral_log_us[MAX_CLIENTS][4] = {};
+            uint64_t t = now_us();
+            if (t - last_neutral_log_us[client_idx][sub_idx] > 1'000'000ULL) {
+                last_neutral_log_us[client_idx][sub_idx] = t;
+                std::printf("[rumble-neutral] client=%d pad=%d raw=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                            client_idx + 1, sub_idx + 1,
+                            rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);
+            }
+        }
         return;
     }
 
@@ -1444,6 +1556,29 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
                     ev.duration_10ms, neutral ? "yes" : "no",
                     rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);
     }
+}
+
+static void queue_debug_test_rumble_if_needed(int client_idx, int sub_idx) {
+    if (!g_test_rumble_on_connect) return;
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
+
+    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+    ClientSession& c = g_clients[client_idx];
+    if (!c.active || c.debug_rumble_sent[sub_idx]) return;
+
+    RumblePacket& ev = c.rumble[sub_idx];
+    ev.magic = RUMBLE_MAGIC;
+    ev.subpad = (uint8_t)sub_idx;
+    ev.low_freq = 180;
+    ev.high_freq = 220;
+    ev.duration_10ms = 25; // 250 ms
+    c.rumble_active[sub_idx] = true;
+    c.debug_rumble_sent[sub_idx] = true;
+    c.rumble_seq[sub_idx]++;
+
+    if (g_verbose)
+        std::printf("[rumble-test] queued client=%d pad=%d low=%u high=%u duration=%u\n",
+                    client_idx + 1, sub_idx + 1, ev.low_freq, ev.high_freq, ev.duration_10ms);
 }
 
 
@@ -1839,7 +1974,7 @@ static void writer_thread(int hz) {
 
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 std::lock_guard<std::mutex> lk(g_mtx[c]);
-                if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > WATCHDOG_MS * 1000ULL) && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
+                if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > g_client_timeout_us) && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
                     g_clients[c].active = false;
                     g_clients[c].report.reset();
                     clear_all_motion_history(g_clients[c]);
@@ -1847,9 +1982,11 @@ static void writer_thread(int hz) {
                     for (int s = 0; s < 4; ++s) {
                         g_clients[c].pad_present[s] = false;
                         g_clients[c].pad_last_present_us[s] = 0;
+                        g_clients[c].debug_rumble_sent[s] = false;
                     }
                     if (g_verbose && !timeout_printed[c]) {
-                        std::printf("PC %d timed out and was disconnected.\n", c + 1);
+                        std::printf("PC %d timed out after %.1fs without UDP input and was disconnected.\n",
+                                    c + 1, (double)(now_stamp - g_clients[c].last_rx_us) / 1000000.0);
                         timeout_printed[c] = true;
                     }
                 } else if (g_clients[c].active) {
@@ -1857,18 +1994,36 @@ static void writer_thread(int hz) {
                 }
                 active_snap[c] = g_clients[c].active;
                 uses_presence_snap[c] = g_clients[c].uses_pad_presence;
+                const bool input_stream_stale =
+                    g_clients[c].active &&
+                    g_clients[c].last_rx_us != 0 &&
+                    (now_stamp - g_clients[c].last_rx_us > CLIENT_STALE_NEUTRAL_US);
+
                 for (int s = 0; s < 4; ++s) {
                     present_snap[c][s] = g_clients[c].pad_present[s];
                     last_present_snap[c][s] = g_clients[c].pad_last_present_us[s];
                 }
-                report_snap[c][0] = g_clients[c].report.p1;
-                report_snap[c][1] = g_clients[c].report.p2;
-                report_snap[c][2] = g_clients[c].report.p3;
-                report_snap[c][3] = g_clients[c].report.p4;
-                for (int s = 0; s < 4; ++s) {
-                    motion_count_snap[c][s] = g_clients[c].motion_history_count[s];
-                    for (int i = 0; i < 3; ++i)
-                        motion_snap[c][s][i] = g_clients[c].motion_history[s][i];
+
+                if (input_stream_stale) {
+                    // Keep the session/port alive through a short Windows UDP stall,
+                    // but release all controls quickly so held R/ZR/sticks do not get
+                    // stuck.  A real disconnect is handled later by g_client_timeout_us.
+                    report_snap[c][0].reset();
+                    report_snap[c][1].reset();
+                    report_snap[c][2].reset();
+                    report_snap[c][3].reset();
+                    for (int s = 0; s < 4; ++s)
+                        motion_count_snap[c][s] = 0;
+                } else {
+                    report_snap[c][0] = g_clients[c].report.p1;
+                    report_snap[c][1] = g_clients[c].report.p2;
+                    report_snap[c][2] = g_clients[c].report.p3;
+                    report_snap[c][3] = g_clients[c].report.p4;
+                    for (int s = 0; s < 4; ++s) {
+                        motion_count_snap[c][s] = g_clients[c].motion_history_count[s];
+                        for (int i = 0; i < 3; ++i)
+                            motion_snap[c][s][i] = g_clients[c].motion_history[s][i];
+                    }
                 }
             }
 
@@ -3806,7 +3961,7 @@ static size_t process_ws_frame(WebClient *c) {
                         clear_all_motion_history(g_clients[i]);
                         g_clients[i].uses_pad_presence = true;
                         clear_udp_rumble_state(g_clients[i]);
-                        for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; }
+                        for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; g_clients[i].debug_rumble_sent[s] = false; }
                         g_clients[i].last_rx_us = now;
                         break;
                     }
@@ -3941,6 +4096,7 @@ static size_t process_ws_frame(WebClient *c) {
                 for (int s = 0; s < 4; ++s) {
                     g_clients[i].pad_present[s] = false;
                     g_clients[i].pad_last_present_us[s] = 0;
+                    g_clients[i].debug_rumble_sent[s] = false;
                 }
                 g_clients[i].last_rx_us = now;
                 for (int s = 0; s < 4; ++s)
@@ -4457,6 +4613,19 @@ int main(int argc, char** argv) {
         else if (a == "--no-auto-gadget") g_auto_gadget_setup = false;
         else if (a == "--force-gadget-setup") g_force_gadget_setup = true;
         else if (a == "--keep-gadget-on-exit") g_teardown_gadget_exit = false;
+        else if (a == "--client-timeout-ms" && i+1 < argc) {
+            uint64_t ms_v = (uint64_t)std::strtoull(argv[++i], nullptr, 10);
+            if (ms_v < 1000) ms_v = 1000;
+            g_client_timeout_us = ms_v * 1000ULL;
+        }
+        else if (a == "--imu-map" && i+1 < argc) {
+            if (!parse_imu_map(argv[++i])) {
+                std::fprintf(stderr, "Unknown --imu-map. Use: direct, invert-x, invert-y, invert-z, swap-yz, switch1, switch2, switch3\n");
+                return 1;
+            }
+        }
+        else if (a == "--log-neutral-rumble") g_log_neutral_rumble = true;
+        else if (a == "--test-rumble") g_test_rumble_on_connect = true;
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
                 web_port = std::atoi(argv[++i]);
@@ -4466,6 +4635,8 @@ int main(int argc, char** argv) {
         else if (a == "-h") {
             puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v]");
             puts("            [--force-gadget-setup] [--no-auto-gadget] [--keep-gadget-on-exit]");
+            puts("            [--client-timeout-ms MS] [--imu-map direct|invert-x|invert-y|invert-z|swap-yz|switch1|switch2|switch3]");
+            puts("            [--log-neutral-rumble] [--test-rumble]");
             return 0;
         }
     }
@@ -4504,6 +4675,14 @@ int main(int argc, char** argv) {
     
     std::printf("UDP %s:%u writer=%d Hz\n",
                 bind_addr.c_str(), port, WRITER_HZ);
+    if (g_verbose) {
+        std::printf("[config] client_timeout=%.1fs stale_neutral=%.0fms imu_map=%s neutral_rumble_log=%s test_rumble=%s\n",
+                    (double)g_client_timeout_us / 1000000.0,
+                    (double)CLIENT_STALE_NEUTRAL_US / 1000.0,
+                    imu_map_name(g_imu_map),
+                    g_log_neutral_rumble ? "yes" : "no",
+                    g_test_rumble_on_connect ? "yes" : "no");
+    }
 
     std::thread wt(writer_thread, WRITER_HZ);
     std::thread st(stats_thread);
@@ -4620,7 +4799,7 @@ int main(int argc, char** argv) {
             if (client_idx == -1) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_mtx[i]);
-                    if (!g_clients[i].active || (now - g_clients[i].last_rx_us > WATCHDOG_MS * 1000ULL)) {
+                    if (!g_clients[i].active || (now - g_clients[i].last_rx_us > g_client_timeout_us)) {
                         client_idx = i;
                         g_clients[i].active = true;
                         g_clients[i].addr = sender;
@@ -4633,6 +4812,7 @@ int main(int argc, char** argv) {
                         for (int s = 0; s < 4; ++s) {
                             g_clients[i].pad_present[s] = false;
                             g_clients[i].pad_last_present_us[s] = 0;
+                            g_clients[i].debug_rumble_sent[s] = false;
                         }
                         g_clients[i].last_rx_us = now;
                         if (g_verbose) std::printf("New UDP client accepted into Server Slot %d/4\n", i+1);
@@ -4752,8 +4932,10 @@ int main(int argc, char** argv) {
 
             // Extended UDP clients opted into rumble by using the new packet
             // format.  Legacy clients are not sent unexpected traffic.
-            if (is_extended_udp)
+            if (is_extended_udp) {
+                queue_debug_test_rumble_if_needed(client_idx, 0);
                 flush_rumble_to_udp(sock, client_idx);
+            }
         } // drain loop
     } // epoll loop
 
