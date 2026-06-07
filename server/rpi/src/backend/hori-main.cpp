@@ -983,9 +983,14 @@ static std::string join_path(const std::string& a, const std::string& b) {
 }
 
 static void remove_link_if_exists(const char* path) {
-    struct stat st{};
-    if (lstat(path, &st) == 0 && S_ISLNK(st.st_mode))
-        unlink(path);
+    if (unlink(path) != 0) {
+        // "if exists" semantics: ignore missing path.
+        // Also ignore directories (not a link/file) to preserve prior behavior.
+        if (errno != ENOENT && errno != EISDIR) {
+            if (g_verbose)
+                std::fprintf(stderr, "[gadget] unlink %s failed: %s\n", path, std::strerror(errno));
+        }
+    }
 }
 
 static void rmdir_if_exists(const char* path) {
