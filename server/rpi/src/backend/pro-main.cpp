@@ -159,6 +159,25 @@ struct ClientSession {
 static std::mutex    g_mtx[MAX_CLIENTS];
 static ClientSession g_clients[MAX_CLIENTS];
 
+static uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
+    // All runtime timestamps should come from ns::now_us()/steady_clock, but
+    // never let a bad/future timestamp wrap an unsigned subtraction into
+    // ~UINT64_MAX.  That was causing bogus logs like:
+    //   timed out after 18446744073709.6s
+    if (then == 0 || then > now) return 0;
+    return now - then;
+}
+
+static bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit) {
+    return then != 0 && elapsed_us_saturated(now, then) > limit;
+}
+
+static void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
+    if (c.active && (c.last_rx_us == 0 || c.last_rx_us > now)) {
+        c.last_rx_us = now;
+    }
+}
+
 static void clear_motion_history(ClientSession& c, int subpad) {
     if (subpad < 0 || subpad >= 4) return;
     for (int i = 0; i < 3; ++i) c.motion_history[subpad][i].reset();
@@ -784,7 +803,8 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
     if (client_idx == -1) {
         for (int i = 0; i < MAX_CLIENTS; ++i) {
             std::lock_guard<std::mutex> lk(g_mtx[i]);
-            if (!g_clients[i].active || (now - g_clients[i].last_rx_us > g_client_timeout_us)) {
+            repair_future_client_timestamp(g_clients[i], now);
+            if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, g_client_timeout_us)) {
                 client_idx = i;
                 g_clients[i].active = true;
                 g_clients[i].addr = sender;
@@ -972,11 +992,22 @@ static bool server_macro_start(int client_idx, int subpad, const std::string& js
 // ── Signal ────────────────────────────────────────────────────────────────────
 static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); }
 
+static uint8_t pro_timer_from_us(uint64_t t_us) {
+    // The byte after report ID 0x30/0x21 is a small controller timer.  Real
+    // controllers advance it with time, not merely by "one per report"; using
+    // a 5ms unit matches the 3x IMU sample spacing most software expects.
+    return (uint8_t)((t_us / 5000ULL) & 0xFF);
+}
+
 
 
 // ── Nintendo Pro Controller USB protocol support ─────────────────────────────
 static constexpr size_t PRO_REPORT_SIZE = 64;
-static constexpr int PRO_ACTIVE_REPORT_HZ = 250;
+// Real Nintendo full input reports are not spammed at the writer loop rate.
+// hid-nintendo documents Pro Controller USB report 0x30 at about every 15ms,
+// with 3 IMU samples spaced roughly 5ms apart.  Keep this configurable for
+// testing, but default to the real cadence instead of 250Hz.
+static uint64_t g_pro_report_interval_us = 15'000ULL;
 static constexpr int PRO_IDLE_REPORT_HZ = 30;
 static constexpr uint64_t PRO_IDLE_REPORT_INTERVAL_US = 1'000'000ULL / PRO_IDLE_REPORT_HZ;
 static constexpr uint64_t PRO_RELEASE_NEUTRAL_US = 250'000ULL;
@@ -1065,6 +1096,7 @@ struct ControllerRuntime {
     bool imu_enabled = false;
     bool vibration_enabled = false;
     bool pending_subcmd_reply = false;
+    uint64_t last_standard_report_us = 0;
     uint64_t last_idle_neutral_us = 0;
     uint64_t neutral_burst_until_us = 0;
     ProInputReport21 pending_reply{};
@@ -1922,6 +1954,7 @@ static void writer_thread(int hz) {
                     rt[i].timer = 0;
                     rt[i].full_report_enabled = false;
                     rt[i].pending_subcmd_reply = false;
+                    rt[i].last_standard_report_us = 0;
                     rt[i].last_idle_neutral_us = 0;
                     rt[i].neutral_burst_until_us = 0;
                     memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
@@ -1974,7 +2007,9 @@ static void writer_thread(int hz) {
 
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 std::lock_guard<std::mutex> lk(g_mtx[c]);
-                if (g_clients[c].active && (now_stamp - g_clients[c].last_rx_us > g_client_timeout_us) && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
+                repair_future_client_timestamp(g_clients[c], now_stamp);
+                const uint64_t client_idle_us = elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us);
+                if (g_clients[c].active && g_clients[c].last_rx_us != 0 && client_idle_us > g_client_timeout_us && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
                     g_clients[c].active = false;
                     g_clients[c].report.reset();
                     clear_all_motion_history(g_clients[c]);
@@ -1986,7 +2021,7 @@ static void writer_thread(int hz) {
                     }
                     if (g_verbose && !timeout_printed[c]) {
                         std::printf("PC %d timed out after %.1fs without UDP input and was disconnected.\n",
-                                    c + 1, (double)(now_stamp - g_clients[c].last_rx_us) / 1000000.0);
+                                    c + 1, (double)elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us) / 1000000.0);
                         timeout_printed[c] = true;
                     }
                 } else if (g_clients[c].active) {
@@ -1997,7 +2032,7 @@ static void writer_thread(int hz) {
                 const bool input_stream_stale =
                     g_clients[c].active &&
                     g_clients[c].last_rx_us != 0 &&
-                    (now_stamp - g_clients[c].last_rx_us > CLIENT_STALE_NEUTRAL_US);
+                    client_idle_us > CLIENT_STALE_NEUTRAL_US;
 
                 for (int s = 0; s < 4; ++s) {
                     present_snap[c][s] = g_clients[c].pad_present[s];
@@ -2118,7 +2153,7 @@ static void writer_thread(int hz) {
 
                 if (rt[h].pending_subcmd_reply) {
                     rt[h].pending_reply.id = RID_INPUT_SUBCMD;
-                    rt[h].pending_reply.timer = rt[h].timer++;
+                    rt[h].pending_reply.timer = pro_timer_from_us(now_stamp);
                     if (port_needed)
                         apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);
                     else
@@ -2136,9 +2171,20 @@ static void writer_thread(int hz) {
                         rt[h].neutral_burst_until_us = 0;
 
                     bool idle_due = (rt[h].last_idle_neutral_us == 0) ||
-                                    (now_stamp - rt[h].last_idle_neutral_us >= PRO_IDLE_REPORT_INTERVAL_US);
+                                    (elapsed_us_saturated(now_stamp, rt[h].last_idle_neutral_us) >= PRO_IDLE_REPORT_INTERVAL_US);
+                    bool standard_due = (rt[h].last_standard_report_us == 0) ||
+                                        (elapsed_us_saturated(now_stamp, rt[h].last_standard_report_us) >= g_pro_report_interval_us);
 
-                    if (port_needed || release_burst || idle_due) {
+                    // A real Pro Controller over USB emits full 0x30 input
+                    // reports roughly every 15ms.  Sending 0x30 at 125-250Hz
+                    // makes the 3 IMU samples/timer cadence unrealistic and
+                    // some Switch software appears to ignore motion even though
+                    // button/stick input still works.
+                    bool should_write_standard = false;
+                    if (port_needed || release_burst) should_write_standard = standard_due;
+                    else should_write_standard = idle_due;
+
+                    if (should_write_standard) {
                         ExtendedHIDReport report_for_port;
                         report_for_port.reset();
                         if (port_needed) report_for_port = out_reports[h];
@@ -2157,11 +2203,13 @@ static void writer_thread(int hz) {
                                               history_for_port,
                                               history_count_for_port,
                                               rt[h].imu_enabled,
-                                              rt[h].timer++,
+                                              pro_timer_from_us(now_stamp),
                                               std_in);
                         memcpy(write_buf, &std_in, sizeof(ProInputReport30));
                         have_report_to_write = true;
 
+                        if (port_needed || release_burst)
+                            rt[h].last_standard_report_us = now_stamp;
                         if (!port_needed && !release_burst)
                             rt[h].last_idle_neutral_us = now_stamp;
                     }
@@ -4624,6 +4672,15 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        else if (a == "--pro-report-us" && i+1 < argc) {
+            uint64_t us_v = (uint64_t)std::strtoull(argv[++i], nullptr, 10);
+            // Keep sane bounds. 15ms is the real USB Pro Controller cadence;
+            // 8ms is useful for experiments, but lower starts to look unlike
+            // the real device and can make IMU consumers unhappy.
+            if (us_v < 8000) us_v = 8000;
+            if (us_v > 50000) us_v = 50000;
+            g_pro_report_interval_us = us_v;
+        }
         else if (a == "--log-neutral-rumble") g_log_neutral_rumble = true;
         else if (a == "--test-rumble") g_test_rumble_on_connect = true;
         else if (a == "-w") {
@@ -4636,7 +4693,7 @@ int main(int argc, char** argv) {
             puts("ns-backend  [-p PORT] [-b ADDR] [--upnp] [-w [WEB_PORT]] [-v]");
             puts("            [--force-gadget-setup] [--no-auto-gadget] [--keep-gadget-on-exit]");
             puts("            [--client-timeout-ms MS] [--imu-map direct|invert-x|invert-y|invert-z|swap-yz|switch1|switch2|switch3]");
-            puts("            [--log-neutral-rumble] [--test-rumble]");
+            puts("            [--pro-report-us US] [--log-neutral-rumble] [--test-rumble]");
             return 0;
         }
     }
@@ -4651,6 +4708,10 @@ int main(int argc, char** argv) {
                                  : "startup gadget recreation requested");
 
     derive_key(DEFAULT_SECRET, g_hmac_key);
+    if (g_verbose)
+        std::printf("[pro] report interval=%llu us, imu-map=%s\n",
+                    (unsigned long long)g_pro_report_interval_us,
+                    imu_map_name(g_imu_map));
     signal(SIGINT,  on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
 
     if (do_upnp) upnp_add_mapping(port);
@@ -4799,7 +4860,7 @@ int main(int argc, char** argv) {
             if (client_idx == -1) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_mtx[i]);
-                    if (!g_clients[i].active || (now - g_clients[i].last_rx_us > g_client_timeout_us)) {
+                    if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, g_client_timeout_us)) {
                         client_idx = i;
                         g_clients[i].active = true;
                         g_clients[i].addr = sender;
