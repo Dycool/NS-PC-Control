@@ -14,7 +14,7 @@ This project was built from scratch in **C++** and uses **UDP** to get the lowes
 
 **🌐 Web App & Mobile Touch Controls** — The server includes an embedded web interface with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
 
-**🎮 Gyroscope and Rumble** — PC clients with gyro-capable controllers (DS4, DualSense, Switch Pro Controller) can send motion data to the Switch and receive HD Rumble feedback. Requires the **Pro Controller** server backend.
+**🎮 Gyroscope and Rumble** — PC clients with gyro-capable controllers (DS4, DualSense, Switch Pro Controller) can send motion data to the Switch and receive rumble feedback. Requires the **Pro Controller** server backend.
 
 > **📦 Pre-compiled Binaries Available!**
 > You can download ready-to-use GUI/CLI clients and the Raspberry Pi server directly from the **[Releases](https://github.com/Dycool/NS-PC-Control/releases)** page.
@@ -57,7 +57,7 @@ The Raspberry Pi server can emulate **two different controller types**, chosen a
 | HID report size | 8 bytes | 64 bytes |
 | **Latency** | **Fastest** | Slightly larger packets |
 | **Gyro / 6-axis IMU** | **No** | **Yes** |
-| **HD Rumble** | **No** | **Yes** (bidirectional, Switch → PC) |
+| **Rumble** | **No** | **Yes** (bidirectional, Switch → PC) |
 | **Macros** | **Yes** | **Yes** |
 
 ---

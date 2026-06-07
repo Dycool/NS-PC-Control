@@ -15,7 +15,7 @@ The Raspberry Pi server can emulate **two different Nintendo Switch controller t
 | **Latency** | **Lowest** | Low |
 | **Gyroscope (6-axis IMU)** | **No** | **Yes** |
 | **Accelerometer** | **No** | **Yes** |
-| **HD Rumble** | **No** | **Yes** (bidirectional) |
+| **Rumble** | **No** | **Yes** (bidirectional) |
 | **Macros** | **Yes** | **Yes** |
 | SPI flash / calibration | No | Yes |
 | Built-in gadget setup | Yes | Yes |
@@ -31,7 +31,7 @@ The Raspberry Pi server can emulate **two different Nintendo Switch controller t
 
 - Full Nintendo Switch Pro Controller emulation with **all features**.
 - **Gyroscope and accelerometer** data is relayed from the PC client to the Switch. Compatible with gyro-aiming games (Splatoon, etc.).
-- **HD Rumble** is bidirectional: rumble commands from the Switch are forwarded back to the PC client.
+- **Rumble** is bidirectional: rumble commands from the Switch are forwarded back to the PC client.
 - **Server-side macros** let you upload and replay button sequences (both backends support macros).
 
 ---
@@ -65,7 +65,7 @@ Platform-specific gyro support:
 
 ### Use Pro Controller mode when:
 - You want **gyro aiming** in supported games.
-- You want **HD Rumble** feedback on your PC controller.
+- You want **Rumble** feedback on your PC controller.
 - You want player LEDs to show active ports.
 
 ---
