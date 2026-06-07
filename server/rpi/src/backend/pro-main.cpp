@@ -64,7 +64,7 @@ static std::string g_usb_serial = "NSBRIDGE000001";
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
-static constexpr int HID_PORT_COUNT = 4;
+static constexpr int HID_PORT_COUNT = 1;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
@@ -932,11 +932,16 @@ static constexpr uint8_t RID_INPUT_SUBCMD   = 0x21;
 static constexpr uint8_t RID_OUTPUT_RUMBLE  = 0x10;
 static constexpr uint8_t RID_OUTPUT_CMD     = 0x01;
 
+static constexpr uint8_t CMD_BT_MANUAL_PAIRING   = 0x01;
 static constexpr uint8_t CMD_GET_DEVICE_INFO     = 0x02;
 static constexpr uint8_t CMD_SET_DATA_FORMAT     = 0x03;
+static constexpr uint8_t CMD_TRIGGER_BUTTONS     = 0x04;
+static constexpr uint8_t CMD_SET_SHIP_MODE       = 0x08;
 static constexpr uint8_t CMD_SPI_FLASH_READ      = 0x10;
+static constexpr uint8_t CMD_SET_NFC_IR_CONFIG   = 0x21;
 static constexpr uint8_t CMD_SET_PLAYER_LIGHTS   = 0x30;
 static constexpr uint8_t CMD_ENABLE_IMU          = 0x40;
+static constexpr uint8_t CMD_SET_IMU_SENS        = 0x41;
 static constexpr uint8_t CMD_ENABLE_VIBRATION    = 0x48;
 
 #define NS_LOCAL_PACKED __attribute__((packed))
@@ -1079,98 +1084,63 @@ static void init_spi_flash(int ctrl) {
     uint8_t* flash = g_spi_flash[ctrl];
     memset(flash, 0xFF, SPI_FLASH_SIZE);
 
-    // Do NOT put the serial at 0x6080.  The host init
-    // sequence reads 0x6080 as IMU horizontal offsets and 0x6086 as analog
-    // stick parameters.  The previous build wrote the ASCII serial there,
-    // which produced a huge bogus stick deadzone/range block and could make
-    // the left stick look completely dead even though reports contained lx/ly.
+    // Public synthetic SPI profile v2.
+    // This intentionally contains no dump/private bytes.  It only builds a
+    // coherent, boring factory profile from generic calibration constants.
+    // Key points learned from compatibility testing:
+    //   - report as USB gamepad type 0x03
+    //   - no user IMU calibration magic at 0x8026
+    //   - prefer factory calibration blocks instead of invented user blocks
+    //   - keep 0x6098 as stick-model continuation, not IMU calibration
     flash[0x6012] = 0x03;
     flash[0x6013] = 0xA0;
     flash[0x601B] = 0x02;
 
-    // Stick calibration must be valid for BOTH sticks.  The console reads
-    // 9 bytes per stick.  Left and right use different field orders:
-    //   left:  max-above-center, center, min-below-center
-    //   right: center, min-below-center, max-above-center
-    // Also expose the same values as USER calibration.  This avoids a bad
-    // cached/old factory-cal path making one analogue stick get flattened.
-    auto pack_stick_cal_pair = [](uint8_t* dst, uint16_t x, uint16_t y) {
-        x &= 0x0FFF;
-        y &= 0x0FFF;
-        dst[0] = x & 0xFF;
-        dst[1] = ((x >> 8) & 0x0F) | ((y & 0x0F) << 4);
-        dst[2] = (y >> 4) & 0xFF;
+    auto put_i16_le = [&](uint16_t addr, int16_t val) {
+        flash[addr]     = (uint8_t)(val & 0xFF);
+        flash[addr + 1] = (uint8_t)((uint16_t)val >> 8);
     };
 
+    auto pack12_pair = [](uint8_t* dst, uint16_t x, uint16_t y) {
+        x &= 0x0FFF;
+        y &= 0x0FFF;
+        dst[0] = (uint8_t)(x & 0xFF);
+        dst[1] = (uint8_t)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
+        dst[2] = (uint8_t)((y >> 4) & 0xFF);
+    };
+
+    // Factory stick calibration: neutral center with symmetric, conservative
+    // range.  Do not set user-cal magic; forcing factory cal avoids a mixed
+    // synthetic factory/user profile that some hosts handle badly.
     static constexpr uint16_t STICK_CENTER = 0x800;
     static constexpr uint16_t STICK_RANGE  = 0x600;
 
-    uint8_t left_cal[9] = {};
-    uint8_t right_cal[9] = {};
+    uint8_t left_cal[9]{};
+    uint8_t right_cal[9]{};
+    pack12_pair(left_cal  + 0, STICK_RANGE,  STICK_RANGE);
+    pack12_pair(left_cal  + 3, STICK_CENTER, STICK_CENTER);
+    pack12_pair(left_cal  + 6, STICK_RANGE,  STICK_RANGE);
+    pack12_pair(right_cal + 0, STICK_CENTER, STICK_CENTER);
+    pack12_pair(right_cal + 3, STICK_RANGE,  STICK_RANGE);
+    pack12_pair(right_cal + 6, STICK_RANGE,  STICK_RANGE);
 
-    // Left stick: range above center, center, range below center.
-    pack_stick_cal_pair(left_cal + 0, STICK_RANGE,  STICK_RANGE);
-    pack_stick_cal_pair(left_cal + 3, STICK_CENTER, STICK_CENTER);
-    pack_stick_cal_pair(left_cal + 6, STICK_RANGE,  STICK_RANGE);
-
-    // Right stick: center, range below center, range above center.
-    pack_stick_cal_pair(right_cal + 0, STICK_CENTER, STICK_CENTER);
-    pack_stick_cal_pair(right_cal + 3, STICK_RANGE,  STICK_RANGE);
-    pack_stick_cal_pair(right_cal + 6, STICK_RANGE,  STICK_RANGE);
-
-    // Factory calibration addresses.
     memcpy(flash + 0x603D, left_cal,  sizeof(left_cal));
     memcpy(flash + 0x6046, right_cal, sizeof(right_cal));
 
-    // User calibration magic + data.  The host driver checks 0xB2 0xA1
-    // before using the user calibration block.
-    flash[0x8010] = 0xB2; flash[0x8011] = 0xA1;
-    memcpy(flash + 0x8012, left_cal, sizeof(left_cal));
-    flash[0x801B] = 0xB2; flash[0x801C] = 0xA1;
-    memcpy(flash + 0x801D, right_cal, sizeof(right_cal));
+    // Explicitly erase user stick/IMU calibration magic areas.  The host should
+    // use the factory blocks above rather than half-synthetic user cal.
+    memset(flash + 0x8010, 0xFF, 0x30);
+    flash[0x8026] = 0xFF;
+    flash[0x8027] = 0xFF;
+    memset(flash + 0x8028, 0xFF, 0x18);
 
-    // SPI 0x6080..0x6085: IMU horizontal offsets, 3 little-endian int16s.
-    // Zero is the neutral/safe value for a virtual controller.
-    memset(flash + 0x6080, 0x00, 6);
-
-    // SPI 0x6086..0x6097: analog stick parameters.  Known consumers unpack
-    // bytes 3..5 as two packed 12-bit values: deadzone and range ratio.
-    // Keep the deadzone small and explicit instead of leaving 0xFF or serial
-    // text here, because that can make real stick movement get snapped to
-    // center.
-    uint8_t stick_params[18] = {};
-    static constexpr uint16_t STICK_DEADZONE    = 0x0A0; // 160
-    static constexpr uint16_t STICK_RANGE_RATIO = 0x100;
-    pack_stick_cal_pair(stick_params + 3, STICK_DEADZONE, STICK_RANGE_RATIO);
-    memcpy(flash + 0x6086, stick_params, sizeof(stick_params));
-
-    // Factory IMU calibration block.
-    // Some host init paths read 0x6020 before/alongside 0x6098. Leaving this
-    // as 0xFF can make the console accept 0x30 reports but ignore or badly
-    // scale the IMU samples. Mirror a sane virtual calibration here too:
-    //   gyro offsets  = 0
-    //   accel offsets = 0
-    //   accel scale   = 0x1000
-    //   gyro scale    = 0x33D0
-    auto put_i16_le = [&](uint16_t addr, int16_t val) {
-        flash[addr]     = (uint8_t)(val & 0xFF);
-        flash[addr + 1] = (uint8_t)((val >> 8) & 0xFF);
-    };
-
-    // hid-Vendor parses the 24-byte IMU calibration block as:
-    //   +0:  accel offsets XYZ
-    //   +6:  accel scales  XYZ
-    //   +12: gyro offsets  XYZ
-    //   +18: gyro scales   XYZ
-    //
-    // The previous build accidentally wrote gyro offsets where accel scales
-    // belong, making accel scale read as zero and gyro offset read as 0x1000.
-    // That is poison for any host that validates/calibrates IMU before using it.
+    // Factory IMU calibration at 0x6020, 24 bytes:
+    // accel offsets XYZ, accel scales XYZ, gyro offsets XYZ, gyro scales XYZ.
+    // Values are generic and synthetic, not copied from any controller dump.
     static constexpr int16_t IMU_ACCEL_OFFSET = 0;
-    static constexpr int16_t IMU_ACCEL_SCALE  = 16384; // hid-Vendor default, 0x4000
+    static constexpr int16_t IMU_ACCEL_SCALE  = 0x4000;
     static constexpr int16_t IMU_GYRO_OFFSET  = 0;
-    static constexpr int16_t IMU_GYRO_SCALE   = 13371; // hid-Vendor default
-
+    static constexpr int16_t IMU_GYRO_SCALE   = 0x343B;
     const int16_t imu_vals[12] = {
         IMU_ACCEL_OFFSET, IMU_ACCEL_OFFSET, IMU_ACCEL_OFFSET,
         IMU_ACCEL_SCALE,  IMU_ACCEL_SCALE,  IMU_ACCEL_SCALE,
@@ -1180,14 +1150,30 @@ static void init_spi_flash(int ctrl) {
     for (int i = 0; i < 12; ++i)
         put_i16_le((uint16_t)(0x6020 + i * 2), imu_vals[i]);
 
-    // Body/grip colors per virtual USB gamepad:
-    //   1 = red, 2 = yellow, 3 = blue, 4 = green.
-    // Buttons stay white for readability in the console UI.
+    // 0x6080..0x6085: IMU horizontal offsets, three int16 values.
+    put_i16_le(0x6080, 0);
+    put_i16_le(0x6082, 0);
+    put_i16_le(0x6084, 0);
+
+    // 0x6086..0x60A9: stick model/parameter block.  Keep it coherent instead
+    // of all-0xFF or random bytes.  Bytes 3..5 are commonly unpacked as two
+    // packed 12-bit values: deadzone and range ratio.
+    uint8_t stick_model[0x24]{};
+    static constexpr uint16_t STICK_DEADZONE    = 0x0A0;
+    static constexpr uint16_t STICK_RANGE_RATIO = 0x100;
+    pack12_pair(stick_model + 3, STICK_DEADZONE, STICK_RANGE_RATIO);
+    // Soft, generic model tail.  These are synthetic low-entropy defaults; they
+    // are only here to avoid an empty/0xFF model continuation.
+    for (size_t i = 6; i < sizeof(stick_model); ++i)
+        stick_model[i] = (i & 1) ? 0x30 : 0x0F;
+    memcpy(flash + 0x6086, stick_model, sizeof(stick_model));
+
+    // Controller colors: synthetic per-slot colors with white buttons.
     static const uint8_t BODY_RGB[4][3] = {
-        {0xE6, 0x00, 0x12}, // red
-        {0xFF, 0xCC, 0x00}, // yellow
-        {0x00, 0x64, 0xFF}, // blue
-        {0x00, 0xC8, 0x53}, // green
+        {0xE6, 0x00, 0x12},
+        {0xFF, 0xCC, 0x00},
+        {0x00, 0x64, 0xFF},
+        {0x00, 0xC8, 0x53},
     };
     const uint8_t* body = BODY_RGB[ctrl];
     flash[0x6050] = body[0]; flash[0x6051] = body[1]; flash[0x6052] = body[2];
@@ -1196,15 +1182,7 @@ static void init_spi_flash(int ctrl) {
     flash[0x6059] = 0xFF;    flash[0x605A] = 0xFF;    flash[0x605B] = 0xFF;
     flash[0x605C] = 0x00;
 
-    // Important: 0x6098 is NOT IMU calibration.  controller
-    // tools read it as the second half of the 0x6086..0x60A9 stick-parameter
-    // model block.  The previous test build mirrored IMU calibration here,
-    // which made the console read nonsense stick-model parameters.  Keep it
-    // neutral/sane instead.
-    memset(flash + 0x6098, 0x00, 0x12);
-
     apply_private_controller_spi_profile(flash);
-
     g_spi_initialized[ctrl] = true;
 }
 
@@ -1448,14 +1426,14 @@ static void build_standard_report(const ExtendedHIDReport& src,
         // ProInputReport30 is packed, so GCC does not allow binding its fields
         // to int16_t&.  Assign fields directly instead.
         if (idx == 0) {
-            dst.accel_y_0 = m.ay; dst.accel_x_0 = m.ax; dst.accel_z_0 = m.az;
-            dst.gyro_y_0  = m.gy; dst.gyro_x_0  = m.gx; dst.gyro_z_0  = m.gz;
+            dst.accel_x_0 = m.ax; dst.accel_y_0 = m.ay; dst.accel_z_0 = m.az;
+            dst.gyro_x_0  = m.gx; dst.gyro_y_0  = m.gy; dst.gyro_z_0  = m.gz;
         } else if (idx == 1) {
-            dst.accel_y_1 = m.ay; dst.accel_x_1 = m.ax; dst.accel_z_1 = m.az;
-            dst.gyro_y_1  = m.gy; dst.gyro_x_1  = m.gx; dst.gyro_z_1  = m.gz;
+            dst.accel_x_1 = m.ax; dst.accel_y_1 = m.ay; dst.accel_z_1 = m.az;
+            dst.gyro_x_1  = m.gx; dst.gyro_y_1  = m.gy; dst.gyro_z_1  = m.gz;
         } else {
-            dst.accel_y_2 = m.ay; dst.accel_x_2 = m.ax; dst.accel_z_2 = m.az;
-            dst.gyro_y_2  = m.gy; dst.gyro_x_2  = m.gx; dst.gyro_z_2  = m.gz;
+            dst.accel_x_2 = m.ax; dst.accel_y_2 = m.ay; dst.accel_z_2 = m.az;
+            dst.gyro_x_2  = m.gx; dst.gyro_y_2  = m.gy; dst.gyro_z_2  = m.gz;
         }
     };
 
@@ -1470,6 +1448,39 @@ static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_
     reply->subcmd_id = subcmd;
 
     switch (subcmd) {
+    case CMD_BT_MANUAL_PAIRING: {
+        // Public/synthetic pairing pages.  Keep the shape but do not embed any
+        // private pairing material.
+        reply->ack = 0x81;
+        if (cmd_len > 0 && cmd_data[0] == 0x02) {
+            memset(reply->reply_data, 0x00, 16);
+            return 16;
+        }
+        if (cmd_len > 0 && cmd_data[0] == 0x03) {
+            memset(reply->reply_data, 0x00, 16);
+            return 16;
+        }
+        return 0;
+    }
+
+    case CMD_TRIGGER_BUTTONS:
+        reply->ack = 0x83;
+        reply->reply_data[0] = 0x00;
+        return 1;
+
+    case CMD_SET_SHIP_MODE:
+        reply->ack = 0x80;
+        return 0;
+
+    case CMD_SET_NFC_IR_CONFIG:
+        reply->ack = 0xA0;
+        reply->reply_data[0] = 0x01;
+        return 1;
+
+    case CMD_SET_IMU_SENS:
+        reply->ack = 0x80;
+        return 0;
+
     case CMD_GET_DEVICE_INFO: {
         uint8_t info[36];
         build_get_device_info_response(info, rt.ctrl);
@@ -1658,7 +1669,7 @@ static void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* pac
     ev.subpad = (uint8_t)sub_idx;
     ev.low_freq = neutral ? 0 : low;
     ev.high_freq = neutral ? 0 : high;
-    // The working capture sends rumble at report cadence.  Keep pulses short so
+    // The compatibility testing sends rumble at report cadence.  Keep pulses short so
     // small precision packets do not smear into a long full-power buzz on classic clients.
     ev.duration_10ms = neutral ? 0 : 3;
 
