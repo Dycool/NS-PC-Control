@@ -735,6 +735,7 @@ struct RawPadState {
     uint16_t vid = 0;
     uint16_t pid = 0;
     std::string name;
+    uint8_t last_report_id = 0;
 };
 
 static constexpr uint64_t RAW_INPUT_STALE_RELEASE_US = 120'000ULL;
@@ -847,6 +848,8 @@ private:
             int cy = 0x800;
             int samples = 0;
         } switch_left_cal, switch_right_cal;
+        int init_step = 0;
+        uint64_t last_init_us = 0;
         std::thread thread;
         ~Device() {
             if (thread.joinable()) thread.detach();
@@ -1283,6 +1286,7 @@ private:
         while (running.load()) {
             DWORD got = 0;
             if (!ReadFile(d->handle, buf.data(), (DWORD)buf.size(), &got, nullptr) || got == 0) {
+                // ... Keep existing error handling ...
                 DWORD err = GetLastError();
                 if (err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_INVALID_HANDLE || err == ERROR_OPERATION_ABORTED) {
                     std::lock_guard<std::mutex> lk(mtx);
@@ -1301,12 +1305,34 @@ private:
             ns::MotionReport motion;
             bool has_motion = false;
             bool ok = false;
-            if (is_ds4(d->info.vid, d->info.pid))
-                ok = parse_ds4(buf.data(), got, input, motion, has_motion);
-            else if (is_dualsense(d->info.vid, d->info.pid))
-                ok = parse_dualsense(buf.data(), got, input, motion, has_motion);
-            else if (is_switch_pro(d->info.vid, d->info.pid))
+
+            if (is_switch_pro(d->info.vid, d->info.pid) && got > 0) {
+                if (buf[0] == 0x3F) {
+                    uint64_t now = ns::now_us();
+                    if (now - d->last_init_us > 200000ULL) {
+                        d->last_init_us = now;
+                        if (d->init_step == 0) {
+                            switch_enable_rumble_once(d);
+                            d->init_step++;
+                        } else if (d->init_step == 1) {
+                            const uint8_t enable_imu = 0x01;
+                            switch_send_subcommand(d, 0x40, &enable_imu, 1);
+                            d->init_step++;
+                        } else if (d->init_step == 2) {
+                            const uint8_t standard_full_report = 0x30;
+                            switch_send_subcommand(d, 0x03, &standard_full_report, 1);
+                            d->init_step = 0;
+                        }
+                    }
+                } else if (buf[0] == 0x30 || buf[0] == 0x31) {
+                    d->init_step = 0; // Successfully entered full report mode
+                }
                 ok = parse_switch_pro(d, buf.data(), got, input, motion, has_motion);
+            } else if (is_ds4(d->info.vid, d->info.pid)) {
+                ok = parse_ds4(buf.data(), got, input, motion, has_motion);
+            } else if (is_dualsense(d->info.vid, d->info.pid)) {
+                ok = parse_dualsense(buf.data(), got, input, motion, has_motion);
+            }
 
             if (!ok) continue;
             std::lock_guard<std::mutex> lk(mtx);
@@ -1315,6 +1341,7 @@ private:
             states[d->slot].motion = motion;
             states[d->slot].has_motion = has_motion;
             states[d->slot].last_input_us = ns::now_us();
+            if (got > 0) states[d->slot].last_report_id = buf[0]; // <--- Record the report ID
         }
     }
 };
@@ -1494,8 +1521,8 @@ public:
         uint64_t now = ns::now_us();
         uint64_t dur_us = neutral ? 0ULL : std::max<uint64_t>(250000ULL, (uint64_t)rp.duration_10ms * 10000ULL);
 
-        if (!neutral && states[slot].low == low && states[slot].high == high &&
-            now - states[slot].last_set_us < 100000ULL) {
+        // FIX: Hard rate-limit rumble to max ~33Hz to prevent Bluetooth stack freezing
+        if (!neutral && now - states[slot].last_set_us < 30000ULL) {
             states[slot].until_us = now + dur_us;
             return;
         }
