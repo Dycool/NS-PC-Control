@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      
+
       - name: Install ARM Cross-Compiler and deps
         run: |
           sudo apt-get update
@@ -35,7 +35,7 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Build Hori Server
+      - name: Build HORI Server
         run: |
           cd server/rpi
           mkdir -p build-hori && cd build-hori
@@ -45,10 +45,11 @@ jobs:
             -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a \
             -DBACKEND_SOURCE=src/backend/hori-main.cpp
           make -j$(nproc)
-          cp ../setup_gadget.sh .
-          mkdir hori-server
-          cp ns-backend setup_gadget.sh hori-server/
-          cd hori-server && zip -r ../hori-server.zip .
+
+          mkdir -p hori-server
+          cp ns-backend hori-server/ns-backend
+          cd hori-server
+          zip -r ../hori-server.zip .
 
       - name: Build Pro Server
         run: |
@@ -60,10 +61,11 @@ jobs:
             -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a \
             -DBACKEND_SOURCE=src/backend/pro-main.cpp
           make -j$(nproc)
-          cp ../setup_gadget.sh .
-          mkdir pro-server
-          cp ns-backend setup_gadget.sh pro-server/
-          cd pro-server && zip -r ../pro-server.zip .
+
+          mkdir -p pro-server
+          cp ns-backend pro-server/ns-backend
+          cd pro-server
+          zip -r ../pro-server.zip .
 
       - uses: actions/upload-artifact@v6
         with:
