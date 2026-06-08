@@ -49,7 +49,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .keyboardType(.numbersAndPunctuation)
                 .disableAutocorrection(true)
-                .onChange(of: host) { UserDefaults.standard.set($1, forKey: "host") }
+                .onChange(of: host) { newValue in UserDefaults.standard.set(newValue, forKey: "host") }
 
             Button("Connect") {
                 host = host.trimmingCharacters(in: .whitespaces)

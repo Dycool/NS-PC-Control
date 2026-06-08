@@ -97,9 +97,9 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { statusText.text = "Connection failed" }
             }
             override fun onMessage(w: WebSocket, bytes: ByteString) {
-                if (bytes.size() >= 8) {
-                    val low = bytes.getByte(5).toInt() and 0xFF
-                    val high = bytes.getByte(6).toInt() and 0xFF
+                if (bytes.size >= 8) {
+                    val low = bytes[5].toInt() and 0xFF
+                    val high = bytes[6].toInt() and 0xFF
                     playHaptic(low, high)
                 }
             }
@@ -218,12 +218,13 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════
 
     private fun setupWebView() {
+        val baseUserAgent = webView.settings.userAgentString ?: ""
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             allowFileAccess = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = settings.userAgentString + " NSControl/1.0"
+            userAgentString = "$baseUserAgent NSControl/1.0"
         }
         webView.addJavascriptInterface(JSBridge(), "NSBridge")
         webView.webViewClient = object : WebViewClient() {
