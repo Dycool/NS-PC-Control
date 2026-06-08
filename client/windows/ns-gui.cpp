@@ -977,9 +977,11 @@ private:
         float accel[3] = {};
         bool got_accel = false;
         if (d.accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
-            out.ax = clamp_motion_i16((accel[0] / 9.80665f) * 4096.0f);
-            out.ay = clamp_motion_i16((accel[1] / 9.80665f) * 4096.0f);
-            out.az = clamp_motion_i16((accel[2] / 9.80665f) * 4096.0f);
+            // Cross SDL accel into the axes that pro-main packs as Nintendo Y, X, Z.
+            out.ay = clamp_motion_i16((accel[0] / 9.80665f) * 4096.0f);
+            out.ax = clamp_motion_i16((-accel[1] / 9.80665f) * 4096.0f);
+            out.az = clamp_motion_i16((-accel[2] / 9.80665f) * 4096.0f);
+            has_motion = true;
             got_accel = true;
         }
 
@@ -988,11 +990,10 @@ private:
             constexpr float RAD_TO_DEG = 57.29577951308232f;
             constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.384f;
 
-            // Competitive/low-latency mode: no bias correction, no smoothing,
-            // no deadzone. Pass SDL gyro straight through with strict clamping.
-            out.gx = clamp_motion_i16(gyro[0] * CONSOLE_GYRO_SCALE);
-            out.gy = clamp_motion_i16(gyro[1] * CONSOLE_GYRO_SCALE);
-            out.gz = clamp_motion_i16(gyro[2] * CONSOLE_GYRO_SCALE);
+            // No filters at the Pro-like 66Hz cadence; only align signs.
+            out.gx = clamp_motion_i16(-gyro[0] * CONSOLE_GYRO_SCALE);
+            out.gy = clamp_motion_i16(-gyro[1] * CONSOLE_GYRO_SCALE);
+            out.gz = clamp_motion_i16(-gyro[2] * CONSOLE_GYRO_SCALE);
 
             has_motion = true;
         }
