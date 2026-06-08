@@ -99,10 +99,11 @@ struct ClientSession {
     bool        first_pkt = true;
     ExtendedMultiReport report{}; // Inputs + optional motion coming from this specific PC/WebSocket
 
-    // The client sends one current/raw motion sample with each input update.
-    // Keep it as-is; report 0x30 duplicates it into the three IMU slots.
-    MotionReport motion_sample[4]{};
+    // Match the simple ESP32 bridge behavior: keep three IMU samples and shift
+    // them at roughly 5 ms spacing, with the newest sample in slot 2.
+    MotionReport motion_samples[4][3]{};
     bool         has_motion[4]{};
+    uint64_t     motion_last_collect_us[4]{};
 
     RumblePacket rumble[4]{};
     PrecisionRumblePacket precision_rumble[4]{};
@@ -145,8 +146,9 @@ static void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
 
 static void clear_motion(ClientSession& c, int subpad) {
     if (subpad < 0 || subpad >= 4) return;
-    c.motion_sample[subpad].reset();
+    for (int i = 0; i < 3; ++i) c.motion_samples[subpad][i].reset();
     c.has_motion[subpad] = false;
+    c.motion_last_collect_us[subpad] = 0;
 }
 
 static void clear_all_motion(ClientSession& c) {
@@ -155,8 +157,17 @@ static void clear_all_motion(ClientSession& c) {
 
 static void set_motion(ClientSession& c, int subpad, const MotionReport& motion) {
     if (subpad < 0 || subpad >= 4) return;
-    c.motion_sample[subpad] = motion;
+
+    uint64_t now = now_us();
+    if (!c.has_motion[subpad]) {
+        for (int i = 0; i < 3; ++i) c.motion_samples[subpad][i] = motion;
+    } else if (elapsed_us_saturated(now, c.motion_last_collect_us[subpad]) > 5000ULL) {
+        c.motion_samples[subpad][0] = c.motion_samples[subpad][1];
+        c.motion_samples[subpad][1] = c.motion_samples[subpad][2];
+    }
+    c.motion_samples[subpad][2] = motion;
     c.has_motion[subpad] = true;
+    c.motion_last_collect_us[subpad] = now;
 }
 
 // Diagnostics
@@ -1463,7 +1474,7 @@ static void apply_input_controls_to_pro21(const ExtendedHIDReport& src, ProInput
 }
 
 static void build_standard_report(const ExtendedHIDReport& src,
-                                  const MotionReport* motion,
+                                  const MotionReport motion_samples[3],
                                   bool has_motion,
                                   bool imu_enabled,
                                   uint8_t timer,
@@ -1495,9 +1506,13 @@ static void build_standard_report(const ExtendedHIDReport& src,
     pack_stick_12(out.left_stick,  in.lx, in.ly);
     pack_stick_12(out.right_stick, in.rx, in.ry);
 
-    MotionReport imu{};
-    const bool has_imu = imu_enabled && has_motion && motion;
-    if (has_imu) imu = *motion;
+    MotionReport imu[3]{};
+    const bool has_imu = imu_enabled && has_motion && motion_samples;
+    if (has_imu) {
+        imu[0] = motion_samples[0];
+        imu[1] = motion_samples[1];
+        imu[2] = motion_samples[2];
+    }
 
     if (g_verbose && (!input_is_neutral(in) || has_imu)) {
         static uint64_t last_log_us = 0;
@@ -1509,9 +1524,9 @@ static void build_standard_report(const ExtendedHIDReport& src,
                         out.left_stick[0], out.left_stick[1], out.left_stick[2],
                         out.right_stick[0], out.right_stick[1], out.right_stick[2],
                         has_imu ? "yes" : "no",
-                        (unsigned)(has_imu ? 1 : 0),
-                        (int)imu.ax, (int)imu.ay, (int)imu.az,
-                        (int)imu.gx, (int)imu.gy, (int)imu.gz);
+                        (unsigned)(has_imu ? 3 : 0),
+                        (int)imu[2].ax, (int)imu[2].ay, (int)imu[2].az,
+                        (int)imu[2].gx, (int)imu[2].gy, (int)imu[2].gz);
         }
     }
 
@@ -1530,14 +1545,9 @@ static void build_standard_report(const ExtendedHIDReport& src,
         }
     };
 
-    // SDL/PC input provides the current sensor state, not a native 3-sample
-    // 5ms-spaced IMU FIFO like a real Pro Controller. A sliding history
-    // (A,B,C -> B,C,D) makes games integrate the same time slices repeatedly.
-    // Fill all 3 IMU frames with the newest sample so the 15ms report carries
-    // the current angular velocity consistently without overlapping history.
-    store_imu_sample(out, 0, imu);
-    store_imu_sample(out, 1, imu);
-    store_imu_sample(out, 2, imu);
+    store_imu_sample(out, 0, imu[0]);
+    store_imu_sample(out, 1, imu[1]);
+    store_imu_sample(out, 2, imu[2]);
 }
 
 static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply) {
@@ -2172,12 +2182,12 @@ static void writer_thread(int hz) {
             bool present_snap[MAX_CLIENTS][4] = {};
             uint64_t last_present_snap[MAX_CLIENTS][4] = {};
             ExtendedHIDReport report_snap[MAX_CLIENTS][4];
-            MotionReport motion_snap[MAX_CLIENTS][4];
+            MotionReport motion_snap[MAX_CLIENTS][4][3];
             bool has_motion_snap[MAX_CLIENTS][4] = {};
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 for (int s = 0; s < 4; ++s) {
                     report_snap[c][s].reset();
-                    motion_snap[c][s].reset();
+                    for (int i = 0; i < 3; ++i) motion_snap[c][s][i].reset();
                 }
             }
 
@@ -2230,7 +2240,8 @@ static void writer_thread(int hz) {
                     report_snap[c][2] = g_clients[c].report.p3;
                     report_snap[c][3] = g_clients[c].report.p4;
                     for (int s = 0; s < 4; ++s) {
-                        motion_snap[c][s] = g_clients[c].motion_sample[s];
+                        for (int i = 0; i < 3; ++i)
+                            motion_snap[c][s][i] = g_clients[c].motion_samples[s][i];
                         has_motion_snap[c][s] = g_clients[c].has_motion[s];
                     }
                 }
@@ -2369,7 +2380,7 @@ static void writer_thread(int hz) {
                         if (port_needed) {
                             int cidx = hw_slots[h].client_idx;
                             int sidx = hw_slots[h].sub_idx;
-                            motion_for_port = &motion_snap[cidx][sidx];
+                            motion_for_port = motion_snap[cidx][sidx];
                             has_motion_for_port = has_motion_snap[cidx][sidx];
                         }
 
