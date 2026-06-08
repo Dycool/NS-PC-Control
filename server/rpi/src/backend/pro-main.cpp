@@ -99,11 +99,10 @@ struct ClientSession {
     bool        first_pkt = true;
     ExtendedMultiReport report{}; // Inputs + optional motion coming from this specific PC/WebSocket
 
-    // The client sends current/raw motion at the same 15ms cadence as report
-    // 0x30, so keep only the newest sample. build_standard_report repeats it
-    // into the three IMU slots without inventing extra history.
-    MotionReport motion_history[4][3]{};
-    uint8_t      motion_history_count[4]{};
+    // The client sends one current/raw motion sample with each input update.
+    // Keep it as-is; report 0x30 duplicates it into the three IMU slots.
+    MotionReport motion_sample[4]{};
+    bool         has_motion[4]{};
 
     RumblePacket rumble[4]{};
     PrecisionRumblePacket precision_rumble[4]{};
@@ -144,31 +143,20 @@ static void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
     }
 }
 
-static void clear_motion_history(ClientSession& c, int subpad) {
+static void clear_motion(ClientSession& c, int subpad) {
     if (subpad < 0 || subpad >= 4) return;
-    for (int i = 0; i < 3; ++i) c.motion_history[subpad][i].reset();
-    c.motion_history_count[subpad] = 0;
+    c.motion_sample[subpad].reset();
+    c.has_motion[subpad] = false;
 }
 
-static void clear_all_motion_history(ClientSession& c) {
-    for (int s = 0; s < 4; ++s) clear_motion_history(c, s);
+static void clear_all_motion(ClientSession& c) {
+    for (int s = 0; s < 4; ++s) clear_motion(c, s);
 }
 
-static MotionReport stabilize_real_pro_motion_sample(const ClientSession& c, int subpad, const MotionReport& raw) {
-    (void)c;
-    (void)subpad;
-    // The client owns calibration, axis alignment, and noise control.
-    // The Pi only transports motion data to the USB report.
-    return raw;
-}
-
-static void push_motion_history(ClientSession& c, int subpad, const MotionReport& motion) {
+static void set_motion(ClientSession& c, int subpad, const MotionReport& motion) {
     if (subpad < 0 || subpad >= 4) return;
-    MotionReport stable = stabilize_real_pro_motion_sample(c, subpad, motion);
-    c.motion_history[subpad][1].reset();
-    c.motion_history[subpad][2].reset();
-    c.motion_history[subpad][0] = stable;
-    c.motion_history_count[subpad] = 1;
+    c.motion_sample[subpad] = motion;
+    c.has_motion[subpad] = true;
 }
 
 // Diagnostics
@@ -738,7 +726,7 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
                 g_clients[i].first_pkt = true;
                 g_clients[i].expected_seq = 0;
                 g_clients[i].report.reset();
-                clear_all_motion_history(g_clients[i]);
+                clear_all_motion(g_clients[i]);
                 g_clients[i].last_rx_us = now;
                 break;
             }
@@ -1475,8 +1463,8 @@ static void apply_input_controls_to_pro21(const ExtendedHIDReport& src, ProInput
 }
 
 static void build_standard_report(const ExtendedHIDReport& src,
-                                  const MotionReport motion_history[3],
-                                  uint8_t motion_history_count,
+                                  const MotionReport* motion,
+                                  bool has_motion,
                                   bool imu_enabled,
                                   uint8_t timer,
                                   ProInputReport30& out) {
@@ -1507,14 +1495,9 @@ static void build_standard_report(const ExtendedHIDReport& src,
     pack_stick_12(out.left_stick,  in.lx, in.ly);
     pack_stick_12(out.right_stick, in.rx, in.ry);
 
-    MotionReport imu[3]{};
-    const bool has_imu = imu_enabled && motion_history && motion_history_count > 0;
-    if (has_imu) {
-        for (int i = 0; i < 3; ++i) {
-            if (i < motion_history_count) imu[i] = motion_history[i];
-            else imu[i] = motion_history[motion_history_count - 1];
-        }
-    }
+    MotionReport imu{};
+    const bool has_imu = imu_enabled && has_motion && motion;
+    if (has_imu) imu = *motion;
 
     if (g_verbose && (!input_is_neutral(in) || has_imu)) {
         static uint64_t last_log_us = 0;
@@ -1526,9 +1509,9 @@ static void build_standard_report(const ExtendedHIDReport& src,
                         out.left_stick[0], out.left_stick[1], out.left_stick[2],
                         out.right_stick[0], out.right_stick[1], out.right_stick[2],
                         has_imu ? "yes" : "no",
-                        (unsigned)(has_imu ? motion_history_count : 0),
-                        (int)imu[0].ax, (int)imu[0].ay, (int)imu[0].az,
-                        (int)imu[0].gx, (int)imu[0].gy, (int)imu[0].gz);
+                        (unsigned)(has_imu ? 1 : 0),
+                        (int)imu.ax, (int)imu.ay, (int)imu.az,
+                        (int)imu.gx, (int)imu.gy, (int)imu.gz);
         }
     }
 
@@ -1552,9 +1535,9 @@ static void build_standard_report(const ExtendedHIDReport& src,
     // (A,B,C -> B,C,D) makes games integrate the same time slices repeatedly.
     // Fill all 3 IMU frames with the newest sample so the 15ms report carries
     // the current angular velocity consistently without overlapping history.
-    store_imu_sample(out, 0, imu[0]);
-    store_imu_sample(out, 1, imu[0]);
-    store_imu_sample(out, 2, imu[0]);
+    store_imu_sample(out, 0, imu);
+    store_imu_sample(out, 1, imu);
+    store_imu_sample(out, 2, imu);
 }
 
 static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply) {
@@ -2189,12 +2172,12 @@ static void writer_thread(int hz) {
             bool present_snap[MAX_CLIENTS][4] = {};
             uint64_t last_present_snap[MAX_CLIENTS][4] = {};
             ExtendedHIDReport report_snap[MAX_CLIENTS][4];
-            MotionReport motion_snap[MAX_CLIENTS][4][3];
-            uint8_t motion_count_snap[MAX_CLIENTS][4] = {};
+            MotionReport motion_snap[MAX_CLIENTS][4];
+            bool has_motion_snap[MAX_CLIENTS][4] = {};
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 for (int s = 0; s < 4; ++s) {
                     report_snap[c][s].reset();
-                    for (int i = 0; i < 3; ++i) motion_snap[c][s][i].reset();
+                    motion_snap[c][s].reset();
                 }
             }
 
@@ -2205,7 +2188,7 @@ static void writer_thread(int hz) {
                 if (g_clients[c].active && g_clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
                     g_clients[c].active = false;
                     g_clients[c].report.reset();
-                    clear_all_motion_history(g_clients[c]);
+                    clear_all_motion(g_clients[c]);
                     g_clients[c].uses_pad_presence = false;
                     for (int s = 0; s < 4; ++s) {
                         g_clients[c].pad_present[s] = false;
@@ -2240,16 +2223,15 @@ static void writer_thread(int hz) {
                     report_snap[c][2].reset();
                     report_snap[c][3].reset();
                     for (int s = 0; s < 4; ++s)
-                        motion_count_snap[c][s] = 0;
+                        has_motion_snap[c][s] = false;
                 } else {
                     report_snap[c][0] = g_clients[c].report.p1;
                     report_snap[c][1] = g_clients[c].report.p2;
                     report_snap[c][2] = g_clients[c].report.p3;
                     report_snap[c][3] = g_clients[c].report.p4;
                     for (int s = 0; s < 4; ++s) {
-                        motion_count_snap[c][s] = g_clients[c].motion_history_count[s];
-                        for (int i = 0; i < 3; ++i)
-                            motion_snap[c][s][i] = g_clients[c].motion_history[s][i];
+                        motion_snap[c][s] = g_clients[c].motion_sample[s];
+                        has_motion_snap[c][s] = g_clients[c].has_motion[s];
                     }
                 }
             }
@@ -2382,19 +2364,19 @@ static void writer_thread(int hz) {
                         report_for_port.reset();
                         if (port_needed) report_for_port = out_reports[h];
 
-                        const MotionReport* history_for_port = nullptr;
-                        uint8_t history_count_for_port = 0;
+                        const MotionReport* motion_for_port = nullptr;
+                        bool has_motion_for_port = false;
                         if (port_needed) {
                             int cidx = hw_slots[h].client_idx;
                             int sidx = hw_slots[h].sub_idx;
-                            history_for_port = motion_snap[cidx][sidx];
-                            history_count_for_port = motion_count_snap[cidx][sidx];
+                            motion_for_port = &motion_snap[cidx][sidx];
+                            has_motion_for_port = has_motion_snap[cidx][sidx];
                         }
 
                         ProInputReport30 std_in{};
                         build_standard_report(report_for_port,
-                                              history_for_port,
-                                              history_count_for_port,
+                                              motion_for_port,
+                                              has_motion_for_port,
                                               rt[h].imu_enabled,
                                               pro_timer_from_us(now_stamp),
                                               std_in);
@@ -4224,7 +4206,7 @@ static size_t process_ws_frame(WebClient *c) {
                         g_clients[i].active = true;
                         g_clients[i].first_pkt = true;
                         g_clients[i].report.reset();
-                        clear_all_motion_history(g_clients[i]);
+                        clear_all_motion(g_clients[i]);
                         g_clients[i].uses_pad_presence = true;
                         clear_udp_rumble_state(g_clients[i]);
                         for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; }
@@ -4269,7 +4251,7 @@ static size_t process_ws_frame(WebClient *c) {
                         g_clients[i].active = true;
                         g_clients[i].first_pkt = true;
                         g_clients[i].report.reset();
-                        clear_all_motion_history(g_clients[i]);
+                        clear_all_motion(g_clients[i]);
                         g_clients[i].uses_pad_presence = true;
                         g_clients[i].last_rx_us = now;
                         break;
@@ -4356,7 +4338,7 @@ static size_t process_ws_frame(WebClient *c) {
                 g_clients[i].active = true;
                 g_clients[i].first_pkt = true;
                 g_clients[i].report.reset();
-                clear_all_motion_history(g_clients[i]);
+                clear_all_motion(g_clients[i]);
                 g_clients[i].uses_pad_presence = true;
                 clear_udp_rumble_state(g_clients[i]);
                 for (int s = 0; s < 4; ++s) {
@@ -4385,7 +4367,7 @@ static size_t process_ws_frame(WebClient *c) {
 
         if (is_reset) {
             g_clients[c->ws_slot].report.reset();
-            clear_all_motion_history(g_clients[c->ws_slot]);
+            clear_all_motion(g_clients[c->ws_slot]);
             for (int s = 0; s < 4; ++s) {
                 g_clients[c->ws_slot].pad_present[s] = false;
                 g_clients[c->ws_slot].pad_last_present_us[s] = 0;
@@ -4395,7 +4377,9 @@ static size_t process_ws_frame(WebClient *c) {
                 if (pad_present[s]) {
                     *dst_pads[s] = *src_pads[s];
                     if (src_pads[s]->has_motion)
-                        push_motion_history(g_clients[c->ws_slot], s, src_pads[s]->motion);
+                        set_motion(g_clients[c->ws_slot], s, src_pads[s]->motion);
+                    else
+                        clear_motion(g_clients[c->ws_slot], s);
                     g_clients[c->ws_slot].pad_present[s] = true;
                     g_clients[c->ws_slot].pad_last_present_us[s] = now;
                 } else {
@@ -4406,7 +4390,7 @@ static size_t process_ws_frame(WebClient *c) {
                     uint64_t last_seen = g_clients[c->ws_slot].pad_last_present_us[s];
                     if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US) {
                         dst_pads[s]->reset();
-                        clear_motion_history(g_clients[c->ws_slot], s);
+                        clear_motion(g_clients[c->ws_slot], s);
                     }
                 }
             }
@@ -4815,7 +4799,7 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
                     if (g_clients[clients[i].ws_slot].last_rx_us == clients[i].ws_last_rx) {
                         g_clients[clients[i].ws_slot].active = false;
                         g_clients[clients[i].ws_slot].report.reset();
-                        clear_all_motion_history(g_clients[clients[i].ws_slot]);
+                        clear_all_motion(g_clients[clients[i].ws_slot]);
                         g_clients[clients[i].ws_slot].uses_pad_presence = false;
                         for (int s = 0; s < 4; ++s) {
                             g_clients[clients[i].ws_slot].pad_present[s] = false;
@@ -4844,7 +4828,7 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
                 if (g_clients[clients[i].ws_slot].last_rx_us == clients[i].ws_last_rx) {
                     g_clients[clients[i].ws_slot].active = false;
                     g_clients[clients[i].ws_slot].report.reset();
-                    clear_all_motion_history(g_clients[clients[i].ws_slot]);
+                    clear_all_motion(g_clients[clients[i].ws_slot]);
                     g_clients[clients[i].ws_slot].uses_pad_presence = false;
                     clear_udp_rumble_state(g_clients[clients[i].ws_slot]);
                     for (int s = 0; s < 4; ++s) {
@@ -5067,7 +5051,7 @@ int main(int argc, char** argv) {
                         g_clients[i].first_pkt = true;
                         g_clients[i].expected_seq = 0;
                         g_clients[i].report.reset();
-                        clear_all_motion_history(g_clients[i]);
+                        clear_all_motion(g_clients[i]);
                         g_clients[i].uses_pad_presence = false;
                         clear_udp_rumble_state(g_clients[i]);
                         for (int s = 0; s < 4; ++s) {
@@ -5131,7 +5115,7 @@ int main(int argc, char** argv) {
 
                 if (is_reset) {
                     g_clients[client_idx].report.reset();
-                    clear_all_motion_history(g_clients[client_idx]);
+                    clear_all_motion(g_clients[client_idx]);
                     for (int s = 0; s < 4; ++s) {
                         g_clients[client_idx].pad_present[s] = false;
                         g_clients[client_idx].pad_last_present_us[s] = 0;
@@ -5158,7 +5142,9 @@ int main(int argc, char** argv) {
                         if (present) {
                             *dst_pads[s] = *src_pads[s];
                             if (src_pads[s]->has_motion)
-                                push_motion_history(g_clients[client_idx], s, src_pads[s]->motion);
+                                set_motion(g_clients[client_idx], s, src_pads[s]->motion);
+                            else
+                                clear_motion(g_clients[client_idx], s);
                             g_clients[client_idx].pad_present[s] = true;
                             g_clients[client_idx].pad_last_present_us[s] = now;
                         } else {
@@ -5166,7 +5152,7 @@ int main(int argc, char** argv) {
                             uint64_t last_seen = g_clients[client_idx].pad_last_present_us[s];
                             if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US) {
                                 dst_pads[s]->reset();
-                                clear_motion_history(g_clients[client_idx], s);
+                                clear_motion(g_clients[client_idx], s);
                             }
                         }
                     }
@@ -5179,7 +5165,7 @@ int main(int argc, char** argv) {
                         g_clients[client_idx].pad_present[s] = false;
                         g_clients[client_idx].pad_last_present_us[s] = 0;
                     }
-                    clear_all_motion_history(g_clients[client_idx]);
+                    clear_all_motion(g_clients[client_idx]);
                     legacy_multi_to_extended(pkt.report, g_clients[client_idx].report);
                 }
 
