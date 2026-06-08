@@ -1,5 +1,5 @@
-#include "../../include/protocol.hpp"
-#include "../../include/sha256.h"
+#include "include/protocol.hpp"
+#include "include/sha256.h"
 
 #include <atomic>
 #include <thread>
