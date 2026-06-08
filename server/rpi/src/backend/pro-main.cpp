@@ -71,7 +71,7 @@ static std::string g_spi_profile_path;
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
-static constexpr int HID_PORT_COUNT = 1;
+static constexpr int HID_PORT_COUNT = 4;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
@@ -1316,21 +1316,34 @@ static size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
 static void build_get_device_info_response(uint8_t* out, int ctrl) {
     memset(out, 0, 36);
 
-    // Hardware-style subcmd 0x02 reply:
-    //   04 21 03 02 <MAC little-endian> 03 02
-    // Older fake builds used 03 48 ... 03 01; the console UI accepted that, but
-    // games did not enable the same gyro/rumble behavior.
-    out[0] = 0x04; // firmware major from capture
-    out[1] = 0x21; // firmware minor from capture
-    out[2] = 0x03; // USB gamepad
-    out[3] = 0x02; // hardware/model
+    // Subcmd 0x02 device-info reply.
+    //
+    //   majorVersion   = 0x03
+    //   minorVersion   = 0x49
+    //   controllerType = 0x03
+    //   unknown00      = 0x02
+    //   macAddress     = generated MAC, reversed/little-endian
+    //   unknown01      = 0x01
+    //   storedColors   = 0x02
+    //
+    // Important: MAC stays generated per virtual controller.
+    out[0] = 0x03; // majorVersion
+    out[1] = 0x49; // minorVersion
+    out[2] = 0x03; // controllerType: Pro Controller
+    out[3] = 0x02; // unknown00
 
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
-    out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3];
-    out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
 
-    out[10] = 0x03;
-    out[11] = 0x02;
+    // Device info wants MAC reversed / little-endian.
+    out[4] = mac[5];
+    out[5] = mac[4];
+    out[6] = mac[3];
+    out[7] = mac[2];
+    out[8] = mac[1];
+    out[9] = mac[0];
+
+    out[10] = 0x01; // unknown01
+    out[11] = 0x02; // storedColors
 }
 
 static void fill_neutral_controls(ProInputReport30& r) {
