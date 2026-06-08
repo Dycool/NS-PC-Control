@@ -971,11 +971,6 @@ private:
                r.lx != 128 || r.ly != 128 || r.rx != 128 || r.ry != 128;
     }
 
-    static float motion_deadzone_float(float v, float dz) {
-        if (std::fabs(v) <= dz) return 0.0f;
-        return v > 0.0f ? (v - dz) : (v + dz);
-    }
-
     static void apply_motion(Device& d, ns::MotionReport& out, bool& has_motion) {
         SDL_Gamepad* pad = d.pad;
         out.reset();
