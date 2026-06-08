@@ -983,7 +983,7 @@ private:
             // Direct accel is what is probably causing the upward/diagonal correction.
             out.ax = 0;
             out.ay = 0;
-            out.az = 0;
+            out.az = 4096;
 
             float gx = gyro[0];
             float gy = gyro[1];
