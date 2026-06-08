@@ -756,6 +756,9 @@ struct MotionTuningRuntime {
     std::atomic<int> accel_sign_x{1};
     std::atomic<int> accel_sign_y{1};
     std::atomic<int> accel_sign_z{1};
+    std::atomic<int> accel_enable_x{1};
+    std::atomic<int> accel_enable_y{1};
+    std::atomic<int> accel_enable_z{1};
 
     std::atomic<int> gyro_src_x{0};
     std::atomic<int> gyro_src_y{1};
@@ -763,6 +766,9 @@ struct MotionTuningRuntime {
     std::atomic<int> gyro_sign_x{1};
     std::atomic<int> gyro_sign_y{1};
     std::atomic<int> gyro_sign_z{1};
+    std::atomic<int> gyro_enable_x{1};
+    std::atomic<int> gyro_enable_y{1};
+    std::atomic<int> gyro_enable_z{1};
 
     std::atomic<int> gyro_scale_percent{100};
     std::atomic<int> gyro_deadzone_mrad{0};
@@ -773,8 +779,10 @@ struct MotionTuningSnapshot {
     int fixed[3] = {0, 0, 4096};
     int accel_src[3] = {0, 1, 2};
     int accel_sign[3] = {1, 1, 1};
+    int accel_enable[3] = {1, 1, 1};
     int gyro_src[3] = {0, 1, 2};
     int gyro_sign[3] = {1, 1, 1};
+    int gyro_enable[3] = {1, 1, 1};
     int gyro_scale_percent = 100;
     int gyro_deadzone_mrad = 0;
 };
@@ -795,6 +803,10 @@ static int motion_sign_value(int v) {
     return v < 0 ? -1 : 1;
 }
 
+static int motion_enable_value(int v) {
+    return v ? 1 : 0;
+}
+
 static float motion_pick_axis(const float v[3], int src) {
     src = motion_axis_index(src);
     return v[src];
@@ -813,6 +825,9 @@ static MotionTuningSnapshot motion_tuning_snapshot() {
     t.accel_sign[0] = motion_sign_value(g_motion_tuning.accel_sign_x.load());
     t.accel_sign[1] = motion_sign_value(g_motion_tuning.accel_sign_y.load());
     t.accel_sign[2] = motion_sign_value(g_motion_tuning.accel_sign_z.load());
+    t.accel_enable[0] = motion_enable_value(g_motion_tuning.accel_enable_x.load());
+    t.accel_enable[1] = motion_enable_value(g_motion_tuning.accel_enable_y.load());
+    t.accel_enable[2] = motion_enable_value(g_motion_tuning.accel_enable_z.load());
 
     t.gyro_src[0] = motion_axis_index(g_motion_tuning.gyro_src_x.load());
     t.gyro_src[1] = motion_axis_index(g_motion_tuning.gyro_src_y.load());
@@ -820,6 +835,9 @@ static MotionTuningSnapshot motion_tuning_snapshot() {
     t.gyro_sign[0] = motion_sign_value(g_motion_tuning.gyro_sign_x.load());
     t.gyro_sign[1] = motion_sign_value(g_motion_tuning.gyro_sign_y.load());
     t.gyro_sign[2] = motion_sign_value(g_motion_tuning.gyro_sign_z.load());
+    t.gyro_enable[0] = motion_enable_value(g_motion_tuning.gyro_enable_x.load());
+    t.gyro_enable[1] = motion_enable_value(g_motion_tuning.gyro_enable_y.load());
+    t.gyro_enable[2] = motion_enable_value(g_motion_tuning.gyro_enable_z.load());
 
     t.gyro_scale_percent = motion_clamp_int(g_motion_tuning.gyro_scale_percent.load(), 0, 500);
     t.gyro_deadzone_mrad = motion_clamp_int(g_motion_tuning.gyro_deadzone_mrad.load(), 0, 500);
@@ -838,6 +856,9 @@ static void motion_tuning_reset_defaults() {
     g_motion_tuning.accel_sign_x = 1;
     g_motion_tuning.accel_sign_y = 1;
     g_motion_tuning.accel_sign_z = 1;
+    g_motion_tuning.accel_enable_x = 1;
+    g_motion_tuning.accel_enable_y = 1;
+    g_motion_tuning.accel_enable_z = 1;
 
     g_motion_tuning.gyro_src_x = 0;
     g_motion_tuning.gyro_src_y = 1;
@@ -845,6 +866,9 @@ static void motion_tuning_reset_defaults() {
     g_motion_tuning.gyro_sign_x = 1;
     g_motion_tuning.gyro_sign_y = 1;
     g_motion_tuning.gyro_sign_z = 1;
+    g_motion_tuning.gyro_enable_x = 1;
+    g_motion_tuning.gyro_enable_y = 1;
+    g_motion_tuning.gyro_enable_z = 1;
     g_motion_tuning.gyro_scale_percent = 100;
     g_motion_tuning.gyro_deadzone_mrad = 0;
 }
@@ -1106,18 +1130,18 @@ private:
                 SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3);
 
             if (tune.accel_mode == 1 && got_accel) {
-                out.ax = clamp_motion_i16((float)tune.accel_sign[0] * motion_pick_axis(accel, tune.accel_src[0]) * CONSOLE_ACCEL_SCALE);
-                out.ay = clamp_motion_i16((float)tune.accel_sign[1] * motion_pick_axis(accel, tune.accel_src[1]) * CONSOLE_ACCEL_SCALE);
-                out.az = clamp_motion_i16((float)tune.accel_sign[2] * motion_pick_axis(accel, tune.accel_src[2]) * CONSOLE_ACCEL_SCALE);
+                out.ax = tune.accel_enable[0] ? clamp_motion_i16((float)tune.accel_sign[0] * motion_pick_axis(accel, tune.accel_src[0]) * CONSOLE_ACCEL_SCALE) : 0;
+                out.ay = tune.accel_enable[1] ? clamp_motion_i16((float)tune.accel_sign[1] * motion_pick_axis(accel, tune.accel_src[1]) * CONSOLE_ACCEL_SCALE) : 0;
+                out.az = tune.accel_enable[2] ? clamp_motion_i16((float)tune.accel_sign[2] * motion_pick_axis(accel, tune.accel_src[2]) * CONSOLE_ACCEL_SCALE) : 0;
             } else {
-                out.ax = (int16_t)tune.fixed[0];
-                out.ay = (int16_t)tune.fixed[1];
-                out.az = (int16_t)tune.fixed[2];
+                out.ax = tune.accel_enable[0] ? (int16_t)tune.fixed[0] : 0;
+                out.ay = tune.accel_enable[1] ? (int16_t)tune.fixed[1] : 0;
+                out.az = tune.accel_enable[2] ? (int16_t)tune.fixed[2] : 0;
             }
 
-            float gx = (float)tune.gyro_sign[0] * motion_pick_axis(gyro, tune.gyro_src[0]);
-            float gy = (float)tune.gyro_sign[1] * motion_pick_axis(gyro, tune.gyro_src[1]);
-            float gz = (float)tune.gyro_sign[2] * motion_pick_axis(gyro, tune.gyro_src[2]);
+            float gx = tune.gyro_enable[0] ? ((float)tune.gyro_sign[0] * motion_pick_axis(gyro, tune.gyro_src[0])) : 0.0f;
+            float gy = tune.gyro_enable[1] ? ((float)tune.gyro_sign[1] * motion_pick_axis(gyro, tune.gyro_src[1])) : 0.0f;
+            float gz = tune.gyro_enable[2] ? ((float)tune.gyro_sign[2] * motion_pick_axis(gyro, tune.gyro_src[2])) : 0.0f;
 
             const float deadzone_rad = (float)tune.gyro_deadzone_mrad / 1000.0f;
             if (std::fabs(gx) < deadzone_rad) gx = 0.0f;
@@ -1609,7 +1633,7 @@ static void SaveKeyboardMode(int mode) {
 }
 
 
-enum { IDC_IP = 101, IDC_CONNECT, IDC_KEYBOARD_COMBO = 110, IDC_BINDINGS_BTN = 111, IDC_MACROS_BTN = 112, IDC_MOTION_BTN = 113, IDC_EDITOR_CHANGE = 200, IDC_EDITOR_SETUP = 400, IDC_EDITOR_RESET = 500, IDC_EDITOR_CLEAR = 501, IDC_EDITOR_KEY_START = 300, IDC_MACRO_EDIT = 600, IDC_MACRO_RUN = 601, IDC_MACRO_SAVE = 602, IDC_MACRO_DELETE = 603, IDC_MACRO_CLOSE = 604, IDC_MACRO_RECORD_START = 605, IDC_MACRO_RECORD_STOP = 606, IDC_MACRO_IMPORT = 607, IDC_MACRO_EXPORT = 608, IDC_MACRO_HOTKEY = 609, IDC_MACRO_NAME = 610, IDC_MACRO_ADD = 611, IDC_MACRO_RECORD_TOGGLE = 612, IDC_MACRO_RUN_BASE = 700, IDC_MACRO_DELETE_BASE = 800, IDC_MACRO_KEY_BASE = 900, IDC_MACRO_RENAME_BASE = 1000, IDC_MACRO_EXPORT_BASE = 1100, IDC_MOTION_MODE = 1300, IDC_MOTION_FIXED_AX = 1301, IDC_MOTION_FIXED_AY = 1302, IDC_MOTION_FIXED_AZ = 1303, IDC_MOTION_ACCEL_SRC_X = 1310, IDC_MOTION_ACCEL_SRC_Y = 1311, IDC_MOTION_ACCEL_SRC_Z = 1312, IDC_MOTION_ACCEL_SIGN_X = 1320, IDC_MOTION_ACCEL_SIGN_Y = 1321, IDC_MOTION_ACCEL_SIGN_Z = 1322, IDC_MOTION_GYRO_SRC_X = 1330, IDC_MOTION_GYRO_SRC_Y = 1331, IDC_MOTION_GYRO_SRC_Z = 1332, IDC_MOTION_GYRO_SIGN_X = 1340, IDC_MOTION_GYRO_SIGN_Y = 1341, IDC_MOTION_GYRO_SIGN_Z = 1342, IDC_MOTION_GYRO_SCALE = 1350, IDC_MOTION_GYRO_DEADZONE = 1351, IDC_MOTION_APPLY = 1360, IDC_MOTION_RESET = 1361, IDC_MOTION_CLOSE = 1362 };
+enum { IDC_IP = 101, IDC_CONNECT, IDC_KEYBOARD_COMBO = 110, IDC_BINDINGS_BTN = 111, IDC_MACROS_BTN = 112, IDC_MOTION_BTN = 113, IDC_EDITOR_CHANGE = 200, IDC_EDITOR_SETUP = 400, IDC_EDITOR_RESET = 500, IDC_EDITOR_CLEAR = 501, IDC_EDITOR_KEY_START = 300, IDC_MACRO_EDIT = 600, IDC_MACRO_RUN = 601, IDC_MACRO_SAVE = 602, IDC_MACRO_DELETE = 603, IDC_MACRO_CLOSE = 604, IDC_MACRO_RECORD_START = 605, IDC_MACRO_RECORD_STOP = 606, IDC_MACRO_IMPORT = 607, IDC_MACRO_EXPORT = 608, IDC_MACRO_HOTKEY = 609, IDC_MACRO_NAME = 610, IDC_MACRO_ADD = 611, IDC_MACRO_RECORD_TOGGLE = 612, IDC_MACRO_RUN_BASE = 700, IDC_MACRO_DELETE_BASE = 800, IDC_MACRO_KEY_BASE = 900, IDC_MACRO_RENAME_BASE = 1000, IDC_MACRO_EXPORT_BASE = 1100, IDC_MOTION_MODE = 1300, IDC_MOTION_FIXED_AX = 1301, IDC_MOTION_FIXED_AY = 1302, IDC_MOTION_FIXED_AZ = 1303, IDC_MOTION_ACCEL_SRC_X = 1310, IDC_MOTION_ACCEL_SRC_Y = 1311, IDC_MOTION_ACCEL_SRC_Z = 1312, IDC_MOTION_ACCEL_SIGN_X = 1320, IDC_MOTION_ACCEL_SIGN_Y = 1321, IDC_MOTION_ACCEL_SIGN_Z = 1322, IDC_MOTION_GYRO_SRC_X = 1330, IDC_MOTION_GYRO_SRC_Y = 1331, IDC_MOTION_GYRO_SRC_Z = 1332, IDC_MOTION_GYRO_SIGN_X = 1340, IDC_MOTION_GYRO_SIGN_Y = 1341, IDC_MOTION_GYRO_SIGN_Z = 1342, IDC_MOTION_GYRO_SCALE = 1350, IDC_MOTION_GYRO_DEADZONE = 1351, IDC_MOTION_ACCEL_ENABLE_X = 1360, IDC_MOTION_ACCEL_ENABLE_Y = 1361, IDC_MOTION_ACCEL_ENABLE_Z = 1362, IDC_MOTION_GYRO_ENABLE_X = 1363, IDC_MOTION_GYRO_ENABLE_Y = 1364, IDC_MOTION_GYRO_ENABLE_Z = 1365, IDC_MOTION_APPLY = 1370, IDC_MOTION_RESET = 1371, IDC_MOTION_CLOSE = 1372 };
 static HWND CreateButton(HWND parent, const wchar_t* text, int x, int y, int w, int h, int id);
 
 // ── Macro runtime/editor ────────────────────────────────────────────────────
@@ -2744,6 +2768,17 @@ static HWND MotionCreateCombo(HWND parent, int id, int x, int y, int w, int h) {
     return hw;
 }
 
+static HWND MotionCreateCheck(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h) {
+    HWND hw = CreateWindowW(L"BUTTON", text,
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX | WS_TABSTOP,
+        x, y, w, h, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
+    HFONT font = CreateFont(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    SendMessage(hw, WM_SETFONT, (WPARAM)font, TRUE);
+    return hw;
+}
+
 static void MotionSetEditInt(HWND hWnd, int id, int value) {
     wchar_t buf[32];
     swprintf(buf, 32, L"%d", value);
@@ -2790,6 +2825,16 @@ static int MotionSignSel(HWND hWnd, int id, int fallback) {
     return sel == 1 ? -1 : 1;
 }
 
+static void MotionSetCheck(HWND hWnd, int id, int enabled) {
+    SendDlgItemMessageW(hWnd, id, BM_SETCHECK, enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static int MotionCheckValue(HWND hWnd, int id, int fallback) {
+    HWND hw = GetDlgItem(hWnd, id);
+    if (!hw) return fallback;
+    return SendMessageW(hw, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0;
+}
+
 static void MotionTuningLoadToDialog(HWND hWnd) {
     MotionTuningSnapshot t = motion_tuning_snapshot();
 
@@ -2809,6 +2854,9 @@ static void MotionTuningLoadToDialog(HWND hWnd) {
     MotionFillSignCombo(hWnd, IDC_MOTION_ACCEL_SIGN_X, t.accel_sign[0]);
     MotionFillSignCombo(hWnd, IDC_MOTION_ACCEL_SIGN_Y, t.accel_sign[1]);
     MotionFillSignCombo(hWnd, IDC_MOTION_ACCEL_SIGN_Z, t.accel_sign[2]);
+    MotionSetCheck(hWnd, IDC_MOTION_ACCEL_ENABLE_X, t.accel_enable[0]);
+    MotionSetCheck(hWnd, IDC_MOTION_ACCEL_ENABLE_Y, t.accel_enable[1]);
+    MotionSetCheck(hWnd, IDC_MOTION_ACCEL_ENABLE_Z, t.accel_enable[2]);
 
     MotionFillAxisCombo(hWnd, IDC_MOTION_GYRO_SRC_X, t.gyro_src[0]);
     MotionFillAxisCombo(hWnd, IDC_MOTION_GYRO_SRC_Y, t.gyro_src[1]);
@@ -2816,6 +2864,9 @@ static void MotionTuningLoadToDialog(HWND hWnd) {
     MotionFillSignCombo(hWnd, IDC_MOTION_GYRO_SIGN_X, t.gyro_sign[0]);
     MotionFillSignCombo(hWnd, IDC_MOTION_GYRO_SIGN_Y, t.gyro_sign[1]);
     MotionFillSignCombo(hWnd, IDC_MOTION_GYRO_SIGN_Z, t.gyro_sign[2]);
+    MotionSetCheck(hWnd, IDC_MOTION_GYRO_ENABLE_X, t.gyro_enable[0]);
+    MotionSetCheck(hWnd, IDC_MOTION_GYRO_ENABLE_Y, t.gyro_enable[1]);
+    MotionSetCheck(hWnd, IDC_MOTION_GYRO_ENABLE_Z, t.gyro_enable[2]);
 
     MotionSetEditInt(hWnd, IDC_MOTION_GYRO_SCALE, t.gyro_scale_percent);
     MotionSetEditInt(hWnd, IDC_MOTION_GYRO_DEADZONE, t.gyro_deadzone_mrad);
@@ -2834,6 +2885,9 @@ static void MotionTuningApplyFromDialog(HWND hWnd) {
     g_motion_tuning.accel_sign_x = MotionSignSel(hWnd, IDC_MOTION_ACCEL_SIGN_X, 1);
     g_motion_tuning.accel_sign_y = MotionSignSel(hWnd, IDC_MOTION_ACCEL_SIGN_Y, 1);
     g_motion_tuning.accel_sign_z = MotionSignSel(hWnd, IDC_MOTION_ACCEL_SIGN_Z, 1);
+    g_motion_tuning.accel_enable_x = MotionCheckValue(hWnd, IDC_MOTION_ACCEL_ENABLE_X, 1);
+    g_motion_tuning.accel_enable_y = MotionCheckValue(hWnd, IDC_MOTION_ACCEL_ENABLE_Y, 1);
+    g_motion_tuning.accel_enable_z = MotionCheckValue(hWnd, IDC_MOTION_ACCEL_ENABLE_Z, 1);
 
     g_motion_tuning.gyro_src_x = MotionComboSel(hWnd, IDC_MOTION_GYRO_SRC_X, 0);
     g_motion_tuning.gyro_src_y = MotionComboSel(hWnd, IDC_MOTION_GYRO_SRC_Y, 1);
@@ -2841,15 +2895,19 @@ static void MotionTuningApplyFromDialog(HWND hWnd) {
     g_motion_tuning.gyro_sign_x = MotionSignSel(hWnd, IDC_MOTION_GYRO_SIGN_X, 1);
     g_motion_tuning.gyro_sign_y = MotionSignSel(hWnd, IDC_MOTION_GYRO_SIGN_Y, 1);
     g_motion_tuning.gyro_sign_z = MotionSignSel(hWnd, IDC_MOTION_GYRO_SIGN_Z, 1);
+    g_motion_tuning.gyro_enable_x = MotionCheckValue(hWnd, IDC_MOTION_GYRO_ENABLE_X, 1);
+    g_motion_tuning.gyro_enable_y = MotionCheckValue(hWnd, IDC_MOTION_GYRO_ENABLE_Y, 1);
+    g_motion_tuning.gyro_enable_z = MotionCheckValue(hWnd, IDC_MOTION_GYRO_ENABLE_Z, 1);
 
     g_motion_tuning.gyro_scale_percent = MotionGetEditInt(hWnd, IDC_MOTION_GYRO_SCALE, 100, 0, 500);
     g_motion_tuning.gyro_deadzone_mrad = MotionGetEditInt(hWnd, IDC_MOTION_GYRO_DEADZONE, 0, 0, 500);
 }
 
-static void MotionCreateAxisRow(HWND hWnd, const wchar_t* label, int y, int srcId, int signId) {
+static void MotionCreateAxisRow(HWND hWnd, const wchar_t* label, int y, int srcId, int signId, int enableId) {
     MotionCreateLabel(hWnd, label, 16, y + 4, 120, 20);
     MotionCreateCombo(hWnd, srcId, 140, y, 110, 120);
     MotionCreateCombo(hWnd, signId, 260, y, 70, 120);
+    MotionCreateCheck(hWnd, L"Enable", enableId, 345, y + 2, 80, 20);
 }
 
 static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2872,20 +2930,22 @@ static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         MotionCreateLabel(hWnd, L"Output", 16, y, 80, 20);
         MotionCreateLabel(hWnd, L"Source", 140, y, 80, 20);
         MotionCreateLabel(hWnd, L"Sign", 260, y, 80, 20);
+        MotionCreateLabel(hWnd, L"Enabled", 345, y, 80, 20);
         y += 22;
-        MotionCreateAxisRow(hWnd, L"Accel out X", y, IDC_MOTION_ACCEL_SRC_X, IDC_MOTION_ACCEL_SIGN_X); y += 30;
-        MotionCreateAxisRow(hWnd, L"Accel out Y", y, IDC_MOTION_ACCEL_SRC_Y, IDC_MOTION_ACCEL_SIGN_Y); y += 30;
-        MotionCreateAxisRow(hWnd, L"Accel out Z", y, IDC_MOTION_ACCEL_SRC_Z, IDC_MOTION_ACCEL_SIGN_Z); y += 40;
+        MotionCreateAxisRow(hWnd, L"Accel out X", y, IDC_MOTION_ACCEL_SRC_X, IDC_MOTION_ACCEL_SIGN_X, IDC_MOTION_ACCEL_ENABLE_X); y += 30;
+        MotionCreateAxisRow(hWnd, L"Accel out Y", y, IDC_MOTION_ACCEL_SRC_Y, IDC_MOTION_ACCEL_SIGN_Y, IDC_MOTION_ACCEL_ENABLE_Y); y += 30;
+        MotionCreateAxisRow(hWnd, L"Accel out Z", y, IDC_MOTION_ACCEL_SRC_Z, IDC_MOTION_ACCEL_SIGN_Z, IDC_MOTION_ACCEL_ENABLE_Z); y += 40;
 
         MotionCreateLabel(hWnd, L"Gyro mapping", 16, y, 200, 20);
         y += 24;
         MotionCreateLabel(hWnd, L"Output", 16, y, 80, 20);
         MotionCreateLabel(hWnd, L"Source", 140, y, 80, 20);
         MotionCreateLabel(hWnd, L"Sign", 260, y, 80, 20);
+        MotionCreateLabel(hWnd, L"Enabled", 345, y, 80, 20);
         y += 22;
-        MotionCreateAxisRow(hWnd, L"Gyro out X", y, IDC_MOTION_GYRO_SRC_X, IDC_MOTION_GYRO_SIGN_X); y += 30;
-        MotionCreateAxisRow(hWnd, L"Gyro out Y", y, IDC_MOTION_GYRO_SRC_Y, IDC_MOTION_GYRO_SIGN_Y); y += 30;
-        MotionCreateAxisRow(hWnd, L"Gyro out Z", y, IDC_MOTION_GYRO_SRC_Z, IDC_MOTION_GYRO_SIGN_Z); y += 38;
+        MotionCreateAxisRow(hWnd, L"Gyro out X", y, IDC_MOTION_GYRO_SRC_X, IDC_MOTION_GYRO_SIGN_X, IDC_MOTION_GYRO_ENABLE_X); y += 30;
+        MotionCreateAxisRow(hWnd, L"Gyro out Y", y, IDC_MOTION_GYRO_SRC_Y, IDC_MOTION_GYRO_SIGN_Y, IDC_MOTION_GYRO_ENABLE_Y); y += 30;
+        MotionCreateAxisRow(hWnd, L"Gyro out Z", y, IDC_MOTION_GYRO_SRC_Z, IDC_MOTION_GYRO_SIGN_Z, IDC_MOTION_GYRO_ENABLE_Z); y += 38;
 
         MotionCreateLabel(hWnd, L"Gyro scale %:", 16, y + 4, 120, 20);
         MotionCreateEdit(hWnd, IDC_MOTION_GYRO_SCALE, 140, y, 70, 22);
@@ -2893,7 +2953,7 @@ static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         MotionCreateEdit(hWnd, IDC_MOTION_GYRO_DEADZONE, 340, y, 70, 22);
         y += 36;
 
-        MotionCreateLabel(hWnd, L"Defaults: fixed accel 0,0,4096; gyro direct X/Y/Z; scale 100; deadzone 0.", 16, y, 520, 20);
+        MotionCreateLabel(hWnd, L"Defaults: fixed accel 0,0,4096; all accel/gyro axes enabled; gyro direct X/Y/Z.", 16, y, 570, 20);
         y += 30;
 
         CreateButton(hWnd, L"Apply", 140, y, 80, 28, IDC_MOTION_APPLY);
@@ -2913,8 +2973,8 @@ static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             MotionTuningLoadToDialog(hWnd);
         } else if (id == IDC_MOTION_APPLY) {
             MotionTuningApplyFromDialog(hWnd);
-        } else if ((id >= IDC_MOTION_MODE && id <= IDC_MOTION_GYRO_DEADZONE) &&
-                   (code == EN_CHANGE || code == CBN_SELCHANGE)) {
+        } else if ((id >= IDC_MOTION_MODE && id <= IDC_MOTION_CLOSE) &&
+                   (code == EN_CHANGE || code == CBN_SELCHANGE || code == BN_CLICKED)) {
             MotionTuningApplyFromDialog(hWnd);
         }
         break;
@@ -2937,7 +2997,7 @@ static void ShowMotionTuning(HWND parent) {
         SetForegroundWindow(g_hMotionTuningWnd);
         return;
     }
-    RECT rc{0, 0, 560, 470};
+    RECT rc{0, 0, 610, 470};
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
     g_hMotionTuningWnd = CreateWindowW(L"NSMotionTuning", L"Motion tuning",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
