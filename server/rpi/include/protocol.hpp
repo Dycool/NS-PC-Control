@@ -42,6 +42,14 @@ static constexpr std::size_t HMAC_TAG_SIZE = 16;
 
 static constexpr uint32_t RUMBLE_MAGIC = 0x4E535652u; // 'NSVR'
 static constexpr uint32_t PRECISION_RUMBLE_MAGIC = 0x4E535648u; // 'NSVH'
+static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
+static constexpr uint8_t  SERVER_INFO_VERSION = 1;
+
+enum ServerBackend : uint8_t {
+    SERVER_BACKEND_UNKNOWN = 0,
+    SERVER_BACKEND_HORI    = 1,
+    SERVER_BACKEND_PRO     = 2,
+};
 
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {
@@ -162,6 +170,21 @@ struct PrecisionRumblePacket {
     uint8_t  reserved[4]{};
 } NS_PACKED_ATTR;
 
+struct ServerInfoProbe {
+    uint32_t magic = SERVER_INFO_MAGIC;
+    uint8_t  version = SERVER_INFO_VERSION;
+    uint8_t  reserved[3]{};
+} NS_PACKED_ATTR;
+
+struct ServerInfoReply {
+    uint32_t magic = SERVER_INFO_MAGIC;
+    uint8_t  version = SERVER_INFO_VERSION;
+    uint8_t  backend = SERVER_BACKEND_UNKNOWN;
+    uint16_t udp_interval_ms = PRO_UDP_INTERVAL_MS;
+    uint16_t udp_hz = PRO_UDP_HZ;
+    uint8_t  reserved[6]{};
+} NS_PACKED_ATTR;
+
 // ── Legacy UDP packet ────────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;
@@ -198,6 +221,10 @@ static_assert(sizeof(RumblePacket) == 8,
               "RumblePacket wire layout changed");
 static_assert(sizeof(PrecisionRumblePacket) == 20,
               "PrecisionRumblePacket wire layout changed");
+static_assert(sizeof(ServerInfoProbe) == 8,
+              "ServerInfoProbe wire layout changed");
+static_assert(sizeof(ServerInfoReply) == 16,
+              "ServerInfoReply wire layout changed");
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 inline uint64_t now_us() noexcept {

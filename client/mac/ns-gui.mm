@@ -1719,6 +1719,32 @@ static bool ApplyMacroOverrideMac(ns::HIDReport[4], bool[4], bool[4], int[4]) {
 //  App Delegate (GUI and Core Logic)
 // ─────────────────────────────────────────────────────────────────────────────
 
+static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
+    if (out_is_hori) *out_is_hori = false;
+    ns::ServerInfoProbe probe{};
+    sendto(sock, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
+           reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+
+    const uint64_t deadline = ns::now_us() + 150000ULL;
+    while (ns::now_us() < deadline) {
+        ns::ServerInfoReply reply{};
+        sockaddr_in from{};
+        socklen_t from_len = sizeof(from);
+        ssize_t n = recvfrom(sock, &reply, sizeof(reply), 0,
+                             reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n == (ssize_t)sizeof(reply) &&
+            reply.magic == ns::SERVER_INFO_MAGIC &&
+            reply.version == ns::SERVER_INFO_VERSION &&
+            reply.udp_interval_ms > 0) {
+            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            return reply.udp_interval_ms;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return fallback_ms;
+}
+
 @class BindingsEditor;
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate> {
@@ -2777,6 +2803,11 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
         memcpy(&dest, res->ai_addr, sizeof(dest));
         freeaddrinfo(res);
 
+        bool serverIsHori = false;
+        const int activeSendIntervalMs = detect_server_udp_interval_ms(
+            self->sock, dest, g_legacyUdp ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS, &serverIsHori);
+        const bool sendMotion = !serverIsHori;
+
         uint32_t seqCounter = 0;
         bool first_packet = true;
         RumbleManager rumble;
@@ -2806,7 +2837,7 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
                 logical_reports[i] = map_gc_to_console(self->states[i]);
                 present[i] = true;
                 controller_for_slot[i] = i;
-                if (self->states[i].has_motion.load(std::memory_order_relaxed)) {
+                if (sendMotion && self->states[i].has_motion.load(std::memory_order_relaxed)) {
                     logical_motion[i] = map_gc_motion_to_console(self->states[i]);
                     has_motion[i] = true;
                 }
@@ -2889,7 +2920,7 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
             self->packetCount++;
 
             auto interval = (active_count > 0)
-                ? std::chrono::milliseconds(g_legacyUdp ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS)
+                ? std::chrono::milliseconds(activeSendIntervalMs)
                 : std::chrono::milliseconds(50); // keep connection alive below watchdog timeout
             std::this_thread::sleep_for(interval);
         }

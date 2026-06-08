@@ -1489,6 +1489,32 @@ struct KeyBindings {
 };
 
 
+static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
+    if (out_is_hori) *out_is_hori = false;
+    ns::ServerInfoProbe probe{};
+    sendto(sock, reinterpret_cast<const char*>(&probe), (int)sizeof(probe), 0,
+           reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+
+    const uint64_t deadline = ns::now_us() + 150000ULL;
+    while (ns::now_us() < deadline) {
+        ns::ServerInfoReply reply{};
+        sockaddr_in from{};
+        int from_len = sizeof(from);
+        int n = recvfrom(sock, reinterpret_cast<char*>(&reply), (int)sizeof(reply), 0,
+                         reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n == (int)sizeof(reply) &&
+            reply.magic == ns::SERVER_INFO_MAGIC &&
+            reply.version == ns::SERVER_INFO_VERSION &&
+            reply.udp_interval_ms > 0) {
+            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            return reply.udp_interval_ms;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return fallback_ms;
+}
+
 int main(int argc, char** argv) {
     timeBeginPeriod(1);
     SDL_SetMainReady();
@@ -1618,6 +1644,11 @@ int main(int argc, char** argv) {
     memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
 
+    bool server_is_hori = false;
+    const int active_send_interval_ms = detect_server_udp_interval_ms(
+        sock, dest, legacy_udp ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS, &server_is_hori);
+    const bool send_motion = !server_is_hori;
+
     if (macro_mode) {
         std::string macro_raw = macro_read_file(macro_path);
         if (macro_raw.empty()) {
@@ -1673,7 +1704,7 @@ int main(int argc, char** argv) {
             sdl_filters[i].apply(logical_reports[i], filter_now);
             logical_motion[i] = sdl[i].motion;
             present[i] = true;
-            has_motion[i] = sdl[i].has_motion;
+            has_motion[i] = send_motion && sdl[i].has_motion;
             sdl_for_slot[i] = i;
             active_count++;
         }
@@ -1747,8 +1778,7 @@ int main(int argc, char** argv) {
 
         if (active_count > 0) {
             no_controllers_printed = false;
-            const int send_interval_ms = legacy_udp ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS;
-            std::this_thread::sleep_for(std::chrono::milliseconds(send_interval_ms));
+            std::this_thread::sleep_for(std::chrono::milliseconds(active_send_interval_ms));
         } else {
             if (!no_controllers_printed) {
                 std::cout << "No controllers detected - waiting for connections...\n";

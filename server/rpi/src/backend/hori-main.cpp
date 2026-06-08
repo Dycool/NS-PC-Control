@@ -3069,6 +3069,19 @@ int main(int argc, char** argv) {
             bytes = recvfrom(sock, udp_rx.data(), udp_rx.size(), 0, (sockaddr*)&sender, &slen);
             if (bytes <= 0) break; // EAGAIN or error — ring is drained
 
+            if (bytes == (ssize_t)sizeof(ServerInfoProbe)) {
+                ServerInfoProbe probe{};
+                memcpy(&probe, udp_rx.data(), sizeof(probe));
+                if (probe.magic == SERVER_INFO_MAGIC && probe.version == SERVER_INFO_VERSION) {
+                    ServerInfoReply reply{};
+                    reply.backend = SERVER_BACKEND_HORI;
+                    reply.udp_interval_ms = HORI_UDP_INTERVAL_MS;
+                    reply.udp_hz = HORI_UDP_HZ;
+                    sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen);
+                    continue;
+                }
+            }
+
 
             if (bytes >= 4) {
                 uint32_t mmagic = 0;

@@ -976,10 +976,9 @@ private:
 
         float accel[3] = {};
         if (d.accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
-            // SDL accel m/s^2 -> console units. pro-main handles Nintendo Y,X,Z packing.
             out.ax = clamp_motion_i16((accel[0] / 9.80665f) * 4096.0f);
-            out.ay = clamp_motion_i16((accel[1] / 9.80665f) * 4096.0f);
-            out.az = clamp_motion_i16((accel[2] / 9.80665f) * 4096.0f);
+            out.ay = clamp_motion_i16((-accel[2] / 9.80665f) * 4096.0f);
+            out.az = clamp_motion_i16((accel[1] / 9.80665f) * 4096.0f);
             has_motion = true;
         }
 
@@ -988,10 +987,9 @@ private:
             constexpr float RAD_TO_DEG = 57.29577951308232f;
             constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.384f;
 
-            // SDL gyro rad/s -> console units. No filters or sign flips.
             out.gx = clamp_motion_i16(gyro[0] * CONSOLE_GYRO_SCALE);
             out.gy = clamp_motion_i16(gyro[1] * CONSOLE_GYRO_SCALE);
-            out.gz = clamp_motion_i16(gyro[2] * CONSOLE_GYRO_SCALE);
+            out.gz = clamp_motion_i16(-gyro[2] * CONSOLE_GYRO_SCALE);
 
             has_motion = true;
         }
@@ -1360,7 +1358,6 @@ static uint8_t g_hmacKey[32]{};
 static uint32_t g_packetCount = 0;
 static std::string g_targetHost;
 static uint16_t g_targetPort = ns::DEFAULT_PORT;
-static bool g_horiUdpRate = false;
 
 // ── Keyboard Mode ──
 enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
@@ -2666,6 +2663,31 @@ static void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
     else if (!override_mode) rep.ry = 128;
 }
 
+static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
+    if (out_is_hori) *out_is_hori = false;
+    ns::ServerInfoProbe probe{};
+    sendto(sock, reinterpret_cast<const char*>(&probe), (int)sizeof(probe), 0,
+           reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+
+    const uint64_t deadline = ns::now_us() + 150000ULL;
+    while (ns::now_us() < deadline) {
+        ns::ServerInfoReply reply{};
+        sockaddr_in from{};
+        int from_len = sizeof(from);
+        int n = recvfrom(sock, reinterpret_cast<char*>(&reply), (int)sizeof(reply), 0,
+                         reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n == (int)sizeof(reply) &&
+            reply.magic == ns::SERVER_INFO_MAGIC &&
+            reply.version == ns::SERVER_INFO_VERSION &&
+            reply.udp_interval_ms > 0) {
+            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            return reply.udp_interval_ms;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return fallback_ms;
+}
+
 // ── Sender thread (4-Player) ──
 static void SenderThread() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -2693,6 +2715,10 @@ static void SenderThread() {
     sockaddr_in dest{};
     memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
+
+    bool serverIsHori = false;
+    const int activeSendIntervalMs = detect_server_udp_interval_ms(sock, dest, ns::PRO_UDP_INTERVAL_MS, &serverIsHori);
+    const bool sendMotion = !serverIsHori;
 
     g_sock = sock;
     g_senderRunning = true;
@@ -2733,7 +2759,7 @@ static void SenderThread() {
             sdlFilters[i].apply(logicalReports[i], filterNow);
             present[i] = true;
             sdlForSlot[i] = i;
-            if (sdl[i].has_motion) {
+            if (sendMotion && sdl[i].has_motion) {
                 logicalMotion[i] = sdl[i].motion;
                 hasMotion[i] = true;
             }
@@ -2799,8 +2825,7 @@ static void SenderThread() {
         rumble.update_timeouts(sdlForSlot);
 
         if (activeCount > 0) {
-            const int sendIntervalMs = g_horiUdpRate ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS;
-            std::this_thread::sleep_for(std::chrono::milliseconds(sendIntervalMs));
+            std::this_thread::sleep_for(std::chrono::milliseconds(activeSendIntervalMs));
         }
         else std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -3372,8 +3397,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     SDL_SetMainReady();
     g_sdlInput.start();
     g_hInst = hInst;
-    const char* horiEnv = std::getenv("NSPC_HORI_UDP");
-    g_horiUdpRate = horiEnv && horiEnv[0] && std::strcmp(horiEnv, "0") != 0;
 
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);

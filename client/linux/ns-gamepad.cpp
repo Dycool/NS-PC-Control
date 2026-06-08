@@ -1157,6 +1157,32 @@ static void pump_udp_rumble(int sock, RumbleManager& rumble, const int controlle
     }
 }
 
+static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
+    if (out_is_hori) *out_is_hori = false;
+    ns::ServerInfoProbe probe{};
+    sendto(sock, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
+           reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+
+    const uint64_t deadline = ns::now_us() + 150000ULL;
+    while (ns::now_us() < deadline) {
+        ns::ServerInfoReply reply{};
+        sockaddr_in from{};
+        socklen_t from_len = sizeof(from);
+        ssize_t n = recvfrom(sock, &reply, sizeof(reply), 0,
+                             reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n == (ssize_t)sizeof(reply) &&
+            reply.magic == ns::SERVER_INFO_MAGIC &&
+            reply.version == ns::SERVER_INFO_VERSION &&
+            reply.udp_interval_ms > 0) {
+            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            return reply.udp_interval_ms;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return fallback_ms;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1233,6 +1259,11 @@ int main(int argc, char** argv) {
     sockaddr_in dest{};
     std::memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
+
+    bool server_is_hori = false;
+    const int active_send_interval_ms = detect_server_udp_interval_ms(
+        sock, dest, g_legacy_udp ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS, &server_is_hori);
+    const bool send_motion = !server_is_hori;
 
     // Initialise SDL3 Gamepad subsystem.
     SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
@@ -1332,7 +1363,7 @@ int main(int argc, char** argv) {
             if (is_conn) {
                 present[i] = true;
                 controller_for_slot[i] = i;
-                has_motion[i] = read_pad_motion(i, motions[i]);
+                has_motion[i] = send_motion && read_pad_motion(i, motions[i]);
                 active_count++;
             }
         }
@@ -1379,10 +1410,8 @@ int main(int argc, char** argv) {
             rumble.update_timeouts(controller_for_slot);
         }
 
-        // Hori/legacy servers want 250Hz; Pro/modern servers want ~66Hz.
         if (active_count > 0) {
-            const int send_interval_ms = g_legacy_udp ? ns::HORI_UDP_INTERVAL_MS : ns::PRO_UDP_INTERVAL_MS;
-            next_tick += std::chrono::milliseconds(send_interval_ms);
+            next_tick += std::chrono::milliseconds(active_send_interval_ms);
         }
         else next_tick += std::chrono::milliseconds(50);
     }
