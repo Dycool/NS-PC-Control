@@ -1599,9 +1599,12 @@ static void build_standard_report(const ExtendedHIDReport& src,
         }
     };
 
-    store_imu_sample(out, 0, imu[0]);
+    // The report carries three IMU samples in chronological order.
+    // motion_history[0] is newest, [1] is middle, [2] is oldest.
+    // Send oldest -> newest so games integrate motion forward in time.
+    store_imu_sample(out, 0, imu[2]);
     store_imu_sample(out, 1, imu[1]);
-    store_imu_sample(out, 2, imu[2]);
+    store_imu_sample(out, 2, imu[0]);
 }
 
 static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply) {
