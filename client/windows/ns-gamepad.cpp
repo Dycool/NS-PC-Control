@@ -1116,9 +1116,9 @@ private:
 
         bool got_any_motion = false;
 
-        // Switch X = -SDL X
-        // Switch Y = -SDL Z
-        // Switch Z = +SDL Y
+        // Console X = -SDL X
+        // Console Y = -SDL Z
+        // Console Z = +SDL Y
         float accel[3] = {};
         if (accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
             out.ax = clamp_motion_i16(-accel[0] * ACCEL_SCALE);
@@ -1131,9 +1131,9 @@ private:
             out.az = 4096;
         }
 
-        // Switch X = -SDL X
-        // Switch Y = -SDL Z
-        // Switch Z = +SDL Y
+        // Console X = -SDL X
+        // Console Y = -SDL Z
+        // Console Z = +SDL Y
         float gyro[3] = {};
         if (gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
             float gx = -gyro[0];
@@ -1292,8 +1292,8 @@ public:
                          const int sdl_for_slot[4]) {
         if (rp.subpad >= 4) return;
         // Normal-rumble build: treat PrecisionRumblePacket as a carrier for
-        // already-decoded classic low/high magnitudes. Do not send Nintendo
-        // HD/precision effect bytes through SDL.
+        // already-decoded classic low/high magnitudes. Do not send vendor
+        // precision effect bytes through SDL.
         ns::RumblePacket fallback{};
         fallback.magic = ns::RUMBLE_MAGIC;
         fallback.subpad = rp.subpad;
@@ -1575,8 +1575,8 @@ struct KeyBindings {
 };
 
 
-static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
-    if (out_is_hori) *out_is_hori = false;
+static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_legacy) {
+    if (out_is_legacy) *out_is_legacy = false;
     ns::ServerInfoProbe probe{};
     sendto(sock, reinterpret_cast<const char*>(&probe), (int)sizeof(probe), 0,
            reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -1592,7 +1592,7 @@ static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, i
             reply.magic == ns::SERVER_INFO_MAGIC &&
             reply.version == ns::SERVER_INFO_VERSION &&
             reply.udp_interval_ms > 0) {
-            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            if (out_is_legacy) *out_is_legacy = reply.backend == ns::SERVER_BACKEND_LEGACY;
             return fallback_ms;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1730,10 +1730,10 @@ int main(int argc, char** argv) {
     memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
 
-    bool server_is_hori = false;
+    bool server_is_legacy = false;
     const int active_send_interval_ms = detect_server_udp_interval_ms(
-        sock, dest, ns::HORI_UDP_INTERVAL_MS, &server_is_hori);
-    const bool send_motion = !server_is_hori;
+        sock, dest, ns::LEGACY_UDP_INTERVAL_MS, &server_is_legacy);
+    const bool send_motion = !server_is_legacy;
 
     if (macro_mode) {
         std::string macro_raw = macro_read_file(macro_path);

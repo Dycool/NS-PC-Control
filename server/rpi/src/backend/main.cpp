@@ -59,7 +59,7 @@ static constexpr uint8_t RUMBLE_MIN_NONZERO = 4;      // floor for a real non-ne
 static constexpr int     RUMBLE_GAIN_PERCENT = 100;
 // Normal-rumble build: decode console rumble into classic low/high packets only.
 static std::string g_usb_serial = "NSBRIDGE000001";
-static bool g_hori_mode = false;
+static bool g_legacy_mode = false;
 
 // Built-in USB gadget lifecycle.  ns-backend can now create/bind the
 // USB gamepad gadget itself on startup and unbind/remove it
@@ -964,7 +964,7 @@ struct NS_LOCAL_PACKED ProInputReport30 {
     uint8_t left_stick[3];
     uint8_t right_stick[3];
     uint8_t vibrator;
-    // Switch Pro IMU wire order is Y, X, Z for each sample.
+    // The 64-byte IMU wire order is Y, X, Z for each sample.
     // Keep field names matching the logical axis they contain so assignment
     // remains readable while packed layout matches hardware.
     int16_t accel_y_0, accel_x_0, accel_z_0;
@@ -1238,7 +1238,7 @@ static void build_get_device_info_response(uint8_t* out, int ctrl) {
     // Important: MAC stays generated per virtual controller.
     out[0] = 0x03; // majorVersion
     out[1] = 0x49; // minorVersion
-    out[2] = 0x03; // controllerType: Pro Controller
+    out[2] = 0x03; // controllerType: 64-byte controller
     out[3] = 0x02; // unknown00
 
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
@@ -1731,7 +1731,7 @@ static const uint8_t PRO_CONTROLLER_REPORT_DESC[] = {
     0x85, 0x82, 0x09, 0x06, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0xC0
 };
 
-static const uint8_t HORI_REPORT_DESC[] = {
+static const uint8_t LEGACY_REPORT_DESC[] = {
     0x05,0x01,0x09,0x05,0xA1,0x01,0x15,0x00,0x25,0x01,0x35,0x00,0x45,0x01,0x75,0x01,
     0x95,0x0D,0x05,0x09,0x19,0x01,0x29,0x0D,0x81,0x02,0x95,0x03,0x81,0x01,0x05,0x01,
     0x25,0x07,0x46,0x3B,0x01,0x75,0x04,0x95,0x01,0x65,0x14,0x09,0x39,0x81,0x42,
@@ -1849,11 +1849,11 @@ static bool create_hid_function(int id) {
     if (!write_text_file(path, "0")) return false;
 
     std::snprintf(path, sizeof(path), "%s/report_length", func);
-    if (!write_text_file(path, g_hori_mode ? "8" : "64")) return false;
+    if (!write_text_file(path, g_legacy_mode ? "8" : "64")) return false;
 
     std::snprintf(path, sizeof(path), "%s/report_desc", func);
-    if (g_hori_mode) {
-        if (!write_bytes_file(path, HORI_REPORT_DESC, sizeof(HORI_REPORT_DESC))) return false;
+    if (g_legacy_mode) {
+        if (!write_bytes_file(path, LEGACY_REPORT_DESC, sizeof(LEGACY_REPORT_DESC))) return false;
     } else {
         if (!write_bytes_file(path, PRO_CONTROLLER_REPORT_DESC, sizeof(PRO_CONTROLLER_REPORT_DESC))) return false;
     }
@@ -1930,7 +1930,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     std::printf("[gadget] %s; creating built-in %d-interface %s gadget\n",
                 reason ? reason : "HID gadget not ready",
                 HID_PORT_COUNT,
-                g_hori_mode ? "HORI" : "Pro Controller");
+                g_legacy_mode ? "legacy 8-byte" : "64-byte motion");
 
     // Try to load and mount configfs.  Ignore failures here because both may
     // already be active on systems that previously used setup_gadget.sh.
@@ -1967,28 +1967,28 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     if (!mkdir_if_needed(strings_dir.c_str())) return false;
     if (!mkdir_if_needed(join_path(GADGET_DIR, "configs").c_str())) return false;
     if (!mkdir_if_needed(configs_dir.c_str())) return false;
-    if (g_hori_mode) {
+    if (g_legacy_mode) {
         if (!mkdir_if_needed(join_path(configs_dir, "strings").c_str())) return false;
         if (!mkdir_if_needed(config_strings_dir.c_str())) return false;
     }
     if (!mkdir_if_needed(functions_dir.c_str())) return false;
 
-    if (!write_text_file(join_path(GADGET_DIR, "bcdDevice").c_str(), g_hori_mode ? "0x0200" : "0x0210")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bcdDevice").c_str(), g_legacy_mode ? "0x0200" : "0x0210")) return false;
     if (!write_text_file(join_path(GADGET_DIR, "bcdUSB").c_str(), "0x0200")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "idVendor").c_str(), g_hori_mode ? "0x0F0D" : "0x057e")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "idProduct").c_str(), g_hori_mode ? "0x0092" : "0x2009")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "bDeviceClass").c_str(), g_hori_mode ? "0xFF" : "0x00")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "bDeviceSubClass").c_str(), g_hori_mode ? "0xFF" : "0x00")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "bDeviceProtocol").c_str(), g_hori_mode ? "0xFF" : "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "idVendor").c_str(), g_legacy_mode ? "0x0F0D" : "0x057e")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "idProduct").c_str(), g_legacy_mode ? "0x0092" : "0x2009")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceClass").c_str(), g_legacy_mode ? "0xFF" : "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceSubClass").c_str(), g_legacy_mode ? "0xFF" : "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceProtocol").c_str(), g_legacy_mode ? "0xFF" : "0x00")) return false;
 
     // USB descriptor serial belongs here, not in the controller SPI area.
-    if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), g_hori_mode ? "000000000001" : g_usb_serial.c_str())) return false;
-    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), g_hori_mode ? "HORI CO., LTD." : "Nintendo Co., Ltd.")) return false;
-    if (!write_text_file(join_path(strings_dir, "product").c_str(), g_hori_mode ? "POKKEN CONTROLLER" : "Pro Controller")) return false;
+    if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), g_legacy_mode ? "000000000001" : g_usb_serial.c_str())) return false;
+    if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "NS Bridge")) return false;
+    if (!write_text_file(join_path(strings_dir, "product").c_str(), g_legacy_mode ? "Legacy USB Gamepad" : "Motion USB Gamepad")) return false;
 
     if (!write_text_file(join_path(configs_dir, "MaxPower").c_str(), "500")) return false;
-    if (!write_text_file(join_path(configs_dir, "bmAttributes").c_str(), g_hori_mode ? "0x80" : "0xA0")) return false;
-    if (g_hori_mode) {
+    if (!write_text_file(join_path(configs_dir, "bmAttributes").c_str(), g_legacy_mode ? "0x80" : "0xA0")) return false;
+    if (g_legacy_mode) {
         if (!write_text_file(join_path(config_strings_dir, "configuration").c_str(), "USB 4-Player Hub Config")) return false;
     }
 
@@ -2043,7 +2043,7 @@ static void drain_hid_output_queue(int fd) {
 }
 
 // ── Smart Multiplexer HID Writer Thread ───────────────────────────────────────
-static void hori_writer_thread(int hz) {
+static void legacy_writer_thread(int hz) {
     const auto tick = us(1'000'000 / hz);
     int fds[HID_PORT_COUNT] = {-1, -1, -1, -1};
     std::string devs[HID_PORT_COUNT] = {"/dev/hidg0", "/dev/hidg1", "/dev/hidg2", "/dev/hidg3"};
@@ -2065,13 +2065,13 @@ static void hori_writer_thread(int hz) {
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; }
             }
-            run_gadget_setup_if_needed(false, "requested HORI /dev/hidg* nodes could not all be opened");
+            run_gadget_setup_if_needed(false, "requested legacy /dev/hidg* nodes could not all be opened");
             std::this_thread::sleep_for(ms(500));
             continue;
         }
 
         if (g_verbose || !was_connected)
-            std::printf("%dx HORI /dev/hidg* opened\n", HID_PORT_COUNT);
+            std::printf("%dx legacy /dev/hidg* opened\n", HID_PORT_COUNT);
         was_connected = true;
 
         auto next = Clock::now() + tick;
@@ -2190,7 +2190,7 @@ static void hori_writer_thread(int hz) {
                         hw_slots[chosen].client_idx = c;
                         hw_slots[chosen].sub_idx = s;
                         if (g_verbose)
-                            std::printf("Map -> PC %d (Pad %d) took console HORI Port %d\n", c + 1, s + 1, chosen + 1);
+                            std::printf("Map -> PC %d (Pad %d) took console legacy Port %d\n", c + 1, s + 1, chosen + 1);
                     }
                 }
             }
@@ -2208,7 +2208,7 @@ static void hori_writer_thread(int hz) {
             }
 
             bool ok = true;
-            static_assert(sizeof(HIDReport) == 8, "HIDReport size mismatch with HORI HID gadget descriptor");
+            static_assert(sizeof(HIDReport) == 8, "HIDReport size mismatch with legacy HID gadget descriptor");
             for (int h = 0; h < HID_PORT_COUNT; ++h) {
                 if (out_reports[h] == prev[h]) continue;
                 ssize_t w = write(fds[h], &out_reports[h], sizeof(HIDReport));
@@ -2243,8 +2243,8 @@ static void hori_writer_thread(int hz) {
 }
 
 static void writer_thread(int hz) {
-    if (g_hori_mode) {
-        hori_writer_thread(hz);
+    if (g_legacy_mode) {
+        legacy_writer_thread(hz);
         return;
     }
 
@@ -3148,8 +3148,8 @@ static const char INDEX_HTML[] =
     "        motion.ay = clamp16((a.y || 0) / 9.80665 * 4096);\n"
     "        motion.az = clamp16((a.z || 0) / 9.80665 * 4096);\n"
     "        motion.gx = clamp16((rr.beta  || 0) * 16);  // pitch\n"
-    "        motion.gy = clamp16((rr.alpha || 0) * 16);  // yaw / Switch Y\n"
-    "        motion.gz = clamp16((rr.gamma || 0) * 16);  // roll / Switch Z\n"
+    "        motion.gy = clamp16((rr.alpha || 0) * 16);  // yaw / console Y\n"
+    "        motion.gz = clamp16((rr.gamma || 0) * 16);  // roll / console Z\n"
     "    }, {passive:true});\n"
     "}\n"
     "function installDeviceOrientationFallback() {\n"
@@ -3700,8 +3700,8 @@ static const char MOBILE_HTML[] =
     "        motion.ay = clamp16((a.y || 0) / 9.80665 * 4096);\n"
     "        motion.az = clamp16((a.z || 0) / 9.80665 * 4096);\n"
     "        motion.gx = clamp16((rr.beta  || 0) * 16);  // pitch\n"
-    "        motion.gy = clamp16((rr.alpha || 0) * 16);  // yaw / Switch Y\n"
-    "        motion.gz = clamp16((rr.gamma || 0) * 16);  // roll / Switch Z\n"
+    "        motion.gy = clamp16((rr.alpha || 0) * 16);  // yaw / console Y\n"
+    "        motion.gz = clamp16((rr.gamma || 0) * 16);  // roll / console Z\n"
     "    }, {passive:true});\n"
     "}\n"
     "function installDeviceOrientationFallback() {\n"
@@ -5008,6 +5008,14 @@ static void web_server_thread(int web_port, uint16_t udp_port) {
 static bool parse_bind_arg(const std::string& raw, std::string& bind_addr, uint16_t& port) {
     if (raw.empty()) return false;
 
+    uint32_t numeric_port = 0;
+    if (macro_parse_uint32_strict(raw, numeric_port)) {
+        if (numeric_port > 65535) return false;
+        bind_addr = "0.0.0.0";
+        port = (uint16_t)numeric_port;
+        return true;
+    }
+
     std::string addr = raw;
     size_t sep = raw.rfind(':');
     if (sep != std::string::npos) {
@@ -5034,21 +5042,21 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
         if (a == "-p") {
-            std::fprintf(stderr, "error: -p was removed; use -b ADDR:PORT or -b :PORT instead\n");
+            std::fprintf(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead\n");
             return 1;
         }
         else if (a == "-b") {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "error: -b requires ADDR or ADDR:PORT\n");
+                std::fprintf(stderr, "error: -b requires ADDR, PORT, or ADDR:PORT\n");
                 return 1;
             }
             if (!parse_bind_arg(argv[++i], bind_addr, port)) {
-                std::fprintf(stderr, "error: invalid bind address; use -b ADDR or -b ADDR:PORT\n");
+                std::fprintf(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT\n");
                 return 1;
             }
         }
         else if (a == "-v")               g_verbose  = true;
-        else if (a == "-hori")            g_hori_mode = true;
+        else if (a == "-legacy")         g_legacy_mode = true;
         else if (a == "--upnp")           do_upnp    = true;
         else if (a == "-w") {
             if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
@@ -5057,14 +5065,18 @@ int main(int argc, char** argv) {
                 web_port = 8080;
         }
         else if (a == "-h") {
-            puts("ns-backend  [-b ADDR[:PORT]] [--upnp] [-w [WEB_PORT]] [-v] [-hori]");
+            puts("ns-backend  [-b ADDR[:PORT]|PORT] [--upnp] [-w [WEB_PORT]] [-v] [-legacy]");
             puts("");
             puts("  -b ADDR[:PORT]  Bind UDP to an address and optional port.");
-            puts("                   Use -b :PORT to keep 0.0.0.0 with a custom port.");
-            puts("  -hori  Expose the legacy HORI/Pokken 8-byte controller gadget.");
-            puts("         Default mode exposes Pro Controller with motion and rumble.");
+            puts("  -b PORT         Keep 0.0.0.0 with a custom UDP port.");
+            puts("  -legacy         Expose the legacy 8-byte controller gadget.");
+            puts("                  Default mode exposes the 64-byte motion/rumble gadget.");
             puts("");
             return 0;
+        }
+        else {
+            std::fprintf(stderr, "error: unknown argument: %s\n", a.c_str());
+            return 1;
         }
     }
 
@@ -5096,12 +5108,16 @@ int main(int argc, char** argv) {
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf));
 
     sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = inet_addr(bind_addr.c_str());
+    if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+        std::fprintf(stderr, "error: invalid IPv4 bind address: %s\n", bind_addr.c_str());
+        close(sock);
+        return 1;
+    }
     if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); close(sock); return 1; }
     
     std::printf("UDP %s:%u writer=%d Hz mode=%s\n",
                 bind_addr.c_str(), port, PRO_WRITER_HZ,
-                g_hori_mode ? "hori" : "pro");
+                g_legacy_mode ? "legacy" : "modern");
     std::thread wt(writer_thread, PRO_WRITER_HZ);
     std::thread st(stats_thread);
 
@@ -5133,9 +5149,9 @@ int main(int argc, char** argv) {
                 memcpy(&probe, udp_rx.data(), sizeof(probe));
                 if (probe.magic == SERVER_INFO_MAGIC && probe.version == SERVER_INFO_VERSION) {
                     ServerInfoReply reply{};
-                    reply.backend = g_hori_mode ? SERVER_BACKEND_HORI : SERVER_BACKEND_PRO;
-                    reply.udp_interval_ms = g_hori_mode ? HORI_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS;
-                    reply.udp_hz = g_hori_mode ? HORI_UDP_HZ : PRO_UDP_HZ;
+                    reply.backend = g_legacy_mode ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO;
+                    reply.udp_interval_ms = g_legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS;
+                    reply.udp_hz = g_legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ;
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen);
                     continue;
                 }

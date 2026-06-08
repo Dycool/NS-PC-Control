@@ -42,7 +42,7 @@ Gyro and rumble require **both** server and client support:
 
 | Side | Requirements |
 |------|--------------|
-| **Server** | Run the default **modern 64-byte Pro mode** |
+| **Server** | Run the default **modern 64-byte mode** |
 | **PC Client** | Must use the extended UDP protocol |
 | **PC Controller** | Must support gyro (DS4, DualSense, compatible USB motion pads) or have rumble motors |
 
@@ -52,7 +52,7 @@ Platform-specific gyro support:
 - **macOS:** GameController.framework motion data
 - **Browser:** Gamepad API (`pose.angularVelocity`, `pose.linearAcceleration`)
 
-> Gyro and rumble are **not available** in legacy Hori mode.
+> Gyro and rumble are **not available** in legacy mode.
 
 ---
 
@@ -84,11 +84,11 @@ make
 Controller mode is selected at runtime:
 
 ```bash
-# Modern Pro mode, default:
+# Modern mode, default:
 sudo ./ns-backend
 
-# Legacy Hori mode:
-sudo ./ns-backend -hori
+# Legacy mode:
+sudo ./ns-backend -legacy
 ```
 
 Pre-built releases use the same binary for both modes.

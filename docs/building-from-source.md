@@ -26,16 +26,16 @@ cmake ..
 make
 ```
 
-Default runtime mode is Pro Controller with gyro, rumble, and macros:
+Default runtime mode is the modern 64-byte controller with gyro, rumble, and macros:
 
 ```bash
 sudo ./ns-backend
 ```
 
-Use legacy Hori/Pokken 8-byte mode when you only want buttons/sticks:
+Use legacy 8-byte mode when you only want buttons/sticks:
 
 ```bash
-sudo ./ns-backend -hori
+sudo ./ns-backend -legacy
 ```
 
 > The server includes **built-in USB gadget setup** - no external `setup_gadget.sh` script needed. It automatically creates and binds the HID gadget on startup and cleans up on exit.

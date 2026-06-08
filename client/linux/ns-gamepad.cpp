@@ -1129,8 +1129,8 @@ public:
     void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
         // Normal-rumble build: treat PrecisionRumblePacket as a carrier for
-        // already-decoded classic low/high magnitudes. Do not send Nintendo
-        // HD/precision effect bytes through SDL.
+        // already-decoded classic low/high magnitudes. Do not send vendor
+        // precision effect bytes through SDL.
         ns::RumblePacket fallback{};
         fallback.magic = ns::RUMBLE_MAGIC;
         fallback.subpad = rp.subpad;
@@ -1218,8 +1218,8 @@ static void pump_udp_rumble(int sock, RumbleManager& rumble, const int controlle
     }
 }
 
-static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
-    if (out_is_hori) *out_is_hori = false;
+static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_legacy) {
+    if (out_is_legacy) *out_is_legacy = false;
     ns::ServerInfoProbe probe{};
     sendto(sock, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
            reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -1235,7 +1235,7 @@ static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int 
             reply.magic == ns::SERVER_INFO_MAGIC &&
             reply.version == ns::SERVER_INFO_VERSION &&
             reply.udp_interval_ms > 0) {
-            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            if (out_is_legacy) *out_is_legacy = reply.backend == ns::SERVER_BACKEND_LEGACY;
             return fallback_ms;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1321,10 +1321,10 @@ int main(int argc, char** argv) {
     std::memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
 
-    bool server_is_hori = false;
+    bool server_is_legacy = false;
     const int active_send_interval_ms = detect_server_udp_interval_ms(
-        sock, dest, ns::HORI_UDP_INTERVAL_MS, &server_is_hori);
-    const bool send_motion = !server_is_hori;
+        sock, dest, ns::LEGACY_UDP_INTERVAL_MS, &server_is_legacy);
+    const bool send_motion = !server_is_legacy;
 
     // Initialise SDL3 Gamepad subsystem.
     SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");

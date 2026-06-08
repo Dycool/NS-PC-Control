@@ -1771,8 +1771,8 @@ static bool ApplyMacroOverrideMac(ns::HIDReport[4], bool[4], bool[4], int[4]) {
 //  App Delegate (GUI and Core Logic)
 // ─────────────────────────────────────────────────────────────────────────────
 
-static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
-    if (out_is_hori) *out_is_hori = false;
+static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_legacy) {
+    if (out_is_legacy) *out_is_legacy = false;
     ns::ServerInfoProbe probe{};
     sendto(sock, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
            reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -1788,7 +1788,7 @@ static int detect_server_udp_interval_ms(int sock, const sockaddr_in& dest, int 
             reply.magic == ns::SERVER_INFO_MAGIC &&
             reply.version == ns::SERVER_INFO_VERSION &&
             reply.udp_interval_ms > 0) {
-            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            if (out_is_legacy) *out_is_legacy = reply.backend == ns::SERVER_BACKEND_LEGACY;
             return fallback_ms;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -2855,10 +2855,10 @@ static bool MacroWriteURLMac(NSURL* url, const std::string& text) {
         memcpy(&dest, res->ai_addr, sizeof(dest));
         freeaddrinfo(res);
 
-        bool serverIsHori = false;
+        bool serverIsLegacy = false;
         const int activeSendIntervalMs = detect_server_udp_interval_ms(
-            self->sock, dest, ns::HORI_UDP_INTERVAL_MS, &serverIsHori);
-        const bool sendMotion = !serverIsHori;
+            self->sock, dest, ns::LEGACY_UDP_INTERVAL_MS, &serverIsLegacy);
+        const bool sendMotion = !serverIsLegacy;
 
         uint32_t seqCounter = 0;
         bool first_packet = true;

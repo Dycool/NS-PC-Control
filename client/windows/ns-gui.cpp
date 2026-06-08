@@ -630,7 +630,7 @@ static_assert(sizeof(ExtendedUdpPacket) == EXT_UDP_PACKET_SIZE, "ExtendedUdpPack
 
 static void set_pad_present_flag(ns::ExtendedHIDReport& r, bool present) {
     // This project keeps the pad-present bit in HIDReport::vendor (byte 7)
-    // so old HORI-compatible HIDReport stays exactly 8 bytes.
+    // so old legacy-compatible HIDReport stays exactly 8 bytes.
     if (present) r.input.vendor |= EXT_PAD_PRESENT;
     else         r.input.vendor &= (uint8_t)~EXT_PAD_PRESENT;
 }
@@ -1003,9 +1003,9 @@ private:
 
         bool got_any_motion = false;
 
-        // Switch X = -SDL X
-        // Switch Y = -SDL Z
-        // Switch Z = +SDL Y
+        // Console X = -SDL X
+        // Console Y = -SDL Z
+        // Console Z = +SDL Y
         float accel[3] = {};
         if (d.accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
             out.ax = clamp_motion_i16(-accel[0] * ACCEL_SCALE);
@@ -1019,9 +1019,9 @@ private:
             out.az = 4096;
         }
 
-        // Switch X = -SDL X
-        // Switch Y = -SDL Z
-        // Switch Z = +SDL Y
+        // Console X = -SDL X
+        // Console Y = -SDL Z
+        // Console Z = +SDL Y
         float gyro[3] = {};
         if (d.gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
             float gx = -gyro[0];
@@ -2708,8 +2708,8 @@ static void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
     else if (!override_mode) rep.ry = 128;
 }
 
-static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_hori) {
-    if (out_is_hori) *out_is_hori = false;
+static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, int fallback_ms, bool* out_is_legacy) {
+    if (out_is_legacy) *out_is_legacy = false;
     ns::ServerInfoProbe probe{};
     sendto(sock, reinterpret_cast<const char*>(&probe), (int)sizeof(probe), 0,
            reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -2725,7 +2725,7 @@ static int detect_server_udp_interval_ms(SOCKET sock, const sockaddr_in& dest, i
             reply.magic == ns::SERVER_INFO_MAGIC &&
             reply.version == ns::SERVER_INFO_VERSION &&
             reply.udp_interval_ms > 0) {
-            if (out_is_hori) *out_is_hori = reply.backend == ns::SERVER_BACKEND_HORI;
+            if (out_is_legacy) *out_is_legacy = reply.backend == ns::SERVER_BACKEND_LEGACY;
             return fallback_ms;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -2761,9 +2761,9 @@ static void SenderThread() {
     memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
 
-    bool serverIsHori = false;
-    const int activeSendIntervalMs = detect_server_udp_interval_ms(sock, dest, ns::HORI_UDP_INTERVAL_MS, &serverIsHori);
-    const bool sendMotion = !serverIsHori;
+    bool serverIsLegacy = false;
+    const int activeSendIntervalMs = detect_server_udp_interval_ms(sock, dest, ns::LEGACY_UDP_INTERVAL_MS, &serverIsLegacy);
+    const bool sendMotion = !serverIsLegacy;
 
     g_sock = sock;
     g_senderRunning = true;
