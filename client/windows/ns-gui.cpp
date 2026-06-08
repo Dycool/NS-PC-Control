@@ -789,6 +789,68 @@ struct MotionTuningSnapshot {
 
 static MotionTuningRuntime g_motion_tuning;
 
+struct MotionSensorLast {
+    std::mutex mtx;
+    bool has_accel = false;
+    bool has_gyro = false;
+    float accel[3] = {0.0f, 0.0f, 0.0f};
+    float gyro[3] = {0.0f, 0.0f, 0.0f};
+    uint64_t accel_us = 0;
+    uint64_t gyro_us = 0;
+};
+
+static MotionSensorLast g_motion_sensor_last;
+static bool g_motion_calib_have_neutral = false;
+static float g_motion_calib_neutral[3] = {0.0f, 0.0f, 0.0f};
+
+static void motion_sensor_store_accel(const float accel[3]) {
+    std::lock_guard<std::mutex> lk(g_motion_sensor_last.mtx);
+    for (int i = 0; i < 3; ++i) g_motion_sensor_last.accel[i] = accel[i];
+    g_motion_sensor_last.has_accel = true;
+    g_motion_sensor_last.accel_us = ns::now_us();
+}
+
+static void motion_sensor_store_gyro(const float gyro[3]) {
+    std::lock_guard<std::mutex> lk(g_motion_sensor_last.mtx);
+    for (int i = 0; i < 3; ++i) g_motion_sensor_last.gyro[i] = gyro[i];
+    g_motion_sensor_last.has_gyro = true;
+    g_motion_sensor_last.gyro_us = ns::now_us();
+}
+
+static bool motion_sensor_read_accel(float out[3]) {
+    std::lock_guard<std::mutex> lk(g_motion_sensor_last.mtx);
+    if (!g_motion_sensor_last.has_accel) return false;
+    if (g_motion_sensor_last.accel_us == 0 || ns::now_us() - g_motion_sensor_last.accel_us > 1000000ULL) return false;
+    for (int i = 0; i < 3; ++i) out[i] = g_motion_sensor_last.accel[i];
+    return true;
+}
+
+static int motion_largest_abs_axis(const float v[3], const bool allow[3]) {
+    int best = -1;
+    float best_abs = -1.0f;
+    for (int i = 0; i < 3; ++i) {
+        if (allow && !allow[i]) continue;
+        float a = std::fabs(v[i]);
+        if (a > best_abs) { best_abs = a; best = i; }
+    }
+    return best < 0 ? 0 : best;
+}
+
+static int motion_permutation_sign(int p0, int p1, int p2) {
+    int inv = 0;
+    int p[3] = {p0, p1, p2};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = i + 1; j < 3; ++j) {
+            if (p[i] > p[j]) ++inv;
+        }
+    }
+    return (inv & 1) ? -1 : 1;
+}
+
+static int motion_float_sign(float v) {
+    return v < 0.0f ? -1 : 1;
+}
+
 static int motion_clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
@@ -1120,6 +1182,7 @@ private:
 
         float gyro[3] = {};
         if (d.gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
+            motion_sensor_store_gyro(gyro);
             constexpr float STANDARD_GRAVITY = 9.80665f;
             constexpr float CONSOLE_ACCEL_SCALE = 4096.0f / STANDARD_GRAVITY;
             constexpr float RAD_TO_DEG = 57.29577951308232f;
@@ -1128,6 +1191,7 @@ private:
             float accel[3] = {};
             const bool got_accel = d.accel_enabled &&
                 SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3);
+            if (got_accel) motion_sensor_store_accel(accel);
 
             if (tune.accel_mode == 1 && got_accel) {
                 out.ax = tune.accel_enable[0] ? clamp_motion_i16((float)tune.accel_sign[0] * motion_pick_axis(accel, tune.accel_src[0]) * CONSOLE_ACCEL_SCALE) : 0;
@@ -1633,7 +1697,7 @@ static void SaveKeyboardMode(int mode) {
 }
 
 
-enum { IDC_IP = 101, IDC_CONNECT, IDC_KEYBOARD_COMBO = 110, IDC_BINDINGS_BTN = 111, IDC_MACROS_BTN = 112, IDC_MOTION_BTN = 113, IDC_EDITOR_CHANGE = 200, IDC_EDITOR_SETUP = 400, IDC_EDITOR_RESET = 500, IDC_EDITOR_CLEAR = 501, IDC_EDITOR_KEY_START = 300, IDC_MACRO_EDIT = 600, IDC_MACRO_RUN = 601, IDC_MACRO_SAVE = 602, IDC_MACRO_DELETE = 603, IDC_MACRO_CLOSE = 604, IDC_MACRO_RECORD_START = 605, IDC_MACRO_RECORD_STOP = 606, IDC_MACRO_IMPORT = 607, IDC_MACRO_EXPORT = 608, IDC_MACRO_HOTKEY = 609, IDC_MACRO_NAME = 610, IDC_MACRO_ADD = 611, IDC_MACRO_RECORD_TOGGLE = 612, IDC_MACRO_RUN_BASE = 700, IDC_MACRO_DELETE_BASE = 800, IDC_MACRO_KEY_BASE = 900, IDC_MACRO_RENAME_BASE = 1000, IDC_MACRO_EXPORT_BASE = 1100, IDC_MOTION_MODE = 1300, IDC_MOTION_FIXED_AX = 1301, IDC_MOTION_FIXED_AY = 1302, IDC_MOTION_FIXED_AZ = 1303, IDC_MOTION_ACCEL_SRC_X = 1310, IDC_MOTION_ACCEL_SRC_Y = 1311, IDC_MOTION_ACCEL_SRC_Z = 1312, IDC_MOTION_ACCEL_SIGN_X = 1320, IDC_MOTION_ACCEL_SIGN_Y = 1321, IDC_MOTION_ACCEL_SIGN_Z = 1322, IDC_MOTION_GYRO_SRC_X = 1330, IDC_MOTION_GYRO_SRC_Y = 1331, IDC_MOTION_GYRO_SRC_Z = 1332, IDC_MOTION_GYRO_SIGN_X = 1340, IDC_MOTION_GYRO_SIGN_Y = 1341, IDC_MOTION_GYRO_SIGN_Z = 1342, IDC_MOTION_GYRO_SCALE = 1350, IDC_MOTION_GYRO_DEADZONE = 1351, IDC_MOTION_ACCEL_ENABLE_X = 1360, IDC_MOTION_ACCEL_ENABLE_Y = 1361, IDC_MOTION_ACCEL_ENABLE_Z = 1362, IDC_MOTION_GYRO_ENABLE_X = 1363, IDC_MOTION_GYRO_ENABLE_Y = 1364, IDC_MOTION_GYRO_ENABLE_Z = 1365, IDC_MOTION_APPLY = 1370, IDC_MOTION_RESET = 1371, IDC_MOTION_CLOSE = 1372 };
+enum { IDC_IP = 101, IDC_CONNECT, IDC_KEYBOARD_COMBO = 110, IDC_BINDINGS_BTN = 111, IDC_MACROS_BTN = 112, IDC_MOTION_BTN = 113, IDC_EDITOR_CHANGE = 200, IDC_EDITOR_SETUP = 400, IDC_EDITOR_RESET = 500, IDC_EDITOR_CLEAR = 501, IDC_EDITOR_KEY_START = 300, IDC_MACRO_EDIT = 600, IDC_MACRO_RUN = 601, IDC_MACRO_SAVE = 602, IDC_MACRO_DELETE = 603, IDC_MACRO_CLOSE = 604, IDC_MACRO_RECORD_START = 605, IDC_MACRO_RECORD_STOP = 606, IDC_MACRO_IMPORT = 607, IDC_MACRO_EXPORT = 608, IDC_MACRO_HOTKEY = 609, IDC_MACRO_NAME = 610, IDC_MACRO_ADD = 611, IDC_MACRO_RECORD_TOGGLE = 612, IDC_MACRO_RUN_BASE = 700, IDC_MACRO_DELETE_BASE = 800, IDC_MACRO_KEY_BASE = 900, IDC_MACRO_RENAME_BASE = 1000, IDC_MACRO_EXPORT_BASE = 1100, IDC_MOTION_MODE = 1300, IDC_MOTION_FIXED_AX = 1301, IDC_MOTION_FIXED_AY = 1302, IDC_MOTION_FIXED_AZ = 1303, IDC_MOTION_ACCEL_SRC_X = 1310, IDC_MOTION_ACCEL_SRC_Y = 1311, IDC_MOTION_ACCEL_SRC_Z = 1312, IDC_MOTION_ACCEL_SIGN_X = 1320, IDC_MOTION_ACCEL_SIGN_Y = 1321, IDC_MOTION_ACCEL_SIGN_Z = 1322, IDC_MOTION_GYRO_SRC_X = 1330, IDC_MOTION_GYRO_SRC_Y = 1331, IDC_MOTION_GYRO_SRC_Z = 1332, IDC_MOTION_GYRO_SIGN_X = 1340, IDC_MOTION_GYRO_SIGN_Y = 1341, IDC_MOTION_GYRO_SIGN_Z = 1342, IDC_MOTION_GYRO_SCALE = 1350, IDC_MOTION_GYRO_DEADZONE = 1351, IDC_MOTION_ACCEL_ENABLE_X = 1360, IDC_MOTION_ACCEL_ENABLE_Y = 1361, IDC_MOTION_ACCEL_ENABLE_Z = 1362, IDC_MOTION_GYRO_ENABLE_X = 1363, IDC_MOTION_GYRO_ENABLE_Y = 1364, IDC_MOTION_GYRO_ENABLE_Z = 1365, IDC_MOTION_APPLY = 1370, IDC_MOTION_RESET = 1371, IDC_MOTION_CLOSE = 1372, IDC_MOTION_AUTO_ACCEL = 1373 };
 static HWND CreateButton(HWND parent, const wchar_t* text, int x, int y, int w, int h, int id);
 
 // ── Macro runtime/editor ────────────────────────────────────────────────────
@@ -2910,6 +2974,79 @@ static void MotionCreateAxisRow(HWND hWnd, const wchar_t* label, int y, int srcI
     MotionCreateCheck(hWnd, L"Enable", enableId, 345, y + 2, 80, 20);
 }
 
+static void MotionTuningAutoCalibrateAccel(HWND hWnd) {
+    MessageBoxW(hWnd,
+        L"Step 1/2:\n\nHold the controller in the neutral position you actually want to play in.\nDo not leave it on the table unless that is the target posture.\n\nClick OK while holding it still.",
+        L"Auto accel calibration", MB_OK | MB_ICONINFORMATION);
+
+    float neutral[3] = {};
+    if (!motion_sensor_read_accel(neutral)) {
+        MessageBoxW(hWnd, L"No recent SDL accelerometer sample. Connect a controller and keep Motion enabled first.",
+            L"Auto accel calibration", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    for (int i = 0; i < 3; ++i) g_motion_calib_neutral[i] = neutral[i];
+    g_motion_calib_have_neutral = true;
+
+    MessageBoxW(hWnd,
+        L"Step 2/2:\n\nTilt the controller LEFT, like Mario Kart tilt steering.\nKeep holding that left tilt and click OK.\n\nThis only chooses accel axes/signs; it does not change gyro.",
+        L"Auto accel calibration", MB_OK | MB_ICONINFORMATION);
+
+    float left[3] = {};
+    if (!motion_sensor_read_accel(left)) {
+        MessageBoxW(hWnd, L"No recent SDL accelerometer sample for the left tilt pose.",
+            L"Auto accel calibration", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    float delta[3] = {
+        left[0] - g_motion_calib_neutral[0],
+        left[1] - g_motion_calib_neutral[1],
+        left[2] - g_motion_calib_neutral[2]
+    };
+
+    bool any[3] = {true, true, true};
+    int src_z = motion_largest_abs_axis(g_motion_calib_neutral, any);
+    int sign_z = motion_float_sign(g_motion_calib_neutral[src_z]);
+
+    bool allow_x[3] = {true, true, true};
+    allow_x[src_z] = false;
+    int src_x = motion_largest_abs_axis(delta, allow_x);
+    int sign_x = motion_float_sign(delta[src_x]);
+
+    int src_y = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (i != src_x && i != src_z) { src_y = i; break; }
+    }
+
+    int perm = motion_permutation_sign(src_x, src_y, src_z);
+    int sign_y = perm * sign_x * sign_z;
+
+    g_motion_tuning.accel_mode = 1;
+    g_motion_tuning.accel_src_x = src_x;
+    g_motion_tuning.accel_src_y = src_y;
+    g_motion_tuning.accel_src_z = src_z;
+    g_motion_tuning.accel_sign_x = sign_x;
+    g_motion_tuning.accel_sign_y = sign_y;
+    g_motion_tuning.accel_sign_z = sign_z;
+    g_motion_tuning.accel_enable_x = 1;
+    g_motion_tuning.accel_enable_y = 1;
+    g_motion_tuning.accel_enable_z = 1;
+
+    MotionTuningLoadToDialog(hWnd);
+
+    wchar_t msg[512];
+    swprintf(msg, 512,
+        L"Applied raw accel mapping:\n\n"
+        L"Accel X <= SDL %d, sign %+d\n"
+        L"Accel Y <= SDL %d, sign %+d\n"
+        L"Accel Z <= SDL %d, sign %+d\n\n"
+        L"If left/right is inverted but the camera is centered, flip only Accel X sign.",
+        src_x, sign_x, src_y, sign_y, src_z, sign_z);
+    MessageBoxW(hWnd, msg, L"Auto accel calibration", MB_OK | MB_ICONINFORMATION);
+}
+
 static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     (void)lParam;
     switch (msg) {
@@ -2954,7 +3091,11 @@ static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         y += 36;
 
         MotionCreateLabel(hWnd, L"Defaults: fixed accel 0,0,4096; all accel/gyro axes enabled; gyro direct X/Y/Z.", 16, y, 570, 20);
-        y += 30;
+        y += 28;
+
+        CreateButton(hWnd, L"Auto accel...", 16, y, 120, 28, IDC_MOTION_AUTO_ACCEL);
+        MotionCreateLabel(hWnd, L"Guided neutral + left-tilt calibration. Keeps your gyro mapping unchanged.", 150, y + 5, 440, 20);
+        y += 38;
 
         CreateButton(hWnd, L"Apply", 140, y, 80, 28, IDC_MOTION_APPLY);
         CreateButton(hWnd, L"Reset", 230, y, 80, 28, IDC_MOTION_RESET);
@@ -2973,6 +3114,8 @@ static LRESULT CALLBACK MotionTuningProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             MotionTuningLoadToDialog(hWnd);
         } else if (id == IDC_MOTION_APPLY) {
             MotionTuningApplyFromDialog(hWnd);
+        } else if (id == IDC_MOTION_AUTO_ACCEL) {
+            MotionTuningAutoCalibrateAccel(hWnd);
         } else if ((id >= IDC_MOTION_MODE && id <= IDC_MOTION_CLOSE) &&
                    (code == EN_CHANGE || code == CBN_SELCHANGE || code == BN_CLICKED)) {
             MotionTuningApplyFromDialog(hWnd);
@@ -2997,7 +3140,7 @@ static void ShowMotionTuning(HWND parent) {
         SetForegroundWindow(g_hMotionTuningWnd);
         return;
     }
-    RECT rc{0, 0, 610, 470};
+    RECT rc{0, 0, 610, 525};
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
     g_hMotionTuningWnd = CreateWindowW(L"NSMotionTuning", L"Motion tuning",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
