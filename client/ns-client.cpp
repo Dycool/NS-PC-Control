@@ -2108,147 +2108,247 @@ static void raise_sender_priority() {
 #endif
 }
 
-static void sender_thread_main(std::string host, uint16_t port, bool legacy_udp) {
-    raise_sender_priority();
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock == INVALID_SOCKET) {
-        g_lastError = "Failed to create UDP socket.";
-        set_status_message(g_lastError);
-        g_connected.store(false);
-        g_senderRunning.store(false);
+struct ClientFrame {
+    ns::HIDReport reports[4];
+    ns::MotionReport motion[4];
+    bool present[4] = {false, false, false, false};
+    bool has_motion[4] = {false, false, false, false};
+    int controller_for_slot[4] = {-1, -1, -1, -1};
+    int active_count = 0;
+
+    void reset() {
+        active_count = 0;
+        for (int i = 0; i < 4; ++i) {
+            reports[i].reset();
+            motion[i].reset();
+            present[i] = false;
+            has_motion[i] = false;
+            controller_for_slot[i] = -1;
+        }
+    }
+};
+
+struct ClientStreamConfig {
+    std::string host;
+    int port = ns::DEFAULT_PORT;
+    bool force_legacy_udp = false;
+    bool gui_features = false;
+    bool print_cli_waiting_messages = false;
+    int idle_sleep_ms = 50;
+    const uint8_t* hmac_key = nullptr;
+};
+
+static void build_client_frame(ClientFrame& frame,
+                               DigitalReleaseFilter filters[4],
+                               bool send_motion,
+                               int keyboard_mode) {
+    frame.reset();
+
+    auto sdl = g_sdlInput.snapshot();
+    const uint64_t filter_now = ns::now_us();
+
+    for (int i = 0; i < 4; ++i) {
+        if (!sdl[i].connected) {
+            filters[i].reset();
+            continue;
+        }
+
+        frame.reports[i] = sdl[i].input;
+        filters[i].apply(frame.reports[i], filter_now);
+        frame.motion[i] = sdl[i].motion;
+        frame.present[i] = true;
+        frame.has_motion[i] = send_motion && sdl[i].has_motion;
+        frame.controller_for_slot[i] = i;
+        ++frame.active_count;
+    }
+
+    if (keyboard_mode == KB_SINGLE) {
+        if (frame.present[0]) {
+            int target = -1;
+            for (int s = 1; s < 4; ++s) {
+                if (!frame.present[s]) { target = s; break; }
+            }
+            if (target >= 0) {
+                frame.reports[target] = frame.reports[0];
+                frame.motion[target] = frame.motion[0];
+                frame.has_motion[target] = frame.has_motion[0];
+                frame.present[target] = true;
+                frame.controller_for_slot[target] = frame.controller_for_slot[0];
+                ++frame.active_count;
+            }
+        }
+
+        frame.reports[0].reset();
+        frame.motion[0].reset();
+        apply_keyboard_to_report(frame.reports[0], false);
+        frame.present[0] = true;
+        frame.has_motion[0] = false;
+        frame.controller_for_slot[0] = -1;
+        frame.active_count = std::max(frame.active_count, 1);
+    } else if (keyboard_mode == KB_OVERRIDE) {
+        apply_keyboard_to_report(frame.reports[0], true);
+        frame.present[0] = true;
+        frame.active_count = std::max(frame.active_count, 1);
+    }
+}
+
+static void send_client_frame(SOCKET sock,
+                              const sockaddr_in& dest,
+                              const uint8_t hmac_key[32],
+                              uint32_t& seq,
+                              bool legacy_packet,
+                              const ClientFrame& frame) {
+    if (legacy_packet) {
+        ns::Packet pkt{};
+        pkt.magic = ns::PROTO_MAGIC;
+        pkt.version = ns::PROTO_VERSION;
+        pkt.flags = ns::FLAG_NONE;
+        pkt.seq = seq++;
+        pkt.ts_us = ns::now_us();
+        pkt.report.reset();
+
+        ns::HIDReport* pads[4] = {&pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4};
+        for (int i = 0; i < 4; ++i) *pads[i] = frame.reports[i];
+
+        uint8_t full_hmac[32];
+        hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE, full_hmac);
+        std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+        send_all_udp(sock, dest, &pkt, ns::PACKET_SIZE);
         return;
     }
+
+    ExtendedUdpPacket pkt{};
+    pkt.magic = ns::PROTO_MAGIC;
+    pkt.version = ns::WEB_PROTO_VERSION;
+    pkt.flags = ns::FLAG_NONE;
+    pkt.seq = seq++;
+    pkt.timestamp_us = ns::now_us();
+    pkt.report.reset();
+
+    ns::ExtendedHIDReport* pads[4] = {&pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4};
+    for (int i = 0; i < 4; ++i) {
+        fill_extended_pad(*pads[i], frame.reports[i], frame.present[i],
+                          frame.has_motion[i] ? &frame.motion[i] : nullptr);
+    }
+
+    uint8_t full_hmac[32];
+    hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE, full_hmac);
+    std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+    send_all_udp(sock, dest, &pkt, sizeof(pkt));
+}
+
+static int run_client_stream(const ClientStreamConfig& cfg,
+                             std::atomic<bool>& running,
+                             std::string* err_out = nullptr) {
+    if (!cfg.hmac_key) {
+        if (err_out) *err_out = "Missing HMAC key.";
+        return 1;
+    }
+
+    raise_sender_priority();
+
+    if (!g_sdlInput.start()) {
+        if (err_out) *err_out = "SDL3 input failed: " + g_sdlInput.error();
+        return 1;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock == INVALID_SOCKET) {
+        if (err_out) *err_out = "Failed to create UDP socket.";
+        return 1;
+    }
     set_socket_nonblocking(sock);
+
     sockaddr_in dest{};
-    if (!resolve_udp_destination(host, port, dest)) {
-        g_lastError = "Cannot resolve address: " + host;
-        set_status_message(g_lastError);
+    if (!resolve_udp_destination(cfg.host, cfg.port, dest)) {
+        if (err_out) *err_out = "Cannot resolve address: " + cfg.host;
         closesocket(sock);
-        g_connected.store(false);
-        g_senderRunning.store(false);
-        return;
+        return 1;
     }
 
     const bool server_is_legacy = detect_server_is_legacy(sock, dest);
+    const bool legacy_packet = cfg.force_legacy_udp || server_is_legacy;
+    const bool send_motion = !legacy_packet;
     const int active_send_interval_ms = ns::LEGACY_UDP_INTERVAL_MS; // always 250 Hz
-    const bool send_motion = !server_is_legacy && !legacy_udp;
+
     uint32_t seq = 0;
     RumbleManager rumble;
     DigitalReleaseFilter sdl_filters[4];
-    g_senderRunning.store(true);
-    set_status_message("Connected to " + host + ":" + std::to_string(port));
+    bool no_controllers_printed = false;
 
-    while (g_senderRunning.load(std::memory_order_relaxed)) {
-        {
+    while (running.load(std::memory_order_relaxed)) {
+        if (cfg.gui_features) {
             std::string upload;
-            { std::lock_guard<std::mutex> lk(g_macro_mtx); upload.swap(g_macro_upload_pending); }
-            if (!upload.empty()) send_macro_udp_packet(sock, dest, g_hmacKey, upload, 0);
+            {
+                std::lock_guard<std::mutex> lk(g_macro_mtx);
+                upload.swap(g_macro_upload_pending);
+            }
+            if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
+
+            poll_macro_entry_hotkeys();
         }
 
-        poll_macro_entry_hotkeys();
         g_sdlInput.poll();
 
-        ns::HIDReport logical_reports[4];
-        ns::MotionReport logical_motion[4];
-        bool present[4] = {false, false, false, false};
-        bool has_motion[4] = {false, false, false, false};
-        int sdl_for_slot[4] = {-1, -1, -1, -1};
-        for (int i = 0; i < 4; ++i) {
-            logical_reports[i].reset();
-            logical_motion[i].reset();
+        ClientFrame frame;
+        build_client_frame(frame, sdl_filters, send_motion, g_keyboardMode.load());
+
+        if (cfg.gui_features) {
+            macro_record_sample(frame.reports[0]);
+            if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) {
+                frame.active_count = 1;
+            }
         }
 
-        int active_count = 0;
-        auto sdl = g_sdlInput.snapshot();
-        const uint64_t filter_now = ns::now_us();
-        for (int i = 0; i < 4; ++i) {
-            if (!sdl[i].connected) {
-                sdl_filters[i].reset();
-                continue;
-            }
-            logical_reports[i] = sdl[i].input;
-            sdl_filters[i].apply(logical_reports[i], filter_now);
-            present[i] = true;
-            sdl_for_slot[i] = i;
-            if (send_motion && sdl[i].has_motion) {
-                logical_motion[i] = sdl[i].motion;
-                has_motion[i] = true;
-            }
-            ++active_count;
-        }
+        send_client_frame(sock, dest, cfg.hmac_key, seq, legacy_packet, frame);
 
-        int km = g_keyboardMode.load();
-        if (km == KB_SINGLE) {
-            if (present[0]) {
-                int target = -1;
-                for (int s = 1; s < 4; ++s) {
-                    if (!present[s]) { target = s; break; }
-                }
-                if (target >= 0) {
-                    logical_reports[target] = logical_reports[0];
-                    logical_motion[target] = logical_motion[0];
-                    has_motion[target] = has_motion[0];
-                    present[target] = true;
-                    sdl_for_slot[target] = sdl_for_slot[0];
-                    ++active_count;
-                }
-            }
-            logical_reports[0].reset();
-            logical_motion[0].reset();
-            apply_keyboard_to_report(logical_reports[0], false);
-            present[0] = true;
-            has_motion[0] = false;
-            sdl_for_slot[0] = -1;
-            active_count = std::max(active_count, 1);
-        } else if (km == KB_OVERRIDE) {
-            apply_keyboard_to_report(logical_reports[0], true);
-            present[0] = true;
-            active_count = std::max(active_count, 1);
-        }
-
-        macro_record_sample(logical_reports[0]);
-        if (apply_macro_override(logical_reports, present, has_motion)) active_count = 1;
-
-        if (legacy_udp || server_is_legacy) {
-            ns::Packet pkt{};
-            pkt.magic = ns::PROTO_MAGIC;
-            pkt.version = ns::PROTO_VERSION;
-            pkt.flags = ns::FLAG_NONE;
-            pkt.seq = seq++;
-            pkt.ts_us = ns::now_us();
-            pkt.report.reset();
-            ns::HIDReport* pads[4] = {&pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4};
-            for (int i = 0; i < 4; ++i) *pads[i] = logical_reports[i];
-            uint8_t full_hmac[32];
-            hmac_sha256(g_hmacKey, 32, reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE, full_hmac);
-            std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-            send_all_udp(sock, dest, &pkt, ns::PACKET_SIZE);
-        } else {
-            ExtendedUdpPacket pkt{};
-            pkt.magic = ns::PROTO_MAGIC;
-            pkt.version = ns::WEB_PROTO_VERSION;
-            pkt.flags = ns::FLAG_NONE;
-            pkt.seq = seq++;
-            pkt.timestamp_us = ns::now_us();
-            pkt.report.reset();
-            ns::ExtendedHIDReport* pads[4] = {&pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4};
-            for (int i = 0; i < 4; ++i)
-                fill_extended_pad(*pads[i], logical_reports[i], present[i], has_motion[i] ? &logical_motion[i] : nullptr);
-            uint8_t full_hmac[32];
-            hmac_sha256(g_hmacKey, 32, reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE, full_hmac);
-            std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-            send_all_udp(sock, dest, &pkt, sizeof(pkt));
-            pump_udp_rumble(sock, rumble, sdl_for_slot);
-            rumble.update_timeouts(sdl_for_slot);
+        if (!legacy_packet) {
+            pump_udp_rumble(sock, rumble, frame.controller_for_slot);
+            rumble.update_timeouts(frame.controller_for_slot);
         }
 
         ++g_packetCount;
-        std::this_thread::sleep_for(std::chrono::milliseconds(active_count > 0 ? active_send_interval_ms : 50));
+
+        if (frame.active_count > 0) {
+            no_controllers_printed = false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(active_send_interval_ms));
+        } else {
+            if (cfg.print_cli_waiting_messages && !no_controllers_printed) {
+                std::cout << "No controllers detected - waiting for connections...\n";
+                no_controllers_printed = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(cfg.idle_sleep_ms));
+        }
     }
 
-    send_udp_disconnect_packet(sock, dest, g_hmacKey, seq++, legacy_udp || server_is_legacy);
     rumble.stop_all();
+    send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++, legacy_packet);
     closesocket(sock);
+    return 0;
+}
+
+static void sender_thread_main(std::string host, uint16_t port, bool legacy_udp) {
+    ClientStreamConfig cfg{};
+    cfg.host = std::move(host);
+    cfg.port = port;
+    cfg.force_legacy_udp = legacy_udp;
+    cfg.gui_features = true;
+    cfg.print_cli_waiting_messages = false;
+    cfg.idle_sleep_ms = 50;
+    cfg.hmac_key = g_hmacKey;
+
+    g_senderRunning.store(true);
+    set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
+
+    std::string err;
+    int rc = run_client_stream(cfg, g_senderRunning, &err);
+    if (rc != 0 && !err.empty()) {
+        g_lastError = err;
+        set_status_message(err);
+    }
+
+    g_connected.store(false);
+    g_senderRunning.store(false);
 }
 
 static bool start_connection(const std::string& target, std::string* err_out = nullptr) {
@@ -2347,6 +2447,7 @@ static int cli_main(const std::vector<std::string>& original_args) {
     signal(SIGINT, cli_signal_handler);
     signal(SIGTERM, cli_signal_handler);
 #endif
+
     std::vector<std::string> args;
     args.reserve(original_args.size());
     for (const std::string& a : original_args) if (a != "--cli") args.push_back(a);
@@ -2400,6 +2501,7 @@ static int cli_main(const std::vector<std::string>& original_args) {
             return 1;
         }
     }
+
     if (host.empty()) {
         print_cli_usage(args[0].c_str());
         return 1;
@@ -2416,23 +2518,22 @@ static int cli_main(const std::vector<std::string>& original_args) {
 
     uint8_t hmac_key[32];
     derive_key(ns::DEFAULT_SECRET, hmac_key);
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock == INVALID_SOCKET) {
-        std::cerr << "ERROR: socket() failed\n";
-        return 1;
-    }
-    set_socket_nonblocking(sock);
-    sockaddr_in dest{};
-    if (!resolve_udp_destination(host, port, dest)) {
-        std::cerr << "ERROR: Unable to resolve IP/host: " << host << "\n";
-        closesocket(sock);
-        return 1;
-    }
-    const bool server_is_legacy = detect_server_is_legacy(sock, dest);
-    const int active_send_interval_ms = ns::LEGACY_UDP_INTERVAL_MS; // always 250 Hz
-    const bool send_motion = !server_is_legacy && !legacy_udp;
 
     if (macro_mode) {
+        SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock == INVALID_SOCKET) {
+            std::cerr << "ERROR: socket() failed\n";
+            return 1;
+        }
+        set_socket_nonblocking(sock);
+
+        sockaddr_in dest{};
+        if (!resolve_udp_destination(host, port, dest)) {
+            std::cerr << "ERROR: Unable to resolve IP/host: " << host << "\n";
+            closesocket(sock);
+            return 1;
+        }
+
         std::string err;
         std::string macro_raw = read_text_file_limited(macro_path, &err);
         if (macro_raw.empty()) {
@@ -2454,120 +2555,21 @@ static int cli_main(const std::vector<std::string>& original_args) {
         return sent ? 0 : 1;
     }
 
-    if (!g_sdlInput.start()) {
-        std::cerr << "ERROR: SDL3 input failed: " << g_sdlInput.error() << "\n";
-        closesocket(sock);
-        return 1;
-    }
+    ClientStreamConfig cfg{};
+    cfg.host = host;
+    cfg.port = port;
+    cfg.force_legacy_udp = legacy_udp;
+    cfg.gui_features = false;
+    cfg.print_cli_waiting_messages = true;
+    cfg.idle_sleep_ms = 500;
+    cfg.hmac_key = hmac_key;
+
     std::cout << "Started unified CLI client. Press Ctrl+C to stop.\n";
-    uint32_t seq = 0;
-    RumbleManager rumble;
-    DigitalReleaseFilter sdl_filters[4];
-    bool no_controllers_printed = false;
-
-    while (g_cliRunning.load(std::memory_order_relaxed)) {
-        g_sdlInput.poll();
-        ns::HIDReport logical_reports[4];
-        ns::MotionReport logical_motion[4];
-        bool present[4] = {false, false, false, false};
-        bool has_motion[4] = {false, false, false, false};
-        int sdl_for_slot[4] = {-1, -1, -1, -1};
-        for (int i = 0; i < 4; ++i) {
-            logical_reports[i].reset();
-            logical_motion[i].reset();
-        }
-        int active_count = 0;
-        auto sdl = g_sdlInput.snapshot();
-        const uint64_t filter_now = ns::now_us();
-        for (int i = 0; i < 4; ++i) {
-            if (!sdl[i].connected) {
-                sdl_filters[i].reset();
-                continue;
-            }
-            logical_reports[i] = sdl[i].input;
-            sdl_filters[i].apply(logical_reports[i], filter_now);
-            logical_motion[i] = sdl[i].motion;
-            present[i] = true;
-            has_motion[i] = send_motion && sdl[i].has_motion;
-            sdl_for_slot[i] = i;
-            ++active_count;
-        }
-
-        if (cli_keyboard_mode == KB_SINGLE) {
-            if (present[0]) {
-                int target = -1;
-                for (int s = 1; s < 4; ++s) if (!present[s]) { target = s; break; }
-                if (target >= 0) {
-                    logical_reports[target] = logical_reports[0];
-                    logical_motion[target] = logical_motion[0];
-                    has_motion[target] = has_motion[0];
-                    present[target] = true;
-                    sdl_for_slot[target] = sdl_for_slot[0];
-                    ++active_count;
-                }
-            }
-            logical_reports[0].reset();
-            logical_motion[0].reset();
-            apply_keyboard_to_report(logical_reports[0], false);
-            present[0] = true;
-            has_motion[0] = false;
-            sdl_for_slot[0] = -1;
-            active_count = std::max(active_count, 1);
-        } else if (cli_keyboard_mode == KB_OVERRIDE) {
-            apply_keyboard_to_report(logical_reports[0], true);
-            present[0] = true;
-            active_count = std::max(active_count, 1);
-        }
-
-        if (legacy_udp || server_is_legacy) {
-            ns::Packet pkt{};
-            pkt.magic = ns::PROTO_MAGIC;
-            pkt.version = ns::PROTO_VERSION;
-            pkt.flags = ns::FLAG_NONE;
-            pkt.seq = seq++;
-            pkt.ts_us = ns::now_us();
-            pkt.report.reset();
-            ns::HIDReport* pads[4] = {&pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4};
-            for (int i = 0; i < 4; ++i) *pads[i] = logical_reports[i];
-            uint8_t full_hmac[32];
-            hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE, full_hmac);
-            std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-            send_all_udp(sock, dest, &pkt, ns::PACKET_SIZE);
-        } else {
-            ExtendedUdpPacket pkt{};
-            pkt.magic = ns::PROTO_MAGIC;
-            pkt.version = ns::WEB_PROTO_VERSION;
-            pkt.flags = ns::FLAG_NONE;
-            pkt.seq = seq++;
-            pkt.timestamp_us = ns::now_us();
-            pkt.report.reset();
-            ns::ExtendedHIDReport* pads[4] = {&pkt.report.p1, &pkt.report.p2, &pkt.report.p3, &pkt.report.p4};
-            for (int i = 0; i < 4; ++i)
-                fill_extended_pad(*pads[i], logical_reports[i], present[i], has_motion[i] ? &logical_motion[i] : nullptr);
-            uint8_t full_hmac[32];
-            hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE, full_hmac);
-            std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-            send_all_udp(sock, dest, &pkt, sizeof(pkt));
-            pump_udp_rumble(sock, rumble, sdl_for_slot);
-            rumble.update_timeouts(sdl_for_slot);
-        }
-
-        if (active_count > 0) {
-            no_controllers_printed = false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(active_send_interval_ms));
-        } else {
-            if (!no_controllers_printed) {
-                std::cout << "No controllers detected - waiting for connections...\n";
-                no_controllers_printed = true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    }
-    rumble.stop_all();
+    std::string err;
+    int rc = run_client_stream(cfg, g_cliRunning, &err);
+    if (rc != 0 && !err.empty()) std::cerr << "ERROR: " << err << "\n";
     std::cout << "\nShutting down...\n";
-    send_udp_disconnect_packet(sock, dest, hmac_key, seq++, legacy_udp || server_is_legacy);
-    closesocket(sock);
-    return 0;
+    return rc;
 }
 
 static std::string q_to_std(const QString& s) { return s.toUtf8().constData(); }
