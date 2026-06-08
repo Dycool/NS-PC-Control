@@ -154,32 +154,11 @@ static void clear_all_motion_history(ClientSession& c) {
     for (int s = 0; s < 4; ++s) clear_motion_history(c, s);
 }
 
-static int16_t motion_clamp_i16(int v) {
-    if (v < -32768) return -32768;
-    if (v >  32767) return  32767;
-    return (int16_t)v;
-}
-
-static int16_t gyro_deadzone_i16(int16_t v) {
-    // Real Pro Controller via the Windows client should be near zero at rest.
-    // Splatoon is very sensitive to tiny gyro noise, so kill only small angular
-    // velocity jitter. Do not deadzone accel: it carries gravity/orientation.
-    static constexpr int GYRO_DEADZONE = 80;
-    return std::abs((int)v) < GYRO_DEADZONE ? 0 : v;
-}
-
-static int16_t gyro_smooth_i16(int16_t prev, int16_t cur) {
-    // Light low-pass: enough to stop camera buzz, not enough to make aiming laggy.
-    // new = 65%, previous = 35%
-    return motion_clamp_i16(((int)prev * 35 + (int)cur * 65) / 100);
-}
-
 static MotionReport stabilize_real_pro_motion_sample(const ClientSession& c, int subpad, const MotionReport& raw) {
     (void)c;
     (void)subpad;
-    // The Windows client now performs source-side gyro bias correction and
-    // hard-zeroes the gyro while resting. Do not add a second backend filter,
-    // because it can preserve old non-zero samples and make the camera drift.
+    // The client owns calibration, axis alignment, and noise control.
+    // The Pi only transports motion data to the USB report.
     return raw;
 }
 
