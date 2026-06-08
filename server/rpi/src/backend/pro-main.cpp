@@ -57,9 +57,7 @@ static constexpr uint64_t CLIENT_STALE_NEUTRAL_US = 350'000ULL; // 350ms release
 // receive micro-rumble too.  all-zero per-motor frames are motor-off, not max.
 static constexpr uint8_t RUMBLE_MIN_NONZERO = 4;      // floor for a real non-neutral half-frame
 static constexpr int     RUMBLE_GAIN_PERCENT = 100;
-// Keep the integrated precision/HD rumble path intact. The Windows client can
-// consume the backend's precision rumble packets, so do not collapse everything
-// into generic SDL/Web weak/strong rumble here.
+// Normal-rumble build: decode console rumble into classic low/high packets only.
 static std::string g_usb_serial = "NSBRIDGE000001";
 
 // Optional local/private controller SPI profile.
@@ -77,7 +75,7 @@ static bool g_spi_profile_full_copy = true;
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
-static constexpr int HID_PORT_COUNT = 4;
+static constexpr int HID_PORT_COUNT = 1;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 static uint8_t  g_hmac_key[32];
@@ -4141,29 +4139,14 @@ static void flush_rumble_to_udp(int sock, int client_idx) {
     for (int s = 0; s < 4; ++s) {
         if (!has[s]) continue;
 
-        // HD/precision first. This is the primary path for the Windows client:
-        // it carries the original 8-byte console rumble frame plus decoded
-        // fallback magnitudes. A real Pro Controller / HD-capable client should
-        // consume this and preserve the console's rumble intent as closely as
-        // the client backend allows.
-        ssize_t precision_sent = sendto(sock, &precision_pending[s], sizeof(PrecisionRumblePacket), 0,
-                                        reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-        if (g_verbose && precision_sent != (ssize_t)sizeof(PrecisionRumblePacket))
-            std::fprintf(stderr, "[udp] failed to send precision rumble packet: %s\n", std::strerror(errno));
-
-        // Classic fallback after precision, but deliberately attenuated.
-        //
-        // HD-capable clients should consume PrecisionRumblePacket and ignore this
-        // fallback for the same frame. Older clients still receive something,
-        // but not a second full-strength vibration on top of the HD path.
-        RumblePacket fallback = pending[s];
-        fallback.high_freq = (uint8_t)((int)fallback.high_freq * 45 / 100);
-        fallback.low_freq  = (uint8_t)((int)fallback.low_freq  * 45 / 100);
-
-        ssize_t sent = sendto(sock, &fallback, sizeof(RumblePacket), 0,
+        // Normal-rumble build: send exactly one classic low/high rumble
+        // packet per console rumble event. No HD/precision packet and no
+        // attenuated duplicate fallback, so the Windows client can keep timing
+        // faithful and avoid double vibration.
+        ssize_t sent = sendto(sock, &pending[s], sizeof(RumblePacket), 0,
                               reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
         if (g_verbose && sent != (ssize_t)sizeof(RumblePacket))
-            std::fprintf(stderr, "[udp] failed to send fallback rumble packet: %s\n", std::strerror(errno));
+            std::fprintf(stderr, "[udp] failed to send rumble packet: %s\n", std::strerror(errno));
     }
 }
 

@@ -865,6 +865,14 @@ private:
         bool rumble_capable = false;
         bool trigger_rumble_capable = false;
         uint64_t precision_retry_after_us = 0;
+
+        // Gyro stabilizer state. SDL sensors can have a small bias and occasional
+        // one-frame jitter, which is very visible in Splatoon while the controller
+        // is resting on a table. Keep this per physical device, not global.
+        bool gyro_filter_initialized = false;
+        float gyro_bias[3] = {0.0f, 0.0f, 0.0f};      // backend units: deg/s * 16
+        float gyro_filtered[3] = {0.0f, 0.0f, 0.0f};  // backend units: deg/s * 16
+
         std::string name;
         uint16_t vid = 0;
         uint16_t pid = 0;
@@ -987,26 +995,89 @@ private:
                r.lx != 128 || r.ly != 128 || r.rx != 128 || r.ry != 128;
     }
 
-    static void apply_motion(SDL_Gamepad* pad, bool accel_enabled, bool gyro_enabled,
-                             ns::MotionReport& out, bool& has_motion) {
+    static float clampf_local(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    static float motion_deadzone_float(float v, float dz) {
+        if (std::fabs(v) <= dz) return 0.0f;
+        return v > 0.0f ? (v - dz) : (v + dz);
+    }
+
+    static void apply_motion(Device& d, ns::MotionReport& out, bool& has_motion) {
+        SDL_Gamepad* pad = d.pad;
         out.reset();
         has_motion = false;
 
         float accel[3] = {};
-        if (accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
+        bool got_accel = false;
+        if (d.accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
             out.ax = clamp_motion_i16((accel[0] / 9.80665f) * 4096.0f);
             out.ay = clamp_motion_i16((accel[1] / 9.80665f) * 4096.0f);
             out.az = clamp_motion_i16((accel[2] / 9.80665f) * 4096.0f);
             has_motion = true;
+            got_accel = true;
         }
 
         float gyro[3] = {};
-        if (gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
+        if (d.gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
             constexpr float RAD_TO_DEG = 57.29577951308232f;
             constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.0f;
-            out.gx = clamp_motion_i16(gyro[0] * CONSOLE_GYRO_SCALE);
-            out.gy = clamp_motion_i16(gyro[1] * CONSOLE_GYRO_SCALE);
-            out.gz = clamp_motion_i16(gyro[2] * CONSOLE_GYRO_SCALE);
+
+            float g[3] = {
+                gyro[0] * CONSOLE_GYRO_SCALE,
+                gyro[1] * CONSOLE_GYRO_SCALE,
+                gyro[2] * CONSOLE_GYRO_SCALE
+            };
+
+            const float accel_mag = got_accel
+                ? std::sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2])
+                : 9.80665f;
+
+            const float gyro_mag_rad =
+                std::sqrt(gyro[0] * gyro[0] + gyro[1] * gyro[1] + gyro[2] * gyro[2]);
+
+            // Rest detection: accel near gravity and very small angular velocity.
+            // While resting, learn the gyro bias quickly enough to remove drift,
+            // but slowly enough to not eat deliberate aiming motion.
+            const bool accel_is_gravity = got_accel && std::fabs(accel_mag - 9.80665f) < 1.75f;
+            const bool gyro_is_quiet = gyro_mag_rad < 0.08f; // ~4.6 deg/s
+            const bool resting = accel_is_gravity && gyro_is_quiet;
+
+            if (!d.gyro_filter_initialized) {
+                d.gyro_bias[0] = resting ? g[0] : 0.0f;
+                d.gyro_bias[1] = resting ? g[1] : 0.0f;
+                d.gyro_bias[2] = resting ? g[2] : 0.0f;
+                d.gyro_filtered[0] = d.gyro_filtered[1] = d.gyro_filtered[2] = 0.0f;
+                d.gyro_filter_initialized = true;
+            }
+
+            if (resting) {
+                constexpr float BIAS_ALPHA = 0.025f;
+                for (int i = 0; i < 3; ++i) {
+                    d.gyro_bias[i] = d.gyro_bias[i] * (1.0f - BIAS_ALPHA) + g[i] * BIAS_ALPHA;
+                }
+            }
+
+            for (int i = 0; i < 3; ++i) {
+                g[i] -= d.gyro_bias[i];
+
+                // Tiny post-bias deadzone kills lobby/table jitter. This is small:
+                // 24 backend units = 1.5 deg/s.
+                g[i] = motion_deadzone_float(g[i], 24.0f);
+
+                // Light low-pass only. More smoothing makes aim feel laggy.
+                constexpr float LP_NEW = 0.72f;
+                d.gyro_filtered[i] = d.gyro_filtered[i] * (1.0f - LP_NEW) + g[i] * LP_NEW;
+
+                // Clamp impossible one-frame spikes that SDL/HID can emit during
+                // reconnect/report changes. 4096 backend units = 256 deg/s.
+                d.gyro_filtered[i] = clampf_local(d.gyro_filtered[i], -4096.0f, 4096.0f);
+            }
+
+            out.gx = clamp_motion_i16(d.gyro_filtered[0]);
+            out.gy = clamp_motion_i16(d.gyro_filtered[1]);
+            out.gz = clamp_motion_i16(d.gyro_filtered[2]);
             has_motion = true;
         }
     }
@@ -1119,7 +1190,7 @@ private:
 
     void refresh_states_locked(uint64_t now) {
         clear_states_locked();
-        for (const auto& d : devices) {
+        for (auto& d : devices) {
             if (!d.pad || d.slot < 0 || d.slot >= 4 || !SDL_GamepadConnected(d.pad)) continue;
             SdlPadState st{};
             st.connected = true;
@@ -1128,7 +1199,7 @@ private:
             st.vid = d.vid;
             st.pid = d.pid;
             st.instance_id = d.id;
-            apply_motion(d.pad, d.accel_enabled, d.gyro_enabled, st.motion, st.has_motion);
+            apply_motion(d, st.motion, st.has_motion);
             if (report_non_neutral(st.input) || st.has_motion) st.last_input_us = now;
             states[d.slot] = st;
         }
@@ -1158,7 +1229,7 @@ public:
         fallback.duration_10ms = rp.duration_10ms;
 
         apply_packet(fallback, sdl_for_slot);
-        states[rp.subpad].suppress_classic_until_us = ns::now_us() + 150000ULL;
+        states[rp.subpad].suppress_classic_until_us = ns::now_us() + 20000ULL;
     }
 
     void apply_packet(const ns::RumblePacket& rp,
@@ -1166,26 +1237,23 @@ public:
         if (rp.subpad >= 4) return;
         const int slot = rp.subpad;
         if (ns::now_us() < states[slot].suppress_classic_until_us) return;
-        uint8_t low = rp.low_freq;
-        uint8_t high = rp.high_freq;
-        bool neutral = (low == 0 && high == 0) || rp.duration_10ms == 0;
-        uint64_t now = ns::now_us();
-        uint64_t dur_us = neutral ? 0ULL : std::max<uint64_t>(80000ULL, (uint64_t)rp.duration_10ms * 10000ULL);
-        uint32_t dur_ms = neutral ? 0U : (uint32_t)std::min<uint64_t>(dur_us / 1000ULL, 0xFFFFFFFFULL);
 
-        // Keep the old anti-spam behavior: several Bluetooth stacks really do
-        // get sad if rumble is hammered every single input frame.
-        if (!neutral && now - states[slot].last_set_us < 30000ULL) {
-            states[slot].until_us = now + dur_us;
-            states[slot].duration_ms = dur_ms;
-            return;
-        }
+        const uint8_t low = rp.low_freq;
+        const uint8_t high = rp.high_freq;
+        const bool neutral = (low == 0 && high == 0) || rp.duration_10ms == 0;
 
+        const uint64_t now = ns::now_us();
+        const uint64_t dur_us = neutral ? 0ULL : (uint64_t)rp.duration_10ms * 10000ULL;
+        const uint32_t dur_ms = neutral ? 0U : (uint32_t)std::min<uint64_t>(dur_us / 1000ULL, 0xFFFFFFFFULL);
+
+        // Time-accurate normal rumble: apply every event. Do not throttle small
+        // packets, because short micro-rumble is part of the game's feedback.
         states[slot].low = low;
         states[slot].high = high;
         states[slot].until_us = neutral ? 0 : now + dur_us;
         states[slot].duration_ms = dur_ms;
         states[slot].last_set_us = now;
+
         set_output(slot, neutral ? 0 : low, neutral ? 0 : high,
                    sdl_for_slot[slot], dur_ms);
     }
