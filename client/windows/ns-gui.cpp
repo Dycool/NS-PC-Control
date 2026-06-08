@@ -1382,6 +1382,7 @@ static bool g_tune_neg_gz = false;
 static HWND g_hTuneAx = nullptr;
 static HWND g_hTuneAy = nullptr;
 static HWND g_hTuneAz = nullptr;
+static HWND g_hTuneReset = nullptr;
 static HWND g_hTuneNegGx = nullptr;
 static HWND g_hTuneNegGy = nullptr;
 static HWND g_hTuneNegGz = nullptr;
