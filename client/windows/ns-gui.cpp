@@ -992,6 +992,7 @@ private:
             out.az = clamp_motion_i16( accel[1] * ACCEL_SCALE);
             got_any_motion = true;
         } else {
+            // Fallback sane gravity if SDL accel is unavailable.
             out.ax = 0;
             out.ay = 0;
             out.az = 4096;
@@ -1006,6 +1007,7 @@ private:
             float gy = -gyro[2];
             float gz =  gyro[1];
 
+            // Optional tiny deadzone.
             constexpr float GYRO_DEADZONE_RAD = 0.0f;
 
             if (std::fabs(gx) < GYRO_DEADZONE_RAD) gx = 0.0f;
@@ -1372,21 +1374,6 @@ static HWND g_hP2Text = nullptr;
 static HWND g_hP3Text = nullptr;
 static HWND g_hP4Text = nullptr;
 
-// ── Motion tuning (live-adjustable) ──
-static int16_t g_tune_ax = 0;
-static int16_t g_tune_ay = 0;
-static int16_t g_tune_az = 4096;
-static bool g_tune_neg_gx = false;
-static bool g_tune_neg_gy = false;
-static bool g_tune_neg_gz = false;
-static HWND g_hTuneAx = nullptr;
-static HWND g_hTuneAy = nullptr;
-static HWND g_hTuneAz = nullptr;
-static HWND g_hTuneReset = nullptr;
-static HWND g_hTuneNegGx = nullptr;
-static HWND g_hTuneNegGy = nullptr;
-static HWND g_hTuneNegGz = nullptr;
-
 static std::atomic<bool> g_senderRunning{false};
 static std::atomic<bool> g_connected{false};
 static std::thread g_senderThread;
@@ -1513,7 +1500,7 @@ static void SaveKeyboardMode(int mode) {
 }
 
 
-enum { IDC_IP = 101, IDC_CONNECT, IDC_KEYBOARD_COMBO = 110, IDC_BINDINGS_BTN = 111, IDC_MACROS_BTN = 112, IDC_EDITOR_CHANGE = 200, IDC_EDITOR_SETUP = 400, IDC_EDITOR_RESET = 500, IDC_EDITOR_CLEAR = 501, IDC_EDITOR_KEY_START = 300, IDC_MACRO_EDIT = 600, IDC_MACRO_RUN = 601, IDC_MACRO_SAVE = 602, IDC_MACRO_DELETE = 603, IDC_MACRO_CLOSE = 604, IDC_MACRO_RECORD_START = 605, IDC_MACRO_RECORD_STOP = 606, IDC_MACRO_IMPORT = 607, IDC_MACRO_EXPORT = 608, IDC_MACRO_HOTKEY = 609, IDC_MACRO_NAME = 610, IDC_MACRO_ADD = 611, IDC_MACRO_RECORD_TOGGLE = 612, IDC_MACRO_RUN_BASE = 700, IDC_MACRO_DELETE_BASE = 800, IDC_MACRO_KEY_BASE = 900, IDC_MACRO_RENAME_BASE = 1000, IDC_MACRO_EXPORT_BASE = 1100, IDC_TUNE_AX = 1200, IDC_TUNE_AY, IDC_TUNE_AZ, IDC_TUNE_NEG_GX, IDC_TUNE_NEG_GY, IDC_TUNE_NEG_GZ, IDC_TUNE_RESET };
+enum { IDC_IP = 101, IDC_CONNECT, IDC_KEYBOARD_COMBO = 110, IDC_BINDINGS_BTN = 111, IDC_MACROS_BTN = 112, IDC_EDITOR_CHANGE = 200, IDC_EDITOR_SETUP = 400, IDC_EDITOR_RESET = 500, IDC_EDITOR_CLEAR = 501, IDC_EDITOR_KEY_START = 300, IDC_MACRO_EDIT = 600, IDC_MACRO_RUN = 601, IDC_MACRO_SAVE = 602, IDC_MACRO_DELETE = 603, IDC_MACRO_CLOSE = 604, IDC_MACRO_RECORD_START = 605, IDC_MACRO_RECORD_STOP = 606, IDC_MACRO_IMPORT = 607, IDC_MACRO_EXPORT = 608, IDC_MACRO_HOTKEY = 609, IDC_MACRO_NAME = 610, IDC_MACRO_ADD = 611, IDC_MACRO_RECORD_TOGGLE = 612, IDC_MACRO_RUN_BASE = 700, IDC_MACRO_DELETE_BASE = 800, IDC_MACRO_KEY_BASE = 900, IDC_MACRO_RENAME_BASE = 1000, IDC_MACRO_EXPORT_BASE = 1100 };
 static HWND CreateButton(HWND parent, const wchar_t* text, int x, int y, int w, int h, int id);
 
 // ── Macro runtime/editor ────────────────────────────────────────────────────
@@ -3094,37 +3081,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hP3Text = makeStatus(L"", y); y += 18;
             g_hP4Text = makeStatus(L"", y);
 
-            // ── Motion Tuning ──
-            y += 22;
-            CreateWindow(L"STATIC", L"Motion Tuning (edits apply immediately)",
-                WS_VISIBLE | WS_CHILD, x, y, 370, 16, hWnd, nullptr, g_hInst, nullptr);
-            SendMessage(hWnd, WM_SETFONT, (WPARAM)hLabelFont, TRUE);
-            y += 22;
-
-            g_hTuneAx = makeEdit(IDC_TUNE_AX, x + 28, y, 60, 22, L"0");
-            g_hTuneAy = makeEdit(IDC_TUNE_AY, x + 114, y, 60, 22, L"0");
-            g_hTuneAz = makeEdit(IDC_TUNE_AZ, x + 200, y, 60, 22, L"4096");
-            CreateWindow(L"STATIC", L"ax", WS_VISIBLE | WS_CHILD | SS_RIGHT,
-                x, y + 2, 24, 18, hWnd, nullptr, g_hInst, nullptr);
-            CreateWindow(L"STATIC", L"ay", WS_VISIBLE | WS_CHILD | SS_RIGHT,
-                x + 86, y + 2, 24, 18, hWnd, nullptr, g_hInst, nullptr);
-            CreateWindow(L"STATIC", L"az", WS_VISIBLE | WS_CHILD | SS_RIGHT,
-                x + 172, y + 2, 24, 18, hWnd, nullptr, g_hInst, nullptr);
-            g_hTuneReset = CreateWindow(L"BUTTON", L"Reset",
-                WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                x + 280, y, 70, 22, hWnd, (HMENU)(INT_PTR)IDC_TUNE_RESET, g_hInst, nullptr);
-            y += 28;
-
-            g_hTuneNegGx = CreateWindow(L"BUTTON", L"Neg GX",
-                WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                x, y, 75, 22, hWnd, (HMENU)(INT_PTR)IDC_TUNE_NEG_GX, g_hInst, nullptr);
-            g_hTuneNegGy = CreateWindow(L"BUTTON", L"Neg GY",
-                WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                x + 85, y, 75, 22, hWnd, (HMENU)(INT_PTR)IDC_TUNE_NEG_GY, g_hInst, nullptr);
-            g_hTuneNegGz = CreateWindow(L"BUTTON", L"Neg GZ",
-                WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                x + 170, y, 75, 22, hWnd, (HMENU)(INT_PTR)IDC_TUNE_NEG_GZ, g_hInst, nullptr);
-
             UpdateControllerStatus();
             EnableWindow(g_hConnectBtn, TRUE);
             break;
@@ -3132,36 +3088,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_COMMAND: {
             int id = LOWORD(wParam);
-            if (HIWORD(wParam) == EN_CHANGE) {
-                if (id == IDC_TUNE_AX || id == IDC_TUNE_AY || id == IDC_TUNE_AZ) {
-                    wchar_t buf[16];
-                    HWND hEdit = (HWND)lParam;
-                    GetWindowText(hEdit, buf, 16);
-                    int val = _wtoi(buf);
-                    if (val < -32768) val = -32768;
-                    if (val > 32767) val = 32767;
-                    if (id == IDC_TUNE_AX) g_tune_ax = (int16_t)val;
-                    else if (id == IDC_TUNE_AY) g_tune_ay = (int16_t)val;
-                    else if (id == IDC_TUNE_AZ) g_tune_az = (int16_t)val;
-                }
-            } else if (HIWORD(wParam) == BN_CLICKED) {
-                if (id == IDC_TUNE_NEG_GX) {
-                    g_tune_neg_gx = SendMessage(g_hTuneNegGx, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                } else if (id == IDC_TUNE_NEG_GY) {
-                    g_tune_neg_gy = SendMessage(g_hTuneNegGy, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                } else if (id == IDC_TUNE_NEG_GZ) {
-                    g_tune_neg_gz = SendMessage(g_hTuneNegGz, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                } else if (id == IDC_TUNE_RESET) {
-                    g_tune_ax = 0; g_tune_ay = 0; g_tune_az = 4096;
-                    g_tune_neg_gx = false; g_tune_neg_gy = false; g_tune_neg_gz = false;
-                    SetWindowText(g_hTuneAx, L"0");
-                    SetWindowText(g_hTuneAy, L"0");
-                    SetWindowText(g_hTuneAz, L"4096");
-                    SendMessage(g_hTuneNegGx, BM_SETCHECK, BST_UNCHECKED, 0);
-                    SendMessage(g_hTuneNegGy, BM_SETCHECK, BST_UNCHECKED, 0);
-                    SendMessage(g_hTuneNegGz, BM_SETCHECK, BST_UNCHECKED, 0);
-                }
-            } else if (id == IDC_CONNECT) {
+            if (id == IDC_CONNECT) {
                 if (!g_connected) DoConnect(hWnd);
                 else DoDisconnect();
             } else if (id == 1002) {
@@ -3531,7 +3458,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     mc.lpszClassName = L"NSMacroEditor";
     RegisterClass(&mc);
 
-    RECT rc{0, 0, 410, 490};
+    RECT rc{0, 0, 410, 345};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX), FALSE);
 
     HWND hWnd = CreateWindowEx(0, CLASS_NAME, L"NS PC Control",
