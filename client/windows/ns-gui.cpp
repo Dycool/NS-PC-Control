@@ -974,62 +974,23 @@ private:
         out.reset();
         has_motion = false;
 
+        constexpr float STANDARD_GRAVITY = 9.80665f;
+        constexpr float ACCEL_SCALE = 4096.0f / STANDARD_GRAVITY;
+        constexpr float RAD_TO_DEG = 57.29577951308232f;
+        constexpr float GYRO_SCALE = RAD_TO_DEG * 16.384f;
+
         float accel[3] = {};
-        const bool got_accel = d.accel_enabled &&
-            SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3);
-
-        if (got_accel) {
-            constexpr float STANDARD_GRAVITY = 9.80665f;
-            constexpr float CONSOLE_ACCEL_SCALE = 4096.0f / STANDARD_GRAVITY;
-
-            out.ax = clamp_motion_i16(accel[0] * CONSOLE_ACCEL_SCALE);
-            out.ay = clamp_motion_i16(accel[1] * CONSOLE_ACCEL_SCALE);
-            out.az = clamp_motion_i16(accel[2] * CONSOLE_ACCEL_SCALE);
+        if (d.accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
+            // Restore the older Switch-Pro-oriented accel mapping.
+            // Resting flat should become roughly ax=0, ay=0, az=4096.
+            out.ax = clamp_motion_i16( accel[0] * ACCEL_SCALE);
+            out.ay = clamp_motion_i16(-accel[2] * ACCEL_SCALE);
+            out.az = clamp_motion_i16( accel[1] * ACCEL_SCALE);
             has_motion = true;
         }
 
         float gyro[3] = {};
         if (d.gyro_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
-            constexpr float RAD_TO_DEG = 57.29577951308232f;
-            constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.384f;
-
-            const float mag = std::sqrt(
-                gyro[0] * gyro[0] +
-                gyro[1] * gyro[1] +
-                gyro[2] * gyro[2]
-            );
-
-            constexpr uint32_t INITIAL_BIAS_SAMPLES = 90;
-            constexpr uint32_t BIAS_READY_SAMPLES = 12;
-            constexpr float INITIAL_LEARN_LIMIT_RAD = 0.35f;
-            constexpr float RUNNING_LEARN_LIMIT_RAD = 0.035f;
-
-            const float learn_limit =
-                d.gyro_bias_samples < INITIAL_BIAS_SAMPLES
-                    ? INITIAL_LEARN_LIMIT_RAD
-                    : RUNNING_LEARN_LIMIT_RAD;
-
-            if (mag < learn_limit) {
-                float alpha;
-                if (d.gyro_bias_samples < INITIAL_BIAS_SAMPLES) {
-                    alpha = 1.0f / (float)(d.gyro_bias_samples + 1);
-                } else {
-                    alpha = 0.0015f;
-                }
-
-                for (int i = 0; i < 3; ++i) {
-                    d.gyro_bias[i] += (gyro[i] - d.gyro_bias[i]) * alpha;
-                }
-
-                if (d.gyro_bias_samples < 1000000u) {
-                    ++d.gyro_bias_samples;
-                }
-
-                if (d.gyro_bias_samples >= BIAS_READY_SAMPLES) {
-                    d.gyro_bias_ready = true;
-                }
-            }
-
             float gx = gyro[0];
             float gy = gyro[1];
             float gz = gyro[2];
@@ -1041,14 +1002,13 @@ private:
             }
 
             constexpr float GYRO_DEADZONE_RAD = 0.0045f;
-
             if (std::fabs(gx) < GYRO_DEADZONE_RAD) gx = 0.0f;
             if (std::fabs(gy) < GYRO_DEADZONE_RAD) gy = 0.0f;
             if (std::fabs(gz) < GYRO_DEADZONE_RAD) gz = 0.0f;
 
-            out.gx = clamp_motion_i16(gx * CONSOLE_GYRO_SCALE);
-            out.gy = clamp_motion_i16(gy * CONSOLE_GYRO_SCALE);
-            out.gz = clamp_motion_i16(gz * CONSOLE_GYRO_SCALE);
+            out.gx = clamp_motion_i16( gx * GYRO_SCALE);
+            out.gy = clamp_motion_i16( gy * GYRO_SCALE);
+            out.gz = clamp_motion_i16(-gz * GYRO_SCALE);
             has_motion = true;
         }
     }
