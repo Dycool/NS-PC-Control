@@ -1051,6 +1051,8 @@ class RumbleManager {
 public:
     void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
+        // Normal-rumble build: treat PrecisionRumblePacket as a carrier for
+        // already-decoded classic low/high magnitudes.
         ns::RumblePacket fallback{};
         fallback.magic = ns::RUMBLE_MAGIC;
         fallback.subpad = rp.subpad;
@@ -1058,11 +1060,13 @@ public:
         fallback.high_freq = rp.high_freq;
         fallback.duration_10ms = rp.duration_10ms;
         apply_packet(fallback, controller_for_slot);
+        states[rp.subpad].suppress_classic_until_us = ns::now_us() + 20000ULL;
     }
 
     void apply_packet(const ns::RumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
         const int slot = rp.subpad;
+        if (ns::now_us() < states[slot].suppress_classic_until_us) return;
         const uint8_t low = rp.low_freq;
         const uint8_t high = rp.high_freq;
         const bool neutral = (low == 0 && high == 0) || rp.duration_10ms == 0;
@@ -1107,6 +1111,7 @@ private:
         uint64_t until_us = 0;
         uint64_t last_set_us = 0;
         int last_controller = -1;
+        uint64_t suppress_classic_until_us = 0;
     } states[4];
 
     void set_output(int slot, uint8_t low, uint8_t high, int ctrl_idx) {

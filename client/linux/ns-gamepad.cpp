@@ -111,9 +111,6 @@ static int SDL_GameControllerRumble(SDL_GameController* pad, uint16_t low, uint1
     }
     return (ok_main || ok_trigger) ? 0 : -1;
 }
-static int SDL_GameControllerSendEffect(SDL_GameController* pad, const void* data, int size) {
-    return SDL_SendGamepadEffect(pad, data, size) ? 0 : -1;
-}
 static void SDL_GameControllerUpdate() { SDL_UpdateGamepads(); }
 
 #include <sys/socket.h>
@@ -1066,32 +1063,13 @@ static void set_pad_rumble(int index, uint8_t low, uint8_t high, uint32_t durati
     }
 }
 
-static bool set_pad_precision_rumble(int index, const uint8_t precision[8]) {
-    if (index < 0 || index >= 4) return false;
-    SDL_GameController* pad = g_pads[index];
-    if (!pad || !SDL_GameControllerGetAttached(pad)) return false;
-    return SDL_GameControllerSendEffect(pad, precision, 8) == 0;
-}
-
 class RumbleManager {
 public:
     void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
         if (rp.subpad >= 4) return;
-        const int slot = rp.subpad;
-        const bool neutral = (rp.low_freq == 0 && rp.high_freq == 0) || rp.duration_10ms == 0;
-        bool precision_payload_zero = true;
-        for (uint8_t b : rp.precision) precision_payload_zero = precision_payload_zero && b == 0;
-        const bool ok_precision = (!precision_payload_zero || neutral) &&
-                           set_pad_precision_rumble(controller_for_slot[slot], rp.precision);
-        if (ok_precision) {
-            states[slot].suppress_classic_until_us = ns::now_us() + 50000ULL;
-            if (neutral) {
-                states[slot].until_us = 0;
-                states[slot].low = states[slot].high = 0;
-            }
-            return;
-        }
-
+        // Normal-rumble build: treat PrecisionRumblePacket as a carrier for
+        // already-decoded classic low/high magnitudes. Do not send Nintendo
+        // HD/precision effect bytes through SDL.
         ns::RumblePacket fallback{};
         fallback.magic = ns::RUMBLE_MAGIC;
         fallback.subpad = rp.subpad;
@@ -1099,6 +1077,7 @@ public:
         fallback.high_freq = rp.high_freq;
         fallback.duration_10ms = rp.duration_10ms;
         apply_packet(fallback, controller_for_slot);
+        states[rp.subpad].suppress_classic_until_us = ns::now_us() + 20000ULL;
     }
 
     void apply_packet(const ns::RumblePacket& rp, const int controller_for_slot[4]) {

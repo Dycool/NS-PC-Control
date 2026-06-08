@@ -835,16 +835,6 @@ public:
         }
     }
 
-    bool set_precision_rumble(int sdl_slot, const uint8_t precision[8]) {
-        (void)sdl_slot;
-        (void)precision;
-        // Normal-rumble build: do not send Nintendo HD/precision effect packets.
-        // SDL_SendGamepadEffect is gamepad-specific and caused disconnects/errors
-        // on some controllers. Precision packets are converted to classic rumble
-        // in RumbleManager::apply_precision_packet instead.
-        return false;
-    }
-
     void stop_all_rumble() {
         std::lock_guard<std::mutex> lk(mtx);
         stop_all_rumble_locked();
@@ -864,8 +854,6 @@ private:
         bool gyro_enabled = false;
         bool rumble_capable = false;
         bool trigger_rumble_capable = false;
-        uint64_t precision_retry_after_us = 0;
-
         // At 250Hz the PC loop can poll the same physical controller sensor
         // frame multiple times. Remember the last raw gyro sample so motion is
         // only marked as "new" when the device actually reported new values.
@@ -900,14 +888,6 @@ private:
 
     static bool contains_upper(const std::string& haystack, const char* needle) {
         return upper_copy(haystack).find(needle) != std::string::npos;
-    }
-
-    static bool supports_nintendo_hd_effect(const Device& d) {
-        // SDL_SendGamepadEffect is gamepad-specific, not a generic HD-rumble API.
-        // Our 8-byte precision payload is a Nintendo/Switch HD-rumble frame.
-        // Sending it to DualShock/DualSense/Xbox can fail repeatedly or kick the
-        // device into a bad enhanced-report state, so let those use classic rumble.
-        return d.vid == 0x057E && (d.pid == 0x2009 || d.pid == 0x2006 || d.pid == 0x2007);
     }
 
     static bool is_sony_controller(const Device& d) {

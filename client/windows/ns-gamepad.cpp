@@ -917,14 +917,6 @@ public:
         }
     }
 
-    bool set_precision_rumble(int sdl_slot, const uint8_t precision[8]) {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return false;
-        Device* d = device_for_slot_locked(sdl_slot);
-        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return false;
-        return SDL_SendGamepadEffect(d->pad, precision, 8);
-    }
-
     void stop_all_rumble() {
         std::lock_guard<std::mutex> lk(mtx);
         stop_all_rumble_locked();
@@ -1213,23 +1205,9 @@ public:
     void apply_precision_packet(const ns::PrecisionRumblePacket& rp,
                          const int sdl_for_slot[4]) {
         if (rp.subpad >= 4) return;
-        const int slot = rp.subpad;
-        const bool neutral = (rp.low_freq == 0 && rp.high_freq == 0) || rp.duration_10ms == 0;
-        bool precision_payload_zero = true;
-        for (uint8_t b : rp.precision) precision_payload_zero = precision_payload_zero && b == 0;
-        const bool ok_precision = (!precision_payload_zero || neutral) &&
-                           sdl_for_slot[slot] >= 0 &&
-                           g_sdlInput.set_precision_rumble(sdl_for_slot[slot], rp.precision);
-        if (ok_precision) {
-            states[slot].suppress_classic_until_us = ns::now_us() + 50000ULL;
-            if (neutral) {
-                states[slot].until_us = 0;
-                states[slot].low = states[slot].high = 0;
-                states[slot].duration_ms = 0;
-            }
-            return;
-        }
-
+        // Normal-rumble build: treat PrecisionRumblePacket as a carrier for
+        // already-decoded classic low/high magnitudes. Do not send Nintendo
+        // HD/precision effect bytes through SDL.
         ns::RumblePacket fallback{};
         fallback.magic = ns::RUMBLE_MAGIC;
         fallback.subpad = rp.subpad;
@@ -1237,6 +1215,7 @@ public:
         fallback.high_freq = rp.high_freq;
         fallback.duration_10ms = rp.duration_10ms;
         apply_packet(fallback, sdl_for_slot);
+        states[rp.subpad].suppress_classic_until_us = ns::now_us() + 20000ULL;
     }
 
     void apply_packet(const ns::RumblePacket& rp,

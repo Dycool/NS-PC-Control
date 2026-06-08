@@ -62,13 +62,9 @@ static std::string g_usb_serial = "NSBRIDGE000001";
 
 // Optional local/private controller SPI profile.
 // Public repository ships only the loader. Users provide their own dump/profile
-// locally; the file must stay out of git. The loader applies only compatibility
-// calibration/model ranges and keeps generated per-controller MAC/serial IDs.
+// locally; the file must stay out of git. The loader copies the user's first
+// 0x10000 SPI bytes and keeps generated per-controller MAC/serial IDs.
 static std::string g_spi_profile_path;
-// Default to faithful mode: copy the user's first 0x10000 SPI bytes exactly.
-// This is still public-safe because the repo contains no dump; users provide
-// their own local file. Runtime MAC/serial replies are still generated.
-static bool g_spi_profile_full_copy = true;
 
 // Built-in USB gadget lifecycle.  ns-backend can now create/bind the
 // USB gamepad gadget itself on startup and unbind/remove it
@@ -1115,12 +1111,6 @@ struct ControllerRuntime {
     b0 = val & 0xFF;
     b1 = (b1 & 0xF0) | ((val >> 8) & 0x0F);
 }
-
-struct SpiProfileRange {
-    uint32_t addr;
-    size_t len;
-    const char* name;
-};
 
 static bool read_file_bytes(const std::string& path, std::vector<uint8_t>& out) {
     out.clear();
