@@ -455,10 +455,10 @@ static bool macro_validate_text(const std::string& raw_text, std::vector<MacroSt
         }
         MacroStep st;
         if (!macro_parse_one_command(part, st, err)) { macro_set_error(err); return false; }
-        steps.push_back(st);
         segment.push_back(st);
-        if (steps.size() > MACRO_EXPANDED_STEP_LIMIT) { macro_set_error("macro expands to too many steps"); return false; }
+        if (steps.size() + segment.size() > MACRO_EXPANDED_STEP_LIMIT) { macro_set_error("macro expands to too many steps"); return false; }
     }
+    if (!segment.empty() && !append_segment(segment, 1)) return false;
     return true;
 }
 
@@ -787,7 +787,14 @@ public:
         if (!initialized) return;
         close_all_locked();
         clear_states_locked();
-        SDL_Quit();
+        Uint32 flags = SDL_INIT_GAMEPAD | SDL_INIT_EVENTS;
+#ifdef SDL_INIT_SENSOR
+        flags |= SDL_INIT_SENSOR;
+#endif
+#ifdef SDL_INIT_HAPTIC
+        flags |= SDL_INIT_HAPTIC;
+#endif
+        SDL_QuitSubSystem(flags);
         initialized = false;
     }
 
