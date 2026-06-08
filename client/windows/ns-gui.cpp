@@ -52,10 +52,6 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
-#if defined(NS_ENABLE_JOYSHOCK) && defined(NS_JSL_STATIC)
-#  include <JoyShockLibrary.h>
-#endif
-
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -704,199 +700,6 @@ struct DigitalReleaseFilter {
 
 
 
-
-// ── Optional JoyShockLibrary static backend ──────────────────────────────────
-// Built only when the workflow defines:
-//   NS_ENABLE_JOYSHOCK
-//   NS_JSL_STATIC
-//
-// JSL is used for gyro/input on controllers it supports. HD rumble is still
-// handled by the existing PrecisionRumblePacket path: Nintendo HD payload first,
-// SDL/classic fallback where needed.
-#if defined(NS_ENABLE_JOYSHOCK) && defined(NS_JSL_STATIC)
-
-struct JslPadState {
-    bool connected = false;
-    ns::HIDReport input{};
-    ns::MotionReport motion{};
-    bool has_motion = false;
-    uint64_t last_input_us = 0;
-    std::string name = "JoyShock";
-    int handle = 0;
-};
-
-static uint8_t jsl_axis_to_byte(float v, bool invert = false) {
-    // JoyShockLibrary sticks are normally -1..1.
-    if (v > -0.08f && v < 0.08f) return 128;
-    if (v < -1.0f) v = -1.0f;
-    if (v >  1.0f) v =  1.0f;
-    if (invert) v = -v;
-    int out = (int)std::lround(128.0f + v * 127.0f);
-    if (out < 0) out = 0;
-    if (out > 255) out = 255;
-    return (uint8_t)out;
-}
-
-static int16_t jsl_clamp_motion_i16(float v) {
-    if (v > 32767.0f) return 32767;
-    if (v < -32768.0f) return -32768;
-    return (int16_t)std::lround(v);
-}
-
-class JoyShockInputManager {
-public:
-    bool start() {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (initialized) return true;
-
-        int count = JslConnectDevices();
-        if (count < 0) count = 0;
-        handles.assign((size_t)std::min(count, 4), 0);
-        if (count > 0 && !handles.empty()) {
-            JslGetConnectedDeviceHandles(handles.data(), (int)handles.size());
-        }
-
-        initialized = true;
-        last_scan_us = ns::now_us();
-        return !handles.empty();
-    }
-
-    void stop() {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (initialized) {
-            JslDisconnectAndDisposeAll();
-            initialized = false;
-        }
-        handles.clear();
-        for (auto& s : states) s = JslPadState{};
-    }
-
-    void poll() {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized) return;
-
-        const uint64_t now = ns::now_us();
-
-        // Rescan occasionally. JSL handles are simple ints; reconnecting is cheap
-        // compared to the stability problems from constantly opening devices.
-        if (now - last_scan_us > 1000000ULL) {
-            last_scan_us = now;
-            int count = JslConnectDevices();
-            if (count < 0) count = 0;
-            handles.assign((size_t)std::min(count, 4), 0);
-            if (count > 0 && !handles.empty()) {
-                JslGetConnectedDeviceHandles(handles.data(), (int)handles.size());
-            }
-        }
-
-        for (auto& s : states) s = JslPadState{};
-
-        for (size_t i = 0; i < handles.size() && i < 4; ++i) {
-            const int h = handles[i];
-            if (h == 0) continue;
-
-            JOY_SHOCK_STATE js{};
-            IMU_STATE imu{};
-            MOTION_STATE motion{};
-
-            js = JslGetSimpleState(h);
-            imu = JslGetIMUState(h);
-            motion = JslGetMotionState(h);
-
-            JslPadState st{};
-            st.connected = true;
-            st.handle = h;
-            st.name = "JoyShockLibrary Controller";
-            st.input.reset();
-
-            // JSL button masks are intentionally kept behind the library API.
-            // These constants are stable in JoyShockLibrary headers, but if an
-            // older header differs, the compiler will catch it.
-            if (js.buttons & JSMASK_S) st.input.buttons |= ns::BTN_B;
-            if (js.buttons & JSMASK_E) st.input.buttons |= ns::BTN_A;
-            if (js.buttons & JSMASK_W) st.input.buttons |= ns::BTN_Y;
-            if (js.buttons & JSMASK_N) st.input.buttons |= ns::BTN_X;
-
-            if (js.buttons & JSMASK_L)  st.input.buttons |= ns::BTN_L;
-            if (js.buttons & JSMASK_R)  st.input.buttons |= ns::BTN_R;
-            if (js.buttons & JSMASK_ZL) st.input.buttons |= ns::BTN_ZL;
-            if (js.buttons & JSMASK_ZR) st.input.buttons |= ns::BTN_ZR;
-
-            if (js.buttons & JSMASK_MINUS) st.input.buttons |= ns::BTN_MINUS;
-            if (js.buttons & JSMASK_PLUS)  st.input.buttons |= ns::BTN_PLUS;
-            if (js.buttons & JSMASK_LCLICK) st.input.buttons |= ns::BTN_LSTICK;
-            if (js.buttons & JSMASK_RCLICK) st.input.buttons |= ns::BTN_RSTICK;
-            if (js.buttons & JSMASK_HOME) st.input.buttons |= ns::BTN_HOME;
-            if (js.buttons & JSMASK_CAPTURE) st.input.buttons |= ns::BTN_CAPTURE;
-
-            bool up = (js.buttons & JSMASK_UP) != 0;
-            bool down = (js.buttons & JSMASK_DOWN) != 0;
-            bool left = (js.buttons & JSMASK_LEFT) != 0;
-            bool right = (js.buttons & JSMASK_RIGHT) != 0;
-            if (up && right) st.input.hat = ns::HAT_NE;
-            else if (up && left) st.input.hat = ns::HAT_NW;
-            else if (down && right) st.input.hat = ns::HAT_SE;
-            else if (down && left) st.input.hat = ns::HAT_SW;
-            else if (up) st.input.hat = ns::HAT_N;
-            else if (down) st.input.hat = ns::HAT_S;
-            else if (left) st.input.hat = ns::HAT_W;
-            else if (right) st.input.hat = ns::HAT_E;
-
-            st.input.lx = jsl_axis_to_byte(js.stickLX);
-            st.input.ly = jsl_axis_to_byte(js.stickLY, true);
-            st.input.rx = jsl_axis_to_byte(js.stickRX);
-            st.input.ry = jsl_axis_to_byte(js.stickRY, true);
-
-            // JSL MotionState is already processed/fused enough for aim. Use
-            // IMU accel for gravity and accumulated gyro for smooth polling.
-            float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-            JslGetAndFlushAccumulatedGyro(h, gx, gy, gz);
-
-            st.motion.reset();
-            st.motion.ax = jsl_clamp_motion_i16(imu.accelX * 4096.0f);
-            st.motion.ay = jsl_clamp_motion_i16(imu.accelY * 4096.0f);
-            st.motion.az = jsl_clamp_motion_i16(imu.accelZ * 4096.0f);
-
-            // JSL gyro is degrees/sec. Backend convention is deg/sec * 16.
-            st.motion.gx = jsl_clamp_motion_i16(gx * 16.0f);
-            st.motion.gy = jsl_clamp_motion_i16(gy * 16.0f);
-            st.motion.gz = jsl_clamp_motion_i16(gz * 16.0f);
-            st.has_motion = true;
-
-            if (st.input.buttons || st.input.hat != ns::HAT_NEUTRAL ||
-                st.input.lx != 128 || st.input.ly != 128 ||
-                st.input.rx != 128 || st.input.ry != 128 ||
-                st.has_motion) {
-                st.last_input_us = now;
-            }
-
-            states[i] = st;
-        }
-    }
-
-    std::array<JslPadState, 4> snapshot() {
-        std::lock_guard<std::mutex> lk(mtx);
-        return states;
-    }
-
-    bool active() const {
-        std::lock_guard<std::mutex> lk(mtx);
-        return initialized && !handles.empty();
-    }
-
-private:
-    mutable std::mutex mtx;
-    bool initialized = false;
-    uint64_t last_scan_us = 0;
-    std::vector<int> handles;
-    std::array<JslPadState, 4> states{};
-};
-
-static JoyShockInputManager g_jslInput;
-
-#endif
-
-
 // ── SDL3 unified gamepad backend ────────────────────────────────────────────
 // SDL gives us one Windows receiver path for gamepads, rumble, and optional motion sensors.
 // The rest of the app still deals only in our console-style HIDReport +
@@ -1033,37 +836,12 @@ public:
     }
 
     bool set_precision_rumble(int sdl_slot, const uint8_t precision[8]) {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return false;
-        Device* d = device_for_slot_locked(sdl_slot);
-        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return false;
-
-        if (!supports_nintendo_hd_effect(*d)) {
-            // Not an error. This just means "use classic fallback".
-            return false;
-        }
-
-        const uint64_t now = ns::now_us();
-        if (d->precision_retry_after_us != 0 && now < d->precision_retry_after_us) {
-            return false;
-        }
-
-        if (SDL_SendGamepadEffect(d->pad, precision, 8)) {
-            d->precision_retry_after_us = 0;
-            return true;
-        }
-
-        const char* e = SDL_GetError();
-        std::ostringstream oss;
-        oss << "SDL_SendGamepadEffect failed for " << d->name
-            << " VID:PID=" << std::hex << d->vid << ":" << d->pid
-            << " - " << ((e && *e) ? e : "unknown error");
-        last_error = oss.str();
-
-        // Do not spam a controller with unsupported effect packets every frame.
-        // Let classic rumble handle feedback, then retry later in case the
-        // device was briefly unavailable.
-        d->precision_retry_after_us = now + 2000000ULL;
+        (void)sdl_slot;
+        (void)precision;
+        // Normal-rumble build: do not send Nintendo HD/precision effect packets.
+        // SDL_SendGamepadEffect is gamepad-specific and caused disconnects/errors
+        // on some controllers. Precision packets are converted to classic rumble
+        // in RumbleManager::apply_precision_packet instead.
         return false;
     }
 
@@ -1364,30 +1142,23 @@ public:
     void apply_precision_packet(const ns::PrecisionRumblePacket& rp,
                          const int sdl_for_slot[4]) {
         if (rp.subpad >= 4) return;
-        const int slot = rp.subpad;
-        const bool neutral = (rp.low_freq == 0 && rp.high_freq == 0) || rp.duration_10ms == 0;
-        bool precision_payload_zero = true;
-        for (uint8_t b : rp.precision) precision_payload_zero = precision_payload_zero && b == 0;
-        const bool ok_precision = (!precision_payload_zero || neutral) &&
-                           sdl_for_slot[slot] >= 0 &&
-                           g_sdlInput.set_precision_rumble(sdl_for_slot[slot], rp.precision);
-        if (ok_precision) {
-            states[slot].suppress_classic_until_us = ns::now_us() + 150000ULL;
-            if (neutral) {
-                states[slot].until_us = 0;
-                states[slot].low = states[slot].high = 0;
-                states[slot].duration_ms = 0;
-            }
-            return;
-        }
 
+        // Normal-rumble build:
+        // Treat PrecisionRumblePacket as a carrier for already-decoded classic
+        // low/high magnitudes. Do NOT send the 8-byte HD payload to SDL.
+        //
+        // The backend may send PrecisionRumblePacket followed by RumblePacket as
+        // fallback. Apply the decoded classic rumble once, then suppress the
+        // immediate duplicate fallback.
         ns::RumblePacket fallback{};
         fallback.magic = ns::RUMBLE_MAGIC;
         fallback.subpad = rp.subpad;
         fallback.low_freq = rp.low_freq;
         fallback.high_freq = rp.high_freq;
         fallback.duration_10ms = rp.duration_10ms;
+
         apply_packet(fallback, sdl_for_slot);
+        states[rp.subpad].suppress_classic_until_us = ns::now_us() + 150000ULL;
     }
 
     void apply_packet(const ns::RumblePacket& rp,
@@ -2954,9 +2725,6 @@ static void SenderThread() {
 
         PollMacroEntryHotkeys();
         g_sdlInput.poll();
-#if defined(NS_ENABLE_JOYSHOCK) && defined(NS_JSL_STATIC)
-    g_jslInput.poll();
-#endif
 
         ns::HIDReport logicalReports[4];
         ns::MotionReport logicalMotion[4];
@@ -3365,9 +3133,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_DESTROY:
             DoDisconnect();
             g_sdlInput.stop();
-#if defined(NS_ENABLE_JOYSHOCK) && defined(NS_JSL_STATIC)
-    g_jslInput.stop();
-#endif
             PostQuitMessage(0);
             break;
 
@@ -3619,9 +3384,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SDL_SetMainReady();
     g_sdlInput.start();
-#if defined(NS_ENABLE_JOYSHOCK) && defined(NS_JSL_STATIC)
-    g_jslInput.start();
-#endif
     g_hInst = hInst;
 
     WSADATA wsa{};
