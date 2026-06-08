@@ -15,9 +15,14 @@ env:
   SDL_REF: release-3.4.10
   SDL_CACHE_VERSION: v1
 
+  # Pin this later to a commit SHA for reproducible builds.
+  JSL_REF: master
+  JSL_CACHE_VERSION: v1
+
 jobs:
   build-windows:
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v6
 
@@ -53,7 +58,50 @@ jobs:
 
           cmake --build _deps/SDL/build-static --config Release --target install --parallel
 
-      - name: Build Windows Clients (MSVC + cached static SDL3)
+      - name: Restore JoyShockLibrary static cache
+        id: cache-jsl
+        uses: actions/cache@v5
+        with:
+          path: _cache/jsl-static
+          key: jsl-${{ runner.os }}-x64-${{ env.JSL_REF }}-mt-${{ env.JSL_CACHE_VERSION }}
+          restore-keys: |
+            jsl-${{ runner.os }}-x64-${{ env.JSL_REF }}-mt-
+
+      - name: Build and install JoyShockLibrary static
+        if: steps.cache-jsl.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:JSL_REF https://github.com/JibbSmart/JoyShockLibrary.git _deps/JoyShockLibrary
+
+          cmake -S _deps/JoyShockLibrary -B _deps/JoyShockLibrary/build-static -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$PWD/_cache/jsl-static" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DBUILD_SHARED_LIBS=OFF
+
+          cmake --build _deps/JoyShockLibrary/build-static --config Release --parallel
+
+          New-Item -ItemType Directory -Force _cache/jsl-static/include | Out-Null
+          New-Item -ItemType Directory -Force _cache/jsl-static/lib | Out-Null
+
+          Copy-Item _deps/JoyShockLibrary/JoyShockLibrary/JoyShockLibrary.h _cache/jsl-static/include/
+
+          $lib = Get-ChildItem _deps/JoyShockLibrary/build-static -Recurse -Filter JoyShockLibrary.lib |
+            Where-Object { $_.FullName -match "\\Release\\" } |
+            Select-Object -First 1
+
+          if (-not $lib) {
+            $lib = Get-ChildItem _deps/JoyShockLibrary/build-static -Recurse -Filter JoyShockLibrary.lib |
+              Select-Object -First 1
+          }
+
+          if (-not $lib) {
+            throw "JoyShockLibrary.lib not found"
+          }
+
+          Copy-Item $lib.FullName _cache/jsl-static/lib/JoyShockLibrary.lib
+
+      - name: Build Windows Clients (MSVC + cached static SDL3 + static JoyShockLibrary)
         shell: pwsh
         run: |
           cd client/windows
@@ -73,6 +121,24 @@ jobs:
           find_package(SDL3 REQUIRED CONFIG
             PATHS "${CMAKE_CURRENT_LIST_DIR}/../../_cache/sdl3-static"
             NO_DEFAULT_PATH
+          )
+
+          set(JSL_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../_cache/jsl-static")
+          set(JSL_INCLUDE_DIR "${JSL_ROOT}/include")
+          set(JSL_LIBRARY "${JSL_ROOT}/lib/JoyShockLibrary.lib")
+
+          if(NOT EXISTS "${JSL_INCLUDE_DIR}/JoyShockLibrary.h")
+            message(FATAL_ERROR "JoyShockLibrary.h not found at ${JSL_INCLUDE_DIR}")
+          endif()
+
+          if(NOT EXISTS "${JSL_LIBRARY}")
+            message(FATAL_ERROR "JoyShockLibrary.lib not found at ${JSL_LIBRARY}")
+          endif()
+
+          add_library(JoyShockLibraryStatic STATIC IMPORTED)
+          set_target_properties(JoyShockLibraryStatic PROPERTIES
+            IMPORTED_LOCATION "${JSL_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${JSL_INCLUDE_DIR}"
           )
 
           add_executable(ns-gamepad
@@ -126,6 +192,16 @@ jobs:
               RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_LIST_DIR}"
             )
           endforeach()
+
+          target_compile_definitions(ns-gui PRIVATE
+            NS_ENABLE_JOYSHOCK
+            NS_JSL_STATIC
+          )
+
+          target_link_libraries(ns-gui PRIVATE
+            JoyShockLibraryStatic
+            hid
+          )
           '@ | Set-Content -Encoding UTF8 CMakeLists.txt
 
           cmake -S . -B build-sdl3 -G "Visual Studio 17 2022" -A x64 `
@@ -137,6 +213,10 @@ jobs:
 
           if (Test-Path ".\SDL3.dll") {
             throw "SDL3.dll was produced next to the clients; expected statically-linked exes."
+          }
+
+          if (Test-Path ".\JoyShockLibrary.dll") {
+            throw "JoyShockLibrary.dll was produced next to the clients; expected statically-linked exe."
           }
 
       - uses: actions/upload-artifact@v6
