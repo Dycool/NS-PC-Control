@@ -982,13 +982,11 @@ private:
         has_motion = false;
 
         float accel[3] = {};
-        bool got_accel = false;
         if (d.accel_enabled && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
             out.ax = clamp_motion_i16((accel[0] / 9.80665f) * 4096.0f);
-            out.ay = clamp_motion_i16((-accel[2] / 9.80665f) * 4096.0f);
-            out.az = clamp_motion_i16((accel[1] / 9.80665f) * 4096.0f);
+            out.ay = clamp_motion_i16((accel[1] / 9.80665f) * 4096.0f);
+            out.az = clamp_motion_i16((accel[2] / 9.80665f) * 4096.0f);
             has_motion = true;
-            got_accel = true;
         }
 
         float gyro[3] = {};
@@ -996,44 +994,9 @@ private:
             constexpr float RAD_TO_DEG = 57.29577951308232f;
             constexpr float CONSOLE_GYRO_SCALE = RAD_TO_DEG * 16.384f;
 
-            float g[3] = {
-                gyro[0] * CONSOLE_GYRO_SCALE,
-                -gyro[2] * CONSOLE_GYRO_SCALE,
-                gyro[1] * CONSOLE_GYRO_SCALE
-            };
-
-            const float accel_mag = got_accel
-                ? std::sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2])
-                : 9.80665f;
-            const float gyro_mag_rad =
-                std::sqrt(gyro[0] * gyro[0] + gyro[1] * gyro[1] + gyro[2] * gyro[2]);
-
-            const bool accel_is_gravity = got_accel && std::fabs(accel_mag - 9.80665f) < 1.75f;
-            const bool gyro_is_quiet = gyro_mag_rad < 0.08f;
-            const bool resting = accel_is_gravity && gyro_is_quiet;
-
-            if (!d.gyro_filter_initialized) {
-                d.gyro_bias[0] = resting ? g[0] : 0.0f;
-                d.gyro_bias[1] = resting ? g[1] : 0.0f;
-                d.gyro_bias[2] = resting ? g[2] : 0.0f;
-                d.gyro_filter_initialized = true;
-            }
-
-            if (resting) {
-                constexpr float BIAS_ALPHA = 0.025f;
-                for (int i = 0; i < 3; ++i)
-                    d.gyro_bias[i] = d.gyro_bias[i] * (1.0f - BIAS_ALPHA) + g[i] * BIAS_ALPHA;
-            }
-
-            for (int i = 0; i < 3; ++i) {
-                g[i] -= d.gyro_bias[i];
-                g[i] = motion_deadzone_float(g[i], 24.0f);
-            }
-
-            out.gx = clamp_motion_i16(g[0]);
-            out.gy = clamp_motion_i16(g[1]);
-            out.gz = clamp_motion_i16(g[2]);
-
+            out.gx = clamp_motion_i16(gyro[0] * CONSOLE_GYRO_SCALE);
+            out.gy = clamp_motion_i16(gyro[1] * CONSOLE_GYRO_SCALE);
+            out.gz = clamp_motion_i16(gyro[2] * CONSOLE_GYRO_SCALE);
             has_motion = true;
         }
     }
