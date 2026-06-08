@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build-clients:
@@ -23,61 +24,95 @@ jobs:
     needs: [build-clients, build-server, build-mobile]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v7
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
-      - name: Create Release Zips
+      - name: Show downloaded artifact tree
         run: |
+          find artifacts -maxdepth 4 -type f -print | sort
+
+      - name: Create Release Zips
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p _zips
 
-          # Windows
+          require_file() {
+            local path="$1"
+            local label="$2"
+            if [ -z "$path" ] || [ ! -f "$path" ]; then
+              echo "Missing $label artifact"
+              echo "Downloaded files:"
+              find artifacts -maxdepth 5 -type f -print | sort
+              exit 1
+            fi
+          }
+
+          # New artifact names from build-clients.yml:
+          #   windows-static-exe/ns-client.exe
+          #   linux-appimage/ns-client-x86_64.AppImage
+          #   macos-app/ns-client-macos.app.zip
+          # New artifact names from build-mobile.yml:
+          #   ns-control-android-debug-apk/app-debug.apk
+          #   ns-control-ios-unsigned-app/NSControl-ios-unsigned.app.zip
+          # Server workflow can vary, so find ns-backend by filename.
+
+          WINDOWS_EXE="$(find artifacts -type f -name 'ns-client.exe' -print -quit)"
+          LINUX_APPIMAGE="$(find artifacts -type f -name 'ns-client*.AppImage' -print -quit)"
+          MAC_ZIP="$(find artifacts -type f \( -name 'ns-client-macos.app.zip' -o -name '*macos*.zip' -o -name '*.app.zip' \) -print -quit)"
+          PI_BACKEND="$(find artifacts -type f -name 'ns-backend' -print -quit)"
+          ANDROID_APK="$(find artifacts -type f -name 'app-debug.apk' -print -quit)"
+          IOS_ZIP="$(find artifacts -type f \( -name 'NSControl-ios-unsigned.app.zip' -o -name '*ios*.zip' -o -name '*.app.zip' \) -print -quit)"
+
+          require_file "$WINDOWS_EXE" "Windows ns-client.exe"
+          require_file "$LINUX_APPIMAGE" "Linux AppImage"
+          require_file "$MAC_ZIP" "macOS .app zip"
+          require_file "$PI_BACKEND" "Raspberry Pi ns-backend"
+          require_file "$ANDROID_APK" "Android APK"
+          require_file "$IOS_ZIP" "iOS .app zip"
+
+          # Avoid accidentally picking the macOS .app zip for iOS if both match *.app.zip.
+          if [ "$IOS_ZIP" = "$MAC_ZIP" ]; then
+            IOS_ZIP="$(find artifacts/ns-control-ios-unsigned-app -type f -name '*.zip' -print -quit 2>/dev/null || true)"
+            require_file "$IOS_ZIP" "iOS .app zip"
+          fi
+
+          # Windows: one real static .exe inside release zip.
           mkdir -p _zips/_windows
-          cp -r artifacts/windows/* _zips/_windows/
-          cd _zips/_windows
-          zip -r ../ns-pc-control-windows.zip .
-          cd ../..
+          cp "$WINDOWS_EXE" _zips/_windows/ns-client.exe
+          (cd _zips/_windows && zip -r ../ns-pc-control-windows.zip .)
           rm -rf _zips/_windows
 
-          # Linux
+          # Linux: one AppImage inside release zip.
           mkdir -p _zips/_linux
-          cp -r artifacts/linux/* _zips/_linux/
-          cd _zips/_linux
-          zip -r ../ns-pc-control-linux.zip .
-          cd ../..
+          cp "$LINUX_APPIMAGE" _zips/_linux/ns-client-x86_64.AppImage
+          chmod +x _zips/_linux/ns-client-x86_64.AppImage
+          (cd _zips/_linux && zip -r ../ns-pc-control-linux.zip .)
           rm -rf _zips/_linux
 
-          # macOS
-          mkdir -p _zips/_mac
-          cp -R artifacts/macos/ns-client.app _zips/_mac/
-          cd _zips/_mac
-          zip -ry ../ns-pc-control-mac.zip ns-client.app
-          cd ../..
-          rm -rf _zips/_mac
+          # macOS: build-clients already created a proper .app zip, so reuse it.
+          cp "$MAC_ZIP" _zips/ns-pc-control-mac.zip
 
-          # Raspberry Pi unified server
+          # Raspberry Pi unified server.
           mkdir -p _zips/_pi
-          cp artifacts/pi-server/ns-backend _zips/_pi/ns-backend
-          cd _zips/_pi
-          zip -r ../ns-pc-control-raspberry-pi.zip ns-backend
-          cd ../..
+          cp "$PI_BACKEND" _zips/_pi/ns-backend
+          chmod +x _zips/_pi/ns-backend
+          (cd _zips/_pi && zip -r ../ns-pc-control-raspberry-pi.zip ns-backend)
           rm -rf _zips/_pi
 
-          # Android APK
+          # Android APK.
           mkdir -p _zips/_android
-          cp artifacts/ns-control-android/app-debug.apk _zips/_android/
-          cd _zips/_android
-          zip -r ../ns-pc-control-android.zip .
-          cd ../..
+          cp "$ANDROID_APK" _zips/_android/app-debug.apk
+          (cd _zips/_android && zip -r ../ns-pc-control-android.zip .)
           rm -rf _zips/_android
 
-          # iOS .app
-          mkdir -p _zips/_ios
-          cp -R artifacts/ns-control-ios/NSControl.app _zips/_ios/
-          cd _zips/_ios
-          zip -ry ../ns-pc-control-ios.zip NSControl.app
-          cd ../..
-          rm -rf _zips/_ios
+          # iOS unsigned .app bundle zip, already packaged by build-mobile.
+          cp "$IOS_ZIP" _zips/ns-pc-control-ios.zip
+
+          echo "Release zips:"
+          ls -lh _zips
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v2
