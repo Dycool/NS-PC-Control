@@ -744,8 +744,8 @@ public:
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "JOY" "_CONS", "1");
-        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
-        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "0"); // avoid Sony enhanced-report reconnect loop by default
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "0"); // avoid Sony enhanced-report reconnect loop by default
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX", "1");
         SDL_SetHint("SDL_JOYSTICK_ENHANCED_REPORTS", "1");
 
@@ -926,6 +926,10 @@ private:
         // Sending it to DualShock/DualSense/Xbox can fail repeatedly or kick the
         // device into a bad enhanced-report state, so let those use classic rumble.
         return d.vid == 0x057E && (d.pid == 0x2009 || d.pid == 0x2006 || d.pid == 0x2007);
+    }
+
+    static bool is_sony_controller(const Device& d) {
+        return d.vid == 0x054C; // Sony Interactive Entertainment
     }
 
     static bool has_native_home_capture(const Device& d) {
@@ -1121,10 +1125,15 @@ private:
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
 
-            if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) {
+            // Nintendo controllers are safe and needed for the project's main gyro path.
+            // Sony controllers on Windows can disconnect/re-enumerate when SDL switches them
+            // into enhanced report/sensor mode. Keep Sony sensors disabled by default so
+            // clicking Connect cannot kick the controller off the PC.
+            const bool allow_sensors = !is_sony_controller(d);
+            if (allow_sensors && SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) {
                 d.accel_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true);
             }
-            if (SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
+            if (allow_sensors && SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
                 d.gyro_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true);
             }
 
