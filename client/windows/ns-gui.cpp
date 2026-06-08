@@ -998,8 +998,8 @@ private:
 
             float g[3] = {
                 gyro[0] * CONSOLE_GYRO_SCALE,
-                gyro[1] * CONSOLE_GYRO_SCALE,
-                -gyro[2] * CONSOLE_GYRO_SCALE
+                -gyro[2] * CONSOLE_GYRO_SCALE,
+                gyro[1] * CONSOLE_GYRO_SCALE
             };
 
             const float accel_mag = got_accel
