@@ -1,9 +1,6 @@
 #pragma once
 
 // Shared macro helpers for NS-PC-Control clients/server.
-// Put this file next to protocol.hpp, for example: server/include/macros.hpp
-// Server include: #include "include/macros.hpp"
-// Client include: #include "../server/include/macros.hpp"
 
 #include "protocol.hpp"
 
