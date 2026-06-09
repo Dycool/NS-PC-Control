@@ -4,32 +4,15 @@
 #include "sdl_controller.h"
 #include "ns_protocol.h"
 
-static JavaVM* g_jvm = NULL;
-
-#ifdef __ANDROID__
-extern "C" void Android_InitJNI(JavaVM* vm, JNIEnv* env);
-#endif
-
-// ─── JNI_OnLoad ────────────────────────────────────────────
-
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    g_jvm = vm;
-    return JNI_VERSION_1_6;
-}
+// SDL3's Android static library already exports JNI_OnLoad.
+// Do not define another JNI_OnLoad here, or the final libnsprotocol.so link
+// fails with a duplicate symbol against SDL_android.c. SDL's JNI_OnLoad is
+// the one that initializes SDL's Android/JavaVM state before SDL_Init().
 
 // ─── SDL lifecycle ─────────────────────────────────────────
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_nscontrol_SDLController_nativeInit(JNIEnv*, jclass) {
-#ifdef __ANDROID__
-    // SDL3 on Android needs a JavaVM to be set before SDL_Init() for JNI access.
-    // Android_InitJNI is defined in SDL3's Android core and linked from SDL3 static.
-    if (g_jvm) {
-        JNIEnv* env = NULL;
-        g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
-        if (env) Android_InitJNI(g_jvm, env);
-    }
-#endif
     return sdl_controller_init() ? JNI_TRUE : JNI_FALSE;
 }
 
