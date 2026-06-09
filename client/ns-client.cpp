@@ -31,8 +31,11 @@ static constexpr int SOCKET_ERROR = -1;
 static int closesocket(SOCKET s) { return close(s); }
 #endif
 
+#include <limits.h>
+
 #ifdef __APPLE__
 #include <CoreGraphics/CoreGraphics.h>
+#include <mach-o/dyld.h>
 #endif
 
 #include <SDL3/SDL.h>
@@ -819,17 +822,34 @@ static std::string path_join(const std::string& a, const std::string& b) {
     return a + sep + b;
 }
 
+static std::string dirname_of(std::string path) {
+    size_t slash = path.find_last_of("\\/");
+    if (slash == std::string::npos) return ".";
+    return path.substr(0, slash);
+}
+
 static std::string executable_dir() {
 #ifdef _WIN32
     char buf[MAX_PATH]{};
     DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::string path(buf);
-        size_t slash = path.find_last_of("\\/");
-        if (slash != std::string::npos) return path.substr(0, slash);
-    }
-#endif
+    if (n > 0 && n < MAX_PATH) return dirname_of(buf);
     return ".";
+#elif defined(__APPLE__)
+    char buf[PATH_MAX]{};
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) return dirname_of(buf);
+    std::vector<char> big(size + 1);
+    if (_NSGetExecutablePath(big.data(), &size) == 0) {
+        big[size] = '\0';
+        return dirname_of(big.data());
+    }
+    return ".";
+#else
+    char buf[PATH_MAX]{};
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; return dirname_of(buf); }
+    return ".";
+#endif
 }
 
 static void make_dir_if_needed(const std::string& dir) {
@@ -1837,9 +1857,19 @@ static QIcon app_icon() {
     if (loaded) return cached;
     loaded = true;
 
-    static const std::string candidates[] = {
-        path_join(executable_dir(), "icon.ico"),
-        path_join(executable_dir(), "icon.png"),
+    const std::string exe_dir = executable_dir();
+
+    std::vector<std::string> candidates = {
+#ifdef __APPLE__
+        path_join(path_join(exe_dir, "../Resources"), "icon.icns"),
+        path_join(path_join(exe_dir, "../Resources"), "icon.png"),
+#endif
+#ifndef _WIN32
+        path_join(path_join(exe_dir, "../share/icons/hicolor/256x256/apps"), "ns-client.png"),
+        path_join(path_join(exe_dir, "../share/pixmaps"), "ns-client.png"),
+#endif
+        path_join(exe_dir, "icon.ico"),
+        path_join(exe_dir, "icon.png"),
         path_join(NS_CLIENT_SOURCE_DIR, "icon.ico"),
         path_join(NS_CLIENT_SOURCE_DIR, "icon.png")
     };

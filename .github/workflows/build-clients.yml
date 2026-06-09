@@ -145,6 +145,8 @@ jobs:
           cp client/build/ns-client AppDir/usr/bin/ns-client
           chmod +x AppDir/usr/bin/ns-client
           cp client/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/ns-client.png
+          cp client/icon.png AppDir/.DirIcon
+          cp client/icon.png AppDir/usr/bin/icon.png
 
           cat > AppDir/usr/share/applications/ns-client.desktop <<'EOF'
           [Desktop Entry]
@@ -155,6 +157,9 @@ jobs:
           Categories=Game;Utility;
           Terminal=false
           EOF
+
+          cp AppDir/usr/share/applications/ns-client.desktop AppDir/ns-client.desktop
+          desktop-file-validate AppDir/usr/share/applications/ns-client.desktop
 
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
@@ -320,6 +325,7 @@ jobs:
           cd - >/dev/null
 
           macdeployqt "$APP" -verbose=1
+          touch "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" client/artifacts/macos/ns-client-macos.app.zip
 
       - uses: actions/upload-artifact@v6
