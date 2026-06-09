@@ -1,6 +1,6 @@
 name: Build Mobile Apps
 
-"on":
+on:
   push:
     paths:
       - 'mobile/**'
@@ -109,31 +109,39 @@ jobs:
           path: SDL3
           fetch-depth: 1
 
-      - name: Build SDL3 for iOS
+      - name: Build and install SDL3 for iOS
         run: |
+          set -euo pipefail
           cmake -S SDL3 -B SDL3/build/ios \
             -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/mobile/ios/SDL3" \
             -DSDL_STATIC=ON \
             -DSDL_SHARED=OFF \
             -DSDL_TEST_LIBRARY=OFF \
             -DSDL_TESTS=OFF \
-            -DSDL_EXAMPLES=OFF
+            -DSDL_EXAMPLES=OFF \
+            -DSDL_INSTALL=ON
           cmake --build SDL3/build/ios --config Release -j"$(sysctl -n hw.logicalcpu)"
+          rm -rf mobile/ios/SDL3
+          cmake --install SDL3/build/ios --config Release --prefix "${{ github.workspace }}/mobile/ios/SDL3"
 
-      - name: Copy SDL3 library to iOS project
-        run: |
-          SDL3_LIB=$(find SDL3/build/ios -name "libSDL3.a" -type f | head -1)
-          if [ -z "$SDL3_LIB" ]; then
-            echo "Could not find libSDL3.a in SDL3/build/ios"
-            find SDL3/build/ios -name "*.a" -type f
-            exit 1
+          # Belt-and-suspenders: some SDL3 CMake/install layouts can leave the
+          # public headers out of the install prefix even when libSDL3.a exists.
+          # Xcode compiles mobile/shared/sdl_controller.c with:
+          #   #include <SDL3/SDL.h>
+          # so make that path exist unconditionally.
+          if [ ! -f mobile/ios/SDL3/include/SDL3/SDL.h ]; then
+            mkdir -p mobile/ios/SDL3/include
+            rsync -a SDL3/include/SDL3 mobile/ios/SDL3/include/
           fi
-          mkdir -p mobile/ios/SDL3/lib
-          cp "$SDL3_LIB" mobile/ios/SDL3/lib/libSDL3.a
+
+          test -f mobile/ios/SDL3/include/SDL3/SDL.h
+          test -f mobile/ios/SDL3/lib/libSDL3.a
+          find mobile/ios/SDL3 -maxdepth 3 -type f \( -name 'SDL.h' -o -name 'libSDL3.a' \) -print
 
       - name: Generate Xcode project
         working-directory: mobile/ios
