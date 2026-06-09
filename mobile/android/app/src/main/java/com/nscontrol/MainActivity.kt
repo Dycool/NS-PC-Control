@@ -37,14 +37,16 @@ class MainActivity : AppCompatActivity() {
     private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private var gyroListener: SensorEventListener? = null
     private var accelListener: SensorEventListener? = null
+    private val sensorLock = Any()
     private var gyroValues = FloatArray(3) // x, y, z angular velocity, rad/s
-    private var accelValues = floatArrayOf(0f, Protocol.STANDARD_GRAVITY, 0f) // x, y, z acceleration, m/s^2
+    private var accelValues = floatArrayOf(0f, Protocol.STANDARD_GRAVITY, 0f) // x, y, z gravity/acceleration, m/s^2
 
     // Haptics
     private val vibrator by lazy { getSystemService(VIBRATOR_SERVICE) as Vibrator }
 
     // Touch data bridged from WebView JS
-    @Volatile private var touchFrame: ByteArray? = null
+    @Volatile private var touchHid: ByteArray? = null
+    @Volatile private var touchFrame: ByteArray? = null // legacy fallback for older bundled pages
     @Volatile private var lastTouchFrameMs: Long = 0
     @Volatile private var lastBridgeFrameParseMs: Long = 0
 
@@ -117,7 +119,18 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 override fun onClosed(w: WebSocket, code: Int, reason: String) {
-                    runOnUiThread { statusText.text = "Disconnected" }
+                    runOnUiThread {
+                        statusText.text = "Disconnected"
+                        if (ws === w) {
+                            sending = false
+                            controlClientActive = false
+                            touchHid = null
+                            touchFrame = null
+                            lastTouchFrameMs = 0
+                            stopGyro()
+                            ws = null
+                        }
+                    }
                 }
                 override fun onFailure(w: WebSocket, t: Throwable, r: Response?) {
                     runOnUiThread {
@@ -125,6 +138,7 @@ class MainActivity : AppCompatActivity() {
                         if (ws === w) {
                             sending = false
                             controlClientActive = false
+                            touchHid = null
                             touchFrame = null
                             lastTouchFrameMs = 0
                             stopGyro()
@@ -179,6 +193,7 @@ class MainActivity : AppCompatActivity() {
                     statusText.text = "Input sender failed"
                     sending = false
                     controlClientActive = false
+                    touchHid = null
                     touchFrame = null
                     lastTouchFrameMs = 0
                     try { ws?.close(1000, "Input sender failed") } catch (_: Throwable) {}
@@ -206,7 +221,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendFrameInternal(flagsOverride: Int? = null, forceNeutral: Boolean = false) {
         val controller = if (forceNeutral) null else snapshotController()
-        val touchActive = !forceNeutral && touchModeActive()
+        val touchActive = !forceNeutral && touchClientActive()
         val flags = flagsOverride ?: if (controller == null && touchActive) Protocol.FLAG_SINGLE_PAD else 0
 
         val pad0Hid: ByteArray? = when {
@@ -223,14 +238,12 @@ class MainActivity : AppCompatActivity() {
                 controller.ry,
                 true
             )
-            touchActive -> touchFrame?.let { Protocol.extractPad0HidFromWebFrame(it) }
+            touchActive -> touchHid ?: touchFrame?.let { Protocol.extractPad0HidFromWebFrame(it) } ?: Protocol.neutralHid()
             else -> null
         }
 
         val pad0Motion: ByteArray? = if (!forceNeutral && (controller != null || touchActive)) {
-            val a = accelValues
-            val g = gyroValues
-            Protocol.motionFromAndroid(a[0], a[1], a[2], g[0], g[1], g[2])
+            currentMotionBytes()
         } else {
             null
         }
@@ -245,6 +258,29 @@ class MainActivity : AppCompatActivity() {
         ws?.send(frame.toByteString())
     }
 
+    private fun currentMotionBytes(): ByteArray {
+        val a = FloatArray(3)
+        val g = FloatArray(3)
+        synchronized(sensorLock) {
+            System.arraycopy(accelValues, 0, a, 0, 3)
+            System.arraycopy(gyroValues, 0, g, 0, 3)
+        }
+        return Protocol.motionFromAndroid(a[0], a[1], a[2], g[0], g[1], g[2])
+    }
+
+    private fun makeHid(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, present: Boolean = true): ByteArray {
+        val hid = ByteArray(Protocol.HID_SIZE)
+        hid[0] = (buttons and 0xFF).toByte()
+        hid[1] = ((buttons ushr 8) and 0xFF).toByte()
+        hid[2] = hat.coerceIn(0, 8).toByte()
+        hid[3] = lx.coerceIn(0, 255).toByte()
+        hid[4] = ly.coerceIn(0, 255).toByte()
+        hid[5] = rx.coerceIn(0, 255).toByte()
+        hid[6] = ry.coerceIn(0, 255).toByte()
+        hid[7] = if (present) 1 else 0
+        return hid
+    }
+
     // ═══════════════════════════════
     //  Gyro
     // ═══════════════════════════════
@@ -257,22 +293,29 @@ class MainActivity : AppCompatActivity() {
             if (gyro != null) {
                 gyroListener = object : SensorEventListener {
                     override fun onSensorChanged(e: SensorEvent) {
-                        if (e.values.size >= 3) System.arraycopy(e.values, 0, gyroValues, 0, 3)
+                        if (e.values.size >= 3) synchronized(sensorLock) {
+                            System.arraycopy(e.values, 0, gyroValues, 0, 3)
+                        }
                     }
                     override fun onAccuracyChanged(s: Sensor, a: Int) {}
                 }
-                sensorManager.registerListener(gyroListener, gyro, SensorManager.SENSOR_DELAY_GAME)
+                sensorManager.registerListener(gyroListener, gyro, SensorManager.SENSOR_DELAY_FASTEST)
             }
 
-            val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            // Prefer the gravity sensor for a stable tilt vector; fall back to the
+            // normal accelerometer on devices that do not expose TYPE_GRAVITY.
+            val accel = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+                ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
             if (accel != null) {
                 accelListener = object : SensorEventListener {
                     override fun onSensorChanged(e: SensorEvent) {
-                        if (e.values.size >= 3) System.arraycopy(e.values, 0, accelValues, 0, 3)
+                        if (e.values.size >= 3) synchronized(sensorLock) {
+                            System.arraycopy(e.values, 0, accelValues, 0, 3)
+                        }
                     }
                     override fun onAccuracyChanged(s: Sensor, a: Int) {}
                 }
-                sensorManager.registerListener(accelListener, accel, SensorManager.SENSOR_DELAY_GAME)
+                sensorManager.registerListener(accelListener, accel, SensorManager.SENSOR_DELAY_FASTEST)
             }
         } catch (_: Throwable) {
             gyroListener = null
@@ -306,12 +349,15 @@ class MainActivity : AppCompatActivity() {
 
         // Do not rumble the phone from the main menu / editor. Phone haptics are
         // only for the actual touch-controls page while it is actively sending input.
-        if (touchModeActive()) playPhoneHaptic(low, high)
+        if (touchClientActive()) playPhoneHaptic(low, high)
     }
 
-    private fun touchModeActive(): Boolean {
-        val t = lastTouchFrameMs
-        return controlClientActive && currentPage == Page.TOUCH_CONTROLS && t != 0L && SystemClock.uptimeMillis() - t < 750L
+    private fun touchClientActive(): Boolean {
+        return controlClientActive && currentPage == Page.TOUCH_CONTROLS
+    }
+
+    private fun controllerClientActive(): Boolean {
+        return controlClientActive && currentPage == Page.MAIN_MENU
     }
 
     private fun playControllerRumble(deviceId: Int, low: Int, high: Int): Boolean {
@@ -410,7 +456,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onOpen() {
             runOnUiThread {
-                if (currentPage == Page.TOUCH_CONTROLS) activateControlClient()
+                if (currentPage == Page.TOUCH_CONTROLS || currentPage == Page.MAIN_MENU) activateControlClient()
             }
         }
 
@@ -431,8 +477,19 @@ class MainActivity : AppCompatActivity() {
 
                 val arr = org.json.JSONArray(json)
                 if (arr.length() < Protocol.FRAME_SIZE) return
-                touchFrame = ByteArray(arr.length()) { i -> arr.getInt(i).toByte() }
+                val frame = ByteArray(arr.length()) { i -> arr.getInt(i).toByte() }
+                touchFrame = frame
+                touchHid = Protocol.extractPad0HidFromWebFrame(frame)
                 lastTouchFrameMs = now
+            } catch (_: Throwable) {}
+        }
+
+        @JavascriptInterface
+        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
+            if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
+            try {
+                touchHid = makeHid(buttons, hat, lx, ly, rx, ry, true)
+                lastTouchFrameMs = SystemClock.uptimeMillis()
             } catch (_: Throwable) {}
         }
 
@@ -557,6 +614,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun activateControlClient() {
         if (controlClientActive) return
+        touchHid = null
         touchFrame = null
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
@@ -581,6 +639,7 @@ class MainActivity : AppCompatActivity() {
         }
         sending = false
         controlClientActive = false
+        touchHid = null
         touchFrame = null
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0

@@ -106,7 +106,8 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         DispatchQueue.main.async { self.onStatus?("Disconnected") }
     }
 
-    /// Called from injected JS bridge with 24 raw bytes for pad 0
+    /// Called from injected JS bridge with 24 raw bytes for pad 0.
+    /// Kept as a fallback for older bundled pages.
     func bridgeTouchPad(_ data: Data) {
         guard connected else { return }
         objc_sync_enter(self)
@@ -114,6 +115,30 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
             touchPad = Data(data.prefix(kPadSize))
             lastTouchPadAt = Date()
         }
+        objc_sync_exit(self)
+    }
+
+    /// Lighter touch bridge: the page sends only the six HID fields instead of a
+    /// full 116-byte web frame. This avoids WebKit message overhead and keeps
+    /// touch input from dropping while gyro keeps running.
+    func bridgeTouchState(buttons: UInt16, hat: UInt8, lx: UInt8, ly: UInt8, rx: UInt8, ry: UInt8) {
+        guard connected else { return }
+        var hid = Data(count: Int(NS_PROTOCOL_HID_SIZE))
+        hid.withUnsafeMutableBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            ns_hid_write(base, buttons, hat, lx, ly, rx, ry, 1)
+        }
+        var pad = neutralPad()
+        pad.withUnsafeMutableBytes { padRaw in
+            hid.withUnsafeBytes { hidRaw in
+                guard let padBase = padRaw.bindMemory(to: UInt8.self).baseAddress,
+                      let hidBase = hidRaw.bindMemory(to: UInt8.self).baseAddress else { return }
+                ns_pad_set_hid(padBase, hidBase)
+            }
+        }
+        objc_sync_enter(self)
+        touchPad = pad
+        lastTouchPadAt = Date()
         objc_sync_exit(self)
     }
 
@@ -176,7 +201,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     }
 
     private func touchModeActive() -> Bool {
-        connected && Date().timeIntervalSince(lastTouchPadAt) < 0.75
+        connected && Date().timeIntervalSince(lastTouchPadAt) < 2.0
     }
 
     // MARK: - Gyro

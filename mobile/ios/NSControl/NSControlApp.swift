@@ -120,11 +120,10 @@ struct WebViewContainer: UIViewRepresentable {
     func updateUIView(_ wv: WKWebView, context: Context) {
         guard let target = Self.localURL(for: page) else { return }
 
-        // Merely opening the Touch Controls page must not bind a console player.
-        // The real native WebSocket starts only when the embedded touch UI presses
-        // its Connect button and creates its WebSocket. Leaving touch controls
-        // releases the player immediately.
-        if page != .touchControls {
+        // Editor is layout-only, so it must never keep a control WebSocket bound.
+        // Main menu and Touch Controls can both bind only after their own Connect
+        // button creates the fake WebSocket.
+        if page == .editor {
             BridgeManager.shared.disconnect()
         }
 
@@ -182,16 +181,23 @@ struct WebViewContainer: UIViewRepresentable {
         let parent: WebViewContainer
         init(parent: WebViewContainer) { self.parent = parent }
 
+        private func intValue(_ value: Any?, _ fallback: Int) -> Int {
+            if let n = value as? NSNumber { return n.intValue }
+            if let i = value as? Int { return i }
+            if let d = value as? Double { return Int(d) }
+            return fallback
+        }
+
         func userContentController(_: WKUserContentController, didReceive msg: WKScriptMessage) {
             guard msg.name == "nsBridge",
                   let dict = msg.body as? [String: Any],
                   let type = dict["type"] as? String else { return }
             switch type {
             case "connect":
-                // Same behavior as the browser page: Touch Controls binds only
-                // after its Connect button creates the WebSocket. Ignore WebSocket
-                // creations from other bundled pages.
-                guard self.parent.page == .touchControls else { return }
+                // Main menu Connect is for physical controllers connected to the phone.
+                // Touch Controls Connect is for the on-screen controls. Merely opening
+                // pages still does not bind a player.
+                guard self.parent.page == .touchControls || self.parent.page == .mainMenu else { return }
                 BridgeManager.shared.connect(host: self.parent.host)
             case "back":
                 BridgeManager.shared.disconnect()
@@ -200,9 +206,17 @@ struct WebViewContainer: UIViewRepresentable {
                 BridgeManager.shared.disconnect()
             case "binary":
                 guard let arr = dict["data"] as? [Int], arr.count >= 44 else { return }
-                // Extract pad 0 bytes (24 bytes at offset 20 in the 116-byte frame)
+                // Legacy fallback: extract pad 0 bytes (24 bytes at offset 20 in the 116-byte frame).
                 let padData = Data(arr[20..<44].map { UInt8($0) })
                 BridgeManager.shared.bridgeTouchPad(padData)
+            case "touchState":
+                let buttons = UInt16(max(0, min(65535, intValue(dict["buttons"], 0))))
+                let hat = UInt8(max(0, min(255, intValue(dict["hat"], Int(NS_HAT_NEUTRAL)))))
+                let lx = UInt8(max(0, min(255, intValue(dict["lx"], 128))))
+                let ly = UInt8(max(0, min(255, intValue(dict["ly"], 128))))
+                let rx = UInt8(max(0, min(255, intValue(dict["rx"], 128))))
+                let ry = UInt8(max(0, min(255, intValue(dict["ry"], 128))))
+                BridgeManager.shared.bridgeTouchState(buttons: buttons, hat: hat, lx: lx, ly: ly, rx: rx, ry: ry)
             default:
                 break
             }

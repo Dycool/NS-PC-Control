@@ -186,6 +186,7 @@ function recomputeTouchControls() {
         else if (info.kind === 'dpad') dpad[info.dir] = true;
     }
     updateHat();
+    publishTouchState();
 }
 function pressControl(touchId, info) {
     if (!info) return false;
@@ -241,7 +242,7 @@ function setupJoystick(baseId, knobId, axisX, axisY) {
     const base = document.getElementById(baseId), knob = document.getElementById(knobId);
     if(!base) return;
     let activeTouch = null;
-    const reset = () => { state[axisX] = 128; state[axisY] = 128; knob.style.transform = `translate(0px, 0px)`; activeTouch = null; };
+    const reset = () => { state[axisX] = 128; state[axisY] = 128; knob.style.transform = `translate(0px, 0px)`; activeTouch = null; publishTouchState(); };
     base.addEventListener('touchstart', e => { e.preventDefault(); activeTouch = e.changedTouches[0].identifier; updateJoy(e.changedTouches[0]); }, {passive:false});
     base.addEventListener('touchmove', e => {
         e.preventDefault();
@@ -257,6 +258,7 @@ function setupJoystick(baseId, knobId, axisX, axisY) {
         knob.style.transform = `translate(${dx}px, ${dy}px)`;
         state[axisX] = Math.round(((dx / maxDist) + 1) * 127.5);
         state[axisY] = Math.round(((dy / maxDist) + 1) * 127.5);
+        publishTouchState();
     }
 }
 setupJoystick('lstick', 'lknob', 'lx', 'ly');
@@ -274,8 +276,21 @@ function normalizeSystemShortcuts(buttons) {
     }
     return buttons;
 }
+function publishTouchState() {
+    const sendButtons = normalizeSystemShortcuts(state.buttons);
+    if (window.NSBridge && typeof NSBridge.onTouchState === 'function') {
+        NSBridge.onTouchState(sendButtons, state.hat, state.lx, state.ly, state.rx, state.ry);
+        return true;
+    }
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge) {
+        window.webkit.messageHandlers.nsBridge.postMessage({type:'touchState', buttons:sendButtons, hat:state.hat, lx:state.lx, ly:state.ly, rx:state.rx, ry:state.ry});
+        return true;
+    }
+    return false;
+}
 function sendPacket() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (publishTouchState()) return;
     const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, FLAG_SINGLE_PAD);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now()*1000), true);

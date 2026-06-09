@@ -81,6 +81,7 @@ window.WebSocket = function(url, protocols) {
     this.close = function() { NSBridge.onClose(); };
     setTimeout(function() {
         this.readyState = 1;
+        if (NSBridge.onOpen) NSBridge.onOpen();
         if (this.onopen) this.onopen();
     }.bind(this), 0);
 };
@@ -182,7 +183,7 @@ window.onload = () => {
         document.getElementById('btnMacros').style.display = 'none';
         document.getElementById('btnTouchControls').style.display = 'inline-block';
         document.getElementById('btnEditor').style.display = 'inline-block';
-        document.getElementById('btnConnect').style.display = 'none';
+        document.getElementById('btnConnect').style.display = 'inline-block';
     }
     const savedMode = localStorage.getItem('nswc_mode');
     if (savedMode) document.getElementById('kbMode').value = savedMode;
@@ -393,6 +394,10 @@ function wireMacroMenu() {
 }
 function buildAndSendPacket() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // In the native mobile apps, Android/iOS collect physical controller input
+    // directly and send it from native code. Avoid flooding the JS bridge with
+    // browser Gamepad frames that WebView may not populate reliably anyway.
+    if (window.NSBridge || (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge)) return;
     const rawGamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     const activePads = [];
     for (let i = 0; i < rawGamepads.length; i++) if (rawGamepads[i]) activePads.push(rawGamepads[i]);
@@ -467,7 +472,7 @@ document.getElementById('btnConnect').onclick = async () => {
         isConnected = true;
         document.getElementById('btnConnect').innerText = "Disconnect";
         document.getElementById('kbMode').disabled = true;
-        document.getElementById('statusText').innerText = `Connected to Pi Proxy.`;
+        document.getElementById('statusText').innerText = `Connected.`;
         try { window.focus(); document.body.focus(); } catch(e) {}
         loopId = setInterval(buildAndSendPacket, 4);
     };
