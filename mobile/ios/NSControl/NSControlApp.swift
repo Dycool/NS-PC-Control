@@ -22,6 +22,18 @@ struct ContentView: View {
                 connectionView
             } else {
                 WebViewContainer(page: $page, host: host)
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 45)
+                            .onEnded { value in
+                                guard page != .mainMenu else { return }
+                                if value.startLocation.x < 32 &&
+                                   value.translation.width > 90 &&
+                                   abs(value.translation.height) < 80 {
+                                    BridgeManager.shared.disconnect()
+                                    page = .mainMenu
+                                }
+                            }
+                    )
                     .toolbar {
                         ToolbarItem(placement: .principal) {
                             HStack(spacing: 6) {
@@ -99,7 +111,8 @@ struct WebViewContainer: UIViewRepresentable {
                                        forMainFrameOnly: false))
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.navigationDelegate = context.coordinator
-        wv.allowsBackForwardNavigationGestures = false
+        // No visible Back button; use the platform back gesture where possible.
+        wv.allowsBackForwardNavigationGestures = true
         wv.scrollView.contentInsetAdjustmentBehavior = .never
         return wv
     }
@@ -215,9 +228,9 @@ struct WebViewContainer: UIViewRepresentable {
         }
 
         func webView(_ wv: WKWebView, didFinish _: WKNavigation!) {
-            if parent.page == .touchControls || parent.page == .editor {
-                wv.evaluateJavaScript(Self.backButtonJS)
-            }
+            // Touch Controls and Editor intentionally have no visible Back button.
+            // Use the iOS back/edge gesture instead.
+            if parent.page == .mainMenu { wv.evaluateJavaScript(Self.brandingJS) }
         }
 
         static let brandingJS = """
@@ -234,17 +247,6 @@ struct WebViewContainer: UIViewRepresentable {
             t.textContent = 'NS Mobile';
             b.appendChild(img);
             b.appendChild(t);
-            document.body.appendChild(b);
-        })();
-        """
-
-        static let backButtonJS = """
-        (function(){
-            var b = document.createElement('div');
-            b.id = 'nb';
-            b.innerHTML = '\\u2190 Back';
-            b.style.cssText = 'position:fixed;top:12px;left:12px;z-index:99999;background:rgba(0,0,0,0.55);color:#fff;padding:8px 18px;border-radius:20px;font-size:15px;cursor:pointer;-webkit-user-select:none;';
-            b.onclick = function(){ window.webkit.messageHandlers.nsBridge.postMessage({type:'back'}); };
             document.body.appendChild(b);
         })();
         """

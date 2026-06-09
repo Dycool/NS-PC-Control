@@ -299,7 +299,9 @@ document.getElementById('btnConnect').onclick = async () => {
         isConnected = true; const btn = document.getElementById('btnConnect');
         btn.innerText = "Connected"; btn.classList.add('connected');
         connectTimeout = setTimeout(() => { btn.style.display = 'none'; document.getElementById('statusDot').style.display = 'block'; }, 2000);
-        loopId = setInterval(sendPacket, 4);
+        // Native app sends the latest touch snapshot to the backend at ~250 Hz.
+        // Keep the WebView->native bridge lighter to avoid Android bridge overload.
+        loopId = setInterval(sendPacket, 16);
     };
     ws.onerror = () => alert("Connection failed!");
     ws.onclose = () => {

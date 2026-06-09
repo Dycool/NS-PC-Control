@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     // Touch data bridged from WebView JS
     @Volatile private var touchFrame: ByteArray? = null
     @Volatile private var lastTouchFrameMs: Long = 0
+    @Volatile private var lastBridgeFrameParseMs: Long = 0
 
     // Native Bluetooth/USB controller state. Android exposes normal buttons/sticks
     // and sometimes a rumble motor. It does not reliably expose Switch/Pro gyro as
@@ -104,7 +105,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectWs(): Boolean {
         return try {
-            val req = Request.Builder().url(wsUrlForHost(host)).build()
+            val cleanHost = normalizeHostForWs(host)
+            val req = Request.Builder().url("ws://$cleanHost:8080/").build()
             ws = client.newWebSocket(req, object : WebSocketListener() {
                 override fun onOpen(w: WebSocket, r: Response) {
                     runOnUiThread {
@@ -131,10 +133,16 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 override fun onMessage(w: WebSocket, bytes: ByteString) {
-                    if (bytes.size >= 8) {
-                        val low = bytes[5].toInt() and 0xFF
-                        val high = bytes[6].toInt() and 0xFF
-                        runOnUiThread { routeRumble(low, high) }
+                    try {
+                        if (bytes.size >= 8) {
+                            val low = bytes[5].toInt() and 0xFF
+                            val high = bytes[6].toInt() and 0xFF
+                            runOnUiThread {
+                                try { routeRumble(low, high) } catch (_: Throwable) {}
+                            }
+                        }
+                    } catch (_: Throwable) {
+                        // Rumble is optional; never let a malformed/odd packet kill the app.
                     }
                 }
             })
@@ -145,14 +153,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun wsUrlForHost(raw: String): String {
+    private fun normalizeHostForWs(raw: String): String {
         var h = raw.trim()
         h = h.removePrefix("http://").removePrefix("https://").removePrefix("ws://").removePrefix("wss://")
         h = h.substringBefore('/').trim()
-        val lastColon = h.lastIndexOf(':')
-        val explicitPort = if (lastColon > 0) h.substring(lastColon + 1).toIntOrNull() else null
-        val hasExplicitPort = explicitPort != null && explicitPort in 1..65535
-        return if (hasExplicitPort) "ws://$h/" else "ws://$h:8080/"
+        if (h.endsWith(":8080")) h = h.removeSuffix(":8080")
+        return h
     }
 
     // ═══════════════════════════════
@@ -244,26 +250,33 @@ class MainActivity : AppCompatActivity() {
     // ═══════════════════════════════
 
     private fun startGyro() {
-        val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        if (gyro != null) {
-            gyroListener = object : SensorEventListener {
-                override fun onSensorChanged(e: SensorEvent) {
-                    System.arraycopy(e.values, 0, gyroValues, 0, 3)
+        // Avoid duplicate listeners if the page reconnects quickly.
+        stopGyro()
+        try {
+            val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            if (gyro != null) {
+                gyroListener = object : SensorEventListener {
+                    override fun onSensorChanged(e: SensorEvent) {
+                        if (e.values.size >= 3) System.arraycopy(e.values, 0, gyroValues, 0, 3)
+                    }
+                    override fun onAccuracyChanged(s: Sensor, a: Int) {}
                 }
-                override fun onAccuracyChanged(s: Sensor, a: Int) {}
+                sensorManager.registerListener(gyroListener, gyro, SensorManager.SENSOR_DELAY_GAME)
             }
-            sensorManager.registerListener(gyroListener, gyro, SensorManager.SENSOR_DELAY_FASTEST)
-        }
 
-        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        if (accel != null) {
-            accelListener = object : SensorEventListener {
-                override fun onSensorChanged(e: SensorEvent) {
-                    System.arraycopy(e.values, 0, accelValues, 0, 3)
+            val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            if (accel != null) {
+                accelListener = object : SensorEventListener {
+                    override fun onSensorChanged(e: SensorEvent) {
+                        if (e.values.size >= 3) System.arraycopy(e.values, 0, accelValues, 0, 3)
+                    }
+                    override fun onAccuracyChanged(s: Sensor, a: Int) {}
                 }
-                override fun onAccuracyChanged(s: Sensor, a: Int) {}
+                sensorManager.registerListener(accelListener, accel, SensorManager.SENSOR_DELAY_GAME)
             }
-            sensorManager.registerListener(accelListener, accel, SensorManager.SENSOR_DELAY_GAME)
+        } catch (_: Throwable) {
+            gyroListener = null
+            accelListener = null
         }
     }
 
@@ -274,11 +287,13 @@ class MainActivity : AppCompatActivity() {
     private fun routeRumble(low: Int, high: Int) {
         val controller = snapshotController()
         if (low == 0 && high == 0) {
-            if (controller != null) {
-                InputDevice.getDevice(controller.deviceId)?.vibrator?.cancel()
-            } else {
-                vibrator.cancel()
-            }
+            try {
+                if (controller != null) {
+                    InputDevice.getDevice(controller.deviceId)?.vibrator?.cancel()
+                } else {
+                    vibrator.cancel()
+                }
+            } catch (_: Throwable) {}
             return
         }
 
@@ -300,17 +315,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playControllerRumble(deviceId: Int, low: Int, high: Int): Boolean {
-        val v = InputDevice.getDevice(deviceId)?.vibrator ?: return false
-        if (!v.hasVibrator()) return false
-        val amp = ((low + high) / 2).coerceIn(1, 255)
-        v.vibrate(VibrationEffect.createOneShot(70, amp))
-        return true
+        return try {
+            val v = InputDevice.getDevice(deviceId)?.vibrator ?: return false
+            if (!v.hasVibrator()) return false
+            val amp = ((low + high) / 2).coerceIn(1, 255)
+            v.vibrate(VibrationEffect.createOneShot(70, amp))
+            true
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     private fun playPhoneHaptic(low: Int, high: Int) {
         if (low == 0 && high == 0) return
-        val amp = ((low + high) / 2).coerceIn(1, 255)
-        vibrator.vibrate(VibrationEffect.createOneShot(50, amp))
+        try {
+            val amp = ((low + high) / 2).coerceIn(1, 255)
+            vibrator.vibrate(VibrationEffect.createOneShot(50, amp))
+        } catch (_: Throwable) {}
     }
 
     // ═══════════════════════════════
@@ -345,9 +366,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(v: WebView, url: String) {
-                if (currentPage == Page.TOUCH_CONTROLS || currentPage == Page.EDITOR) {
-                    injectBackButton(v)
-                }
+                // Touch Controls and Editor intentionally have no visible Back button.
+                // Use the Android system back gesture/button to return.
             }
         }
     }
@@ -378,10 +398,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun injectBackButton(v: WebView) {
-        v.evaluateJavascript(INJECT_BACK_JS, null)
-    }
-
     private fun injectBranding(v: WebView) {
         v.evaluateJavascript(INJECT_BRANDING_JS, null)
     }
@@ -405,10 +421,19 @@ class MainActivity : AppCompatActivity() {
             // its fake WebSocket, which happens from the touch page Connect button.
             if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
             try {
+                // The native sender already transmits at ~250 Hz.  The WebView only
+                // needs to refresh the latest touch snapshot.  Throttling the JS
+                // bridge avoids flooding Android's JavascriptInterface/JSON path,
+                // which was the likely crash path after pressing Connect.
+                val now = SystemClock.uptimeMillis()
+                if (now - lastBridgeFrameParseMs < 8L) return
+                lastBridgeFrameParseMs = now
+
                 val arr = org.json.JSONArray(json)
+                if (arr.length() < Protocol.FRAME_SIZE) return
                 touchFrame = ByteArray(arr.length()) { i -> arr.getInt(i).toByte() }
-                lastTouchFrameMs = SystemClock.uptimeMillis()
-            } catch (_: Exception) {}
+                lastTouchFrameMs = now
+            } catch (_: Throwable) {}
         }
 
         @JavascriptInterface
@@ -534,6 +559,7 @@ class MainActivity : AppCompatActivity() {
         if (controlClientActive) return
         touchFrame = null
         lastTouchFrameMs = 0
+        lastBridgeFrameParseMs = 0
         controlClientActive = true
         if (!connectWs()) {
             controlClientActive = false
@@ -557,6 +583,7 @@ class MainActivity : AppCompatActivity() {
         controlClientActive = false
         touchFrame = null
         lastTouchFrameMs = 0
+        lastBridgeFrameParseMs = 0
         try { vibrator.cancel() } catch (_: Throwable) {}
         try { ws?.close(1000, "Leaving controller mode") } catch (_: Throwable) {}
         ws = null
@@ -642,16 +669,6 @@ var t = document.createElement('span');
 t.textContent = 'NS Mobile';
 b.appendChild(img);
 b.appendChild(t);
-document.body.appendChild(b);
-})();
-"""
-
-        private const val INJECT_BACK_JS = """
-(function(){
-var b = document.createElement('div');
-b.textContent = '\u2190 Back';
-b.style.cssText = 'position:fixed;top:12px;left:12px;z-index:99999;background:rgba(0,0,0,0.55);color:#fff;padding:8px 18px;border-radius:20px;font-size:15px;cursor:pointer;-webkit-user-select:none;';
-b.onclick = function(){ NSBridge.onBack(); };
 document.body.appendChild(b);
 })();
 """

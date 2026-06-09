@@ -391,6 +391,8 @@ private:
         std::string name;
         uint16_t vid = 0;
         uint16_t pid = 0;
+        int16_t cached_gx = 0, cached_gy = 0, cached_gz = 0;
+        uint64_t last_gyro_us = 0;
     };
 
     mutable std::mutex mtx;
@@ -502,12 +504,19 @@ private:
         if (d.gyro_enabled) {
             float gyro[3] = {0, 0, 0};
             if (SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
-                float gx = -gyro[0];
-                float gy = -gyro[2];
-                float gz =  gyro[1];
-                out.gx = gyro_deadzone_i16(clamp_motion_i16(gx * GYRO_SCALE));
-                out.gy = gyro_deadzone_i16(clamp_motion_i16(gy * GYRO_SCALE));
-                out.gz = gyro_deadzone_i16(clamp_motion_i16(gz * GYRO_SCALE));
+                uint64_t now = ns::now_us();
+                if (now - d.last_gyro_us >= 5000) {
+                    d.last_gyro_us = now;
+                    float gx = -gyro[0];
+                    float gy = -gyro[2];
+                    float gz =  gyro[1];
+                    d.cached_gx = gyro_deadzone_i16(clamp_motion_i16(gx * GYRO_SCALE));
+                    d.cached_gy = gyro_deadzone_i16(clamp_motion_i16(gy * GYRO_SCALE));
+                    d.cached_gz = gyro_deadzone_i16(clamp_motion_i16(gz * GYRO_SCALE));
+                }
+                out.gx = d.cached_gx;
+                out.gy = d.cached_gy;
+                out.gz = d.cached_gz;
                 has_motion = true;
             }
         }
