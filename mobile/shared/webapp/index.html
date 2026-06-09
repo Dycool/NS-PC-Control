@@ -554,43 +554,5 @@ document.getElementById('btnSetupBindings').onclick = () => {
     setupQueue = Object.keys(currentBindings); isSetupMode = true; startNextSetupBind();
 };
 </script>
-<!-- DEBUG: remove later -->
-<div id="dbgBtn" style="position:fixed;bottom:8px;left:8px;z-index:99999;width:28px;height:28px;background:rgba(255,255,255,0.12);color:#888;border:1px solid rgba(255,255,255,0.2);border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;font-family:sans-serif;font-weight:bold;">D</div>
-<div id="dbgPanel" style="display:none;position:fixed;bottom:40px;left:8px;z-index:99999;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:6px;padding:10px;font-size:12px;font-family:monospace;min-width:210px;">
-  <div style="font-weight:bold;margin-bottom:6px;color:#fff;">Debug Motion</div>
-  <div style="margin-bottom:3px;"><span style="width:52px;display:inline-block;">ax+gx:</span><select id="dbgIn0" style="background:#333;color:#ccc;border:1px solid #555;font-size:11px;width:40px;"><option value="0">X</option><option value="1">Y</option><option value="2">Z</option></select><select id="dbgSign0" style="background:#333;color:#ccc;border:1px solid #555;font-size:11px;margin-left:4px;width:44px;"><option value="1">+1</option><option value="-1">-1</option></select></div>
-  <div style="margin-bottom:3px;"><span style="width:52px;display:inline-block;">ay+gy:</span><select id="dbgIn1" style="background:#333;color:#ccc;border:1px solid #555;font-size:11px;width:40px;"><option value="0">X</option><option value="1">Y</option><option value="2">Z</option></select><select id="dbgSign1" style="background:#333;color:#ccc;border:1px solid #555;font-size:11px;margin-left:4px;width:44px;"><option value="1">+1</option><option value="-1">-1</option></select></div>
-  <div style="margin-bottom:6px;"><span style="width:52px;display:inline-block;">az+gz:</span><select id="dbgIn2" style="background:#333;color:#ccc;border:1px solid #555;font-size:11px;width:40px;"><option value="0">X</option><option value="1">Y</option><option value="2">Z</option></select><select id="dbgSign2" style="background:#333;color:#ccc;border:1px solid #555;font-size:11px;margin-left:4px;width:44px;"><option value="1">+1</option><option value="-1">-1</option></select></div>
-  <div style="display:flex;gap:6px;"><button id="dbgReset" style="background:#444;color:#ccc;border:1px solid #666;padding:3px 8px;border-radius:3px;font-size:11px;cursor:pointer;">Reset</button><button id="dbgClose" style="background:#444;color:#ccc;border:1px solid #666;padding:3px 8px;border-radius:3px;font-size:11px;cursor:pointer;">Close</button></div>
-</div>
-<script>
-(function(){
-var d = [{axis:0,sign:-1},{axis:2,sign:-1},{axis:1,sign:1}];
-var c = [{axis:0,sign:-1},{axis:2,sign:-1},{axis:1,sign:1}];
-function s(){
-  for(var i=0;i<3;i++){var e=document.getElementById('dbgIn'+i);if(e)e.value=c[i].axis;var se=document.getElementById('dbgSign'+i);if(se)se.value=c[i].sign;}
-}
-function r(){
-  if(window.NSBridge&&typeof NSBridge.setMotionRemap==='function'){
-    NSBridge.setMotionRemap(c[0].axis,c[0].sign,c[1].axis,c[1].sign,c[2].axis,c[2].sign);
-  }else if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.nsBridge){
-    window.webkit.messageHandlers.nsBridge.postMessage({type:'setMotionRemap',remap:[{axis:c[0].axis,sign:c[0].sign},{axis:c[1].axis,sign:c[1].sign},{axis:c[2].axis,sign:c[2].sign}]});
-  }
-}
-function init(){
-  var btn=document.getElementById('dbgBtn'),panel=document.getElementById('dbgPanel');
-  if(!btn||!panel)return;
-  btn.onclick=function(){panel.style.display=(panel.style.display==='none'?'block':'none');};
-  var cl=document.getElementById('dbgClose');if(cl)cl.onclick=function(){panel.style.display='none';};
-  var rs=document.getElementById('dbgReset');if(rs)rs.onclick=function(){c=JSON.parse(JSON.stringify(d));s();r();};
-  for(var i=0;i<3;i++){(function(idx){
-    var ie=document.getElementById('dbgIn'+idx);if(ie)ie.onchange=function(){c[idx].axis=parseInt(this.value);r();};
-    var se=document.getElementById('dbgSign'+idx);if(se)se.onchange=function(){c[idx].sign=parseInt(this.value);r();};
-  })(i);}
-  s();
-}
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
-})();
-</script>
 </body>
 </html>

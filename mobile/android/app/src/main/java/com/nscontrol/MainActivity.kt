@@ -653,13 +653,6 @@ class MainActivity : AppCompatActivity() {
         fun onHubRefresh() { runOnUiThread { scanPhysicalControllers(); updateHubStatusOnPage() } }
 
         @JavascriptInterface
-        fun setMotionRemap(axis0: Int, sign0: Int, axis1: Int, sign1: Int, axis2: Int, sign2: Int) {
-            NativeProtocol.nativeSetMotionRemap(0, axis0, sign0)
-            NativeProtocol.nativeSetMotionRemap(1, axis1, sign1)
-            NativeProtocol.nativeSetMotionRemap(2, axis2, sign2)
-        }
-
-        @JavascriptInterface
         fun onOpenTouch() { runOnUiThread { navTo(Page.TOUCH_CONTROLS) } }
 
         @JavascriptInterface
@@ -983,12 +976,12 @@ class MainActivity : AppCompatActivity() {
         val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
         val gyroScale = 57.29577951308232f * 16.384f
         val sample = Protocol.motionFromValues(
-            clampMotionShort(-a[0] * accelScale),
+            clampMotionShort(-a[1] * accelScale),
             clampMotionShort(-a[2] * accelScale),
-            clampMotionShort( a[1] * accelScale),
-            gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
+            clampMotionShort(-a[0] * accelScale),
+            gyroDeadzoneShort(clampMotionShort(-g[1] * gyroScale)),
             gyroDeadzoneShort(clampMotionShort(-g[2] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort( g[1] * gyroScale)),
+            gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
             hasMotion = true
         )
         val pad = physicalPads[slot]
