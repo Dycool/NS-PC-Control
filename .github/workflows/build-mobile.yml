@@ -117,6 +117,7 @@ jobs:
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/mobile/ios/SDL3" \
             -DSDL_STATIC=ON \
@@ -153,6 +154,7 @@ jobs:
           set -euo pipefail
           xcodebuild -project NSControl.xcodeproj -scheme NSControl -configuration Release -sdk iphoneos -showBuildSettings | tee /tmp/nscontrol-buildsettings.txt
           grep -q "OTHER_LDFLAGS.*SDL3/lib/libSDL3.a" /tmp/nscontrol-buildsettings.txt
+          grep -q "OTHER_LDFLAGS.*CoreMedia" /tmp/nscontrol-buildsettings.txt
 
       - name: Build iOS app unsigned
         working-directory: mobile/ios

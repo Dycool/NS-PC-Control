@@ -35,7 +35,7 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: NSControl/ProtocolBridge.h
         HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/../shared $(PROJECT_DIR)/SDL3/include"
         LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/SDL3/lib"
-        OTHER_LDFLAGS: "$(PROJECT_DIR)/SDL3/lib/libSDL3.a -framework AudioToolbox -framework AVFoundation -framework CoreAudio -framework CoreBluetooth -framework CoreGraphics -framework CoreHaptics -framework CoreMotion -framework CoreVideo -framework Foundation -framework GameController -framework Metal -framework OpenGLES -framework QuartzCore -framework UIKit"
+        OTHER_LDFLAGS: "$(PROJECT_DIR)/SDL3/lib/libSDL3.a -framework AudioToolbox -framework AVFoundation -framework CoreAudio -framework CoreBluetooth -framework CoreGraphics -framework CoreHaptics -framework CoreMedia -framework CoreMotion -framework CoreVideo -framework Foundation -framework GameController -framework Metal -framework OpenGLES -framework QuartzCore -framework UIKit"
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: ""
@@ -74,6 +74,7 @@ targets:
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${SDL_INSTALL}" \
             -DSDL_STATIC=ON \
