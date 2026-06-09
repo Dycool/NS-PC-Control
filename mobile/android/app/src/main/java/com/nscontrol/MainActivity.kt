@@ -8,13 +8,11 @@ import android.hardware.SensorManager
 import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Bundle
-import android.os.CombinedVibration
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
-import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -65,7 +63,6 @@ class MainActivity : AppCompatActivity() {
     private var accelSensor: Sensor? = null
     private var gravitySensor: Sensor? = null
     private var gyroSensor: Sensor? = null
-    private var vibrator: Vibrator? = null
     @Volatile private var phoneSensorsActive = false
     private val phoneSensorLock = Any()
     private val latestPhoneAccel = FloatArray(3)
@@ -167,11 +164,6 @@ class MainActivity : AppCompatActivity() {
         override fun onInputDeviceChanged(deviceId: Int) { if (activeClientMode == ClientMode.HUB) runOnUiThread { scanPhysicalControllers() } }
     }
 
-    private var rumbleLow = 0
-    private var rumbleHigh = 0
-    private var rumbleUntilMs = 0L
-    private var rumbleLastSetMs = 0L
-
     private val phoneSensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             synchronized(phoneSensorLock) {
@@ -231,12 +223,6 @@ class MainActivity : AppCompatActivity() {
         gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
         accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         gyroSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        vibrator = if (Build.VERSION.SDK_INT >= 31) {
-            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-        }
     }
 
     private fun onConnect() {
@@ -316,7 +302,6 @@ class MainActivity : AppCompatActivity() {
         lastTouchFrameMs = 0
         ws = null
         stopPhoneSensors()
-        phoneRumble(0, 0)
     }
 
     private fun normalizeWsUrl(raw: String): String {
@@ -437,17 +422,16 @@ class MainActivity : AppCompatActivity() {
         if (!hasLatestPhoneGyro || (!hasLatestPhoneGravity && !hasLatestPhoneAccel)) return
 
         val accel = if (hasLatestPhoneGravity) latestPhoneGravity else latestPhoneAccel
-        val a = remapSensorForDisplay(accel)
-        val g = remapSensorForDisplay(latestPhoneGyro)
+        val g = latestPhoneGyro
         val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
         val gyroScale = 57.29577951308232f * 16.384f
         val sample = Protocol.motionFromValues(
-            clampMotionShort(-a[0] * accelScale),
-            clampMotionShort(-a[2] * accelScale),
-            clampMotionShort( a[1] * accelScale),
+            clampMotionShort(-accel[0] * accelScale),
+            clampMotionShort(-accel[1] * accelScale),
+            clampMotionShort(-accel[2] * accelScale),
             gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
+            gyroDeadzoneShort(clampMotionShort(-g[1] * gyroScale)),
             gyroDeadzoneShort(clampMotionShort(-g[2] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort( g[1] * gyroScale)),
             hasMotion = true
         )
 
@@ -522,82 +506,7 @@ class MainActivity : AppCompatActivity() {
         if (!controlClientActive) return
         when (activeClientMode) {
             ClientMode.HUB -> physicalRumble(subpad, low, high, duration10Ms)
-            ClientMode.TOUCH -> {
-                // Touch mode owns one virtual pad. The current backend should report
-                // subpad 0 for this session, but accept any subpad while testing so
-                // a temporary server-side mapping cannot make haptics vanish.
-                phoneRumble(low, high, duration10Ms)
-            }
             ClientMode.NONE -> Unit
-        }
-    }
-
-    private fun phoneRumble(low: Int, high: Int, duration10Ms: Int = 0) {
-        try {
-            val v = vibrator
-            val neutral = (low == 0 && high == 0) || duration10Ms == 0
-            val now = SystemClock.uptimeMillis()
-            if (neutral) {
-                rumbleLow = 0
-                rumbleHigh = 0
-                rumbleUntilMs = 0L
-                rumbleLastSetMs = now
-                v?.cancel()
-                Log.d(TAG, "rumble stop")
-                return
-            }
-
-            // Match the desktop ns-client behavior: classic NSVR duration is in
-            // 10ms units, but tiny Pro rumble pulses are too short to feel on a
-            // phone if we vibrate for only 30-40ms. Keep a 250ms minimum haptic
-            // window while still refreshing it when packets keep arriving.
-            val durationMs = maxOf(250L, duration10Ms.coerceIn(1, 255) * 10L)
-            val strength = maxOf(low, high).coerceIn(1, 255)
-            if (rumbleLow == low && rumbleHigh == high && now - rumbleLastSetMs < 100L) {
-                rumbleUntilMs = now + durationMs
-                return
-            }
-
-            rumbleLow = low
-            rumbleHigh = high
-            rumbleUntilMs = now + durationMs
-            rumbleLastSetMs = now
-
-            var didVibrate = false
-            if (Build.VERSION.SDK_INT >= 31) {
-                try {
-                    val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                    val amp = strength.coerceAtLeast(96)
-                    val effect = VibrationEffect.createWaveform(longArrayOf(0L, durationMs), intArrayOf(0, amp), -1)
-                    vm.vibrate(CombinedVibration.createParallel(effect))
-                    didVibrate = true
-                } catch (t: Throwable) {
-                    Log.d(TAG, "VibratorManager rumble failed, falling back", t)
-                }
-            }
-            if (!didVibrate) {
-                didVibrate = if (v != null && v.hasVibrator()) {
-                    if (Build.VERSION.SDK_INT >= 26) {
-                        val amp = if (v.hasAmplitudeControl()) strength.coerceAtLeast(96) else VibrationEffect.DEFAULT_AMPLITUDE
-                        v.vibrate(VibrationEffect.createWaveform(longArrayOf(0L, durationMs), intArrayOf(0, amp), -1))
-                    } else {
-                        @Suppress("DEPRECATION")
-                        v.vibrate(durationMs)
-                    }
-                    true
-                } else false
-            }
-            // Some devices expose weak/disabled vibrator access to WebView apps.
-            // Only use View haptic as a real fallback; firing both can feel like
-            // a double-click and can add jitter on some Android builds.
-            if (!didVibrate) {
-                runOnUiThread {
-                    try { webView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) } catch (_: Throwable) {}
-                }
-            }
-            Log.d(TAG, "rumble start low=$low high=$high durationMs=$durationMs didVibrate=$didVibrate")
-        } catch (t: Throwable) {
-            Log.w(TAG, "phone rumble failed", t)
         }
     }
 
@@ -747,7 +656,7 @@ class MainActivity : AppCompatActivity() {
         fun onHubStart() { runOnUiThread { toggleControllerHub() } }
 
         @JavascriptInterface
-        fun onHubStop() { runOnUiThread { deactivateControlClient(); updateHubStatusOnPage("Hub stopped") } }
+        fun onHubStop() { runOnUiThread { deactivateControlClient(); updateHubStatusOnPage("Not connected") } }
 
         @JavascriptInterface
         fun onHubRefresh() { runOnUiThread { scanPhysicalControllers(); updateHubStatusOnPage() } }
@@ -780,7 +689,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleControllerHub() {
         if (controlClientActive && activeClientMode == ClientMode.HUB) {
             deactivateControlClient()
-            updateHubStatusOnPage("Hub stopped")
+            updateHubStatusOnPage("Not connected")
         } else {
             activateControllerHub()
         }
@@ -789,7 +698,7 @@ class MainActivity : AppCompatActivity() {
     private fun activateControllerHub() {
         if (controlClientActive && activeClientMode == ClientMode.HUB) {
             scanPhysicalControllers()
-            updateHubStatusOnPage("Hub already running")
+            updateHubStatusOnPage("Connected")
             return
         }
         deactivateControlClient()
@@ -797,11 +706,11 @@ class MainActivity : AppCompatActivity() {
         activeClientMode = ClientMode.HUB
         controlClientActive = true
         scanPhysicalControllers()
-        updateHubStatusOnPage("Connecting hub...")
+        updateHubStatusOnPage("Connected")
         if (!connectWs()) {
             controlClientActive = false
             activeClientMode = ClientMode.NONE
-            updateHubStatusOnPage("Hub connection failed")
+            updateHubStatusOnPage("Not connected")
         }
     }
 
@@ -1135,7 +1044,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val status = prefix ?: when (activeClientMode) {
-            ClientMode.HUB -> "Controller Hub running"
+            ClientMode.HUB -> "Connected"
             ClientMode.TOUCH -> "Touch Controls running"
             ClientMode.NONE -> "Ready"
         }
@@ -1188,7 +1097,6 @@ class MainActivity : AppCompatActivity() {
         stopPhoneSensors()
         stopPhysicalControllerSensors()
         stopAllPhysicalRumble()
-        phoneRumble(0, 0)
         activeClientMode = ClientMode.NONE
 
         if (closingWs != null) {

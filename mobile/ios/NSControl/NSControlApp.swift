@@ -248,12 +248,12 @@ struct WebViewContainer: UIViewRepresentable {
         {
             if let url = nav.request.url {
                 let last = url.lastPathComponent.lowercased()
-                if url.path == "/mobile" || last == "mobile.html" {
+                if last == "mobile.html", self.parent.page != .touchControls {
                     BridgeManager.shared.disconnect()
                     DispatchQueue.main.async { self.parent.page = .touchControls }
                     decisionHandler(.cancel); return
                 }
-                if url.path == "/editor" || last == "editor.html" {
+                if last == "editor.html", self.parent.page != .editor {
                     BridgeManager.shared.disconnect()
                     DispatchQueue.main.async { self.parent.page = .editor }
                     decisionHandler(.cancel); return

@@ -59,7 +59,6 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     private let motionManager = CMMotionManager()
     private let phoneMotionLock = NSLock()
     private var nativePhoneMotionSamples: [Data] = []
-    private var lastPhoneHapticAt: TimeInterval = 0
     private var controllerMotionSamples: [[Data]] = Array(repeating: [], count: Int(NS_PROTOCOL_PAD_COUNT))
 
     private struct ControllerRumbleState {
@@ -142,7 +141,6 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         touchPad = Data(count: kPadSize)
         lastTouchPadAt = Date.distantPast
         objc_sync_exit(self)
-        phoneHapticRumble(low: 0, high: 0, duration10Ms: 0)
         stopNativePhoneMotion()
         stopControllerHub()
         if hadClient { DispatchQueue.main.async { self.onStatus?("Disconnected") } }
@@ -152,7 +150,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
                     webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol protocol: String?) {
         connected = true
-        DispatchQueue.main.async { self.onStatus?(self.currentMode == .controllerHub ? "Controller Hub connected" : "Connected") }
+        DispatchQueue.main.async { self.onStatus?("Connected") }
         if currentMode == .touchControls {
             startNativePhoneMotion()
         } else {
@@ -302,15 +300,17 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         motionManager.startDeviceMotionUpdates(to: OperationQueue()) { [weak self] motion, _ in
             guard let self = self, let motion = motion else { return }
             var bytes = Data(count: kMotionSize)
+            let accelScale = ns_accel_scale_apple()
+            let gyroScale = ns_gyro_scale()
             bytes.withUnsafeMutableBytes { raw in
                 guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-                ns_motion_from_apple(base,
-                                     Float(motion.gravity.x),
-                                     Float(motion.gravity.y),
-                                     Float(motion.gravity.z),
-                                     Float(motion.rotationRate.x),
-                                     Float(motion.rotationRate.y),
-                                     Float(motion.rotationRate.z))
+                let ax = ns_clamp_motion(-Float(motion.gravity.x) * accelScale)
+                let ay = ns_clamp_motion(-Float(motion.gravity.y) * accelScale)
+                let az = ns_clamp_motion(-Float(motion.gravity.z) * accelScale)
+                let gx = ns_clamp_motion(-Float(motion.rotationRate.x) * gyroScale)
+                let gy = ns_clamp_motion(-Float(motion.rotationRate.y) * gyroScale)
+                let gz = ns_clamp_motion(-Float(motion.rotationRate.z) * gyroScale)
+                ns_motion_write_values(base, ax, ay, az, abs(gx) <= 32 ? 0 : gx, abs(gy) <= 32 ? 0 : gy, abs(gz) <= 32 ? 0 : gz, 1)
             }
             self.phoneMotionLock.lock()
             self.nativePhoneMotionSamples.append(bytes)
@@ -354,12 +354,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
                         let duration = d[d.startIndex + 7]
                         DispatchQueue.main.async {
                             self.onRumble?(subpad, low, high)
-                            if self.currentMode == .touchControls {
-                                // Touch mode owns a single virtual pad; accept any subpad while testing.
-                                self.phoneHapticRumble(low: low, high: high, duration10Ms: duration)
-                            } else {
-                                self.controllerRumble(slot: subpad, low: low, high: high, duration10Ms: duration)
-                            }
+                            self.controllerRumble(slot: subpad, low: low, high: high, duration10Ms: duration)
                         }
                     }
                 }
@@ -367,21 +362,6 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
             case .failure:
                 if self.sessionToken == token { self.disconnect() }
             }
-        }
-    }
-
-    private func phoneHapticRumble(low: UInt8, high: UInt8, duration10Ms: UInt8 = 3) {
-        if (low == 0 && high == 0) || duration10Ms == 0 { return }
-        let now = Date().timeIntervalSinceReferenceDate
-        // Desktop ns-client stretches short classic rumble pulses to roughly
-        // 250 ms; do the same conceptually by not rate-limiting too hard.
-        if now - lastPhoneHapticAt < 0.10 { return }
-        lastPhoneHapticAt = now
-        let intensity = max(0.25, min(1.0, CGFloat(max(low, high)) / 255.0))
-        DispatchQueue.main.async {
-            let generator = UIImpactFeedbackGenerator(style: .heavy)
-            generator.prepare()
-            generator.impactOccurred(intensity: intensity)
         }
     }
 
