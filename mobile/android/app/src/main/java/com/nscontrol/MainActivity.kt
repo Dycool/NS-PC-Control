@@ -496,6 +496,7 @@ class MainActivity : AppCompatActivity() {
         if (!controlClientActive) return
         when (activeClientMode) {
             ClientMode.HUB -> physicalRumble(subpad, low, high, duration10Ms)
+            ClientMode.TOUCH -> Unit
             ClientMode.NONE -> Unit
         }
     }

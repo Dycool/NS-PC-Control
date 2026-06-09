@@ -22,6 +22,7 @@ struct ContentView: View {
                 connectionView
             } else {
                 WebViewContainer(page: $page, host: host)
+                    .ignoresSafeArea()
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 45)
                             .onEnded { value in

@@ -141,7 +141,7 @@ Java_com_nscontrol_NativeProtocol_nativePhoneMotion(JNIEnv* env, jclass clazz,
                                                     jfloat accelX, jfloat accelY, jfloat accelZ,
                                                     jfloat gyroX, jfloat gyroY, jfloat gyroZ) {
     uint8_t motion[NS_PROTOCOL_MOTION_SIZE];
-    ns_motion_from_phone_android(motion, accelX, accelY, accelZ, gyroX, gyroY, gyroZ);
+    ns_motion_from_android(motion, accelX, accelY, accelZ, gyroX, gyroY, gyroZ);
     return jni_new_byte_array(env, NS_PROTOCOL_MOTION_SIZE, motion);
 }
 
