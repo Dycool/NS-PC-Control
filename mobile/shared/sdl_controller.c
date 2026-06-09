@@ -302,7 +302,7 @@ int sdl_controller_phone_sensors_open(void) {
     if (!ids) return 0;
 
     for (int i = 0; i < count; ++i) {
-        SDL_Sensor* s = SDL_OpenSensorDeviceInstanceID(ids[i]);
+        SDL_Sensor* s = SDL_OpenSensor(ids[i]);
         if (!s) continue;
         int type = SDL_GetSensorType(s);
         if (type == SDL_SENSOR_ACCEL && !C.phone_accel) {
@@ -354,7 +354,7 @@ int sdl_controller_phone_haptic_open(void) {
 
 void sdl_controller_phone_haptic_close(void) {
     if (C.phone_haptic) {
-        SDL_PlayHapticRumble(C.phone_haptic, 0.0, 0, 0);
+        SDL_PlayHapticRumble(C.phone_haptic, 0.0f, 0);
         SDL_CloseHaptic(C.phone_haptic);
         C.phone_haptic = NULL;
     }
@@ -364,7 +364,7 @@ void sdl_controller_phone_haptic_close(void) {
 void sdl_controller_phone_haptic_rumble(uint8_t low, uint8_t high) {
     if (!C.phone_haptic) return;
     if (low == 0 && high == 0) {
-        SDL_PlayHapticRumble(C.phone_haptic, 0.0, 0, 0);
+        SDL_PlayHapticRumble(C.phone_haptic, 0.0f, 0);
         return;
     }
     float strength = (float)((int)low + (int)high) / 510.0f;
