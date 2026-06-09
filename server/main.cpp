@@ -1,4 +1,5 @@
 #include "include/protocol.hpp"
+#include "include/macros.hpp"
 #include "include/sha256.h"
 
 #include <atomic>
@@ -171,528 +172,16 @@ static std::atomic<uint64_t> g_hid_writes{0};
 
 
 // ── Server-side macro playback ───────────────────────────────────────────────────────────
-// Macro grammar is intentionally strict and shared by CLI/GUI clients:
-//   WAIT 100                         -> release macro inputs for 100ms
-//   A 100                            -> hold A for 100ms
-//   R+LSTICK_LEFT 450                -> hold R and steer left for 450ms
-//   LOOP 200                         -> repeat the block since the previous LOOP/start 200 times
-// Accepted JSON:
-//   {"name":"...","commands":"WAIT 100; A 100"}
-//   {"name":"...","commands":["WAIT 100", "A 100"]}
-static constexpr size_t MACRO_JSON_MAX_BYTES = 50ULL * 1024ULL * 1024ULL;
-static std::string g_macro_last_error;
-
-
-static constexpr uint32_t MACRO_UDP_MAGIC       = 0x4E534D43u; // 'NSMC' legacy one-datagram upload
-static constexpr uint32_t MACRO_UDP_CHUNK_MAGIC = 0x4E534D4Bu; // 'NSMK' chunked upload
-static constexpr size_t   MACRO_UDP_TEXT_MAX    = MACRO_JSON_MAX_BYTES;
-static constexpr size_t   MACRO_UDP_CHUNK_MAX   = 1200;
-static constexpr uint8_t  MACRO_CHUNK_FLAG_LAST = 0x01;
-
-struct ServerMacroStep {
-    uint16_t buttons = 0;
-    uint8_t hat = HAT_NEUTRAL;
-    uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
-    bool has_lstick = false;
-    bool has_rstick = false;
-    uint32_t duration_ms = 0;
-};
-
-static void macro_set_error(const std::string& e) { g_macro_last_error = e; }
-static const std::string& macro_last_error() { return g_macro_last_error; }
-
-static std::string macro_trim(std::string s) {
-    auto not_space = [](unsigned char c){ return !std::isspace(c); };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-    return s;
-}
-
-static std::string macro_upper(std::string s) {
-    for (char& c : s) c = (char)std::toupper((unsigned char)c);
-    return s;
-}
-
-static bool macro_is_hex4(const std::string& s, size_t pos) {
-    if (pos + 4 > s.size()) return false;
-    for (size_t i = 0; i < 4; ++i) if (!std::isxdigit((unsigned char)s[pos+i])) return false;
-    return true;
-}
-
-static bool macro_read_json_string_at(const std::string& raw, size_t& pos, std::string& out, std::string& err) {
-    if (pos >= raw.size() || raw[pos] != '"') { err = "expected JSON string"; return false; }
-    out.clear();
-    ++pos;
-    while (pos < raw.size()) {
-        char c = raw[pos++];
-        if ((unsigned char)c < 0x20) { err = "unescaped control character in JSON string"; return false; }
-        if (c == '"') return true;
-        if (c != '\\') { out += c; continue; }
-        if (pos >= raw.size()) { err = "unfinished JSON escape"; return false; }
-        char e = raw[pos++];
-        switch (e) {
-            case '"': out += '"'; break;
-            case '\\': out += '\\'; break;
-            case '/': out += '/'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'n': out += '\n'; break;
-            case 'r': out += '\r'; break;
-            case 't': out += '\t'; break;
-            case 'u':
-                if (!macro_is_hex4(raw, pos)) { err = "invalid JSON unicode escape"; return false; }
-                // Macro commands are ASCII; preserve unicode names as '?' rather than failing the whole file.
-                out += '?'; pos += 4; break;
-            default: err = "invalid JSON escape"; return false;
-        }
-    }
-    err = "unterminated JSON string";
-    return false;
-}
-
-static void macro_skip_ws(const std::string& raw, size_t& pos) {
-    while (pos < raw.size() && std::isspace((unsigned char)raw[pos])) ++pos;
-}
-
-static bool macro_skip_json_value(const std::string& raw, size_t& pos, std::string& err);
-
-static bool macro_skip_json_array(const std::string& raw, size_t& pos, std::string& err) {
-    if (pos >= raw.size() || raw[pos] != '[') { err = "expected JSON array"; return false; }
-    ++pos;
-    macro_skip_ws(raw, pos);
-    if (pos < raw.size() && raw[pos] == ']') { ++pos; return true; }
-    while (pos < raw.size()) {
-        if (!macro_skip_json_value(raw, pos, err)) return false;
-        macro_skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ',') { ++pos; macro_skip_ws(raw, pos); continue; }
-        if (pos < raw.size() && raw[pos] == ']') { ++pos; return true; }
-        err = "expected ',' or ']' in JSON array"; return false;
-    }
-    err = "unterminated JSON array"; return false;
-}
-
-static bool macro_skip_json_object(const std::string& raw, size_t& pos, std::string& err) {
-    if (pos >= raw.size() || raw[pos] != '{') { err = "expected JSON object"; return false; }
-    ++pos;
-    macro_skip_ws(raw, pos);
-    if (pos < raw.size() && raw[pos] == '}') { ++pos; return true; }
-    while (pos < raw.size()) {
-        std::string key;
-        if (!macro_read_json_string_at(raw, pos, key, err)) return false;
-        macro_skip_ws(raw, pos);
-        if (pos >= raw.size() || raw[pos] != ':') { err = "expected ':' after JSON key"; return false; }
-        ++pos;
-        macro_skip_ws(raw, pos);
-        if (!macro_skip_json_value(raw, pos, err)) return false;
-        macro_skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ',') { ++pos; macro_skip_ws(raw, pos); continue; }
-        if (pos < raw.size() && raw[pos] == '}') { ++pos; return true; }
-        err = "expected ',' or '}' in JSON object"; return false;
-    }
-    err = "unterminated JSON object"; return false;
-}
-
-static bool macro_skip_json_value(const std::string& raw, size_t& pos, std::string& err) {
-    macro_skip_ws(raw, pos);
-    if (pos >= raw.size()) { err = "missing JSON value"; return false; }
-    if (raw[pos] == '"') { std::string tmp; return macro_read_json_string_at(raw, pos, tmp, err); }
-    if (raw[pos] == '{') return macro_skip_json_object(raw, pos, err);
-    if (raw[pos] == '[') return macro_skip_json_array(raw, pos, err);
-    if (raw.compare(pos, 4, "true") == 0) { pos += 4; return true; }
-    if (raw.compare(pos, 5, "false") == 0) { pos += 5; return true; }
-    if (raw.compare(pos, 4, "null") == 0) { pos += 4; return true; }
-    if (raw[pos] == '-' || std::isdigit((unsigned char)raw[pos])) {
-        ++pos;
-        while (pos < raw.size() && (std::isdigit((unsigned char)raw[pos]) || raw[pos]=='.' || raw[pos]=='e' || raw[pos]=='E' || raw[pos]=='+' || raw[pos]=='-')) ++pos;
-        return true;
-    }
-    err = "invalid JSON value"; return false;
-}
-
-static bool macro_extract_commands_text(const std::string& raw_in, std::string& out, std::string& err) {
-    if (raw_in.size() > MACRO_JSON_MAX_BYTES) { err = "macro JSON exceeds 50MB limit"; return false; }
-    std::string raw = macro_trim(raw_in);
-    out.clear();
-    if (raw.empty()) { err = "empty macro"; return false; }
-
-    // Raw command text remains supported for CLI convenience.
-    if (raw[0] != '{' && raw[0] != '[') { out = raw; return true; }
-
-    size_t pos = 0;
-    macro_skip_ws(raw, pos);
-    if (raw[pos] == '[') {
-        // Accept a bare array of command strings.
-        ++pos; macro_skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ']') { err = "commands array is empty"; return false; }
-        while (pos < raw.size()) {
-            std::string item;
-            if (!macro_read_json_string_at(raw, pos, item, err)) return false;
-            if (!out.empty()) out += ";";
-            out += item;
-            macro_skip_ws(raw, pos);
-            if (pos < raw.size() && raw[pos] == ',') { ++pos; macro_skip_ws(raw, pos); continue; }
-            if (pos < raw.size() && raw[pos] == ']') { ++pos; break; }
-            err = "expected ',' or ']' in commands array"; return false;
-        }
-        macro_skip_ws(raw, pos);
-        if (pos != raw.size()) { err = "extra data after JSON array"; return false; }
-        return true;
-    }
-
-    if (raw[pos] != '{') { err = "macro JSON must be an object or commands array"; return false; }
-    ++pos; macro_skip_ws(raw, pos);
-    bool found_commands = false;
-    if (pos < raw.size() && raw[pos] == '}') { err = "macro object is missing commands"; return false; }
-    while (pos < raw.size()) {
-        std::string key;
-        if (!macro_read_json_string_at(raw, pos, key, err)) return false;
-        macro_skip_ws(raw, pos);
-        if (pos >= raw.size() || raw[pos] != ':') { err = "expected ':' after JSON key"; return false; }
-        ++pos; macro_skip_ws(raw, pos);
-        if (key == "commands") {
-            found_commands = true;
-            if (pos < raw.size() && raw[pos] == '"') {
-                if (!macro_read_json_string_at(raw, pos, out, err)) return false;
-            } else if (pos < raw.size() && raw[pos] == '[') {
-                ++pos; macro_skip_ws(raw, pos);
-                if (pos < raw.size() && raw[pos] == ']') { err = "commands array is empty"; return false; }
-                while (pos < raw.size()) {
-                    std::string item;
-                    if (!macro_read_json_string_at(raw, pos, item, err)) { err = "commands array must contain only strings"; return false; }
-                    if (!out.empty()) out += ";";
-                    out += item;
-                    macro_skip_ws(raw, pos);
-                    if (pos < raw.size() && raw[pos] == ',') { ++pos; macro_skip_ws(raw, pos); continue; }
-                    if (pos < raw.size() && raw[pos] == ']') { ++pos; break; }
-                    err = "expected ',' or ']' in commands array"; return false;
-                }
-            } else { err = "commands must be a string or an array of strings"; return false; }
-        } else {
-            if (!macro_skip_json_value(raw, pos, err)) return false;
-        }
-        macro_skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ',') { ++pos; macro_skip_ws(raw, pos); continue; }
-        if (pos < raw.size() && raw[pos] == '}') { ++pos; break; }
-        err = "expected ',' or '}' in macro object"; return false;
-    }
-    macro_skip_ws(raw, pos);
-    if (pos != raw.size()) { err = "extra data after JSON object"; return false; }
-    if (!found_commands) { err = "macro object is missing commands"; return false; }
-    return true;
-}
-
-static bool macro_parse_uint32_strict(const std::string& s, uint32_t& out) {
-    if (s.empty()) return false;
-    uint64_t v = 0;
-    for (char c : s) {
-        if (!std::isdigit((unsigned char)c)) return false;
-        v = v * 10 + (uint64_t)(c - '0');
-        if (v > 0xFFFFFFFFULL) return false;
-    }
-    if (v == 0) return false;
-    out = (uint32_t)v;
-    return true;
-}
-
-static uint16_t macro_button_bit(const std::string& token) {
-    std::string name = macro_upper(macro_trim(token));
-    if (name == "A" || name == "BTN_A") return BTN_A;
-    if (name == "B" || name == "BTN_B") return BTN_B;
-    if (name == "X" || name == "BTN_X") return BTN_X;
-    if (name == "Y" || name == "BTN_Y") return BTN_Y;
-    if (name == "L" || name == "BTN_L") return BTN_L;
-    if (name == "R" || name == "BTN_R") return BTN_R;
-    if (name == "ZL" || name == "BTN_ZL") return BTN_ZL;
-    if (name == "ZR" || name == "BTN_ZR") return BTN_ZR;
-    if (name == "MINUS" || name == "-" || name == "BTN_MINUS") return BTN_MINUS;
-    if (name == "PLUS" || name == "+" || name == "BTN_PLUS") return BTN_PLUS;
-    if (name == "LSTICK" || name == "LS" || name == "BTN_LSTICK") return BTN_LSTICK;
-    if (name == "RSTICK" || name == "RS" || name == "BTN_RSTICK") return BTN_RSTICK;
-    if (name == "HOME" || name == "BTN_HOME") return BTN_HOME;
-    if (name == "CAPTURE" || name == "BTN_CAPTURE") return BTN_CAPTURE;
-    return 0;
-}
-
-static bool macro_apply_token(const std::string& raw_tok, ServerMacroStep& st, std::string& err,
-                              bool& du, bool& dd, bool& dl, bool& dr,
-                              bool& llu, bool& lld, bool& lll, bool& llr,
-                              bool& rru, bool& rrd, bool& rrl, bool& rrr) {
-    std::string tok = macro_upper(macro_trim(raw_tok));
-    if (tok.empty()) return true;
-    uint16_t bit = macro_button_bit(tok);
-    if (bit) { st.buttons |= bit; return true; }
-
-    if (tok == "DPAD_UP" || tok == "DUP" || tok == "UP") { du = true; return true; }
-    if (tok == "DPAD_DOWN" || tok == "DDOWN" || tok == "DOWN") { dd = true; return true; }
-    if (tok == "DPAD_LEFT" || tok == "DLEFT" || tok == "LEFT") { dl = true; return true; }
-    if (tok == "DPAD_RIGHT" || tok == "DRIGHT" || tok == "RIGHT") { dr = true; return true; }
-
-    if (tok == "LSTICK_UP" || tok == "LS_UP") { llu = true; st.has_lstick = true; return true; }
-    if (tok == "LSTICK_DOWN" || tok == "LS_DOWN") { lld = true; st.has_lstick = true; return true; }
-    if (tok == "LSTICK_LEFT" || tok == "LS_LEFT") { lll = true; st.has_lstick = true; return true; }
-    if (tok == "LSTICK_RIGHT" || tok == "LS_RIGHT") { llr = true; st.has_lstick = true; return true; }
-
-    if (tok == "RSTICK_UP" || tok == "RS_UP") { rru = true; st.has_rstick = true; return true; }
-    if (tok == "RSTICK_DOWN" || tok == "RS_DOWN") { rrd = true; st.has_rstick = true; return true; }
-    if (tok == "RSTICK_LEFT" || tok == "RS_LEFT") { rrl = true; st.has_rstick = true; return true; }
-    if (tok == "RSTICK_RIGHT" || tok == "RS_RIGHT") { rrr = true; st.has_rstick = true; return true; }
-
-    err = "unknown macro input: " + raw_tok;
-    return false;
-}
-
-static bool macro_parse_one_command(const std::string& part, ServerMacroStep& st, std::string& err) {
-    size_t last_space = part.find_last_of(" \t");
-    if (last_space == std::string::npos) { err = "missing duration in command: " + part; return false; }
-    std::string cmd = macro_trim(part.substr(0, last_space));
-    std::string ms_s = macro_trim(part.substr(last_space + 1));
-    uint32_t ms = 0;
-    if (!macro_parse_uint32_strict(ms_s, ms)) { err = "invalid duration in command: " + part; return false; }
-    st = ServerMacroStep{};
-    st.duration_ms = ms;
-    std::string up = macro_upper(cmd);
-    if (up == "WAIT") return true;
-    if (cmd.empty()) { err = "missing input before duration in command: " + part; return false; }
-
-    for (char& c : cmd) if (c == '+' || c == ',' || c == '|') c = ' ';
-    std::istringstream iss(cmd);
-    std::string tok;
-    bool du=false,dd=false,dl=false,dr=false, llu=false,lld=false,lll=false,llr=false, rru=false,rrd=false,rrl=false,rrr=false;
-    int token_count = 0;
-    while (iss >> tok) {
-        ++token_count;
-        if (!macro_apply_token(tok, st, err, du,dd,dl,dr, llu,lld,lll,llr, rru,rrd,rrl,rrr)) return false;
-    }
-    if (token_count == 0) { err = "empty input in command: " + part; return false; }
-    if (du && dd) { err = "DPAD_UP and DPAD_DOWN conflict in command: " + part; return false; }
-    if (dl && dr) { err = "DPAD_LEFT and DPAD_RIGHT conflict in command: " + part; return false; }
-    if (llu && lld) { err = "LSTICK_UP and LSTICK_DOWN conflict in command: " + part; return false; }
-    if (lll && llr) { err = "LSTICK_LEFT and LSTICK_RIGHT conflict in command: " + part; return false; }
-    if (rru && rrd) { err = "RSTICK_UP and RSTICK_DOWN conflict in command: " + part; return false; }
-    if (rrl && rrr) { err = "RSTICK_LEFT and RSTICK_RIGHT conflict in command: " + part; return false; }
-
-    if (du && dr) st.hat = HAT_NE;
-    else if (du && dl) st.hat = HAT_NW;
-    else if (dd && dr) st.hat = HAT_SE;
-    else if (dd && dl) st.hat = HAT_SW;
-    else if (du) st.hat = HAT_N;
-    else if (dd) st.hat = HAT_S;
-    else if (dr) st.hat = HAT_E;
-    else if (dl) st.hat = HAT_W;
-
-    if (st.has_lstick) { st.lx = lll ? 0 : (llr ? 255 : 128); st.ly = llu ? 0 : (lld ? 255 : 128); }
-    if (st.has_rstick) { st.rx = rrl ? 0 : (rrr ? 255 : 128); st.ry = rru ? 0 : (rrd ? 255 : 128); }
-    return true;
-}
-
-static bool server_macro_validate_text(const std::string& raw_text, std::vector<ServerMacroStep>& steps, std::vector<std::string>* normalized = nullptr) {
-    g_macro_last_error.clear();
-    steps.clear();
-    if (normalized) normalized->clear();
-    std::string text, err;
-    if (!macro_extract_commands_text(raw_text, text, err)) { macro_set_error(err); return false; }
-    for (char& c : text) if (c == '\n' || c == '\r') c = ';';
-    size_t pos = 0;
-    size_t loop_block_start = 0;
-    static constexpr size_t MACRO_MAX_EXPANDED_STEPS = 1000000;
-    while (pos < text.size()) {
-        size_t semi = text.find(';', pos);
-        std::string part = macro_trim(text.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos));
-        pos = (semi == std::string::npos) ? text.size() : semi + 1;
-        if (part.empty() || part[0] == '#') continue;
-
-        size_t last_space = part.find_last_of(" 	");
-        std::string maybe_cmd = last_space == std::string::npos ? macro_upper(part) : macro_upper(macro_trim(part.substr(0, last_space)));
-        if (maybe_cmd == "LOOP") {
-            if (last_space == std::string::npos) { macro_set_error("missing count in LOOP command: " + part); return false; }
-            uint32_t count = 0;
-            if (!macro_parse_uint32_strict(macro_trim(part.substr(last_space + 1)), count)) { macro_set_error("invalid LOOP count in command: " + part); return false; }
-            if (steps.size() == loop_block_start) { macro_set_error("LOOP has no previous commands to repeat: " + part); return false; }
-            const size_t block_len = steps.size() - loop_block_start;
-            if (count > 1 && block_len > (MACRO_MAX_EXPANDED_STEPS - steps.size()) / (count - 1)) {
-                macro_set_error("LOOP expansion is too large; reduce LOOP count or split the macro");
-                return false;
-            }
-            std::vector<ServerMacroStep> block(steps.begin() + (std::ptrdiff_t)loop_block_start, steps.end());
-            for (uint32_t i = 1; i < count; ++i) steps.insert(steps.end(), block.begin(), block.end());
-            loop_block_start = steps.size();
-            if (normalized) normalized->push_back(part);
-            continue;
-        }
-
-        ServerMacroStep st;
-        if (!macro_parse_one_command(part, st, err)) { macro_set_error(err); return false; }
-        steps.push_back(st);
-        if (normalized) normalized->push_back(part);
-    }
-    if (steps.empty()) { macro_set_error("no valid macro commands found"); return false; }
-    return true;
-}
-
-static std::vector<ServerMacroStep> server_macro_parse_text(const std::string& raw_text) {
-    std::vector<ServerMacroStep> steps;
-    server_macro_validate_text(raw_text, steps, nullptr);
-    return steps;
-}
-
-static std::string macro_read_file(const std::string& path) {
-    g_macro_last_error.clear();
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) { macro_set_error("cannot open macro file"); return ""; }
-    std::streamoff len = f.tellg();
-    if (len < 0) { macro_set_error("cannot read macro file size"); return ""; }
-    if ((uint64_t)len > MACRO_JSON_MAX_BYTES) { macro_set_error("macro JSON exceeds 50MB limit"); return ""; }
-    f.seekg(0, std::ios::beg);
-    std::string s((size_t)len, '\0');
-    if (len > 0) f.read(&s[0], len);
-    if (!f && len > 0) { macro_set_error("failed while reading macro file"); return ""; }
-    return s;
-}
-
-[[maybe_unused]] static std::vector<ServerMacroStep> server_macro_load_file(const std::string& path) {
-    std::string txt = macro_read_file(path);
-    if (txt.empty()) return {};
-    return server_macro_parse_text(txt);
-}
-
-static std::string macro_escape_json(const std::string& s) {
-    std::string out;
-    for (unsigned char c : s) {
-        if (c == '\\') out += "\\\\";
-        else if (c == '"') out += "\\\"";
-        else if (c == '\n') out += "\\n";
-        else if (c == '\r') out += "\\r";
-        else if (c == '\t') out += "\\t";
-        else out += (char)c;
-    }
-    return out;
-}
-
-static std::string macro_extract_name_or_default(const std::string& raw, const std::string& fallback_name) {
-    std::string t = macro_trim(raw);
-    if (t.empty() || t[0] != '{') return fallback_name;
-    size_t pos = 1; std::string err;
-    macro_skip_ws(t, pos);
-    while (pos < t.size() && t[pos] != '}') {
-        std::string key;
-        if (!macro_read_json_string_at(t, pos, key, err)) return fallback_name;
-        macro_skip_ws(t, pos);
-        if (pos >= t.size() || t[pos] != ':') return fallback_name;
-        ++pos; macro_skip_ws(t, pos);
-        if (key == "name" && pos < t.size() && t[pos] == '"') {
-            std::string name;
-            if (macro_read_json_string_at(t, pos, name, err) && !macro_trim(name).empty()) return name;
-            return fallback_name;
-        }
-        if (!macro_skip_json_value(t, pos, err)) return fallback_name;
-        macro_skip_ws(t, pos);
-        if (pos < t.size() && t[pos] == ',') { ++pos; macro_skip_ws(t, pos); }
-    }
-    return fallback_name;
-}
-
-static std::string macro_pretty_json(const std::string& raw_text, const std::string& fallback_name = "Macro") {
-    std::vector<ServerMacroStep> steps;
-    std::vector<std::string> lines;
-    if (!server_macro_validate_text(raw_text, steps, &lines)) {
-        lines = {"WAIT 200"};
-    }
-    std::string name = macro_extract_name_or_default(raw_text, fallback_name);
-    std::string out;
-    out += "{\n";
-    out += "  \"name\": \"" + macro_escape_json(name) + "\",\n";
-    out += "  \"commands\": [\n";
-    for (size_t i = 0; i < lines.size(); ++i) {
-        out += "    \"" + macro_escape_json(lines[i]) + "\"";
-        if (i + 1 < lines.size()) out += ",";
-        out += "\n";
-    }
-    out += "  ]\n";
-    out += "}";
-    return out;
-}
-
-[[maybe_unused]] static bool macro_validate_to_pretty_json(const std::string& raw_text, std::string& pretty, std::string& err, const std::string& fallback_name = "Macro") {
-    std::vector<ServerMacroStep> steps;
-    if (!server_macro_validate_text(raw_text, steps, nullptr)) { err = macro_last_error(); return false; }
-    pretty = macro_pretty_json(raw_text, fallback_name);
-    err.clear();
-    return true;
-}
-
-static uint64_t server_macro_total_ms(const std::vector<ServerMacroStep>& steps) {
-    uint64_t total = 0;
-    for (const auto& s : steps) {
-        if (UINT64_MAX - total < s.duration_ms) return UINT64_MAX;
-        total += s.duration_ms;
-    }
-    return total;
-}
-
-[[maybe_unused]] static bool server_macro_report_at(const std::vector<ServerMacroStep>& steps, uint64_t elapsed_ms, HIDReport& out) {
-    out.reset();
-    uint64_t t = 0;
-    for (const auto& s : steps) {
-        uint64_t next = t + s.duration_ms;
-        if (elapsed_ms < next) {
-            out.buttons = s.buttons;
-            out.hat = s.hat;
-            if (s.has_lstick) { out.lx = s.lx; out.ly = s.ly; }
-            if (s.has_rstick) { out.rx = s.rx; out.ry = s.ry; }
-            return true;
-        }
-        t = next;
-    }
-    return false;
-}
-
-
-static bool server_macro_step_at(const std::vector<ServerMacroStep>& steps, uint64_t elapsed_ms, ServerMacroStep& out) {
-    uint64_t t = 0;
-    for (const auto& s : steps) {
-        uint64_t next = t + s.duration_ms;
-        if (elapsed_ms < next) { out = s; return true; }
-        t = next;
-    }
-    return false;
-}
-
-
+// Shared parser/export/playback helpers live in include/macros.hpp.
+// This file keeps only server-specific runtime/upload wiring.
 struct ServerMacroRuntime {
-    std::vector<ServerMacroStep> steps;
+    std::vector<ns::macro::Step> steps;
     bool running = false;
     uint64_t start_us = 0;
 };
 
 static std::mutex g_server_macro_mtx;
 static ServerMacroRuntime g_server_macros[MAX_CLIENTS][4];
-
-#define NS_MACRO_PACKED __attribute__((packed))
-struct NS_MACRO_PACKED MacroUdpHeaderWire {
-    uint32_t magic;
-    uint8_t version;
-    uint8_t subpad;
-    uint32_t text_len;
-    uint32_t seq;
-};
-static constexpr size_t MACRO_UDP_HEADER_SIZE = sizeof(MacroUdpHeaderWire);
-static constexpr size_t MACRO_UDP_AUTH_SIZE(size_t text_len) { return MACRO_UDP_HEADER_SIZE + text_len; }
-
-struct NS_MACRO_PACKED MacroUdpChunkHeaderWire {
-    uint32_t magic;
-    uint8_t version;
-    uint8_t subpad;
-    uint8_t flags;
-    uint8_t reserved;
-    uint32_t upload_id;
-    uint32_t chunk_index;
-    uint32_t chunk_count;
-    uint32_t total_len;
-    uint16_t chunk_len;
-    uint32_t seq;
-};
-static constexpr size_t MACRO_CHUNK_HEADER_SIZE = sizeof(MacroUdpChunkHeaderWire);
-static_assert(MACRO_CHUNK_HEADER_SIZE == 30, "Macro chunk header must stay 30 bytes");
 
 struct ServerMacroUploadRuntime {
     bool active = false;
@@ -748,17 +237,17 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
 }
 
 static bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, const sockaddr_in& sender) {
-    if (bytes < MACRO_CHUNK_HEADER_SIZE + HMAC_TAG_SIZE) return false;
-    MacroUdpChunkHeaderWire h{};
+    if (bytes < ns::macro::CHUNK_HEADER_SIZE + HMAC_TAG_SIZE) return false;
+    ns::macro::MacroUdpChunkHeaderWire h{};
     memcpy(&h, data, sizeof(h));
-    if (h.magic != MACRO_UDP_CHUNK_MAGIC) return false;
+    if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION) { if (g_verbose) puts("bad macro chunk version, dropped"); return true; }
-    if (h.total_len > MACRO_UDP_TEXT_MAX) { if (g_verbose) puts("macro chunk total over 50MB, dropped"); return true; }
-    if (h.chunk_len > MACRO_UDP_CHUNK_MAX) { if (g_verbose) puts("macro chunk too large, dropped"); return true; }
+    if (h.total_len > ns::macro::UDP_TEXT_MAX) { if (g_verbose) puts("macro chunk total over 50MB, dropped"); return true; }
+    if (h.chunk_len > ns::macro::UDP_CHUNK_MAX) { if (g_verbose) puts("macro chunk too large, dropped"); return true; }
     if (h.chunk_count == 0 || h.chunk_index >= h.chunk_count) { if (g_verbose) puts("bad macro chunk index/count, dropped"); return true; }
-    if (bytes != MACRO_CHUNK_HEADER_SIZE + (size_t)h.chunk_len + HMAC_TAG_SIZE) { if (g_verbose) puts("bad macro chunk packet size, dropped"); return true; }
-    const uint8_t* recv_hmac = data + MACRO_CHUNK_HEADER_SIZE + h.chunk_len;
-    if (hmac_verify(g_hmac_key, 32, data, MACRO_CHUNK_HEADER_SIZE + h.chunk_len, recv_hmac, HMAC_TAG_SIZE) != 0) { if (g_verbose) puts("bad macro chunk HMAC, dropped"); return true; }
+    if (bytes != ns::macro::CHUNK_HEADER_SIZE + (size_t)h.chunk_len + HMAC_TAG_SIZE) { if (g_verbose) puts("bad macro chunk packet size, dropped"); return true; }
+    const uint8_t* recv_hmac = data + ns::macro::CHUNK_HEADER_SIZE + h.chunk_len;
+    if (hmac_verify(g_hmac_key, 32, data, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len, recv_hmac, HMAC_TAG_SIZE) != 0) { if (g_verbose) puts("bad macro chunk HMAC, dropped"); return true; }
     if (!rate_allow(sender.sin_addr.s_addr)) return true;
 
     uint64_t now = now_us();
@@ -793,7 +282,7 @@ static bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, 
         if (up.total_len != h.total_len || up.chunk_count != h.chunk_count) { if (g_verbose) puts("macro chunk metadata mismatch, dropped"); return true; }
         up.last_rx_us = now;
         if (!up.got[h.chunk_index]) {
-            up.chunks[h.chunk_index].assign(reinterpret_cast<const char*>(data + MACRO_CHUNK_HEADER_SIZE), h.chunk_len);
+            up.chunks[h.chunk_index].assign(reinterpret_cast<const char*>(data + ns::macro::CHUNK_HEADER_SIZE), h.chunk_len);
             up.got[h.chunk_index] = 1;
             up.received_count++;
         }
@@ -817,13 +306,13 @@ static bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, 
 
 static bool server_macro_handle_ws_chunk_packet(int client_idx, const uint8_t* data, size_t bytes) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
-    if (bytes < MACRO_CHUNK_HEADER_SIZE) return false;
-    MacroUdpChunkHeaderWire h{};
+    if (bytes < ns::macro::CHUNK_HEADER_SIZE) return false;
+    ns::macro::MacroUdpChunkHeaderWire h{};
     memcpy(&h, data, sizeof(h));
-    if (h.magic != MACRO_UDP_CHUNK_MAGIC) return false;
+    if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION) return true;
-    if (h.total_len > MACRO_UDP_TEXT_MAX || h.chunk_len > MACRO_UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_index >= h.chunk_count) return true;
-    if (bytes != MACRO_CHUNK_HEADER_SIZE + (size_t)h.chunk_len) return true;
+    if (h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_index >= h.chunk_count) return true;
+    if (bytes != ns::macro::CHUNK_HEADER_SIZE + (size_t)h.chunk_len) return true;
     uint64_t now = now_us();
     std::string completed;
     uint8_t completed_subpad = h.subpad < 4 ? h.subpad : 0;
@@ -844,7 +333,7 @@ static bool server_macro_handle_ws_chunk_packet(int client_idx, const uint8_t* d
         if (up.total_len != h.total_len || up.chunk_count != h.chunk_count) return true;
         up.last_rx_us = now;
         if (!up.got[h.chunk_index]) {
-            up.chunks[h.chunk_index].assign(reinterpret_cast<const char*>(data + MACRO_CHUNK_HEADER_SIZE), h.chunk_len);
+            up.chunks[h.chunk_index].assign(reinterpret_cast<const char*>(data + ns::macro::CHUNK_HEADER_SIZE), h.chunk_len);
             up.got[h.chunk_index] = 1;
             up.received_count++;
         }
@@ -866,7 +355,7 @@ static bool server_macro_running(int client_idx, int subpad) {
     ServerMacroRuntime& rt = g_server_macros[client_idx][subpad];
     if (!rt.running) return false;
     uint64_t elapsed_ms = (now_us() - rt.start_us) / 1000ULL;
-    if (elapsed_ms > server_macro_total_ms(rt.steps) + 120) { rt.running = false; return false; }
+    if (elapsed_ms > ns::macro::total_ms(rt.steps) + 120) { rt.running = false; return false; }
     return true;
 }
 
@@ -876,8 +365,8 @@ static void server_macro_apply(int client_idx, int subpad, HIDReport& live) {
     ServerMacroRuntime& rt = g_server_macros[client_idx][subpad];
     if (!rt.running) return;
     uint64_t elapsed_ms = (now_us() - rt.start_us) / 1000ULL;
-    ServerMacroStep step{};
-    if (!server_macro_step_at(rt.steps, elapsed_ms, step)) {
+    ns::macro::Step step{};
+    if (!ns::macro::step_at(rt.steps, elapsed_ms, step)) {
         rt.running = false;
         return;
     }
@@ -890,9 +379,9 @@ static void server_macro_apply(int client_idx, int subpad, HIDReport& live) {
 static bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
     if (subpad < 0 || subpad >= 4) subpad = 0;
-    std::vector<ServerMacroStep> steps;
-    if (!server_macro_validate_text(json_or_commands, steps, nullptr)) {
-        if (g_verbose) std::printf("[macro] rejected: %s\n", macro_last_error().c_str());
+    std::vector<ns::macro::Step> steps;
+    if (!ns::macro::validate_text(json_or_commands, steps, nullptr)) {
+        if (g_verbose) std::printf("[macro] rejected: %s\n", ns::macro::last_error().c_str());
         return false;
     }
     std::lock_guard<std::mutex> lk(g_server_macro_mtx);
@@ -4139,10 +3628,10 @@ static size_t process_ws_frame(WebClient *c) {
     if (masked)
         for (uint64_t i = 0; i < flen; i++) payload[i] ^= mask[i & 3];
 
-    if (flen >= MACRO_CHUNK_HEADER_SIZE) {
+    if (flen >= ns::macro::CHUNK_HEADER_SIZE) {
         uint32_t maybe_macro_magic = 0;
         memcpy(&maybe_macro_magic, payload, 4);
-        if (maybe_macro_magic == MACRO_UDP_CHUNK_MAGIC) {
+        if (maybe_macro_magic == ns::macro::UDP_CHUNK_MAGIC) {
             uint64_t now = now_us();
             if (c->ws_slot < 0) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -4752,7 +4241,7 @@ static bool parse_bind_arg(const std::string& raw, std::string& bind_addr, uint1
     if (raw.empty()) return false;
 
     uint32_t numeric_port = 0;
-    if (macro_parse_uint32_strict(raw, numeric_port)) {
+    if (ns::macro::parse_uint32_strict(raw, numeric_port)) {
         if (numeric_port > 65535) return false;
         bind_addr = "0.0.0.0";
         port = (uint16_t)numeric_port;
@@ -4764,7 +4253,7 @@ static bool parse_bind_arg(const std::string& raw, std::string& bind_addr, uint1
     if (sep != std::string::npos) {
         std::string port_text = raw.substr(sep + 1);
         uint32_t parsed_port = 0;
-        if (!macro_parse_uint32_strict(port_text, parsed_port) || parsed_port > 65535)
+        if (!ns::macro::parse_uint32_strict(port_text, parsed_port) || parsed_port > 65535)
             return false;
 
         addr = raw.substr(0, sep);
@@ -4866,7 +4355,7 @@ int main(int argc, char** argv) {
 
     int ep = epoll_create1(0); epoll_event ev{}; ev.events = EPOLLIN; ev.data.fd = sock; epoll_ctl(ep, EPOLL_CTL_ADD, sock, &ev);
 
-    std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, MACRO_CHUNK_HEADER_SIZE + MACRO_UDP_CHUNK_MAX + HMAC_TAG_SIZE));
+    std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
     epoll_event evs[4];
 
     while (g_running.load(std::memory_order_relaxed)) {
@@ -4904,22 +4393,22 @@ int main(int argc, char** argv) {
             if (bytes >= 4) {
                 uint32_t mmagic = 0;
                 memcpy(&mmagic, udp_rx.data(), 4);
-                if (mmagic == MACRO_UDP_CHUNK_MAGIC) {
+                if (mmagic == ns::macro::UDP_CHUNK_MAGIC) {
                     server_macro_handle_chunk_packet(udp_rx.data(), (size_t)bytes, sender);
                     continue;
                 }
             }
 
-            if (bytes >= (ssize_t)(MACRO_UDP_HEADER_SIZE + HMAC_TAG_SIZE)) {
+            if (bytes >= (ssize_t)(ns::macro::UDP_HEADER_SIZE + HMAC_TAG_SIZE)) {
                 uint32_t mmagic = 0;
                 memcpy(&mmagic, udp_rx.data(), 4);
-                if (mmagic == MACRO_UDP_MAGIC) {
-                    MacroUdpHeaderWire mh{};
+                if (mmagic == ns::macro::UDP_MAGIC) {
+                    ns::macro::MacroUdpHeaderWire mh{};
                     memcpy(&mh, udp_rx.data(), sizeof(mh));
                     uint32_t text_len = mh.text_len;
-                    if (text_len <= MACRO_UDP_TEXT_MAX && bytes == (ssize_t)(MACRO_UDP_HEADER_SIZE + text_len + HMAC_TAG_SIZE)) {
-                        const uint8_t* recv_hmac = udp_rx.data() + MACRO_UDP_HEADER_SIZE + text_len;
-                        if (hmac_verify(g_hmac_key, 32, udp_rx.data(), MACRO_UDP_HEADER_SIZE + text_len, recv_hmac, HMAC_TAG_SIZE) == 0) {
+                    if (text_len <= ns::macro::UDP_TEXT_MAX && bytes == (ssize_t)(ns::macro::UDP_HEADER_SIZE + text_len + HMAC_TAG_SIZE)) {
+                        const uint8_t* recv_hmac = udp_rx.data() + ns::macro::UDP_HEADER_SIZE + text_len;
+                        if (hmac_verify(g_hmac_key, 32, udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len, recv_hmac, HMAC_TAG_SIZE) == 0) {
                             if (!rate_allow(sender.sin_addr.s_addr)) continue;
                             int client_idx = server_macro_client_for_sender(sender);
                             if (client_idx >= 0) {
@@ -4930,7 +4419,7 @@ int main(int argc, char** argv) {
                                     g_clients[client_idx].pad_present[sp] = true;
                                     g_clients[client_idx].pad_last_present_us[sp] = now_us();
                                 }
-                                std::string text(reinterpret_cast<char*>(udp_rx.data() + MACRO_UDP_HEADER_SIZE), text_len);
+                                std::string text(reinterpret_cast<char*>(udp_rx.data() + ns::macro::UDP_HEADER_SIZE), text_len);
                                 server_macro_start(client_idx, mh.subpad < 4 ? mh.subpad : 0, text);
                             }
                         } else if (g_verbose) puts("bad macro HMAC, dropped");
