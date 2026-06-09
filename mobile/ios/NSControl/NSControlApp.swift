@@ -55,9 +55,11 @@ struct ContentView: View {
 
             TextField("Server IP (e.g. 192.168.1.100)", text: $host)
                 .textFieldStyle(.roundedBorder)
-                .keyboardType(.numbersAndPunctuation)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
-                .onChange(of: host) { newValue in UserDefaults.standard.set(newValue, forKey: "host") }
+                .onChange(of: host) { newValue in UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "host") }
+
 
             Button("Connect") {
                 host = host.trimmingCharacters(in: .whitespaces)
