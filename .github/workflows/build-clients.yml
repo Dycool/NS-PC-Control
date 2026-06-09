@@ -3,8 +3,8 @@ name: Build Clients
 on:
   push:
     paths:
-      - 'client/ns-client.cpp'
-      - '.github/workflows/build-clients.yml'
+      - 'client/**'
+      - 'server/include/**'
   workflow_dispatch:
   workflow_call:
 
