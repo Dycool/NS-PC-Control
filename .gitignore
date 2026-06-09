@@ -11,12 +11,12 @@
 *.user
 
 # Android
-client/mobile/android/.gradle/
-client/mobile/android/build/
-client/mobile/android/app/build/
-client/mobile/android/local.properties
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
 *.apk
 
 # iOS (xcodegen generates .xcodeproj)
-client/mobile/ios/*.xcodeproj
-client/mobile/ios/build/
+mobile/ios/*.xcodeproj
+mobile/ios/build/

@@ -3,7 +3,7 @@ name: Build Mobile Apps
 on:
   push:
     paths:
-      - 'client/mobile/**'
+      - 'mobile/**'
       - '.github/workflows/build-mobile.yml'
   workflow_dispatch:
   workflow_call:
@@ -31,13 +31,13 @@ jobs:
           gradle-version: '8.5'
 
       - name: Build debug APK
-        working-directory: client/mobile/android
+        working-directory: mobile/android
         run: gradle :app:assembleDebug --no-daemon
 
       - name: Stage Android APK
         run: |
           mkdir -p _artifact
-          cp client/mobile/android/app/build/outputs/apk/debug/app-debug.apk _artifact/NS-mobile.apk
+          cp mobile/android/app/build/outputs/apk/debug/app-debug.apk _artifact/NS-mobile.apk
 
       - name: Upload Android APK
         uses: actions/upload-artifact@v6
@@ -58,11 +58,11 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        working-directory: client/mobile/ios
+        working-directory: mobile/ios
         run: xcodegen generate
 
       - name: Build iOS app (unsigned)
-        working-directory: client/mobile/ios
+        working-directory: mobile/ios
         run: |
           xcodebuild \
             -project NSControl.xcodeproj \
@@ -80,10 +80,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _artifact Payload
-          APP="$(find client/mobile/ios/build/Release-iphoneos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          APP="$(find mobile/ios/build/Release-iphoneos -maxdepth 1 -type d -name '*.app' -print -quit)"
           if [ -z "$APP" ]; then
             echo "Could not find built .app"
-            find client/mobile/ios/build -maxdepth 4 -print | sort
+            find mobile/ios/build -maxdepth 4 -print | sort
             exit 1
           fi
           rm -rf Payload/NS-mobile.app
