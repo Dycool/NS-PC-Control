@@ -653,6 +653,13 @@ class MainActivity : AppCompatActivity() {
         fun onHubRefresh() { runOnUiThread { scanPhysicalControllers(); updateHubStatusOnPage() } }
 
         @JavascriptInterface
+        fun setMotionRemap(axis0: Int, sign0: Int, axis1: Int, sign1: Int, axis2: Int, sign2: Int) {
+            NativeProtocol.nativeSetMotionRemap(0, axis0, sign0)
+            NativeProtocol.nativeSetMotionRemap(1, axis1, sign1)
+            NativeProtocol.nativeSetMotionRemap(2, axis2, sign2)
+        }
+
+        @JavascriptInterface
         fun onOpenTouch() { runOnUiThread { navTo(Page.TOUCH_CONTROLS) } }
 
         @JavascriptInterface

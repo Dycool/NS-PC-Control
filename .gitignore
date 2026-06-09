@@ -20,3 +20,6 @@ mobile/android/local.properties
 # iOS (xcodegen generates .xcodeproj)
 mobile/ios/*.xcodeproj
 mobile/ios/build/
+
+# macOS
+.DS_Store

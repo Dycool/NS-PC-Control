@@ -33,5 +33,6 @@ object NativeProtocol {
         accelX: Float, accelY: Float, accelZ: Float,
         gyroX: Float, gyroY: Float, gyroZ: Float
     ): ByteArray
+    external fun nativeSetMotionRemap(outputAxis: Int, inputAxis: Int, sign: Int)
     external fun nativeExtractPadHid(frame: ByteArray): ByteArray?
 }

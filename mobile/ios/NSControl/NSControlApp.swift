@@ -238,6 +238,13 @@ struct WebViewContainer: UIViewRepresentable {
             case "openEditor":
                 BridgeManager.shared.disconnect()
                 DispatchQueue.main.async { self.parent.page = .editor }
+            case "setMotionRemap":
+                guard let remap = dict["remap"] as? [[String: Any]] else { break }
+                for (i, entry) in remap.enumerated() where i < 3 {
+                    guard let axis = entry["axis"] as? Int,
+                          let sign = entry["sign"] as? Int else { continue }
+                    ns_set_motion_remap(Int32(i), Int32(axis), Int32(sign))
+                }
             default:
                 break
             }

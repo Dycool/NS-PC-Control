@@ -154,6 +154,12 @@ Java_com_nscontrol_NativeProtocol_nativeMotionFromAndroid(JNIEnv* env, jclass cl
     return jni_new_byte_array(env, NS_PROTOCOL_MOTION_SIZE, motion);
 }
 
+void JNICALL
+Java_com_nscontrol_NativeProtocol_nativeSetMotionRemap(JNIEnv* env, jclass clazz,
+                                                       jint outputAxis, jint inputAxis, jint sign) {
+    ns_set_motion_remap((int)outputAxis, (int)inputAxis, (int)sign);
+}
+
 jbyteArray JNICALL
 Java_com_nscontrol_NativeProtocol_nativeExtractPadHid(JNIEnv* env, jclass clazz,
                                                       jbyteArray frame) {
