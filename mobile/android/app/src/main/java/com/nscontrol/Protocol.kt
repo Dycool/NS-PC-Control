@@ -17,7 +17,9 @@ object Protocol {
     private const val VERSION = 6
 
     const val RUMBLE_PACKET_SIZE = 8
+    const val PRECISION_RUMBLE_PACKET_SIZE = 20
     const val RUMBLE_MAGIC = 0x4E535652 // 'NSVR'
+    const val PRECISION_RUMBLE_MAGIC = 0x4E535648 // 'NSVH'
 
     const val FLAG_RESET = 0x01
     const val FLAG_DISCONNECT = 0x08

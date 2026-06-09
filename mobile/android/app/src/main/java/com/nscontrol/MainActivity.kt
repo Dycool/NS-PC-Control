@@ -8,6 +8,7 @@ import android.hardware.SensorManager
 import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Bundle
+import android.os.CombinedVibration
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -274,18 +275,25 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onMessage(w: WebSocket, bytes: ByteString) {
-                    // Server -> mobile rumble is the classic 8-byte ns::RumblePacket:
+                    // Server -> mobile rumble normally uses classic 8-byte ns::RumblePacket:
                     // magic 'NSVR', subpad, low_freq, high_freq, duration_10ms.
-                    // Do not wait for/use PrecisionRumblePacket here; the current ns-client
-                    // path consumes classic NSVR packets too, and the server sends classic rumble.
-                    if (bytes.size != Protocol.RUMBLE_PACKET_SIZE) return
+                    // Keep a tiny NSVH fallback too, because older backend/client builds may
+                    // still send PrecisionRumblePacket; its low/high/duration bytes are the same.
+                    val size = bytes.size
+                    if (size != Protocol.RUMBLE_PACKET_SIZE && size != Protocol.PRECISION_RUMBLE_PACKET_SIZE) {
+                        Log.d(TAG, "ignored ws binary size=$size")
+                        return
+                    }
                     val magic = readU32LE(bytes, 0)
-                    if (magic != Protocol.RUMBLE_MAGIC) return
+                    if (magic != Protocol.RUMBLE_MAGIC && magic != Protocol.PRECISION_RUMBLE_MAGIC) {
+                        Log.d(TAG, "ignored ws binary magic=0x${magic.toString(16)} size=$size")
+                        return
+                    }
                     val subpad = bytes[4].toInt() and 0xFF
                     val low = bytes[5].toInt() and 0xFF
                     val high = bytes[6].toInt() and 0xFF
                     val duration10Ms = bytes[7].toInt() and 0xFF
-                    Log.d(TAG, "rumble packet subpad=$subpad low=$low high=$high duration10ms=$duration10Ms")
+                    Log.d(TAG, "rumble packet ${if (magic == Protocol.RUMBLE_MAGIC) "NSVR" else "NSVH"} subpad=$subpad low=$low high=$high duration10ms=$duration10Ms")
                     // OkHttp already calls this on a background thread. Keep rumble/haptics
                     // off the UI thread; only the View haptic fallback hops to UI if needed.
                     routeRumble(subpad, low, high, duration10Ms)
@@ -555,16 +563,30 @@ class MainActivity : AppCompatActivity() {
             rumbleUntilMs = now + durationMs
             rumbleLastSetMs = now
 
-            val didVibrate = if (v != null && v.hasVibrator()) {
-                if (Build.VERSION.SDK_INT >= 26) {
-                    val amp = if (v.hasAmplitudeControl()) strength.coerceAtLeast(80) else VibrationEffect.DEFAULT_AMPLITUDE
-                    v.vibrate(VibrationEffect.createOneShot(durationMs, amp))
-                } else {
-                    @Suppress("DEPRECATION")
-                    v.vibrate(durationMs)
+            var didVibrate = false
+            if (Build.VERSION.SDK_INT >= 31) {
+                try {
+                    val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                    val amp = strength.coerceAtLeast(96)
+                    val effect = VibrationEffect.createWaveform(longArrayOf(0L, durationMs), intArrayOf(0, amp), -1)
+                    vm.vibrate(CombinedVibration.createParallel(effect))
+                    didVibrate = true
+                } catch (t: Throwable) {
+                    Log.d(TAG, "VibratorManager rumble failed, falling back", t)
                 }
-                true
-            } else false
+            }
+            if (!didVibrate) {
+                didVibrate = if (v != null && v.hasVibrator()) {
+                    if (Build.VERSION.SDK_INT >= 26) {
+                        val amp = if (v.hasAmplitudeControl()) strength.coerceAtLeast(96) else VibrationEffect.DEFAULT_AMPLITUDE
+                        v.vibrate(VibrationEffect.createWaveform(longArrayOf(0L, durationMs), intArrayOf(0, amp), -1))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        v.vibrate(durationMs)
+                    }
+                    true
+                } else false
+            }
             // Some devices expose weak/disabled vibrator access to WebView apps.
             // Only use View haptic as a real fallback; firing both can feel like
             // a double-click and can add jitter on some Android builds.
@@ -606,33 +628,47 @@ class MainActivity : AppCompatActivity() {
                 if (currentPage == Page.MAIN_MENU) {
                     v.evaluateJavascript("""
                         (function(){
-                          var connect = document.getElementById('btnConnect');
-                          if (connect) connect.style.display = 'none';
                           var kb = document.getElementById('kbModeContainer');
                           if (kb) kb.style.display = 'none';
                           var bindings = document.getElementById('btnBindings');
                           if (bindings) bindings.style.display = 'none';
                           var macros = document.getElementById('btnMacros');
                           if (macros) macros.style.display = 'none';
+                          var oldHub = document.getElementById('btnHubStart');
+                          if (oldHub) oldHub.remove();
+                          var oldStop = document.getElementById('btnHubStop');
+                          if (oldStop) oldStop.remove();
+                          var oldRefresh = document.getElementById('btnHubRefresh');
+                          if (oldRefresh) oldRefresh.remove();
+                          var connect = document.getElementById('btnConnect');
+                          if (connect) {
+                            connect.style.display = 'inline-block';
+                            connect.textContent = 'Connect';
+                            connect.onclick = function(ev){
+                              if (ev) ev.preventDefault();
+                              if (window.NSBridge && NSBridge.onHubStart) NSBridge.onHubStart();
+                              return false;
+                            };
+                          }
                           var touch = document.getElementById('btnTouchControls');
-                          if (touch) touch.style.display = 'inline-block';
+                          if (touch) {
+                            touch.style.display = 'inline-block';
+                            touch.onclick = function(ev){
+                              if (ev) ev.preventDefault();
+                              if (window.NSBridge && NSBridge.onOpenTouch) NSBridge.onOpenTouch();
+                              else window.location.href='mobile.html';
+                              return false;
+                            };
+                          }
                           var editor = document.getElementById('btnEditor');
-                          if (editor) editor.style.display = 'inline-block';
-                          var group = document.querySelector('.btn-group');
-                          if (group && !document.getElementById('btnHubStart')) {
-                            var start = document.createElement('button');
-                            start.id = 'btnHubStart'; start.textContent = 'Controller Hub';
-                            start.style.cssText = 'background:#e8f5e9;border-color:#a5d6a7;';
-                            start.onclick = function(){ if (window.NSBridge && NSBridge.onHubStart) NSBridge.onHubStart(); };
-                            var stop = document.createElement('button');
-                            stop.id = 'btnHubStop'; stop.textContent = 'Stop Hub';
-                            stop.onclick = function(){ if (window.NSBridge && NSBridge.onHubStop) NSBridge.onHubStop(); };
-                            var refresh = document.createElement('button');
-                            refresh.id = 'btnHubRefresh'; refresh.textContent = 'Refresh Pads';
-                            refresh.onclick = function(){ if (window.NSBridge && NSBridge.onHubRefresh) NSBridge.onHubRefresh(); };
-                            group.insertBefore(start, group.firstChild);
-                            group.insertBefore(stop, start.nextSibling);
-                            group.insertBefore(refresh, stop.nextSibling);
+                          if (editor) {
+                            editor.style.display = 'inline-block';
+                            editor.onclick = function(ev){
+                              if (ev) ev.preventDefault();
+                              if (window.NSBridge && NSBridge.onOpenEditor) NSBridge.onOpenEditor();
+                              else window.location.href='editor.html';
+                              return false;
+                            };
                           }
                           if (window.NSBridge && NSBridge.onHubRefresh) NSBridge.onHubRefresh();
                         })();
@@ -708,13 +744,19 @@ class MainActivity : AppCompatActivity() {
         fun onClose() { runOnUiThread { deactivateControlClient() } }
 
         @JavascriptInterface
-        fun onHubStart() { runOnUiThread { activateControllerHub() } }
+        fun onHubStart() { runOnUiThread { toggleControllerHub() } }
 
         @JavascriptInterface
         fun onHubStop() { runOnUiThread { deactivateControlClient(); updateHubStatusOnPage("Hub stopped") } }
 
         @JavascriptInterface
         fun onHubRefresh() { runOnUiThread { scanPhysicalControllers(); updateHubStatusOnPage() } }
+
+        @JavascriptInterface
+        fun onOpenTouch() { runOnUiThread { navTo(Page.TOUCH_CONTROLS) } }
+
+        @JavascriptInterface
+        fun onOpenEditor() { runOnUiThread { navTo(Page.EDITOR) } }
 
         @JavascriptInterface
         fun onBack() { runOnUiThread { goBack() } }
@@ -733,6 +775,15 @@ class MainActivity : AppCompatActivity() {
             buttons = buttons and Protocol.BTN_LSTICK.inv() and Protocol.BTN_RSTICK.inv() and Protocol.BTN_CAPTURE.inv()
         }
         return buttons
+    }
+
+    private fun toggleControllerHub() {
+        if (controlClientActive && activeClientMode == ClientMode.HUB) {
+            deactivateControlClient()
+            updateHubStatusOnPage("Hub stopped")
+        } else {
+            activateControllerHub()
+        }
     }
 
     private fun activateControllerHub() {
@@ -812,10 +863,23 @@ class MainActivity : AppCompatActivity() {
         return ((v + 1.0f) * 127.5f).roundToInt().coerceIn(0, 255)
     }
 
+    private fun motionRange(device: InputDevice?, source: Int, axis: Int): InputDevice.MotionRange? =
+        device?.getMotionRange(axis, source) ?: device?.getMotionRange(axis)
+
+    private fun axisPresent(device: InputDevice?, source: Int, axis: Int): Boolean =
+        motionRange(device, source, axis) != null
+
     private fun centeredAxis(event: MotionEvent, device: InputDevice?, axis: Int): Float {
         val value = event.getAxisValue(axis)
-        val flat = device?.getMotionRange(axis, event.source)?.flat ?: 0.05f
+        val flat = motionRange(device, event.source, axis)?.flat ?: 0.05f
         return if (abs(value) <= flat) 0.0f else value.coerceIn(-1.0f, 1.0f)
+    }
+
+    private fun centeredAxisAny(event: MotionEvent, device: InputDevice?, vararg axes: Int): Float {
+        for (axis in axes) {
+            if (axisPresent(device, event.source, axis)) return centeredAxis(event, device, axis)
+        }
+        return 0.0f
     }
 
     private fun buttonBitForKeyCode(code: Int): Int = when (code) {
@@ -866,32 +930,52 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (handleControllerMotion(event)) return true
+        return super.dispatchGenericMotionEvent(event)
+    }
+
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (activeClientMode == ClientMode.HUB && controlClientActive &&
-            (event.source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK &&
-            event.action == MotionEvent.ACTION_MOVE) {
-            synchronized(physicalLock) {
-                val slot = slotForDeviceIdLocked(event.deviceId)
-                if (slot >= 0) {
-                    val device = event.device
-                    val pad = physicalPads[slot]
-                    pad.lx = axisToByte(centeredAxis(event, device, MotionEvent.AXIS_X))
-                    pad.ly = axisToByte(centeredAxis(event, device, MotionEvent.AXIS_Y))
-                    pad.rx = axisToByte(centeredAxis(event, device, MotionEvent.AXIS_Z))
-                    pad.ry = axisToByte(centeredAxis(event, device, MotionEvent.AXIS_RZ))
-                    val l2 = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE))
-                    val r2 = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS))
-                    if (l2 > 0.5f) pad.buttons = pad.buttons or Protocol.BTN_ZL else pad.buttons = pad.buttons and Protocol.BTN_ZL.inv()
-                    if (r2 > 0.5f) pad.buttons = pad.buttons or Protocol.BTN_ZR else pad.buttons = pad.buttons and Protocol.BTN_ZR.inv()
-                    val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-                    val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
-                    pad.dpadLeft = hx < -0.5f; pad.dpadRight = hx > 0.5f
-                    pad.dpadUp = hy < -0.5f; pad.dpadDown = hy > 0.5f
-                    return true
-                }
-            }
-        }
+        if (handleControllerMotion(event)) return true
         return super.onGenericMotionEvent(event)
+    }
+
+    private fun handleControllerMotion(event: MotionEvent): Boolean {
+        if (activeClientMode != ClientMode.HUB || !controlClientActive || event.action != MotionEvent.ACTION_MOVE) return false
+        val isJoy = (event.source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+        val isGamepad = (event.source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+        if (!isJoy && !isGamepad) return false
+
+        synchronized(physicalLock) {
+            val slot = slotForDeviceIdLocked(event.deviceId)
+            if (slot < 0) return false
+            val device = event.device
+            val pad = physicalPads[slot]
+
+            // Android controller axis layouts vary a lot. Switch Pro over BT often
+            // exposes the right stick as RX/RY, while Xbox-style mappings often use Z/RZ.
+            pad.lx = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_X))
+            pad.ly = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_Y))
+            pad.rx = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_Z, MotionEvent.AXIS_RX))
+            pad.ry = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_RZ, MotionEvent.AXIS_RY))
+
+            val l2 = maxOf(
+                centeredAxisAny(event, device, MotionEvent.AXIS_LTRIGGER),
+                centeredAxisAny(event, device, MotionEvent.AXIS_BRAKE)
+            )
+            val r2 = maxOf(
+                centeredAxisAny(event, device, MotionEvent.AXIS_RTRIGGER),
+                centeredAxisAny(event, device, MotionEvent.AXIS_GAS)
+            )
+            if (l2 > 0.5f) pad.buttons = pad.buttons or Protocol.BTN_ZL else pad.buttons = pad.buttons and Protocol.BTN_ZL.inv()
+            if (r2 > 0.5f) pad.buttons = pad.buttons or Protocol.BTN_ZR else pad.buttons = pad.buttons and Protocol.BTN_ZR.inv()
+
+            val hx = centeredAxisAny(event, device, MotionEvent.AXIS_HAT_X)
+            val hy = centeredAxisAny(event, device, MotionEvent.AXIS_HAT_Y)
+            pad.dpadLeft = hx < -0.5f; pad.dpadRight = hx > 0.5f
+            pad.dpadUp = hy < -0.5f; pad.dpadDown = hy > 0.5f
+            return true
+        }
     }
 
     private fun deviceHasVibrator(device: InputDevice): Boolean = try {
@@ -1056,9 +1140,11 @@ class MainActivity : AppCompatActivity() {
             ClientMode.NONE -> "Ready"
         }
         fun jsEscape(v: String): String = v.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
+        val connectButtonText = if (activeClientMode == ClientMode.HUB && controlClientActive) "Disconnect" else "Connect"
         val js = buildString {
             append("(function(){")
             append("var s=document.getElementById('statusText'); if(s)s.textContent='").append(jsEscape(status)).append("';")
+            append("var b=document.getElementById('btnConnect'); if(b)b.textContent='").append(jsEscape(connectButtonText)).append("';")
             for (i in 0 until Protocol.PAD_COUNT) {
                 append("var p=document.getElementById('p").append(i + 1).append("Text'); if(p)p.textContent='").append(jsEscape(lines[i])).append("';")
             }

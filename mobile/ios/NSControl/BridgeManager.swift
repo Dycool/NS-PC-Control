@@ -2,6 +2,7 @@ import Foundation
 import CoreMotion
 import UIKit
 import GameController
+import CoreHaptics
 
 private let kSinglePad: UInt8 = UInt8(NS_FLAG_SINGLE_PAD)
 private let kFrameSize = Int(NS_PROTOCOL_WEB_FRAME_SIZE)
@@ -61,6 +62,15 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     private var lastPhoneHapticAt: TimeInterval = 0
     private var controllerMotionSamples: [[Data]] = Array(repeating: [], count: Int(NS_PROTOCOL_PAD_COUNT))
 
+    private struct ControllerRumbleState {
+        var low: UInt8 = 0
+        var high: UInt8 = 0
+        var until: TimeInterval = 0
+        var lastSet: TimeInterval = 0
+    }
+    private var controllerRumbleStates = Array(repeating: ControllerRumbleState(), count: Int(NS_PROTOCOL_PAD_COUNT))
+    private var controllerHapticEngines: [ObjectIdentifier: CHHapticEngine] = [:]
+
     private func nextSeq() -> UInt32 {
         seqLock.lock()
         defer { seqLock.unlock() }
@@ -74,6 +84,10 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     }
 
     // MARK: - Connection
+
+    func isRunning(mode: BridgeClientMode) -> Bool {
+        return connected && currentMode == mode && ws != nil
+    }
 
     func connect(host: String, port: UInt16 = 8080, mode: BridgeClientMode = .touchControls) {
         guard let url = normalizeWebSocketURL(host, defaultPort: port) else {
@@ -379,11 +393,27 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
 
     private func startControllerHub() {
         controllerMotionSamples = Array(repeating: [], count: Int(NS_PROTOCOL_PAD_COUNT))
-        GCController.startWirelessControllerDiscovery(completionHandler: nil)
+        controllerRumbleStates = Array(repeating: ControllerRumbleState(), count: Int(NS_PROTOCOL_PAD_COUNT))
+        controllerHapticEngines.removeAll()
+        for c in GCController.controllers() {
+            if let motion = c.motion, motion.sensorsRequireManualActivation {
+                motion.sensorsActive = true
+            }
+        }
+        GCController.startWirelessControllerDiscovery { 
+            for c in GCController.controllers() {
+                if let motion = c.motion, motion.sensorsRequireManualActivation {
+                    motion.sensorsActive = true
+                }
+            }
+        }
     }
 
     private func stopControllerHub() {
         GCController.stopWirelessControllerDiscovery()
+        for engine in controllerHapticEngines.values { engine.stop(completionHandler: nil) }
+        controllerHapticEngines.removeAll()
+        controllerRumbleStates = Array(repeating: ControllerRumbleState(), count: Int(NS_PROTOCOL_PAD_COUNT))
         controllerMotionSamples = Array(repeating: [], count: Int(NS_PROTOCOL_PAD_COUNT))
     }
 
@@ -398,6 +428,9 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
 
         let controllers = Array(GCController.controllers().prefix(Int(NS_PROTOCOL_PAD_COUNT)))
         for (slot, controller) in controllers.enumerated() {
+            if let motion = controller.motion, motion.sensorsRequireManualActivation {
+                motion.sensorsActive = true
+            }
             var pad = padForController(controller, slot: slot)
             frame.withUnsafeMutableBytes { frameRaw in
                 pad.withUnsafeBytes { padRaw in
@@ -472,9 +505,54 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     }
 
     private func controllerRumble(slot: Int, low: UInt8, high: UInt8, duration10Ms: UInt8) {
-        // iOS exposes controller haptics through CoreHaptics engines per controller.
-        // Keep this no-crash for now; touch haptics are handled by phoneHapticRumble.
-        guard currentMode == .controllerHub, slot >= 0 else { return }
+        guard currentMode == .controllerHub, slot >= 0, slot < Int(NS_PROTOCOL_PAD_COUNT) else { return }
+        let neutral = (low == 0 && high == 0) || duration10Ms == 0
+        let now = Date().timeIntervalSinceReferenceDate
+        let duration = neutral ? 0.0 : max(0.25, Double(max(1, Int(duration10Ms))) * 0.010)
+        if !neutral {
+            var st = controllerRumbleStates[slot]
+            if st.low == low && st.high == high && now - st.lastSet < 0.10 {
+                st.until = now + duration
+                controllerRumbleStates[slot] = st
+                return
+            }
+            st.low = low; st.high = high; st.until = now + duration; st.lastSet = now
+            controllerRumbleStates[slot] = st
+        } else {
+            controllerRumbleStates[slot] = ControllerRumbleState()
+        }
         DispatchQueue.main.async { self.onRumble?(slot, low, high) }
+
+        guard !neutral, #available(iOS 14.0, *) else { return }
+        let controllers = Array(GCController.controllers().prefix(Int(NS_PROTOCOL_PAD_COUNT)))
+        guard slot < controllers.count else { return }
+        let controller = controllers[slot]
+        guard let haptics = controller.haptics else { return }
+        let key = ObjectIdentifier(controller)
+        let engine: CHHapticEngine
+        if let cached = controllerHapticEngines[key] {
+            engine = cached
+        } else if let created = haptics.createEngine(withLocality: .handles) {
+            engine = created
+            engine.playsHapticsOnly = true
+            controllerHapticEngines[key] = created
+        } else {
+            return
+        }
+        do {
+            try engine.start()
+            let strength = Float(max(low, high)) / 255.0
+            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: max(0.25, min(1.0, strength)))
+            let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.45)
+            let event = CHHapticEvent(eventType: .hapticContinuous,
+                                      parameters: [intensity, sharpness],
+                                      relativeTime: 0,
+                                      duration: duration)
+            let pattern = try CHHapticPattern(events: [event], parameters: [])
+            let player = try engine.makePlayer(with: pattern)
+            try player.start(atTime: 0)
+        } catch {
+            // Some controllers/OS versions expose input but refuse haptic engines.
+        }
     }
 }
