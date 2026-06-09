@@ -94,7 +94,7 @@ class MainActivity : AppCompatActivity() {
         connected = true
         currentPage = Page.MAIN_MENU
         pageStack.clear()
-        loadUrl("http://$host:8080/")
+        loadUrl(pageUrl(Page.MAIN_MENU))
         statusText.text = "Loaded"
     }
 
@@ -271,7 +271,8 @@ class MainActivity : AppCompatActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            allowFileAccess = false
+            allowFileAccess = true
+            allowContentAccess = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = "$baseUserAgent NS-mobile/1.0"
         }
@@ -280,36 +281,16 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(v: WebView, req: WebResourceRequest): Boolean {
                 val url = req.url.toString()
                 return when {
-                    url.endsWith("/mobile") -> { navTo(Page.TOUCH_CONTROLS, url); true }
-                    url.endsWith("/editor") -> { navTo(Page.EDITOR, url); true }
+                    url.endsWith("/mobile") || url.endsWith("/mobile.html") -> {
+                        navTo(Page.TOUCH_CONTROLS)
+                        true
+                    }
+                    url.endsWith("/editor") || url.endsWith("/editor.html") -> {
+                        navTo(Page.EDITOR)
+                        true
+                    }
                     else -> false
                 }
-            }
-
-            // Inject bridge JS by intercepting the HTML and prepending the script
-            override fun shouldInterceptRequest(
-                v: WebView, req: WebResourceRequest
-            ): WebResourceResponse? {
-                val url = req.url.toString()
-                if (!req.isForMainFrame || !url.startsWith("http://$host:8080")) return null
-                return try {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-                    val ctype = conn.contentType ?: "text/html"
-                    val data = conn.inputStream.readBytes()
-                    val body = String(data)
-                    // Only inject into HTML responses that have </head>
-                    val headIdx = body.indexOf("</head>")
-                    if (headIdx < 0) {
-                        WebResourceResponse(ctype, "UTF-8", ByteArrayInputStream(data))
-                    } else {
-                        val injected = StringBuilder(body)
-                        injected.insert(headIdx, BRIDGE_SCRIPT)
-                        WebResourceResponse(ctype, "UTF-8",
-                            ByteArrayInputStream(injected.toString().toByteArray()))
-                    }
-                } catch (_: Exception) { null }
             }
 
             override fun onPageFinished(v: WebView, url: String) {
@@ -324,25 +305,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadUrl(url: String) { webView.loadUrl(url) }
 
-    private fun navTo(page: Page, url: String) {
-        pageStack.add(currentPage)
-        enterPage(page, url)
+    private fun pageUrl(page: Page): String = when (page) {
+        Page.MAIN_MENU -> "file:///android_asset/ns_mobile/index.html"
+        Page.TOUCH_CONTROLS -> "file:///android_asset/ns_mobile/mobile.html"
+        Page.EDITOR -> "file:///android_asset/ns_mobile/editor.html"
     }
 
-    private fun enterPage(page: Page, url: String) {
+    private fun navTo(page: Page) {
+        pageStack.add(currentPage)
+        enterPage(page)
+    }
+
+    private fun enterPage(page: Page) {
         currentPage = page
         if (page == Page.TOUCH_CONTROLS) activateControlClient() else deactivateControlClient()
-        loadUrl(url)
+        loadUrl(pageUrl(page))
     }
 
     private fun goBack() {
         if (pageStack.isNotEmpty()) {
             val previous = pageStack.removeLast()
-            enterPage(previous, when (previous) {
-                Page.MAIN_MENU -> "http://$host:8080/"
-                Page.TOUCH_CONTROLS -> "http://$host:8080/mobile"
-                Page.EDITOR -> "http://$host:8080/editor"
-            })
+            enterPage(previous)
         }
     }
 

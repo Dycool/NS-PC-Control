@@ -105,20 +105,26 @@ struct WebViewContainer: UIViewRepresentable {
     }
 
     func updateUIView(_ wv: WKWebView, context: Context) {
-        let target: String = {
-            switch page {
-            case .mainMenu:      return "http://\(host):8080/"
-            case .touchControls: return "http://\(host):8080/mobile"
-            case .editor:        return "http://\(host):8080/editor"
-            }
-        }()
+        guard let target = Self.localURL(for: page) else { return }
+
         if page == .touchControls {
             BridgeManager.shared.connect(host: host)
         } else {
             BridgeManager.shared.disconnect()
         }
-        guard wv.url?.absoluteString != target else { return }
-        wv.load(URLRequest(url: URL(string: target)!))
+
+        guard wv.url != target else { return }
+        wv.loadFileURL(target, allowingReadAccessTo: target.deletingLastPathComponent())
+    }
+
+    private static func localURL(for page: ContentView.Page) -> URL? {
+        let name: String
+        switch page {
+        case .mainMenu:      name = "index"
+        case .touchControls: name = "mobile"
+        case .editor:        name = "editor"
+        }
+        return Bundle.main.url(forResource: name, withExtension: "html", subdirectory: "WebApp")
     }
 
     static let bridgeJS = """
@@ -186,11 +192,12 @@ struct WebViewContainer: UIViewRepresentable {
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void)
         {
             if let url = nav.request.url, nav.targetFrame?.isMainFrame == true {
-                if url.path == "/mobile" {
+                let last = url.lastPathComponent.lowercased()
+                if url.path == "/mobile" || last == "mobile.html" {
                     DispatchQueue.main.async { self.parent.page = .touchControls }
                     decisionHandler(.cancel); return
                 }
-                if url.path == "/editor" {
+                if url.path == "/editor" || last == "editor.html" {
                     BridgeManager.shared.disconnect()
                     DispatchQueue.main.async { self.parent.page = .editor }
                     decisionHandler(.cancel); return

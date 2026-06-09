@@ -16,7 +16,12 @@ targets:
     type: application
     platform: iOS
     sources:
-      - NSControl
+      - path: NSControl
+        excludes:
+          - WebApp/**
+      - path: NSControl/WebApp
+        type: folder
+        buildPhase: resources
       - ../shared/ns_protocol.c
       - ../shared/ns_protocol.h
     settings:
