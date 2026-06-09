@@ -6,6 +6,7 @@ private let kSinglePad: UInt8 = UInt8(NS_FLAG_SINGLE_PAD)
 private let kFrameSize = Int(NS_PROTOCOL_WEB_FRAME_SIZE)
 private let kPadSize = Int(NS_PROTOCOL_EXT_PAD_SIZE)
 private let kMotionSize = Int(NS_PROTOCOL_MOTION_SIZE)
+private let kMotionSampleCount = Int(NS_PROTOCOL_MOTION_SAMPLE_COUNT)
 
 enum BridgeClientMode {
     case touchControls
@@ -53,7 +54,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
 
     private let motionManager = CMMotionManager()
     private let phoneMotionLock = NSLock()
-    private var nativePhoneMotionBytes: Data? = nil
+    private var nativePhoneMotionSamples: [Data] = []
     private var lastPhoneHapticAt: TimeInterval = 0
 
     private func nextSeq() -> UInt32 {
@@ -245,19 +246,26 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         return pad
     }
 
-    private func mergeMotionBytes(_ motion: Data, into pad: inout Data) {
+    private func mergeMotionSamples(_ samples: [Data], into pad: inout Data) {
+        guard samples.count >= kMotionSampleCount else { return }
         pad.withUnsafeMutableBytes { padRaw in
-            motion.withUnsafeBytes { motionRaw in
-                guard let padBase = padRaw.bindMemory(to: UInt8.self).baseAddress,
-                      let motionBase = motionRaw.bindMemory(to: UInt8.self).baseAddress else { return }
-                ns_pad_set_motion(padBase, motionBase)
+            samples[0].withUnsafeBytes { m0 in
+                samples[1].withUnsafeBytes { m1 in
+                    samples[2].withUnsafeBytes { m2 in
+                        guard let padBase = padRaw.bindMemory(to: UInt8.self).baseAddress,
+                              let b0 = m0.bindMemory(to: UInt8.self).baseAddress,
+                              let b1 = m1.bindMemory(to: UInt8.self).baseAddress,
+                              let b2 = m2.bindMemory(to: UInt8.self).baseAddress else { return }
+                        ns_pad_set_motion_samples(padBase, b0, b1, b2)
+                    }
+                }
             }
         }
     }
 
     private func mergePhoneMotion(into pad: inout Data) {
-        if let motionBytes = latestNativePhoneMotionBytes() {
-            mergeMotionBytes(motionBytes, into: &pad)
+        if let samples = latestNativePhoneMotionSamples() {
+            mergeMotionSamples(samples, into: &pad)
         }
     }
 
@@ -280,7 +288,10 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
                                      Float(motion.rotationRate.z))
             }
             self.phoneMotionLock.lock()
-            self.nativePhoneMotionBytes = bytes
+            self.nativePhoneMotionSamples.append(bytes)
+            if self.nativePhoneMotionSamples.count > kMotionSampleCount {
+                self.nativePhoneMotionSamples.removeFirst(self.nativePhoneMotionSamples.count - kMotionSampleCount)
+            }
             self.phoneMotionLock.unlock()
         }
     }
@@ -288,13 +299,13 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     private func stopNativePhoneMotion() {
         if motionManager.isDeviceMotionActive { motionManager.stopDeviceMotionUpdates() }
         phoneMotionLock.lock()
-        nativePhoneMotionBytes = nil
+        nativePhoneMotionSamples.removeAll()
         phoneMotionLock.unlock()
     }
 
-    private func latestNativePhoneMotionBytes() -> Data? {
+    private func latestNativePhoneMotionSamples() -> [Data]? {
         phoneMotionLock.lock()
-        let out = nativePhoneMotionBytes
+        let out = nativePhoneMotionSamples.count >= kMotionSampleCount ? nativePhoneMotionSamples : nil
         phoneMotionLock.unlock()
         return out
     }

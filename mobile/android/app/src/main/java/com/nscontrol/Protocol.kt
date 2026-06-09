@@ -3,14 +3,18 @@ package com.nscontrol
 import kotlin.math.roundToInt
 
 object Protocol {
-    const val FRAME_SIZE = 116
+    // WebSocket/mobile protocol v6 matches ns::ExtendedMultiReport3:
+    // 20-byte frame header + 4 pads * 48 bytes. Each pad carries HID + 3 real
+    // MotionReport samples (oldest -> newest). This avoids backend-faked IMU samples.
+    const val FRAME_SIZE = 212
     const val HID_SIZE = 8
-    const val MOTION_SIZE = 16
-    const val EXT_PAD_SIZE = 24
+    const val MOTION_SAMPLE_SIZE = 12
+    const val MOTION_SAMPLE_COUNT = 3
+    const val EXT_PAD_SIZE = 48
     const val PAD_COUNT = 4
 
     private const val MAGIC = 0x4E535743
-    private const val VERSION = 5
+    private const val VERSION = 6
 
     const val FLAG_RESET = 0x01
     const val FLAG_DISCONNECT = 0x02
@@ -46,7 +50,7 @@ object Protocol {
     const val STANDARD_GRAVITY: Float = 9.80665f
 
     fun neutralHid(): ByteArray = ByteArray(HID_SIZE).also { writeNeutralHid(it) }
-    fun neutralMotion(): ByteArray = ByteArray(MOTION_SIZE)
+    fun neutralMotion(): ByteArray = ByteArray(MOTION_SAMPLE_SIZE)
 
     fun controllerHid(
         buttons: Int,
@@ -89,14 +93,19 @@ object Protocol {
         ax: Short, ay: Short, az: Short,
         gx: Short, gy: Short, gz: Short,
         hasMotion: Boolean
-    ): ByteArray = ByteArray(MOTION_SIZE).also { out ->
+    ): ByteArray = if (!hasMotion) neutralMotion() else ByteArray(MOTION_SAMPLE_SIZE).also { out ->
         writeI16LE(out, 0, ax)
         writeI16LE(out, 2, ay)
         writeI16LE(out, 4, az)
         writeI16LE(out, 6, gx)
         writeI16LE(out, 8, gy)
         writeI16LE(out, 10, gz)
-        out[12] = if (hasMotion) 1 else 0
+    }
+
+    fun duplicateMotionSamples(sample: ByteArray): Array<ByteArray>? {
+        if (sample.size < MOTION_SAMPLE_SIZE) return null
+        val s = sample.copyOfRange(0, MOTION_SAMPLE_SIZE)
+        return arrayOf(s.copyOf(), s.copyOf(), s.copyOf())
     }
 
     fun buildFrame(
@@ -125,8 +134,18 @@ object Protocol {
     }
 
     fun setFrameMotion(frame: ByteArray, padIndex: Int, motion: ByteArray) {
-        if (frame.size < FRAME_SIZE || motion.size < MOTION_SIZE || padIndex !in 0 until PAD_COUNT) return
-        motion.copyInto(frame, 20 + padIndex * EXT_PAD_SIZE + HID_SIZE, 0, MOTION_SIZE)
+        duplicateMotionSamples(motion)?.let { setFrameMotionSamples(frame, padIndex, it) }
+    }
+
+    fun setFrameMotionSamples(frame: ByteArray, padIndex: Int, samples: Array<ByteArray>) {
+        if (frame.size < FRAME_SIZE || samples.size < MOTION_SAMPLE_COUNT || padIndex !in 0 until PAD_COUNT) return
+        val base = 20 + padIndex * EXT_PAD_SIZE + HID_SIZE
+        for (i in 0 until MOTION_SAMPLE_COUNT) {
+            val sample = samples[i]
+            if (sample.size < MOTION_SAMPLE_SIZE) return
+            sample.copyInto(frame, base + i * MOTION_SAMPLE_SIZE, 0, MOTION_SAMPLE_SIZE)
+        }
+        frame[20 + padIndex * EXT_PAD_SIZE + 44] = 1
     }
 
     fun extractPad0HidFromWebFrame(src: ByteArray): ByteArray? {
@@ -179,7 +198,7 @@ object Protocol {
     private fun clampMotionShort(v: Float): Short =
         v.roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
 
-    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
+    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 8) 0 else v
 
     private fun writeU16LE(out: ByteArray, off: Int, value: Int) {
         out[off] = (value and 0xFF).toByte()

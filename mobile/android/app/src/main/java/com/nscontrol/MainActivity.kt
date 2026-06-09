@@ -54,14 +54,19 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var sensorManager: SensorManager
     private var accelSensor: Sensor? = null
+    private var gravitySensor: Sensor? = null
     private var gyroSensor: Sensor? = null
     private var vibrator: Vibrator? = null
     @Volatile private var phoneSensorsActive = false
     private val phoneSensorLock = Any()
     private val latestPhoneAccel = FloatArray(3)
+    private val latestPhoneGravity = FloatArray(3)
     private val latestPhoneGyro = FloatArray(3)
     private var hasLatestPhoneAccel = false
+    private var hasLatestPhoneGravity = false
     private var hasLatestPhoneGyro = false
+    private val latestMotionSamples = Array(Protocol.MOTION_SAMPLE_COUNT) { ByteArray(Protocol.MOTION_SAMPLE_SIZE) }
+    private var latestMotionSampleCount = 0
 
     @Volatile private var touchHid: ByteArray? = null
     @Volatile private var touchFrame: ByteArray? = null
@@ -76,6 +81,10 @@ class MainActivity : AppCompatActivity() {
         override fun onSensorChanged(event: SensorEvent) {
             synchronized(phoneSensorLock) {
                 when (event.sensor.type) {
+                    Sensor.TYPE_GRAVITY -> {
+                        for (i in 0 until minOf(3, event.values.size)) latestPhoneGravity[i] = event.values[i]
+                        hasLatestPhoneGravity = true
+                    }
                     Sensor.TYPE_ACCELEROMETER -> {
                         for (i in 0 until minOf(3, event.values.size)) latestPhoneAccel[i] = event.values[i]
                         hasLatestPhoneAccel = true
@@ -83,6 +92,7 @@ class MainActivity : AppCompatActivity() {
                     Sensor.TYPE_GYROSCOPE -> {
                         for (i in 0 until minOf(3, event.values.size)) latestPhoneGyro[i] = event.values[i]
                         hasLatestPhoneGyro = true
+                        pushMotionSampleLocked()
                     }
                 }
             }
@@ -120,6 +130,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
         accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         gyroSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         vibrator = if (Build.VERSION.SDK_INT >= 31) {
@@ -167,10 +178,13 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onMessage(w: WebSocket, bytes: ByteString) {
                     if (bytes.size < 8) return
+                    val magic = readU32LE(bytes, 0)
+                    if (magic != 0x4E535652 && magic != 0x4E535648) return // NSVR / NSVH
                     val subpad = bytes[4].toInt() and 0xFF
                     val low = bytes[5].toInt() and 0xFF
                     val high = bytes[6].toInt() and 0xFF
-                    runOnUiThread { routeRumble(subpad, low, high) }
+                    val duration10Ms = bytes[7].toInt() and 0xFF
+                    runOnUiThread { routeRumble(subpad, low, high, duration10Ms) }
                 }
             })
             true
@@ -228,6 +242,13 @@ class MainActivity : AppCompatActivity() {
         return "$wsScheme://$safeHost$portText$path$query"
     }
 
+    private fun readU32LE(bytes: ByteString, off: Int): Int {
+        return (bytes[off].toInt() and 0xFF) or
+            ((bytes[off + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[off + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[off + 3].toInt() and 0xFF) shl 24)
+    }
+
     private fun startSending() {
         if (sending) return
         val token = senderToken.incrementAndGet()
@@ -278,36 +299,22 @@ class MainActivity : AppCompatActivity() {
                     Protocol.neutralHid()
                 }
                 Protocol.setFrameHid(frame, 0, hid)
-                phoneMotionBytes()?.let { Protocol.setFrameMotion(frame, 0, it) }
+                phoneMotionSamples()?.let { Protocol.setFrameMotionSamples(frame, 0, it) }
             }
 
             if (!socket.send(frame.toByteString())) throw IllegalStateException("WebSocket send queue rejected frame")
         }
     }
 
-    private fun phoneMotionBytes(): ByteArray? {
-        val accel = FloatArray(3)
-        val gyro = FloatArray(3)
-        val hasAccel: Boolean
-        val hasGyro: Boolean
-        synchronized(phoneSensorLock) {
-            hasAccel = hasLatestPhoneAccel
-            hasGyro = hasLatestPhoneGyro
-            if (!hasAccel && !hasGyro) return null
-            for (i in 0 until 3) {
-                accel[i] = latestPhoneAccel[i]
-                gyro[i] = latestPhoneGyro[i]
-            }
-        }
+    private fun pushMotionSampleLocked() {
+        if (!hasLatestPhoneGyro || (!hasLatestPhoneGravity && !hasLatestPhoneAccel)) return
 
-        // If only the gyroscope is ready, provide upright gravity so the backend still receives valid motion.
-        if (!hasAccel && hasGyro) accel[1] = Protocol.STANDARD_GRAVITY
-
+        val accel = if (hasLatestPhoneGravity) latestPhoneGravity else latestPhoneAccel
         val a = remapSensorForDisplay(accel)
-        val g = remapSensorForDisplay(gyro)
+        val g = remapSensorForDisplay(latestPhoneGyro)
         val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
         val gyroScale = 57.29577951308232f * 16.384f
-        return Protocol.motionFromValues(
+        val sample = Protocol.motionFromValues(
             clampMotionShort(-a[0] * accelScale),
             clampMotionShort(-a[2] * accelScale),
             clampMotionShort( a[1] * accelScale),
@@ -316,10 +323,22 @@ class MainActivity : AppCompatActivity() {
             gyroDeadzoneShort(clampMotionShort( g[1] * gyroScale)),
             hasMotion = true
         )
+
+        latestMotionSamples[0] = latestMotionSamples[1]
+        latestMotionSamples[1] = latestMotionSamples[2]
+        latestMotionSamples[2] = sample
+        if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) latestMotionSampleCount++
+    }
+
+    private fun phoneMotionSamples(): Array<ByteArray>? {
+        synchronized(phoneSensorLock) {
+            if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) return null
+            return Array(Protocol.MOTION_SAMPLE_COUNT) { i -> latestMotionSamples[i].copyOf() }
+        }
     }
 
     private fun clampMotionShort(v: Float): Short = v.roundToInt().coerceIn(-32768, 32767).toShort()
-    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
+    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 8) 0 else v
 
     private fun remapSensorForDisplay(v: FloatArray): FloatArray {
         val rotation = try {
@@ -340,12 +359,22 @@ class MainActivity : AppCompatActivity() {
         if (phoneSensorsActive) return
         synchronized(phoneSensorLock) {
             hasLatestPhoneAccel = false
+            hasLatestPhoneGravity = false
             hasLatestPhoneGyro = false
             latestPhoneAccel.fill(0.0f)
+            latestPhoneGravity.fill(0.0f)
             latestPhoneGyro.fill(0.0f)
+            latestMotionSampleCount = 0
+            for (i in 0 until Protocol.MOTION_SAMPLE_COUNT) latestMotionSamples[i].fill(0)
         }
         var opened = false
-        accelSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
+        val gravityOpened = gravitySensor?.let {
+            sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME)
+        } ?: false
+        opened = gravityOpened
+        if (!gravityOpened) {
+            accelSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
+        }
         gyroSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
         phoneSensorsActive = opened
     }
@@ -356,15 +385,19 @@ class MainActivity : AppCompatActivity() {
         phoneSensorsActive = false
         synchronized(phoneSensorLock) {
             hasLatestPhoneAccel = false
+            hasLatestPhoneGravity = false
             hasLatestPhoneGyro = false
+            latestMotionSampleCount = 0
         }
     }
 
-    private fun routeRumble(subpad: Int, low: Int, high: Int) {
-        if (touchClientActive() && subpad == 0) phoneRumble(low, high)
+    private fun routeRumble(subpad: Int, low: Int, high: Int, duration10Ms: Int) {
+        // Native mobile v1 owns only one logical pad. Accept any subpad here so
+        // a temporary server-side pad remap cannot make phone haptics disappear.
+        if (touchClientActive()) phoneRumble(low, high, duration10Ms)
     }
 
-    private fun phoneRumble(low: Int, high: Int) {
+    private fun phoneRumble(low: Int, high: Int, duration10Ms: Int = 0) {
         try {
             val v = vibrator ?: return
             if (low == 0 && high == 0) {
@@ -372,11 +405,13 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val strength = maxOf(low, high).coerceIn(0, 255)
+            val durationMs = maxOf(35L, (duration10Ms.coerceIn(1, 20) * 10L))
             if (Build.VERSION.SDK_INT >= 26) {
-                v.vibrate(VibrationEffect.createOneShot(45L, strength.coerceAtLeast(32)))
+                val amp = if (v.hasAmplitudeControl()) strength.coerceAtLeast(48) else VibrationEffect.DEFAULT_AMPLITUDE
+                v.vibrate(VibrationEffect.createOneShot(durationMs, amp))
             } else {
                 @Suppress("DEPRECATION")
-                v.vibrate(45L)
+                v.vibrate(durationMs)
             }
         } catch (_: Throwable) {}
     }
@@ -466,7 +501,7 @@ class MainActivity : AppCompatActivity() {
                 if (now - lastBridgeFrameParseMs < 8L) return
                 lastBridgeFrameParseMs = now
                 val arr = JSONArray(json)
-                if (arr.length() < Protocol.FRAME_SIZE) return
+                if (arr.length() < 20 + Protocol.HID_SIZE) return
                 val frame = ByteArray(arr.length()) { i -> arr.getInt(i).toByte() }
                 touchFrame = frame
                 touchHid = Protocol.extractPad0HidFromWebFrame(frame)

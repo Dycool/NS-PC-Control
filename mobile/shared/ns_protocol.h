@@ -10,6 +10,7 @@ extern "C" {
 enum {
     NS_PROTO_MAGIC = 0x4E535743u,
     NS_WEB_PROTO_VERSION = 5,
+    NS_WEB_PROTO_VERSION_3 = 6,
 
     NS_FLAG_RESET = 0x01,
     NS_FLAG_DISCONNECT = 0x02,
@@ -18,9 +19,10 @@ enum {
     NS_EXT_PAD_PRESENT = 0x01,
 
     NS_PROTOCOL_HID_SIZE = 8,
-    NS_PROTOCOL_MOTION_SIZE = 16,
-    NS_PROTOCOL_EXT_PAD_SIZE = 24,
-    NS_PROTOCOL_WEB_FRAME_SIZE = 116,
+    NS_PROTOCOL_MOTION_SIZE = 12,
+    NS_PROTOCOL_MOTION_SAMPLE_COUNT = 3,
+    NS_PROTOCOL_EXT_PAD_SIZE = 48,
+    NS_PROTOCOL_WEB_FRAME_SIZE = 212,
     NS_PROTOCOL_PAD_COUNT = 4,
 };
 
@@ -115,6 +117,10 @@ void ns_pad_set_hid(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
                     const uint8_t hid[NS_PROTOCOL_HID_SIZE]);
 void ns_pad_set_motion(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
                        const uint8_t motion[NS_PROTOCOL_MOTION_SIZE]);
+void ns_pad_set_motion_samples(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
+                               const uint8_t motion0[NS_PROTOCOL_MOTION_SIZE],
+                               const uint8_t motion1[NS_PROTOCOL_MOTION_SIZE],
+                               const uint8_t motion2[NS_PROTOCOL_MOTION_SIZE]);
 
 void ns_web_frame_init(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
                        uint8_t flags,
@@ -129,6 +135,11 @@ void ns_web_frame_set_hid(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
 void ns_web_frame_set_motion(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
                              int pad_index,
                              const uint8_t motion[NS_PROTOCOL_MOTION_SIZE]);
+void ns_web_frame_set_motion_samples(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
+                                     int pad_index,
+                                     const uint8_t motion0[NS_PROTOCOL_MOTION_SIZE],
+                                     const uint8_t motion1[NS_PROTOCOL_MOTION_SIZE],
+                                     const uint8_t motion2[NS_PROTOCOL_MOTION_SIZE]);
 int ns_web_frame_extract_hid(const uint8_t* frame,
                              size_t frame_size,
                              int pad_index,

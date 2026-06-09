@@ -1554,7 +1554,7 @@ static void legacy_writer_thread(int hz) {
         bool all_open = true;
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
             if (fds[i] < 0) {
-                fds[i] = open(devs[i].c_str(), O_WRONLY);
+                fds[i] = open(devs[i].c_str(), O_WRONLY | O_NONBLOCK);
                 if (fds[i] < 0) all_open = false;
             }
         }
@@ -1564,7 +1564,7 @@ static void legacy_writer_thread(int hz) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; }
             }
             run_gadget_setup_if_needed(false, "requested legacy /dev/hidg* nodes could not all be opened");
-            std::this_thread::sleep_for(ms(500));
+            for (int wait_i = 0; wait_i < 50 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
 
@@ -1723,7 +1723,7 @@ static void legacy_writer_thread(int hz) {
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected - waiting for reconnect..."); error_shown = true; }
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; }
-                std::this_thread::sleep_for(ms(1000));
+                for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
             }
         }
@@ -1762,7 +1762,7 @@ static void writer_thread(int hz) {
         bool all_open = true;
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
             if (fds[i] < 0) {
-                fds[i] = open(devs[i].c_str(), O_RDWR);
+                fds[i] = open(devs[i].c_str(), O_RDWR | O_NONBLOCK);
                 if (fds[i] >= 0) {
                     rt[i].fd = fds[i];
                     rt[i].timer = 0;
@@ -1789,7 +1789,7 @@ static void writer_thread(int hz) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
             }
             run_gadget_setup_if_needed(false, "requested /dev/hidg* nodes could not all be opened");
-            std::this_thread::sleep_for(ms(500));
+            for (int wait_i = 0; wait_i < 50 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
 
@@ -2134,7 +2134,7 @@ static void writer_thread(int hz) {
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected — waiting for reconnect..."); error_shown = true; }
                 for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
-                std::this_thread::sleep_for(ms(1000));
+                for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
             }
 
@@ -2160,7 +2160,9 @@ static std::mutex g_rate_mtx;
 static void stats_thread() {
     uint64_t last_cleanup = 0;
     while (g_running.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(ms(5000));
+        for (int wait_i = 0; wait_i < 50 && g_running.load(std::memory_order_relaxed); ++wait_i)
+            std::this_thread::sleep_for(ms(100));
+        if (!g_running.load(std::memory_order_relaxed)) break;
 
         // Periodic rate limiter cleanup (every 60s)
         uint64_t now = now_us();
@@ -3517,7 +3519,7 @@ static bool send_ws_binary_frame(WebClient* c, const uint8_t* payload, size_t le
 
     const size_t hdr = 2;
     const size_t total = hdr + len;
-    uint8_t small_frame[2 + sizeof(RumblePacket)] = {};
+    uint8_t small_frame[2 + sizeof(PrecisionRumblePacket)] = {};
     if (total > sizeof(small_frame)) return false;
 
     small_frame[0] = 0x82; // FIN + binary
@@ -3567,8 +3569,14 @@ static void flush_rumble_to_ws(WebClient* c) {
 
     for (int s = 0; s < 4; ++s) {
         if (!has[s]) continue;
-        if (send_ws_binary_frame(c, (const uint8_t*)&pending[s], sizeof(RumblePacket)))
+        if (send_ws_binary_frame(c, (const uint8_t*)&pending[s], sizeof(RumblePacket))) {
             c->last_rumble_seq[s] = seqs[s];
+            if (g_verbose)
+                std::printf("[ws] sent rumble client_slot=%d pad=%d low=%u high=%u duration=%u\n",
+                            c->ws_slot + 1, s + 1,
+                            pending[s].low_freq, pending[s].high_freq,
+                            pending[s].duration_10ms);
+        }
     }
 }
 

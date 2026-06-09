@@ -124,7 +124,7 @@ void ns_motion_write_values(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
     ns_write_i16le(out_motion + 6, gx);
     ns_write_i16le(out_motion + 8, gy);
     ns_write_i16le(out_motion + 10, gz);
-    out_motion[12] = has_motion ? 1 : 0;
+    (void)has_motion;
 }
 
 void ns_motion_from_android(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
@@ -177,10 +177,21 @@ void ns_pad_set_hid(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
     memcpy(out_pad, hid, NS_PROTOCOL_HID_SIZE);
 }
 
+void ns_pad_set_motion_samples(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
+                               const uint8_t motion0[NS_PROTOCOL_MOTION_SIZE],
+                               const uint8_t motion1[NS_PROTOCOL_MOTION_SIZE],
+                               const uint8_t motion2[NS_PROTOCOL_MOTION_SIZE]) {
+    if (!out_pad || !motion0 || !motion1 || !motion2) return;
+    memcpy(out_pad + NS_PROTOCOL_HID_SIZE + 0 * NS_PROTOCOL_MOTION_SIZE, motion0, NS_PROTOCOL_MOTION_SIZE);
+    memcpy(out_pad + NS_PROTOCOL_HID_SIZE + 1 * NS_PROTOCOL_MOTION_SIZE, motion1, NS_PROTOCOL_MOTION_SIZE);
+    memcpy(out_pad + NS_PROTOCOL_HID_SIZE + 2 * NS_PROTOCOL_MOTION_SIZE, motion2, NS_PROTOCOL_MOTION_SIZE);
+    out_pad[44] = 1;
+}
+
 void ns_pad_set_motion(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
                        const uint8_t motion[NS_PROTOCOL_MOTION_SIZE]) {
     if (!out_pad || !motion) return;
-    memcpy(out_pad + NS_PROTOCOL_HID_SIZE, motion, NS_PROTOCOL_MOTION_SIZE);
+    ns_pad_set_motion_samples(out_pad, motion, motion, motion);
 }
 
 void ns_web_frame_init(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
@@ -190,7 +201,7 @@ void ns_web_frame_init(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
     if (!out_frame) return;
     memset(out_frame, 0, NS_PROTOCOL_WEB_FRAME_SIZE);
     ns_write_u32le(out_frame + 0, NS_PROTO_MAGIC);
-    out_frame[4] = NS_WEB_PROTO_VERSION;
+    out_frame[4] = NS_WEB_PROTO_VERSION_3;
     out_frame[5] = flags;
     out_frame[6] = 0;
     out_frame[7] = 0;
@@ -215,13 +226,21 @@ void ns_web_frame_set_hid(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
     memcpy(out_frame + 20 + (pad_index * NS_PROTOCOL_EXT_PAD_SIZE), hid, NS_PROTOCOL_HID_SIZE);
 }
 
+void ns_web_frame_set_motion_samples(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
+                                     int pad_index,
+                                     const uint8_t motion0[NS_PROTOCOL_MOTION_SIZE],
+                                     const uint8_t motion1[NS_PROTOCOL_MOTION_SIZE],
+                                     const uint8_t motion2[NS_PROTOCOL_MOTION_SIZE]) {
+    if (!out_frame || !motion0 || !motion1 || !motion2 || pad_index < 0 || pad_index >= NS_PROTOCOL_PAD_COUNT) return;
+    uint8_t* pad = out_frame + 20 + (pad_index * NS_PROTOCOL_EXT_PAD_SIZE);
+    ns_pad_set_motion_samples(pad, motion0, motion1, motion2);
+}
+
 void ns_web_frame_set_motion(uint8_t out_frame[NS_PROTOCOL_WEB_FRAME_SIZE],
                              int pad_index,
                              const uint8_t motion[NS_PROTOCOL_MOTION_SIZE]) {
     if (!out_frame || !motion || pad_index < 0 || pad_index >= NS_PROTOCOL_PAD_COUNT) return;
-    memcpy(out_frame + 20 + (pad_index * NS_PROTOCOL_EXT_PAD_SIZE) + NS_PROTOCOL_HID_SIZE,
-           motion,
-           NS_PROTOCOL_MOTION_SIZE);
+    ns_web_frame_set_motion_samples(out_frame, pad_index, motion, motion, motion);
 }
 
 int ns_web_frame_extract_hid(const uint8_t* frame,
