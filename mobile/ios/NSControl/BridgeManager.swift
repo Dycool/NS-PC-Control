@@ -44,6 +44,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         var high: UInt8 = 0
         var until: TimeInterval = 0
         var lastSet: TimeInterval = 0
+        var player: CHHapticPatternPlayer? = nil
     }
     private var controllerRumbleStates = Array(repeating: ControllerRumbleState(), count: Int(NS_PROTOCOL_PAD_COUNT))
     private var controllerHapticEngines: [ObjectIdentifier: CHHapticEngine] = [:]
@@ -359,6 +360,9 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
 
     private func stopControllerHub() {
         GCController.stopWirelessControllerDiscovery()
+        for i in controllerRumbleStates.indices {
+            try? controllerRumbleStates[i].player?.stop(atTime: 0)
+        }
         for engine in controllerHapticEngines.values { engine.stop(completionHandler: nil) }
         controllerHapticEngines.removeAll()
         controllerRumbleStates = Array(repeating: ControllerRumbleState(), count: Int(NS_PROTOCOL_PAD_COUNT))
@@ -467,6 +471,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
             st.low = low; st.high = high; st.until = now + duration; st.lastSet = now
             controllerRumbleStates[slot] = st
         } else {
+            try? controllerRumbleStates[slot].player?.stop(atTime: 0)
             controllerRumbleStates[slot] = ControllerRumbleState()
         }
         DispatchQueue.main.async { self.onRumble?(slot, low, high) }
@@ -489,15 +494,17 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         }
         do {
             try engine.start()
-            let strength = Float(max(low, high)) / 255.0
-            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: max(0.25, min(1.0, strength)))
+            let strength = min(1.0, Float(max(low, high)) / 255.0)
+            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: strength)
             let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.45)
             let event = CHHapticEvent(eventType: .hapticContinuous,
                                       parameters: [intensity, sharpness],
                                       relativeTime: 0,
                                       duration: duration)
             let pattern = try CHHapticPattern(events: [event], parameters: [])
+            try controllerRumbleStates[slot].player?.stop(atTime: 0)
             let player = try engine.makePlayer(with: pattern)
+            controllerRumbleStates[slot].player = player
             try player.start(atTime: 0)
         } catch {
             // Some controllers/OS versions expose input but refuse haptic engines.
