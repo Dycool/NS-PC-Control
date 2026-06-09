@@ -3,4 +3,3 @@
 
 #pragma once
 #include "../../shared/ns_protocol.h"
-#include "../../shared/sdl_controller.h"

@@ -183,7 +183,7 @@ window.onload = () => {
         document.getElementById('btnMacros').style.display = 'none';
         document.getElementById('btnTouchControls').style.display = 'inline-block';
         document.getElementById('btnEditor').style.display = 'inline-block';
-        document.getElementById('btnConnect').style.display = 'inline-block';
+        document.getElementById('btnConnect').style.display = 'none';
     }
     const savedMode = localStorage.getItem('nswc_mode');
     if (savedMode) document.getElementById('kbMode').value = savedMode;
@@ -394,9 +394,7 @@ function wireMacroMenu() {
 }
 function buildAndSendPacket() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // In the native mobile apps, Android/iOS collect physical controller input
-    // directly and send it from native code. Avoid flooding the JS bridge with
-    // browser Gamepad frames that WebView may not populate reliably anyway.
+    // Native mobile v1 is touch-only. Physical controller support is intentionally disabled here.
     if (window.NSBridge || (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge)) return;
     const rawGamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     const activePads = [];

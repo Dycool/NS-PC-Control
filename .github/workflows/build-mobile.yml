@@ -31,51 +31,8 @@ jobs:
         with:
           gradle-version: '8.5'
 
-      - name: Install Android native build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build
-          yes | sdkmanager --licenses
-          sdkmanager --install "cmake;3.22.1" "ndk;26.3.11579264"
-
-      - name: Checkout SDL3
-        uses: actions/checkout@v4
-        with:
-          repository: libsdl-org/SDL
-          ref: release-3.4.10
-          path: SDL3
-          fetch-depth: 1
-
-      - name: Build and install SDL3 for Android
-        env:
-          SDL3_INSTALL_ROOT: ${{ github.workspace }}/_cache/sdl3-android
-        run: |
-          set -euo pipefail
-          ANDROID_NDK="${ANDROID_HOME}/ndk/26.3.11579264"
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            echo "::group::SDL3 ${abi}"
-            cmake -S SDL3 -B "SDL3/build/android-${abi}" -G Ninja \
-              -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake" \
-              -DANDROID_ABI="${abi}" \
-              -DANDROID_PLATFORM=26 \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX="${SDL3_INSTALL_ROOT}/${abi}" \
-              -DSDL_SHARED=OFF \
-              -DSDL_STATIC=ON \
-              -DSDL_TEST_LIBRARY=OFF \
-              -DSDL_TESTS=OFF \
-              -DSDL_EXAMPLES=OFF \
-              -DSDL_INSTALL=ON
-            cmake --build "SDL3/build/android-${abi}" --config Release --parallel 2
-            cmake --install "SDL3/build/android-${abi}" --config Release
-            test -d "${SDL3_INSTALL_ROOT}/${abi}/lib/cmake/SDL3"
-            echo "::endgroup::"
-          done
-
       - name: Build debug APK
         working-directory: mobile/android
-        env:
-          SDL3_ANDROID_ROOT: ${{ github.workspace }}/_cache/sdl3-android
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Stage Android APK
@@ -101,60 +58,9 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Checkout SDL3
-        uses: actions/checkout@v4
-        with:
-          repository: libsdl-org/SDL
-          ref: release-3.4.10
-          path: SDL3
-          fetch-depth: 1
-
-      - name: Build and install SDL3 for iOS
-        run: |
-          set -euo pipefail
-          cmake -S SDL3 -B SDL3/build/ios \
-            -G Xcode \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/mobile/ios/SDL3" \
-            -DSDL_STATIC=ON \
-            -DSDL_SHARED=OFF \
-            -DSDL_TEST_LIBRARY=OFF \
-            -DSDL_TESTS=OFF \
-            -DSDL_EXAMPLES=OFF \
-            -DSDL_INSTALL=ON
-          cmake --build SDL3/build/ios --config Release -j"$(sysctl -n hw.logicalcpu)"
-          rm -rf mobile/ios/SDL3
-          cmake --install SDL3/build/ios --config Release --prefix "${{ github.workspace }}/mobile/ios/SDL3"
-
-          # Belt-and-suspenders: some SDL3 CMake/install layouts can leave the
-          # public headers out of the install prefix even when libSDL3.a exists.
-          # Xcode compiles mobile/shared/sdl_controller.c with:
-          #   #include <SDL3/SDL.h>
-          # so make that path exist unconditionally.
-          if [ ! -f mobile/ios/SDL3/include/SDL3/SDL.h ]; then
-            mkdir -p mobile/ios/SDL3/include
-            rsync -a SDL3/include/SDL3 mobile/ios/SDL3/include/
-          fi
-
-          test -f mobile/ios/SDL3/include/SDL3/SDL.h
-          test -f mobile/ios/SDL3/lib/libSDL3.a
-          find mobile/ios/SDL3 -maxdepth 3 -type f \( -name 'SDL.h' -o -name 'libSDL3.a' \) -print
-
       - name: Generate Xcode project
         working-directory: mobile/ios
         run: xcodegen generate
-
-      - name: Verify iOS SDL3 linker settings
-        working-directory: mobile/ios
-        run: |
-          set -euo pipefail
-          xcodebuild -project NSControl.xcodeproj -scheme NSControl -configuration Release -sdk iphoneos -showBuildSettings | tee /tmp/nscontrol-buildsettings.txt
-          grep -q "OTHER_LDFLAGS.*SDL3/lib/libSDL3.a" /tmp/nscontrol-buildsettings.txt
-          grep -q "OTHER_LDFLAGS.*CoreMedia" /tmp/nscontrol-buildsettings.txt
 
       - name: Build iOS app unsigned
         working-directory: mobile/ios

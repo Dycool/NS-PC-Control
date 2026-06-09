@@ -1,52 +1,77 @@
 package com.nscontrol
 
-import android.os.Bundle
-import android.os.Build
-import android.os.SystemClock
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.content.Context
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.view.*
-import android.webkit.*
-import android.widget.*
-import androidx.appcompat.app.AppCompatActivity
+import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.view.Surface
+import android.view.View
+import android.view.WindowManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
-import okhttp3.*
+import androidx.appcompat.app.AppCompatActivity
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
-import java.util.concurrent.atomic.AtomicInteger
+import org.json.JSONArray
 import java.net.URI
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
     private lateinit var connectView: View
     private lateinit var webView: WebView
     private lateinit var hostInput: EditText
     private lateinit var statusText: TextView
+
     private var host = ""
     private var connected = false
     @Volatile private var controlClientActive = false
+    @Volatile private var sending = false
     private var ws: WebSocket? = null
     private val client = OkHttpClient.Builder().build()
     private val seq = AtomicInteger(0)
     private val senderToken = AtomicInteger(0)
-    @Volatile private var sending = false
     private val sendLock = Any()
 
     private lateinit var sensorManager: SensorManager
     private var accelSensor: Sensor? = null
     private var gyroSensor: Sensor? = null
     private var vibrator: Vibrator? = null
-    @Volatile private var androidPhoneSensorsActive = false
+    @Volatile private var phoneSensorsActive = false
     private val phoneSensorLock = Any()
     private val latestPhoneAccel = FloatArray(3)
     private val latestPhoneGyro = FloatArray(3)
     private var hasLatestPhoneAccel = false
     private var hasLatestPhoneGyro = false
+
+    @Volatile private var touchHid: ByteArray? = null
+    @Volatile private var touchFrame: ByteArray? = null
+    @Volatile private var lastTouchFrameMs: Long = 0
+    @Volatile private var lastBridgeFrameParseMs: Long = 0
+
+    private enum class Page { MAIN_MENU, TOUCH_CONTROLS, EDITOR }
+    private var currentPage = Page.MAIN_MENU
+    private val pageStack = mutableListOf<Page>()
+
     private val phoneSensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             synchronized(phoneSensorLock) {
@@ -65,23 +90,16 @@ class MainActivity : AppCompatActivity() {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
-    @Volatile private var touchHid: ByteArray? = null
-    @Volatile private var touchFrame: ByteArray? = null
-    @Volatile private var lastTouchFrameMs: Long = 0
-    @Volatile private var lastBridgeFrameParseMs: Long = 0
-
-    private enum class Page { MAIN_MENU, TOUCH_CONTROLS, EDITOR }
-    private var currentPage = Page.MAIN_MENU
-    private val pageStack = mutableListOf<Page>()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         connectView = layoutInflater.inflate(R.layout.connect, null)
         webView = WebView(this)
         hostInput = connectView.findViewById(R.id.hostInput)
         statusText = connectView.findViewById(R.id.statusText)
         connectView.findViewById<Button>(R.id.connectBtn).setOnClickListener { onConnect() }
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
@@ -94,9 +112,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+
         setContentView(connectView)
         getPreferences(MODE_PRIVATE).getString("host", "")?.let {
-            hostInput.setText(it); hostInput.setSelection(it.length)
+            hostInput.setText(it)
+            hostInput.setSelection(it.length)
         }
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -108,7 +128,6 @@ class MainActivity : AppCompatActivity() {
             @Suppress("DEPRECATION")
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-
     }
 
     private fun onConnect() {
@@ -116,18 +135,15 @@ class MainActivity : AppCompatActivity() {
         if (host.isEmpty()) return
         getPreferences(MODE_PRIVATE).edit().putString("host", host).apply()
         setupWebView()
-        setContentView(webView)
         connected = true
         currentPage = Page.MAIN_MENU
         pageStack.clear()
+        setContentView(webView)
         loadUrl(pageUrl(Page.MAIN_MENU))
         statusText.text = "Loaded"
     }
 
-    // ═══════════════════════════════
-    //  WebSocket
-    // ═══════════════════════════════
-
+    // WebSocket to the Raspberry Pi backend. Only Touch Controls owns a session in this native-mobile v1.
     private fun connectWs(): Boolean {
         return try {
             val wsUrl = normalizeWsUrl(host)
@@ -140,50 +156,41 @@ class MainActivity : AppCompatActivity() {
                         startSending()
                     }
                 }
+
                 override fun onClosed(w: WebSocket, code: Int, reason: String) {
-                    runOnUiThread {
-                        statusText.text = "Disconnected"
-                        if (ws === w) {
-                            sending = false
-                            controlClientActive = false
-                            touchHid = null
-                            touchFrame = null
-                            lastTouchFrameMs = 0
-                            ws = null
-                        }
-                    }
+                    runOnUiThread { handleWsClosed(w, "Disconnected") }
                 }
+
                 override fun onFailure(w: WebSocket, t: Throwable, r: Response?) {
-                    runOnUiThread {
-                        statusText.text = "Connection failed"
-                        if (ws === w) {
-                            sending = false
-                            controlClientActive = false
-                            touchHid = null
-                            touchFrame = null
-                            lastTouchFrameMs = 0
-                            ws = null
-                        }
-                    }
+                    runOnUiThread { handleWsClosed(w, "Connection failed") }
                 }
+
                 override fun onMessage(w: WebSocket, bytes: ByteString) {
-                    try {
-                        if (bytes.size >= 8) {
-                            val subpad = bytes[4].toInt() and 0xFF
-                            val low = bytes[5].toInt() and 0xFF
-                            val high = bytes[6].toInt() and 0xFF
-                            runOnUiThread {
-                                try { routeRumble(subpad, low, high) } catch (_: Throwable) {}
-                            }
-                        }
-                    } catch (_: Throwable) {}
+                    if (bytes.size < 8) return
+                    val subpad = bytes[4].toInt() and 0xFF
+                    val low = bytes[5].toInt() and 0xFF
+                    val high = bytes[6].toInt() and 0xFF
+                    runOnUiThread { routeRumble(subpad, low, high) }
                 }
             })
             true
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
             runOnUiThread { statusText.text = "Invalid server address" }
             false
         }
+    }
+
+    private fun handleWsClosed(socket: WebSocket, text: String) {
+        if (ws !== socket) return
+        statusText.text = text
+        sending = false
+        controlClientActive = false
+        touchHid = null
+        touchFrame = null
+        lastTouchFrameMs = 0
+        ws = null
+        stopPhoneSensors()
+        phoneRumble(0, 0)
     }
 
     private fun normalizeWsUrl(raw: String): String {
@@ -221,156 +228,64 @@ class MainActivity : AppCompatActivity() {
         return "$wsScheme://$safeHost$portText$path$query"
     }
 
-    private fun ensureSdlReady(): Boolean {
-        return SDLController.init()
-    }
-
-    private inline fun withSdl(block: () -> Unit) {
-        if (!SDLController.isReady()) return
-        try { block() } catch (_: Throwable) {}
-    }
-
-
-    // ═══════════════════════════════
-    //  Send loop (~250 Hz)
-    // ═══════════════════════════════
-
     private fun startSending() {
         if (sending) return
         val token = senderToken.incrementAndGet()
         sending = true
         Thread {
             try {
-                // Open phone sensors/haptics once for the session.
-                // Android SensorManager/Vibrator are used as the reliable phone path;
-                // SDL remains available for controller sensors and as a fallback.
-                startAndroidPhoneSensors()
-                if (controllerClientActive()) {
-                    ensureSdlReady()
-                }
-                if (SDLController.isReady()) {
-                    SDLController.phoneSensorsOpen()
-                    SDLController.phoneHapticOpen()
-                }
+                startPhoneSensors()
                 while (sending && controlClientActive && senderToken.get() == token) {
                     sendFrame()
                     Thread.sleep(4)
                 }
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 runOnUiThread {
                     if (senderToken.get() != token) return@runOnUiThread
                     statusText.text = "Input sender failed"
-                    sending = false
-                    controlClientActive = false
-                    touchHid = null
-                    touchFrame = null
-                    lastTouchFrameMs = 0
-                    try { ws?.close(1000, "Input sender failed") } catch (_: Throwable) {}
-                    ws = null
+                    deactivateControlClient()
                 }
             } finally {
                 if (senderToken.get() == token) {
                     sending = false
-                    stopAndroidPhoneSensors()
-                    withSdl {
-                        SDLController.phoneHapticClose()
-                        SDLController.phoneSensorsClose()
-                    }
+                    stopPhoneSensors()
                 }
             }
         }.start()
     }
 
     private fun sendFrame() {
-        sendFrameInternal(flagsOverride = null)
-    }
-
-    private fun sendResetFrame() {
-        ws?.let { sendResetFrameTo(it) }
+        sendFrameInternal()
     }
 
     private fun sendResetFrameTo(socket: WebSocket) {
-        try {
-            sendFrameInternal(socketOverride = socket, flagsOverride = Protocol.FLAG_RESET, forceNeutral = true)
-        } catch (_: Throwable) {}
+        try { sendFrameInternal(socketOverride = socket, flagsOverride = Protocol.FLAG_RESET, forceNeutral = true) } catch (_: Throwable) {}
     }
 
     private fun sendFrameInternal(socketOverride: WebSocket? = null, flagsOverride: Int? = null, forceNeutral: Boolean = false) {
         synchronized(sendLock) {
             val socket = socketOverride ?: ws ?: return
-
-            // Poll SDL3 only in physical-controller mode. Touch mode uses Android
-            // SensorManager/Vibrator and should not load native SDL at startup.
-            val sdlReady = !forceNeutral && controllerClientActive() && ensureSdlReady()
-            if (sdlReady) SDLController.poll()
-
-            val anyController = sdlReady &&
-                (0 until Protocol.PAD_COUNT).any { SDLController.padConnected(it) }
             val touchActive = !forceNeutral && touchClientActive()
-            val flags = flagsOverride ?: if (!anyController && touchActive) Protocol.FLAG_SINGLE_PAD else 0
+            val flags = flagsOverride ?: if (touchActive) Protocol.FLAG_SINGLE_PAD else 0
             val timestampUs = System.currentTimeMillis() * 1000L
-
             val frame = Protocol.initFrame(flags, seq.getAndIncrement(), timestampUs)
 
-            if (!forceNeutral) {
-                if (anyController) {
-                    for (pad in 0 until Protocol.PAD_COUNT) {
-                        if (!SDLController.padConnected(pad)) continue
-                        Protocol.setFrameHid(frame, pad, controllerHidForPad(pad))
-                        controllerMotionBytes(pad)?.let { Protocol.setFrameMotion(frame, pad, it) }
-                    }
-                } else if (touchActive) {
-                    val hid = touchHid
-                        ?: touchFrame?.let { Protocol.extractPad0HidFromWebFrame(it) }
-                        ?: Protocol.neutralHid()
-                    Protocol.setFrameHid(frame, 0, hid)
-                    phoneMotionBytes()?.let { Protocol.setFrameMotion(frame, 0, it) }
+            if (touchActive) {
+                val now = SystemClock.uptimeMillis()
+                val hid = if (now - lastTouchFrameMs <= 500L) {
+                    touchHid ?: touchFrame?.let { Protocol.extractPad0HidFromWebFrame(it) } ?: Protocol.neutralHid()
+                } else {
+                    Protocol.neutralHid()
                 }
+                Protocol.setFrameHid(frame, 0, hid)
+                phoneMotionBytes()?.let { Protocol.setFrameMotion(frame, 0, it) }
             }
 
-            if (!socket.send(frame.toByteString())) {
-                throw IllegalStateException("WebSocket send queue rejected frame")
-            }
+            if (!socket.send(frame.toByteString())) throw IllegalStateException("WebSocket send queue rejected frame")
         }
-    }
-
-    private fun controllerHidForPad(pad: Int): ByteArray = Protocol.controllerHid(
-        SDLController.padButtons(pad),
-        SDLController.padDpadUp(pad),
-        SDLController.padDpadDown(pad),
-        SDLController.padDpadLeft(pad),
-        SDLController.padDpadRight(pad),
-        SDLController.padLX(pad),
-        SDLController.padLY(pad),
-        SDLController.padRX(pad),
-        SDLController.padRY(pad),
-        true
-    )
-
-    private fun controllerMotionBytes(pad: Int): ByteArray? {
-        // This path is already converted in shared SDL C using the same axis map
-        // and scale as the PC SDL3 client: ax=-x, ay=-z, az=+y and gx=-x, gy=-z, gz=+y.
-        if (SDLController.padHasMotion(pad)) {
-            val m = SDLController.padMotion(pad) ?: return null
-            return Protocol.motionFromValues(m[0], m[1], m[2], m[3], m[4], m[5], hasMotion = true)
-        }
-
-        // Preserve the old single-controller fallback: a controller without IMU
-        // can still use the phone gyro, but do not copy phone motion onto pads 2-4.
-        return if (pad == 0) phoneMotionBytes() else null
     }
 
     private fun phoneMotionBytes(): ByteArray? {
-        // Prefer Android's own phone sensors for touch controls. This avoids SDL Android
-        // activity/sensor quirks and uses the same scale + axis map as the PC SDL3 client.
-        androidPhoneMotionBytes()?.let { return it }
-
-        if (!SDLController.isReady()) return null
-        val m = SDLController.phoneSensorsRead() ?: return null
-        return Protocol.motionFromValues(m[0], m[1], m[2], m[3], m[4], m[5], hasMotion = true)
-    }
-
-    private fun androidPhoneMotionBytes(): ByteArray? {
         val accel = FloatArray(3)
         val gyro = FloatArray(3)
         val hasAccel: Boolean
@@ -385,56 +300,30 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Match the PC SDL3 conversion exactly:
-        // accel m/s² -> Switch units using 4096 / gravity
-        // gyro rad/s -> deg/s * 16.384
-        // axes: ax=-x, ay=-z, az=+y and gx=-x, gy=-z, gz=+y
+        // If only the gyroscope is ready, provide upright gravity so the backend still receives valid motion.
         if (!hasAccel && hasGyro) accel[1] = Protocol.STANDARD_GRAVITY
+
+        val a = remapSensorForDisplay(accel)
+        val g = remapSensorForDisplay(gyro)
         val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
         val gyroScale = 57.29577951308232f * 16.384f
         return Protocol.motionFromValues(
-            clampMotionShort(-accel[0] * accelScale),
-            clampMotionShort(-accel[2] * accelScale),
-            clampMotionShort( accel[1] * accelScale),
-            gyroDeadzoneShort(clampMotionShort(-gyro[0] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-gyro[2] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort( gyro[1] * gyroScale)),
+            clampMotionShort(-a[0] * accelScale),
+            clampMotionShort(-a[2] * accelScale),
+            clampMotionShort( a[1] * accelScale),
+            gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
+            gyroDeadzoneShort(clampMotionShort(-g[2] * gyroScale)),
+            gyroDeadzoneShort(clampMotionShort( g[1] * gyroScale)),
             hasMotion = true
         )
     }
 
-    private fun clampMotionShort(v: Float): Short {
-        val rounded = kotlin.math.round(v).toInt().coerceIn(-32768, 32767)
-        return rounded.toShort()
-    }
-
-    private fun gyroDeadzoneShort(v: Short): Short {
-        return if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
-    }
-
-    private fun remapMotionForDisplay(m: ShortArray): ShortArray {
-        // SDL convert_motion produces:
-        //   ax = -accel_x, ay = -accel_z, az = +accel_y
-        //   gx = -gyro_x, gy = -gyro_z, gz = +gyro_y
-        // Remap to align with the current display rotation.
-        val rotation = try {
-            if (Build.VERSION.SDK_INT >= 30) display?.rotation ?: Surface.ROTATION_0
-            else legacyDisplayRotation()
-        } catch (_: Throwable) { Surface.ROTATION_0 }
-        val ax = m[0]; val ay = m[1]; val az = m[2]
-        val gx = m[3]; val gy = m[4]; val gz = m[5]
-        return when (rotation) {
-            Surface.ROTATION_90  -> shortArrayOf(az, ay, (-ax).toShort(), gz, gy, (-gx).toShort())
-            Surface.ROTATION_180 -> shortArrayOf((-ax).toShort(), ay, (-az).toShort(), (-gx).toShort(), gy, (-gz).toShort())
-            Surface.ROTATION_270 -> shortArrayOf((-az).toShort(), ay, ax, (-gz).toShort(), gy, gx)
-            else -> shortArrayOf(ax, ay, az, gx, gy, gz)
-        }
-    }
+    private fun clampMotionShort(v: Float): Short = v.roundToInt().coerceIn(-32768, 32767).toShort()
+    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
 
     private fun remapSensorForDisplay(v: FloatArray): FloatArray {
         val rotation = try {
-            if (Build.VERSION.SDK_INT >= 30) display?.rotation ?: Surface.ROTATION_0
-            else legacyDisplayRotation()
+            if (Build.VERSION.SDK_INT >= 30) display?.rotation ?: Surface.ROTATION_0 else legacyDisplayRotation()
         } catch (_: Throwable) { Surface.ROTATION_0 }
         return when (rotation) {
             Surface.ROTATION_90  -> floatArrayOf(-v[1],  v[0], v[2])
@@ -447,41 +336,8 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     private fun legacyDisplayRotation(): Int = windowManager.defaultDisplay.rotation
 
-    // ═══════════════════════════════
-    //  Haptics / Rumble
-    // ═══════════════════════════════
-
-    private fun routeRumble(subpad: Int, low: Int, high: Int) {
-        if (low == 0 && high == 0) {
-            // Stop rumble on the active output type only. Touch mode must not
-            // keep physical SDL controllers associated with server slots.
-            if (controllerClientActive() && subpad >= 0 && subpad < Protocol.PAD_COUNT && SDLController.isReady()) {
-                if (SDLController.padConnected(subpad)) SDLController.padStopRumble(subpad)
-            }
-            if (touchClientActive() && subpad == 0) phoneRumble(0, 0)
-            return
-        }
-
-        if (controllerClientActive() && subpad >= 0 && subpad < Protocol.PAD_COUNT && ensureSdlReady() && SDLController.padConnected(subpad)) {
-            SDLController.padRumble(subpad, low, high, 50)
-            return
-        }
-
-        // Touch Controls is touch-only: server rumble becomes phone haptics,
-        // never SDL controller rumble.
-        if (touchClientActive()) phoneRumble(low, high)
-    }
-
-    private fun touchClientActive(): Boolean {
-        return controlClientActive && currentPage == Page.TOUCH_CONTROLS
-    }
-
-    private fun controllerClientActive(): Boolean {
-        return controlClientActive && currentPage == Page.MAIN_MENU
-    }
-
-    private fun startAndroidPhoneSensors() {
-        if (androidPhoneSensorsActive) return
+    private fun startPhoneSensors() {
+        if (phoneSensorsActive) return
         synchronized(phoneSensorLock) {
             hasLatestPhoneAccel = false
             hasLatestPhoneGyro = false
@@ -491,43 +347,41 @@ class MainActivity : AppCompatActivity() {
         var opened = false
         accelSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
         gyroSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
-        androidPhoneSensorsActive = opened
+        phoneSensorsActive = opened
     }
 
-    private fun stopAndroidPhoneSensors() {
-        if (!androidPhoneSensorsActive) return
+    private fun stopPhoneSensors() {
+        if (!phoneSensorsActive) return
         try { sensorManager.unregisterListener(phoneSensorListener) } catch (_: Throwable) {}
-        androidPhoneSensorsActive = false
+        phoneSensorsActive = false
         synchronized(phoneSensorLock) {
             hasLatestPhoneAccel = false
             hasLatestPhoneGyro = false
         }
     }
 
+    private fun routeRumble(subpad: Int, low: Int, high: Int) {
+        if (touchClientActive() && subpad == 0) phoneRumble(low, high)
+    }
+
     private fun phoneRumble(low: Int, high: Int) {
         try {
-            val v = vibrator
+            val v = vibrator ?: return
             if (low == 0 && high == 0) {
-                v?.cancel()
-                withSdl { SDLController.phoneHapticRumble(0, 0) }
+                v.cancel()
                 return
             }
             val strength = maxOf(low, high).coerceIn(0, 255)
             if (Build.VERSION.SDK_INT >= 26) {
-                val effect = VibrationEffect.createOneShot(45L, strength.coerceAtLeast(32))
-                v?.vibrate(effect)
+                v.vibrate(VibrationEffect.createOneShot(45L, strength.coerceAtLeast(32)))
             } else {
                 @Suppress("DEPRECATION")
-                v?.vibrate(45L)
+                v.vibrate(45L)
             }
-        } catch (_: Throwable) {
-            withSdl { SDLController.phoneHapticRumble(low, high) }
-        }
+        } catch (_: Throwable) {}
     }
 
-    // ═══════════════════════════════
-    //  WebView
-    // ═══════════════════════════════
+    private fun touchClientActive(): Boolean = controlClientActive && currentPage == Page.TOUCH_CONTROLS
 
     private fun setupWebView() {
         val baseUserAgent = webView.settings.userAgentString ?: ""
@@ -544,20 +398,31 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(v: WebView, req: WebResourceRequest): Boolean {
                 val url = req.url.toString()
                 return when {
-                    url.endsWith("/mobile") || url.endsWith("/mobile.html") -> {
-                        navTo(Page.TOUCH_CONTROLS)
-                        true
-                    }
-                    url.endsWith("/editor") || url.endsWith("/editor.html") -> {
-                        navTo(Page.EDITOR)
-                        true
-                    }
+                    url.endsWith("/mobile") || url.endsWith("/mobile.html") -> { navTo(Page.TOUCH_CONTROLS); true }
+                    url.endsWith("/editor") || url.endsWith("/editor.html") -> { navTo(Page.EDITOR); true }
                     else -> false
                 }
             }
 
             override fun onPageFinished(v: WebView, url: String) {
-                if (currentPage == Page.MAIN_MENU) injectBranding(v)
+                if (currentPage == Page.MAIN_MENU) {
+                    v.evaluateJavascript("""
+                        (function(){
+                          var connect = document.getElementById('btnConnect');
+                          if (connect) connect.style.display = 'none';
+                          var kb = document.getElementById('kbModeContainer');
+                          if (kb) kb.style.display = 'none';
+                          var bindings = document.getElementById('btnBindings');
+                          if (bindings) bindings.style.display = 'none';
+                          var macros = document.getElementById('btnMacros');
+                          if (macros) macros.style.display = 'none';
+                          var touch = document.getElementById('btnTouchControls');
+                          if (touch) touch.style.display = 'inline-block';
+                          var editor = document.getElementById('btnEditor');
+                          if (editor) editor.style.display = 'inline-block';
+                        })();
+                    """.trimIndent(), null)
+                }
             }
         }
     }
@@ -577,34 +442,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun enterPage(page: Page) {
         currentPage = page
-        // Switching away from the main controller page must release every
-        // controller slot on the server. Touch Controls starts a fresh
-        // touch-only session when its own Connect button is pressed; Editor
-        // never owns a controller session at all.
         if (page == Page.TOUCH_CONTROLS || page == Page.EDITOR) deactivateControlClient()
         loadUrl(pageUrl(page))
     }
 
     private fun goBack() {
-        if (pageStack.isNotEmpty()) {
-            val previous = pageStack.removeLast()
-            enterPage(previous)
-        }
+        if (pageStack.isNotEmpty()) enterPage(pageStack.removeAt(pageStack.lastIndex))
     }
-
-    private fun injectBranding(v: WebView) {
-        v.evaluateJavascript(INJECT_BRANDING_JS, null)
-    }
-
-    // ═══════════════════════════════
-    //  JavaScript Bridge Interface
-    // ═══════════════════════════════
 
     inner class JSBridge {
         @JavascriptInterface
         fun onOpen() {
             runOnUiThread {
-                if (currentPage == Page.TOUCH_CONTROLS || currentPage == Page.MAIN_MENU) activateControlClient()
+                if (currentPage == Page.TOUCH_CONTROLS) activateControlClient()
             }
         }
 
@@ -615,8 +465,7 @@ class MainActivity : AppCompatActivity() {
                 val now = SystemClock.uptimeMillis()
                 if (now - lastBridgeFrameParseMs < 8L) return
                 lastBridgeFrameParseMs = now
-
-                val arr = org.json.JSONArray(json)
+                val arr = JSONArray(json)
                 if (arr.length() < Protocol.FRAME_SIZE) return
                 val frame = ByteArray(arr.length()) { i -> arr.getInt(i).toByte() }
                 touchFrame = frame
@@ -628,19 +477,16 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
             if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
-            try {
-                val hid = ByteArray(Protocol.HID_SIZE)
-                hid[0] = (buttons and 0xFF).toByte()
-                hid[1] = ((buttons ushr 8) and 0xFF).toByte()
-                hid[2] = hat.coerceIn(0, 8).toByte()
-                hid[3] = lx.coerceIn(0, 255).toByte()
-                hid[4] = ly.coerceIn(0, 255).toByte()
-                hid[5] = rx.coerceIn(0, 255).toByte()
-                hid[6] = ry.coerceIn(0, 255).toByte()
-                hid[7] = 1
-                touchHid = hid
-                lastTouchFrameMs = SystemClock.uptimeMillis()
-            } catch (_: Throwable) {}
+            touchHid = Protocol.hid(
+                normalizeSystemShortcuts(buttons),
+                hat.coerceIn(0, 8),
+                lx.coerceIn(0, 255),
+                ly.coerceIn(0, 255),
+                rx.coerceIn(0, 255),
+                ry.coerceIn(0, 255),
+                present = true
+            )
+            lastTouchFrameMs = SystemClock.uptimeMillis()
         }
 
         @JavascriptInterface
@@ -650,13 +496,23 @@ class MainActivity : AppCompatActivity() {
         fun onBack() { runOnUiThread { goBack() } }
     }
 
-    // ═══════════════════════════════
-    //  Lifecycle
-    // ═══════════════════════════════
+    private fun normalizeSystemShortcuts(buttonsIn: Int): Int {
+        var buttons = buttonsIn
+        val captureCombo = (buttons and Protocol.BTN_MINUS) != 0 && (buttons and Protocol.BTN_PLUS) != 0
+        val homeCombo = (buttons and Protocol.BTN_LSTICK) != 0 && (buttons and Protocol.BTN_RSTICK) != 0
+        if (captureCombo) {
+            buttons = buttons or Protocol.BTN_CAPTURE
+            buttons = buttons and Protocol.BTN_MINUS.inv() and Protocol.BTN_PLUS.inv() and Protocol.BTN_HOME.inv()
+            if (homeCombo) buttons = buttons and Protocol.BTN_LSTICK.inv() and Protocol.BTN_RSTICK.inv()
+        } else if (homeCombo) {
+            buttons = buttons or Protocol.BTN_HOME
+            buttons = buttons and Protocol.BTN_LSTICK.inv() and Protocol.BTN_RSTICK.inv() and Protocol.BTN_CAPTURE.inv()
+        }
+        return buttons
+    }
 
     override fun onDestroy() {
         disconnect()
-        withSdl { SDLController.quit() }
         super.onDestroy()
     }
 
@@ -667,10 +523,7 @@ class MainActivity : AppCompatActivity() {
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
         controlClientActive = true
-        if (!connectWs()) {
-            controlClientActive = false
-            return
-        }
+        if (!connectWs()) controlClientActive = false
     }
 
     private fun deactivateControlClient() {
@@ -684,13 +537,7 @@ class MainActivity : AppCompatActivity() {
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
         ws = null
-
-        // Stop all rumble before closing.
-        if (SDLController.isReady()) {
-            for (i in 0 until Protocol.PAD_COUNT) {
-                if (SDLController.padConnected(i)) SDLController.padStopRumble(i)
-            }
-        }
+        stopPhoneSensors()
         phoneRumble(0, 0)
 
         if (closingWs != null) {
@@ -700,7 +547,7 @@ class MainActivity : AppCompatActivity() {
                         sendResetFrameTo(closingWs)
                         try { Thread.sleep(4) } catch (_: InterruptedException) { return@Thread }
                     }
-                    try { closingWs.close(1000, "Leaving controller mode") } catch (_: Throwable) {}
+                    try { closingWs.close(1000, "Leaving touch controls") } catch (_: Throwable) {}
                 } catch (_: Throwable) {}
             }.start()
         }
@@ -709,27 +556,7 @@ class MainActivity : AppCompatActivity() {
     private fun disconnect() {
         deactivateControlClient()
         connected = false
-        webView.loadUrl("about:blank")
+        try { webView.loadUrl("about:blank") } catch (_: Throwable) {}
         setContentView(connectView)
-    }
-
-    companion object {
-        private const val INJECT_BRANDING_JS = """
-(function(){
-var old = document.getElementById('ns-mobile-brand');
-if (old) old.remove();
-var b = document.createElement('div');
-b.id = 'ns-mobile-brand';
-b.style.cssText = 'position:fixed;top:12px;left:12px;z-index:99998;display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.92);color:#111;padding:7px 12px;border-radius:18px;font:700 15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 3px 16px rgba(0,0,0,0.18);pointer-events:none;';
-var img = document.createElement('img');
-img.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAA/iklEQVR4nJW9ebRlx13f+6mqvfeZz5379iB1S+rWZM0eZVt4wAJjgwkQZCAEO0CCnbcCvDzeCoE8nqwszFsEeDE4ecEmQCAxAcvY2NjYxmBZWB4l2ZZkja1uqefuO997pj1V/d4fezy3W4LsXrfPsPeuXfX9zb9fVR3FP/AQEXXvvei3v13Z4ru7P/Chxd7SwetUo32r1+rM2zR9CVrPKO2hlG4pcZcrpRoiKK2UUkZlbSFKoxCUUuWrZI0q0Cicqp6tAQGVn5bie3fpjiICSilBBEFQiDhElFPiRCB7mIhz4kQEiJTW51FqIoIqzokICE5wTpwVnN0yfvPJJBwnSTg67sbDZ1cf/NRz73//+3eKx39YxNwFTikll+re7kP9/ZfAXR/+sLn37W+3AL/+6/+1p2+49S00u98vyrzaYS7TfiNwSmNFYUUQUYDgrMsBKNFB5aMvSYEq3yMgOcwlQS7qolziuxc68msv1URx5M/TWoFSU+ennqQUWmW00wpcHKKwI+3SEypNvhEPVj+58sWPfbogRh2zFztedCQiot7zHtQ99yj3S+/7veX+1a/8l6bR/icEnatj5TEYh4yjiCR1ThSSYwg5qJK/ufRD8hNSjfvS4Kr8f6lj8yIDyjuSX130ZwrV3ePMmESqa8k/ZfdJyQsCaDSCVkoHnlHtZoNeu4nnIuxo+1gy3PjA+hfv/b3f/u3f3rpbRN+TScILdvsFCXD33Xfre+65xwH8+z//yo+a7sJ7TXf2qu1hyPZ4YmPrcuZVSiFKKYXaxUGqUBqFAhGVDULU9INV/dPFRLiok3mTMkXu6lahAu+SreSIihJUzjl/H6EK7pKSKIJkFBEF0vS0mum0TK8dkOysPRGdff4Xf/Wnv/eTKIU4p15IJV2SAHffLfqee5T7+bv/4+z8y9/4G15n/p8PE9gcjNIUUYjSWk/fXvBpvUU1fUlN3Vzim6mL6yDkLddvzLT0lHKrbtgN/O5OSO3qgmKClMyziwCl0ZHdt1OoTYDctrhAa1nod72GhJJunv8Pn3z7Hb/yMCR1hn6BnmVHAf4vve9PloMjN/+519/z2pWNLTtJLCC64PJpcHcRQk1/FnYBWEhCXderS5BGdgGpytYqkFQFzvR39fc5yNMfQckUoIU01Bu7iG2lIMLuM4IDRBQacd1GoBZmOjpcOfGJ1c/9wTs++MEPbl+KCFOjLi74pff9ybI5fPNfqO7i7SvrW0nirKdV5ouoGgiFVqkpgarRgrF3qaUpwzht5aY7NPXmIn2QEWNKN0/r67r2q5tzKfm53m5lAYr269Dvpim7CFBanHoTItLyPbs4N+NHK89/Tv7mo3f9+u/9h+3d6sir3aAAWYmac3Lwuj+XzsLtK+tbSeqclzmJpfbLx1uYrtxA1lAv+qcUiFTdV+xSQ1Pkz64r+FRJ9c3UdVNqfRraepN1jHKzg5TPfxFTLhdzfTX66cfVZGrXPYJSSo3j1FvZ2EoWlw59V/iG7/3vP/Pwr//j94DNRyaQudgAvAeUUkrat7z+N83s/teubWwlqbPetIdSGK8atWXqzHRXLvExe5XdPa6fuehV8ndSe5bUPpRX537/RcpBVW1VglPT9eJq919Ss1LoHskeXuthQewaIPmhNYRp6q1v7STenqve1n7Xp+6+Ryl3d42aGjKf9R6l3L/6vU//kOrt+an1re00cmIq0aw4reAiioeqEoWqM2q6czLVRvbqxOKsRaxFrMtfLVibP9NVIEiJ4jSwgOTPryRtWlzEWcSliLPgUsSm2bNc/pwaqNntObi77XZNhV7CMkwp4YI3ICP4JEnMYBxatXjoF3/2t/7bGzMiSO7GZKqH73vXe1pXfufbvqL7SzfvDIcWlFYF1HWWqHmV7Pq6frGqqYVqFKC0BhS60UC0AQGtFUr... (line truncated to 2000 chars)
-img.style.cssText = 'width:24px;height:24px;border-radius:6px;';
-var t = document.createElement('span');
-t.textContent = 'NS Mobile';
-b.appendChild(img);
-b.appendChild(t);
-document.body.appendChild(b);
-})();
-"""
     }
 }

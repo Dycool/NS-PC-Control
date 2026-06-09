@@ -198,12 +198,10 @@ struct WebViewContainer: UIViewRepresentable {
                   let type = dict["type"] as? String else { return }
             switch type {
             case "connect":
-                // Main menu Connect is for physical controllers connected to the phone.
-                // Touch Controls Connect is for the on-screen controls. Merely opening
-                // pages still does not bind a player.
-                guard self.parent.page == .touchControls || self.parent.page == .mainMenu else { return }
-                let mode: BridgeClientMode = self.parent.page == .touchControls ? .touchControls : .controllers
-                BridgeManager.shared.connect(host: self.parent.host, mode: mode)
+                // Native-mobile v1 is touch-only. The main menu Connect button is ignored;
+                // Touch Controls owns the only live backend session.
+                guard self.parent.page == .touchControls else { return }
+                BridgeManager.shared.connect(host: self.parent.host, mode: .touchControls)
             case "back":
                 BridgeManager.shared.disconnect()
                 DispatchQueue.main.async { self.parent.page = .mainMenu }
@@ -250,8 +248,28 @@ struct WebViewContainer: UIViewRepresentable {
         func webView(_ wv: WKWebView, didFinish _: WKNavigation!) {
             // Touch Controls and Editor intentionally have no visible Back button.
             // Use the iOS back/edge gesture instead.
-            if parent.page == .mainMenu { wv.evaluateJavaScript(Self.brandingJS) }
+            if parent.page == .mainMenu {
+                wv.evaluateJavaScript(Self.brandingJS)
+                wv.evaluateJavaScript(Self.mobileMenuJS)
+            }
         }
+
+        static let mobileMenuJS = """
+        (function(){
+            var connect = document.getElementById('btnConnect');
+            if (connect) connect.style.display = 'none';
+            var kb = document.getElementById('kbModeContainer');
+            if (kb) kb.style.display = 'none';
+            var bindings = document.getElementById('btnBindings');
+            if (bindings) bindings.style.display = 'none';
+            var macros = document.getElementById('btnMacros');
+            if (macros) macros.style.display = 'none';
+            var touch = document.getElementById('btnTouchControls');
+            if (touch) touch.style.display = 'inline-block';
+            var editor = document.getElementById('btnEditor');
+            if (editor) editor.style.display = 'inline-block';
+        })();
+        """
 
         static let brandingJS = """
         (function(){
