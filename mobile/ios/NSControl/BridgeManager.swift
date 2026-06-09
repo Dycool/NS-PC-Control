@@ -302,13 +302,13 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
             var bytes = Data(count: kMotionSize)
             bytes.withUnsafeMutableBytes { raw in
                 guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-                ns_motion_from_apple(base,
-                                     Float(motion.gravity.x),
-                                     Float(motion.gravity.y),
-                                     Float(motion.gravity.z),
-                                     Float(motion.rotationRate.x),
-                                     Float(motion.rotationRate.y),
-                                     Float(motion.rotationRate.z))
+                ns_motion_from_apple_phone_touch(base,
+                                                 Float(motion.gravity.x),
+                                                 Float(motion.gravity.y),
+                                                 Float(motion.gravity.z),
+                                                 Float(motion.rotationRate.x),
+                                                 Float(motion.rotationRate.y),
+                                                 Float(motion.rotationRate.z))
             }
             self.phoneMotionLock.lock()
             self.nativePhoneMotionSamples.append(bytes)

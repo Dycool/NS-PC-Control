@@ -426,22 +426,36 @@ class MainActivity : AppCompatActivity() {
         val accel = if (hasLatestPhoneGravity) latestPhoneGravity else latestPhoneAccel
         val a = remapSensorForDisplay(accel)
         val g = remapSensorForDisplay(latestPhoneGyro)
-        val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
-        val gyroScale = 57.29577951308232f * 16.384f
-        val sample = Protocol.motionFromValues(
-            clampMotionShort(-a[0] * accelScale),
-            clampMotionShort(-a[2] * accelScale),
-            clampMotionShort( a[1] * accelScale),
-            gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-g[2] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort( g[1] * gyroScale)),
-            hasMotion = true
-        )
+        val sample = phoneTouchMotionFromDisplayAxes(a, g)
 
         latestMotionSamples[0] = latestMotionSamples[1]
         latestMotionSamples[1] = latestMotionSamples[2]
         latestMotionSamples[2] = sample
         if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) latestMotionSampleCount++
+    }
+
+    /**
+     * Phone touch controls use a different neutral pose from a real controller.
+     *
+     * A physical gamepad's sensor axes already arrive in a controller-like frame, so the
+     * old mapping used by pushPhysicalMotionSampleLocked() is left alone. A phone used as
+     * touch controls is normally held in locked landscape with the screen facing upward.
+     * Therefore the phone's display Z axis, the axis coming out of the screen, must be the
+     * Switch controller Z axis. The previous mapping used display Y as Switch Z, which made
+     * Android gyro feel correct only when the phone was held vertically facing the player.
+     */
+    private fun phoneTouchMotionFromDisplayAxes(accel: FloatArray, gyro: FloatArray): ByteArray {
+        val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
+        val gyroScale = 57.29577951308232f * 16.384f
+        return Protocol.motionFromValues(
+            clampMotionShort(-accel[0] * accelScale),
+            clampMotionShort(-accel[1] * accelScale),
+            clampMotionShort( accel[2] * accelScale),
+            gyroDeadzoneShort(clampMotionShort(-gyro[0] * gyroScale)),
+            gyroDeadzoneShort(clampMotionShort(-gyro[1] * gyroScale)),
+            gyroDeadzoneShort(clampMotionShort( gyro[2] * gyroScale)),
+            hasMotion = true
+        )
     }
 
     private fun phoneMotionSamples(): Array<ByteArray>? {
@@ -471,7 +485,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyOrientationForPage(page: Page) {
         requestedOrientation = if (page == Page.TOUCH_CONTROLS) {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            // Touch controls need a stable display frame for phone gyro. Do not allow
+            // landscape-left/landscape-right flipping while the user is moving the phone.
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         }
