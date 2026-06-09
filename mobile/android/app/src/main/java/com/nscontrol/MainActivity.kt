@@ -423,17 +423,7 @@ class MainActivity : AppCompatActivity() {
 
         val accel = if (hasLatestPhoneGravity) latestPhoneGravity else latestPhoneAccel
         val g = latestPhoneGyro
-        val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
-        val gyroScale = 57.29577951308232f * 16.384f
-        val sample = Protocol.motionFromValues(
-            clampMotionShort(-accel[0] * accelScale),
-            clampMotionShort(-accel[1] * accelScale),
-            clampMotionShort(-accel[2] * accelScale),
-            gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-g[1] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-g[2] * gyroScale)),
-            hasMotion = true
-        )
+        val sample = NativeProtocol.nativePhoneMotion(accel[0], accel[1], accel[2], g[0], g[1], g[2])
 
         latestMotionSamples[0] = latestMotionSamples[1]
         latestMotionSamples[1] = latestMotionSamples[2]
@@ -449,7 +439,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun clampMotionShort(v: Float): Short = v.roundToInt().coerceIn(-32768, 32767).toShort()
-    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 8) 0 else v
+    private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
 
     private fun remapSensorForDisplay(v: FloatArray): FloatArray {
         val rotation = try {
@@ -638,7 +628,7 @@ class MainActivity : AppCompatActivity() {
         fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
             if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
             touchHid = Protocol.hid(
-                normalizeSystemShortcuts(buttons),
+                NativeProtocol.nativeNormalizeShortcuts(buttons),
                 hat.coerceIn(0, 8),
                 lx.coerceIn(0, 255),
                 ly.coerceIn(0, 255),
@@ -669,21 +659,6 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun onBack() { runOnUiThread { goBack() } }
-    }
-
-    private fun normalizeSystemShortcuts(buttonsIn: Int): Int {
-        var buttons = buttonsIn
-        val captureCombo = (buttons and Protocol.BTN_MINUS) != 0 && (buttons and Protocol.BTN_PLUS) != 0
-        val homeCombo = (buttons and Protocol.BTN_LSTICK) != 0 && (buttons and Protocol.BTN_RSTICK) != 0
-        if (captureCombo) {
-            buttons = buttons or Protocol.BTN_CAPTURE
-            buttons = buttons and Protocol.BTN_MINUS.inv() and Protocol.BTN_PLUS.inv() and Protocol.BTN_HOME.inv()
-            if (homeCombo) buttons = buttons and Protocol.BTN_LSTICK.inv() and Protocol.BTN_RSTICK.inv()
-        } else if (homeCombo) {
-            buttons = buttons or Protocol.BTN_HOME
-            buttons = buttons and Protocol.BTN_LSTICK.inv() and Protocol.BTN_RSTICK.inv() and Protocol.BTN_CAPTURE.inv()
-        }
-        return buttons
     }
 
     private fun toggleControllerHub() {

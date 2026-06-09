@@ -15,28 +15,6 @@ enum BridgeClientMode {
     case controllerHub
 }
 
-private func normalizeSystemShortcuts(_ buttonsIn: UInt16) -> UInt16 {
-    var buttons = buttonsIn
-    let captureCombo = (buttons & UInt16(NS_BTN_MINUS)) != 0 && (buttons & UInt16(NS_BTN_PLUS)) != 0
-    let homeCombo = (buttons & UInt16(NS_BTN_LSTICK)) != 0 && (buttons & UInt16(NS_BTN_RSTICK)) != 0
-    if captureCombo {
-        buttons |= UInt16(NS_BTN_CAPTURE)
-        buttons &= ~UInt16(NS_BTN_MINUS)
-        buttons &= ~UInt16(NS_BTN_PLUS)
-        buttons &= ~UInt16(NS_BTN_HOME)
-        if homeCombo {
-            buttons &= ~UInt16(NS_BTN_LSTICK)
-            buttons &= ~UInt16(NS_BTN_RSTICK)
-        }
-    } else if homeCombo {
-        buttons |= UInt16(NS_BTN_HOME)
-        buttons &= ~UInt16(NS_BTN_LSTICK)
-        buttons &= ~UInt16(NS_BTN_RSTICK)
-        buttons &= ~UInt16(NS_BTN_CAPTURE)
-    }
-    return buttons
-}
-
 final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
     static let shared = BridgeManager()
 
@@ -189,7 +167,7 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         var hid = Data(count: Int(NS_PROTOCOL_HID_SIZE))
         hid.withUnsafeMutableBytes { raw in
             guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-            ns_hid_write(base, normalizeSystemShortcuts(buttons), hat, lx, ly, rx, ry, 1)
+            ns_hid_write(base, ns_normalize_system_shortcuts(buttons), hat, lx, ly, rx, ry, 1)
         }
         var pad = neutralPad()
         pad.withUnsafeMutableBytes { padRaw in
@@ -300,17 +278,11 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
         motionManager.startDeviceMotionUpdates(to: OperationQueue()) { [weak self] motion, _ in
             guard let self = self, let motion = motion else { return }
             var bytes = Data(count: kMotionSize)
-            let accelScale = ns_accel_scale_apple()
-            let gyroScale = ns_gyro_scale()
             bytes.withUnsafeMutableBytes { raw in
                 guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-                let ax = ns_clamp_motion(-Float(motion.gravity.x) * accelScale)
-                let ay = ns_clamp_motion(-Float(motion.gravity.y) * accelScale)
-                let az = ns_clamp_motion(-Float(motion.gravity.z) * accelScale)
-                let gx = ns_clamp_motion(-Float(motion.rotationRate.x) * gyroScale)
-                let gy = ns_clamp_motion(-Float(motion.rotationRate.y) * gyroScale)
-                let gz = ns_clamp_motion(-Float(motion.rotationRate.z) * gyroScale)
-                ns_motion_write_values(base, ax, ay, az, abs(gx) <= 32 ? 0 : gx, abs(gy) <= 32 ? 0 : gy, abs(gz) <= 32 ? 0 : gz, 1)
+                ns_motion_from_phone_apple(base,
+                    Float(motion.gravity.x), Float(motion.gravity.y), Float(motion.gravity.z),
+                    Float(motion.rotationRate.x), Float(motion.rotationRate.y), Float(motion.rotationRate.z))
             }
             self.phoneMotionLock.lock()
             self.nativePhoneMotionSamples.append(bytes)

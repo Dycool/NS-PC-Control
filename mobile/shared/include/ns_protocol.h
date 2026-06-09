@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +64,8 @@ float ns_gyro_scale(void);
 uint8_t ns_axis_to_byte(float v);
 uint8_t ns_hat_from_dpad(int up, int down, int left, int right);
 int16_t ns_clamp_motion(float v);
+int16_t ns_gyro_deadzone(int16_t v);
+uint16_t ns_normalize_system_shortcuts(uint16_t buttons);
 
 void ns_hid_write_neutral(uint8_t out_hid[NS_PROTOCOL_HID_SIZE]);
 void ns_hid_write(uint8_t out_hid[NS_PROTOCOL_HID_SIZE],
@@ -111,6 +114,17 @@ void ns_motion_from_apple(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
                           float rotation_x,
                           float rotation_y,
                           float rotation_z);
+
+// Phone motion: direct all-negative mapping (no axis swizzling).
+// Android: accel in m/s^2, gyro in rad/s.
+void ns_motion_from_phone_android(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
+                                  float accel_x, float accel_y, float accel_z,
+                                  float gyro_x, float gyro_y, float gyro_z);
+
+// Apple: gravity in g, rotation in rad/s.
+void ns_motion_from_phone_apple(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
+                                float gravity_x, float gravity_y, float gravity_z,
+                                float rotation_x, float rotation_y, float rotation_z);
 
 void ns_pad_write_neutral(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE]);
 void ns_pad_set_hid(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],

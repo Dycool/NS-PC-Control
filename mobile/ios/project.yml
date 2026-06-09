@@ -23,7 +23,7 @@ targets:
         type: folder
         buildPhase: resources
       - ../shared/ns_protocol.c
-      - ../shared/ns_protocol.h
+      - ../shared/include/ns_protocol.h
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nscontrol.app
@@ -31,7 +31,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_FILE: NSControl/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: NSControl/ProtocolBridge.h
-        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/../shared"
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/../shared/include"
         OTHER_LDFLAGS: "-framework CoreMotion -framework GameController -framework CoreHaptics -framework UIKit -framework Foundation"
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_STYLE: Manual

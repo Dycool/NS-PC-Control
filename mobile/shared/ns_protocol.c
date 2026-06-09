@@ -1,4 +1,4 @@
-#include "ns_protocol.h"
+#include <ns_protocol.h>
 
 #include <math.h>
 #include <string.h>
@@ -55,8 +55,24 @@ int16_t ns_clamp_motion(float v) {
     return (int16_t)lroundf(v);
 }
 
-static int16_t ns_gyro_deadzone_i16(int16_t v) {
+int16_t ns_gyro_deadzone(int16_t v) {
     return (v >= -32 && v <= 32) ? 0 : v;
+}
+
+uint16_t ns_normalize_system_shortcuts(uint16_t buttons) {
+    bool capture_combo = (buttons & NS_BTN_MINUS) && (buttons & NS_BTN_PLUS);
+    bool home_combo = (buttons & NS_BTN_LSTICK) && (buttons & NS_BTN_RSTICK);
+    if (capture_combo) {
+        buttons |= NS_BTN_CAPTURE;
+        buttons &= ~(uint16_t)(NS_BTN_MINUS | NS_BTN_PLUS | NS_BTN_HOME);
+        if (home_combo) {
+            buttons &= ~(uint16_t)(NS_BTN_LSTICK | NS_BTN_RSTICK);
+        }
+    } else if (home_combo) {
+        buttons |= NS_BTN_HOME;
+        buttons &= ~(uint16_t)(NS_BTN_LSTICK | NS_BTN_RSTICK | NS_BTN_CAPTURE);
+    }
+    return buttons;
 }
 
 void ns_hid_write_neutral(uint8_t out_hid[NS_PROTOCOL_HID_SIZE]) {
@@ -140,9 +156,9 @@ void ns_motion_from_android(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
                            ns_clamp_motion(-accel_x * accel_scale),
                            ns_clamp_motion(-accel_z * accel_scale),
                            ns_clamp_motion( accel_y * accel_scale),
-                           ns_gyro_deadzone_i16(ns_clamp_motion(-gyro_x * gyro_scale)),
-                           ns_gyro_deadzone_i16(ns_clamp_motion(-gyro_z * gyro_scale)),
-                           ns_gyro_deadzone_i16(ns_clamp_motion( gyro_y * gyro_scale)),
+                           ns_gyro_deadzone(ns_clamp_motion(-gyro_x * gyro_scale)),
+                           ns_gyro_deadzone(ns_clamp_motion(-gyro_z * gyro_scale)),
+                           ns_gyro_deadzone(ns_clamp_motion( gyro_y * gyro_scale)),
                            1);
 }
 
@@ -159,10 +175,40 @@ void ns_motion_from_apple(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
                            ns_clamp_motion(-gravity_x * accel_scale),
                            ns_clamp_motion(-gravity_z * accel_scale),
                            ns_clamp_motion( gravity_y * accel_scale),
-                           ns_gyro_deadzone_i16(ns_clamp_motion(-rotation_x * gyro_scale)),
-                           ns_gyro_deadzone_i16(ns_clamp_motion(-rotation_z * gyro_scale)),
-                           ns_gyro_deadzone_i16(ns_clamp_motion( rotation_y * gyro_scale)),
+                           ns_gyro_deadzone(ns_clamp_motion(-rotation_x * gyro_scale)),
+                           ns_gyro_deadzone(ns_clamp_motion(-rotation_z * gyro_scale)),
+                           ns_gyro_deadzone(ns_clamp_motion( rotation_y * gyro_scale)),
                            1);
+}
+
+void ns_motion_from_phone_android(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
+                                  float accel_x, float accel_y, float accel_z,
+                                  float gyro_x, float gyro_y, float gyro_z) {
+    const float as = ns_accel_scale_android();
+    const float gs = ns_gyro_scale();
+    ns_motion_write_values(out_motion,
+        ns_clamp_motion(-accel_x * as),
+        ns_clamp_motion(-accel_y * as),
+        ns_clamp_motion(-accel_z * as),
+        ns_gyro_deadzone(ns_clamp_motion(-gyro_x * gs)),
+        ns_gyro_deadzone(ns_clamp_motion(-gyro_y * gs)),
+        ns_gyro_deadzone(ns_clamp_motion(-gyro_z * gs)),
+        1);
+}
+
+void ns_motion_from_phone_apple(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
+                                float gravity_x, float gravity_y, float gravity_z,
+                                float rotation_x, float rotation_y, float rotation_z) {
+    const float as = ns_accel_scale_apple();
+    const float gs = ns_gyro_scale();
+    ns_motion_write_values(out_motion,
+        ns_clamp_motion(-gravity_x * as),
+        ns_clamp_motion(-gravity_y * as),
+        ns_clamp_motion(-gravity_z * as),
+        ns_gyro_deadzone(ns_clamp_motion(-rotation_x * gs)),
+        ns_gyro_deadzone(ns_clamp_motion(-rotation_y * gs)),
+        ns_gyro_deadzone(ns_clamp_motion(-rotation_z * gs)),
+        1);
 }
 
 void ns_pad_write_neutral(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE]) {
