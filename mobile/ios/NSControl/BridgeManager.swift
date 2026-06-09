@@ -230,7 +230,6 @@ final class BridgeManager: NSObject, URLSessionWebSocketDelegate {
 
         var frame = Data(count: kFrameSize)
         let touchActive = mode == .touchControls && connected
-        let anyController = mode == .controllers && (0..<4).contains { sdl.padConnected($0) }
         let flags: UInt8 = touchActive ? kSinglePad : UInt8(0)
         let timestampUs = UInt64(Date().timeIntervalSince1970 * 1_000_000)
         let frameSeq = nextSeq()
