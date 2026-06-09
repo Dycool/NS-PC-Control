@@ -4344,11 +4344,6 @@ int main(int argc, char** argv) {
 
     if (do_upnp) upnp_add_mapping(port);
 
-    // Start WebSocket server by default. -w keeps WebSocket enabled and also serves the browser webapp.
-    std::thread web_thread;
-    if (web_port > 0)
-        web_thread = std::thread(web_server_thread, web_port, port, web_mode);
-
     int sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     if (sock < 0) { perror("socket"); return 1; }
 
@@ -4365,6 +4360,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); close(sock); return 1; }
+
+    // Start WebSocket server only after UDP socket is up.
+    std::thread web_thread;
+    if (web_port > 0)
+        web_thread = std::thread(web_server_thread, web_port, port, web_mode);
     
     std::printf("UDP %s:%u writer=%d Hz mode=%s\n",
                 bind_addr.c_str(), port, PRO_WRITER_HZ,
