@@ -434,26 +434,17 @@ class MainActivity : AppCompatActivity() {
         if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) latestMotionSampleCount++
     }
 
-    /**
-     * Phone touch controls use a different neutral pose from a real controller.
-     *
-     * A physical gamepad's sensor axes already arrive in a controller-like frame, so the
-     * old mapping used by pushPhysicalMotionSampleLocked() is left alone. A phone used as
-     * touch controls is normally held in locked landscape with the screen facing upward.
-     * Therefore the phone's display Z axis, the axis coming out of the screen, must be the
-     * Switch controller Z axis. The previous mapping used display Y as Switch Z, which made
-     * Android gyro feel correct only when the phone was held vertically facing the player.
-     */
+
     private fun phoneTouchMotionFromDisplayAxes(accel: FloatArray, gyro: FloatArray): ByteArray {
         val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
         val gyroScale = 57.29577951308232f * 16.384f
         return Protocol.motionFromValues(
             clampMotionShort(-accel[0] * accelScale),
-            clampMotionShort(-accel[1] * accelScale),
-            clampMotionShort( accel[2] * accelScale),
-            gyroDeadzoneShort(clampMotionShort(-gyro[0] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-gyro[1] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort( gyro[2] * gyroScale)),
+            clampMotionShort(-accel[2] * accelScale),
+            clampMotionShort( accel[1] * accelScale),
+            phoneGyroDeadzoneShort(clampMotionShort(-gyro[0] * gyroScale)),
+            phoneGyroDeadzoneShort(clampMotionShort(-gyro[2] * gyroScale)),
+            phoneGyroDeadzoneShort(clampMotionShort( gyro[1] * gyroScale)),
             hasMotion = true
         )
     }
@@ -467,6 +458,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun clampMotionShort(v: Float): Short = v.roundToInt().coerceIn(-32768, 32767).toShort()
     private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
+    private fun phoneGyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 8) 0 else v
 
     private fun remapSensorForDisplay(v: FloatArray): FloatArray {
         val rotation = try {
@@ -485,9 +477,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyOrientationForPage(page: Page) {
         requestedOrientation = if (page == Page.TOUCH_CONTROLS) {
-            // Touch controls need a stable display frame for phone gyro. Do not allow
-            // landscape-left/landscape-right flipping while the user is moving the phone.
-            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            // Keep SENSOR_LANDSCAPE here. Physical controller gyro currently uses
+            // remapSensorForDisplay(), so forcing a specific landscape side can rotate
+            // controller axes. Phone gyro has its own mapping below; controller gyro must
+            // stay byte-for-byte on the old working behavior.
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         }
