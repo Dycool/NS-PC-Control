@@ -15,6 +15,7 @@
 		A00000000000000000000006 /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000016 /* CoreMotion.framework */; };
 		A00000000000000000000007 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000017 /* GameController.framework */; };
 		A00000000000000000000008 /* CoreHaptics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000018 /* CoreHaptics.framework */; };
+		A0000000000000000000000A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +26,7 @@
 		A00000000000000000000014 /* ns_mobile */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ns_mobile; sourceTree = "<group>"; };
 		A00000000000000000000019 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A0000000000000000000001A /* NSMobile-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "NSMobile-Bridging-Header.h"; sourceTree = "<group>"; };
+		A0000000000000000000001B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A00000000000000000000015 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		A00000000000000000000016 /* CoreMotion.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMotion.framework; path = System/Library/Frameworks/CoreMotion.framework; sourceTree = SDKROOT; };
 		A00000000000000000000017 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
@@ -63,6 +65,7 @@
 				A00000000000000000000013 /* ns_protocol.c */,
 				A0000000000000000000001A /* NSMobile-Bridging-Header.h */,
 				A00000000000000000000019 /* Info.plist */,
+				A0000000000000000000001B /* Assets.xcassets */,
 				A00000000000000000000014 /* ns_mobile */,
 			);
 			path = NSMobile;
@@ -146,6 +149,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000004 /* ns_mobile in Resources */,
+				A0000000000000000000000A /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -282,7 +286,7 @@
 		A00000000000000000000071 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
 				HEADER_SEARCH_PATHS = (
@@ -305,7 +309,7 @@
 		A00000000000000000000072 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
 				HEADER_SEARCH_PATHS = (

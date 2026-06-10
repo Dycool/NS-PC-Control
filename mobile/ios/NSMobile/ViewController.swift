@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import CoreMotion
+import Network
 import GameController
 import CoreHaptics
 
@@ -264,6 +265,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        requestLocalNetworkPermission()
         setupConnectView()
         setupWebView()
         setupControllerObservers()
@@ -271,6 +273,23 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         connectView.frame = view.bounds
         connectView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         hostField.text = UserDefaults.standard.string(forKey: "host") ?? ""
+    }
+
+    private func requestLocalNetworkPermission() {
+        let connection = NWConnection(
+            host: NWEndpoint.Host("255.255.255.255"),
+            port: NWEndpoint.Port(integerLiteral: 0),
+            using: .udp
+        )
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .failed, .cancelled, .waiting:
+                connection.cancel()
+            default:
+                break
+            }
+        }
+        connection.start(queue: DispatchQueue.global(qos: .background))
     }
 
     override func viewDidLayoutSubviews() {
@@ -282,55 +301,73 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func setupConnectView() {
         connectView.backgroundColor = UIColor(red: 0.03, green: 0.03, blue: 0.04, alpha: 1.0)
 
-        let logo = UILabel()
-        logo.text = "NS Mobile"
-        logo.textColor = .white
-        logo.font = UIFont.systemFont(ofSize: 34, weight: .bold)
-        logo.textAlignment = .center
-        logo.translatesAutoresizingMaskIntoConstraints = false
+        let logoView = UIImageView(image: UIImage(named: "Logo"))
+        logoView.contentMode = .scaleAspectFit
+        logoView.translatesAutoresizingMaskIntoConstraints = false
 
-        hostField.placeholder = "Raspberry Pi IP / domain"
+        let titleLabel = UILabel()
+        titleLabel.text = "NS Mobile"
+        titleLabel.textColor = UIColor(red: 0.80, green: 0.0, blue: 0.0, alpha: 1.0)
+        titleLabel.font = UIFont.systemFont(ofSize: 34, weight: .bold)
+        titleLabel.textAlignment = .center
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let subtitleLabel = UILabel()
+        subtitleLabel.text = "Connect to your Raspberry Pi server"
+        subtitleLabel.textColor = UIColor(white: 1.0, alpha: 0.55)
+        subtitleLabel.font = UIFont.systemFont(ofSize: 16)
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        hostField.placeholder = "Server IP or domain"
         hostField.autocapitalizationType = .none
         hostField.autocorrectionType = .no
         hostField.keyboardType = .URL
         hostField.returnKeyType = .go
         hostField.textColor = .white
         hostField.tintColor = .white
-        hostField.backgroundColor = UIColor(white: 1.0, alpha: 0.12)
+        hostField.backgroundColor = UIColor(white: 1.0, alpha: 0.10)
         hostField.layer.cornerRadius = 12
         hostField.layer.borderWidth = 1
-        hostField.layer.borderColor = UIColor(white: 1.0, alpha: 0.18).cgColor
-        hostField.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
+        hostField.layer.borderColor = UIColor(white: 1.0, alpha: 0.15).cgColor
+        hostField.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 16, height: 1))
         hostField.leftViewMode = .always
         hostField.translatesAutoresizingMaskIntoConstraints = false
-        hostField.attributedPlaceholder = NSAttributedString(string: "Raspberry Pi IP / domain", attributes: [.foregroundColor: UIColor(white: 1.0, alpha: 0.45)])
+        hostField.attributedPlaceholder = NSAttributedString(string: "Server IP or domain", attributes: [.foregroundColor: UIColor(white: 1.0, alpha: 0.40)])
         hostField.addTarget(self, action: #selector(hostReturnPressed), for: .editingDidEndOnExit)
 
         connectButton.setTitle("Connect", for: .normal)
-        connectButton.titleLabel?.font = UIFont.systemFont(ofSize: 17, weight: .semibold)
-        connectButton.backgroundColor = UIColor(red: 0.10, green: 0.31, blue: 0.55, alpha: 1.0)
+        connectButton.titleLabel?.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
+        connectButton.backgroundColor = UIColor(red: 0.80, green: 0.0, blue: 0.0, alpha: 1.0)
         connectButton.tintColor = .white
         connectButton.layer.cornerRadius = 12
         connectButton.translatesAutoresizingMaskIntoConstraints = false
         connectButton.addTarget(self, action: #selector(onConnect), for: .touchUpInside)
 
         statusLabel.text = "Ready"
-        statusLabel.textColor = UIColor(white: 1.0, alpha: 0.65)
+        statusLabel.textColor = UIColor(white: 1.0, alpha: 0.45)
         statusLabel.textAlignment = .center
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = UIStackView(arrangedSubviews: [logo, hostField, connectButton, statusLabel])
+        let stack = UIStackView(arrangedSubviews: [logoView, titleLabel, subtitleLabel, hostField, connectButton, statusLabel])
         stack.axis = .vertical
-        stack.spacing = 16
+        stack.spacing = 12
+        stack.setCustomSpacing(4, after: logoView)
+        stack.setCustomSpacing(24, after: subtitleLabel)
+        stack.setCustomSpacing(20, after: hostField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         connectView.addSubview(stack)
 
         NSLayoutConstraint.activate([
+            logoView.heightAnchor.constraint(equalToConstant: 96),
+            logoView.widthAnchor.constraint(equalToConstant: 96),
             stack.centerYAnchor.constraint(equalTo: connectView.centerYAnchor),
-            stack.leadingAnchor.constraint(equalTo: connectView.safeAreaLayoutGuide.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: connectView.safeAreaLayoutGuide.trailingAnchor, constant: -28),
-            hostField.heightAnchor.constraint(equalToConstant: 48),
-            connectButton.heightAnchor.constraint(equalToConstant: 48)
+            stack.centerXAnchor.constraint(equalTo: connectView.centerXAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: connectView.safeAreaLayoutGuide.leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: connectView.safeAreaLayoutGuide.trailingAnchor, constant: -32),
+            stack.widthAnchor.constraint(lessThanOrEqualToConstant: 400),
+            hostField.heightAnchor.constraint(equalToConstant: 56),
+            connectButton.heightAnchor.constraint(equalToConstant: 56)
         ])
     }
 
