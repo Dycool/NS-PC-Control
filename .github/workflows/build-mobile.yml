@@ -48,3 +48,41 @@ jobs:
           path: _artifact/NS-mobile.apk
           if-no-files-found: error
 
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build unsigned iOS app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project mobile/ios/NSMobile.xcodeproj \
+            -target NSMobile \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath mobile/ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Stage iOS IPA
+        run: |
+          set -euo pipefail
+          mkdir -p _artifact/Payload
+          APP="$(find mobile/ios/build/Build/Products/Release-iphoneos -maxdepth 1 -name 'NSMobile.app' -print -quit)"
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "NSMobile.app not found"
+            find mobile/ios/build -maxdepth 5 -print || true
+            exit 1
+          fi
+          cp -R "$APP" _artifact/Payload/NSMobile.app
+          (cd _artifact && zip -r NS-mobile.ipa Payload)
+
+      - name: Upload iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns-mobile-ios-ipa
+          path: _artifact/NS-mobile.ipa
+          if-no-files-found: error

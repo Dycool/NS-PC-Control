@@ -2465,6 +2465,7 @@ public:
             dlg.exec();
         });
         connect(macrosBtn, &QPushButton::clicked, this, [this] {
+            if (!g_connected.load()) { QMessageBox::information(this, "Macros", "Not connected to server."); return; }
             load_macro_entries();
             auto* dlg = new MacroDialog(this);
             dlg->setAttribute(Qt::WA_DeleteOnClose);

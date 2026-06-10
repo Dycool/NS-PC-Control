@@ -386,7 +386,7 @@ function beginMacroHotkeyListen(i) { const once=(ev)=>{ ev.preventDefault(); let
 function renameMacro(i) { const old=macroEntryName(savedMacros[i],i); const name=prompt('Macro name:', old); if(name===null) return; const n=name.trim(); if(!n){ alert('Macro name cannot be empty.'); return; } const dup=savedMacros.findIndex((m,j)=>j!==i && String(m.name||'').toUpperCase()===n.toUpperCase()); if(dup>=0){ alert('Another macro already uses that name.'); return; } savedMacros[i].name=n; savedMacros[i]=macroPrettyEntry(savedMacros[i]); persistMacros(); refreshMacroList(); }
 function wireMacroMenu() {
     const btn = document.getElementById('btnMacros'); if (!btn) return;
-    btn.onclick = () => { if (!isConnected) { alert('Not connected to server.'); return; } refreshMacroList(); document.getElementById('macroOverlay').style.display='flex'; };
+    btn.onclick = () => { refreshMacroList(); document.getElementById('macroOverlay').style.display='flex'; };
     document.getElementById('btnMacroClose').onclick = () => document.getElementById('macroOverlay').style.display='none';
     document.getElementById('btnMacroExport').onclick = exportMacrosJson;
     document.getElementById('btnMacroImport').onclick = () => document.getElementById('macroImportFile').click();

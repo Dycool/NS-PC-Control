@@ -55,11 +55,13 @@ jobs:
           MAC_ZIP="$(find artifacts -type f \( -name 'ns-client-macos.app.zip' -o -name '*macos*.zip' -o -name '*.app.zip' \) -print -quit)"
           PI_BACKEND="$(find artifacts -type f -name 'ns-backend' -print -quit)"
           ANDROID_APK="$(find artifacts -type f \( -name 'NS-mobile.apk' -o -name 'app-debug.apk' \) -print -quit)"
+          IOS_IPA="$(find artifacts -type f \( -name 'NS-mobile.ipa' -o -name '*.ipa' \) -print -quit)"
           require_file "$WINDOWS_EXE" "Windows ns-client.exe"
           require_file "$LINUX_APPIMAGE" "Linux AppImage"
           require_file "$MAC_ZIP" "macOS .app zip"
           require_file "$PI_BACKEND" "Raspberry Pi ns-backend"
           require_file "$ANDROID_APK" "Android APK"
+          require_file "$IOS_IPA" "iOS IPA"
 
           # Windows: one real static .exe inside release zip.
           mkdir -p _zips/_windows
@@ -90,6 +92,12 @@ jobs:
           (cd _zips/_android && zip -r ../ns-pc-control-android.zip NS-mobile.apk)
           rm -rf _zips/_android
 
+          # iOS IPA, unsigned by CI unless you add signing credentials.
+          mkdir -p _zips/_ios
+          cp "$IOS_IPA" _zips/_ios/NS-mobile.ipa
+          (cd _zips/_ios && zip -r ../ns-pc-control-ios.zip NS-mobile.ipa)
+          rm -rf _zips/_ios
+
           echo "Release zips:"
           ls -lh _zips
 
@@ -102,5 +110,6 @@ jobs:
             _zips/ns-pc-control-mac.zip
             _zips/ns-pc-control-raspberry-pi.zip
             _zips/ns-pc-control-android.zip
+            _zips/ns-pc-control-ios.zip
           draft: true
           generate_release_notes: true
