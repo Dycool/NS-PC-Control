@@ -60,29 +60,30 @@ struct ContentView: View {
                         }
                     }
                     .navigationBarBackButtonHidden(true)
-                    .onChange(of: page) { newPage in Self.lockOrientation(to: newPage) }
-                    .onAppear { Self.lockOrientation(to: page) }
+                    .onChange(of: page) { newPage in lockOrientation(newPage) }
+                    .onAppear { lockOrientation(page) }
             }
         }
         .animation(.easeInOut, value: connected)
         .animation(.easeInOut, value: page)
-        .onAppear { Self.lockOrientation(to: page) }
+        .onAppear { lockOrientation(page) }
     }
+}
 
-    private static func lockOrientation(to page: Page) {
-        DispatchQueue.main.async {
-            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-            let mask: UIInterfaceOrientationMask = page == .mainMenu ? .all : .portrait
-            if #available(iOS 17.0, *) {
-                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
-            } else {
-                if mask != .all {
-                    UIDevice.current.setValue(UIDeviceOrientation.portrait.rawValue, forKey: "orientation")
-                }
-                UIViewController.attemptRotationToDeviceOrientation()
-            }
+func lockOrientation(_ page: ContentView.Page) {
+    DispatchQueue.main.async {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        let mask: UIInterfaceOrientationMask = page == .mainMenu ? .all : .portrait
+        if #available(iOS 17.0, *) {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
+        } else if #available(iOS 16.0, *) {
+            scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+        if mask != .all {
+            UIDevice.current.setValue(UIDeviceOrientation.portrait.rawValue, forKey: "orientation")
         }
     }
+}
 
     var connectionView: some View {
         VStack(spacing: 24) {
@@ -109,7 +110,7 @@ struct ContentView: View {
                 connected = true
                 page = .mainMenu
                 status = "Loaded"
-                Self.lockOrientation(to: .mainMenu)
+                lockOrientation(.mainMenu)
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
@@ -245,7 +246,7 @@ struct WebViewContainer: UIViewRepresentable {
                 BridgeManager.shared.disconnect()
                 DispatchQueue.main.async {
                     self.parent.page = .mainMenu
-                    ContentView.lockOrientation(to: .mainMenu)
+                    lockOrientation(.mainMenu)
                 }
             case "close":
                 BridgeManager.shared.disconnect()
@@ -274,13 +275,13 @@ struct WebViewContainer: UIViewRepresentable {
                 BridgeManager.shared.disconnect()
                 DispatchQueue.main.async {
                     self.parent.page = .touchControls
-                    ContentView.lockOrientation(to: .touchControls)
+                    lockOrientation(.touchControls)
                 }
             case "openEditor":
                 BridgeManager.shared.disconnect()
                 DispatchQueue.main.async {
                     self.parent.page = .editor
-                    ContentView.lockOrientation(to: .editor)
+                    lockOrientation(.editor)
                 }
             default:
                 break
@@ -297,7 +298,7 @@ struct WebViewContainer: UIViewRepresentable {
                     BridgeManager.shared.disconnect()
                     DispatchQueue.main.async {
                         self.parent.page = .touchControls
-                        ContentView.lockOrientation(to: .touchControls)
+                        lockOrientation(.touchControls)
                     }
                     decisionHandler(.cancel); return
                 }
@@ -305,7 +306,7 @@ struct WebViewContainer: UIViewRepresentable {
                     BridgeManager.shared.disconnect()
                     DispatchQueue.main.async {
                         self.parent.page = .editor
-                        ContentView.lockOrientation(to: .editor)
+                        lockOrientation(.editor)
                     }
                     decisionHandler(.cancel); return
                 }
