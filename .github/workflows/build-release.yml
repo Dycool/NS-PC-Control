@@ -55,21 +55,11 @@ jobs:
           MAC_ZIP="$(find artifacts -type f \( -name 'ns-client-macos.app.zip' -o -name '*macos*.zip' -o -name '*.app.zip' \) -print -quit)"
           PI_BACKEND="$(find artifacts -type f -name 'ns-backend' -print -quit)"
           ANDROID_APK="$(find artifacts -type f \( -name 'NS-mobile.apk' -o -name 'app-debug.apk' \) -print -quit)"
-          IOS_IPA="$(find artifacts -type f -name 'NS-mobile.ipa' -print -quit)"
-          IOS_ZIP="$(find artifacts -type f \( -name 'NSControl-ios-unsigned.app.zip' -o -name '*ios*.zip' -o -name '*.app.zip' \) -print -quit)"
-
           require_file "$WINDOWS_EXE" "Windows ns-client.exe"
           require_file "$LINUX_APPIMAGE" "Linux AppImage"
           require_file "$MAC_ZIP" "macOS .app zip"
           require_file "$PI_BACKEND" "Raspberry Pi ns-backend"
           require_file "$ANDROID_APK" "Android APK"
-          if [ -z "${IOS_IPA:-}" ]; then
-            require_file "$IOS_ZIP" "iOS artifact"
-            if [ "$IOS_ZIP" = "$MAC_ZIP" ]; then
-              IOS_ZIP="$(find artifacts/ns-control-ios-unsigned-app artifacts/ns-mobile-ios-ipa -type f \( -name '*.zip' -o -name '*.ipa' \) -print -quit 2>/dev/null || true)"
-              require_file "$IOS_ZIP" "iOS artifact"
-            fi
-          fi
 
           # Windows: one real static .exe inside release zip.
           mkdir -p _zips/_windows
@@ -100,17 +90,6 @@ jobs:
           (cd _zips/_android && zip -r ../ns-pc-control-android.zip NS-mobile.apk)
           rm -rf _zips/_android
 
-          # iOS IPA, release-polished filename.
-          mkdir -p _zips/_ios
-          if [ -n "${IOS_IPA:-}" ] && [ -f "$IOS_IPA" ]; then
-            cp "$IOS_IPA" _zips/_ios/NS-mobile.ipa
-            (cd _zips/_ios && zip -r ../ns-pc-control-ios.zip NS-mobile.ipa)
-          else
-            cp "$IOS_ZIP" _zips/_ios/NS-mobile-ios-unsigned.app.zip
-            (cd _zips/_ios && zip -r ../ns-pc-control-ios.zip NS-mobile-ios-unsigned.app.zip)
-          fi
-          rm -rf _zips/_ios
-
           echo "Release zips:"
           ls -lh _zips
 
@@ -123,6 +102,5 @@ jobs:
             _zips/ns-pc-control-mac.zip
             _zips/ns-pc-control-raspberry-pi.zip
             _zips/ns-pc-control-android.zip
-            _zips/ns-pc-control-ios.zip
           draft: true
           generate_release_notes: true

@@ -99,11 +99,7 @@ On Windows, use Visual Studio Build Tools plus Qt6 and SDL3 packages built for t
 
 ---
 
-### Mobile Clients (Android, iOS)
-
-Both mobile clients share a C protocol library at `mobile/shared/` and differ only in platform glue (WebSocket, sensors, controllers, haptics).
-
-#### Android
+### Mobile Client (Android)
 
 **Prerequisites:**
 
@@ -118,33 +114,6 @@ gradle :app:assembleDebug --no-daemon
 ```
 
 Output: `mobile/android/app/build/outputs/apk/debug/app-debug.apk`
-
-#### iOS
-
-**Prerequisites:**
-
-- macOS with Xcode 15+
-- XcodeGen (`brew install xcodegen`)
-
-**Build:**
-
-```bash
-cd mobile/ios
-xcodegen generate
-xcodebuild \
-  -project NSControl.xcodeproj \
-  -scheme NSControl \
-  -sdk iphoneos \
-  -destination 'generic/platform=iOS' \
-  -configuration Release \
-  SYMROOT=build \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY='' \
-  build
-```
-
-Output: `mobile/ios/build/Release-iphoneos/NSControl.app` (package as `.ipa` for sideloading).
 
 ---
 
