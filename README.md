@@ -85,6 +85,7 @@ Detailed guides and technical information are in the `docs/` folder:
 * **[Macros](docs/macros.md)** - Recording and replaying button sequences for speedruns and TAS.
 * **[Architecture & Security](docs/architecture.md)** - Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Controls](docs/web-app.md)** - Using the embedded web interface and mobile touch controls.
+* **[How I Got This Idea](docs/vision.md)** - The story behind this project.
 
 ---
 
