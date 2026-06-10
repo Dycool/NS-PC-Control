@@ -98,7 +98,8 @@ window.WebSocket.CLOSED = 3;
 </script>
 </head>
 <body>
-    <h2>NS PC Control</h2>
+    <h2 id="appTitle">NS Web Control</h2>
+    <script>if (location.protocol === 'file:') document.getElementById('appTitle').textContent = 'NS Mobile';</script>
     <div class="row" id="kbModeContainer">
         <label>Keyboard Mode:</label>
         <select id="kbMode">
