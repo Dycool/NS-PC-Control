@@ -577,7 +577,8 @@ document.getElementById('btnSetupBindings').onclick = () => {
 <script>
 (function(){
 var isIOS = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge);
-if(!isIOS)return;
+var isAndroid = !!(window.NSBridge && typeof NSBridge.setMotionRemap=== 'function');
+if(!isIOS && !isAndroid)return;
 document.getElementById('dbgBtn').style.display='flex';
 
 var perms = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
@@ -587,7 +588,7 @@ for(var p=0;p<perms.length;p++)for(var s=0;s<8;s++){
 }
 var idx = 0, timer = null, running = false;
 
-var d = [{axis:1,sign:1},{axis:2,sign:-1},{axis:0,sign:1}];
+var d = isIOS ? [{axis:1,sign:1},{axis:2,sign:-1},{axis:0,sign:1}] : [{axis:1,sign:-1},{axis:2,sign:-1},{axis:0,sign:-1}];
 var c = [{axis:d[0].axis,sign:d[0].sign},{axis:d[1].axis,sign:d[1].sign},{axis:d[2].axis,sign:d[2].sign}];
 
 function syncUI(){
