@@ -121,7 +121,7 @@ func lockOrientation(_ page: ContentView.Page) {
             scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         }
         if mask != .all {
-            UIDevice.current.setValue(UIDeviceOrientation.portrait.rawValue, forKey: "orientation")
+            UIDevice.current.setValue(UIDeviceOrientation.landscapeRight.rawValue, forKey: "orientation")
         }
     }
 }
@@ -182,7 +182,13 @@ struct WebViewContainer: UIViewRepresentable {
         onHubRefresh: function(){ window.webkit.messageHandlers.nsBridge.postMessage({type:'hubRefresh'}); },
         onOpenTouch: function(){ window.webkit.messageHandlers.nsBridge.postMessage({type:'openTouch'}); },
         onOpenEditor: function(){ window.webkit.messageHandlers.nsBridge.postMessage({type:'openEditor'}); },
-        onBack: function(){ window.webkit.messageHandlers.nsBridge.postMessage({type:'back'}); }
+        onBack: function(){ window.webkit.messageHandlers.nsBridge.postMessage({type:'back'}); },
+        setMotionRemap: function(axInput, axSign, ayInput, aySign, azInput, azSign) {
+            window.webkit.messageHandlers.nsBridge.postMessage({
+                type:'setMotionRemap',
+                remap:[{axis:axInput,sign:axSign},{axis:ayInput,sign:aySign},{axis:azInput,sign:azSign}]
+            });
+        }
     };
     window.__bridge = {
         connect: function(url) {
