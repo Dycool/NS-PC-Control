@@ -136,6 +136,14 @@ Java_com_nscontrol_NativeProtocol_nativeMotionFromValues(JNIEnv* env, jclass cla
     return jni_new_byte_array(env, NS_PROTOCOL_MOTION_SIZE, motion);
 }
 
+void JNICALL
+Java_com_nscontrol_NativeProtocol_nativeSetMotionRemap(JNIEnv* env, jclass clazz,
+                                                       jint axInput, jint axSign,
+                                                       jint ayInput, jint aySign,
+                                                       jint azInput, jint azSign) {
+    ns_set_motion_remap_android(axInput, axSign, ayInput, aySign, azInput, azSign);
+}
+
 jbyteArray JNICALL
 Java_com_nscontrol_NativeProtocol_nativePhoneMotion(JNIEnv* env, jclass clazz,
                                                     jfloat accelX, jfloat accelY, jfloat accelZ,

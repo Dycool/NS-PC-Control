@@ -143,6 +143,28 @@ void ns_motion_write_values(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
     (void)has_motion;
 }
 
+static struct {
+    int input;
+    int sign;
+} gAndroidRemap[3] = {{1, -1}, {2, -1}, {0, -1}};  // defaults: (-y, -z, -x)
+
+static float pick_value(float x, float y, float z, int input) {
+    switch (input) {
+        case 0: return x;
+        case 1: return y;
+        case 2: return z;
+        default: return 0;
+    }
+}
+
+void ns_set_motion_remap_android(int ax_input, int ax_sign,
+                                 int ay_input, int ay_sign,
+                                 int az_input, int az_sign) {
+    gAndroidRemap[0].input = ax_input; gAndroidRemap[0].sign = ax_sign == -1 ? -1 : 1;
+    gAndroidRemap[1].input = ay_input; gAndroidRemap[1].sign = ay_sign == -1 ? -1 : 1;
+    gAndroidRemap[2].input = az_input; gAndroidRemap[2].sign = az_sign == -1 ? -1 : 1;
+}
+
 void ns_motion_from_android(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
                             float accel_x,
                             float accel_y,
@@ -152,14 +174,16 @@ void ns_motion_from_android(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],
                             float gyro_z) {
     const float accel_scale = ns_accel_scale_android();
     const float gyro_scale = ns_gyro_scale();
+    float a[3] = {accel_x, accel_y, accel_z};
+    float g[3] = {gyro_x, gyro_y, gyro_z};
     ns_motion_write_values(out_motion,
-                           ns_clamp_motion(-accel_y * accel_scale),
-                           ns_clamp_motion(-accel_z * accel_scale),
-                           ns_clamp_motion(-accel_x * accel_scale),
-                           ns_gyro_deadzone(ns_clamp_motion(-gyro_y * gyro_scale)),
-                           ns_gyro_deadzone(ns_clamp_motion(-gyro_z * gyro_scale)),
-                           ns_gyro_deadzone(ns_clamp_motion(-gyro_x * gyro_scale)),
-                           1);
+        ns_clamp_motion(pick_value(a[0], a[1], a[2], gAndroidRemap[0].input) * (float)gAndroidRemap[0].sign * accel_scale),
+        ns_clamp_motion(pick_value(a[0], a[1], a[2], gAndroidRemap[1].input) * (float)gAndroidRemap[1].sign * accel_scale),
+        ns_clamp_motion(pick_value(a[0], a[1], a[2], gAndroidRemap[2].input) * (float)gAndroidRemap[2].sign * accel_scale),
+        ns_gyro_deadzone(ns_clamp_motion(pick_value(g[0], g[1], g[2], gAndroidRemap[0].input) * (float)gAndroidRemap[0].sign * gyro_scale)),
+        ns_gyro_deadzone(ns_clamp_motion(pick_value(g[0], g[1], g[2], gAndroidRemap[1].input) * (float)gAndroidRemap[1].sign * gyro_scale)),
+        ns_gyro_deadzone(ns_clamp_motion(pick_value(g[0], g[1], g[2], gAndroidRemap[2].input) * (float)gAndroidRemap[2].sign * gyro_scale)),
+        1);
 }
 
 static struct {
@@ -173,15 +197,6 @@ void ns_set_motion_remap(int ax_input, int ax_sign,
     gRemap[0].input = ax_input; gRemap[0].sign = ax_sign == -1 ? -1 : 1;
     gRemap[1].input = ay_input; gRemap[1].sign = ay_sign == -1 ? -1 : 1;
     gRemap[2].input = az_input; gRemap[2].sign = az_sign == -1 ? -1 : 1;
-}
-
-static float pick_value(float x, float y, float z, int input) {
-    switch (input) {
-        case 0: return x;
-        case 1: return y;
-        case 2: return z;
-        default: return 0;
-    }
 }
 
 void ns_motion_from_apple(uint8_t out_motion[NS_PROTOCOL_MOTION_SIZE],

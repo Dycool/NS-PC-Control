@@ -653,6 +653,11 @@ class MainActivity : AppCompatActivity() {
         fun onHubRefresh() { runOnUiThread { scanPhysicalControllers(); updateHubStatusOnPage() } }
 
         @JavascriptInterface
+        fun setMotionRemap(axInput: Int, axSign: Int, ayInput: Int, aySign: Int, azInput: Int, azSign: Int) {
+            NativeProtocol.nativeSetMotionRemap(axInput, axSign, ayInput, aySign, azInput, azSign)
+        }
+
+        @JavascriptInterface
         fun onOpenTouch() { runOnUiThread { navTo(Page.TOUCH_CONTROLS) } }
 
         @JavascriptInterface
@@ -973,17 +978,7 @@ class MainActivity : AppCompatActivity() {
         val accel = if (physicalHasGravity[slot]) physicalGravity[slot] else physicalAccel[slot]
         val a = remapSensorForDisplay(accel)
         val g = remapSensorForDisplay(physicalGyro[slot])
-        val accelScale = 4096.0f / Protocol.STANDARD_GRAVITY
-        val gyroScale = 57.29577951308232f * 16.384f
-        val sample = Protocol.motionFromValues(
-            clampMotionShort(-a[1] * accelScale),
-            clampMotionShort(-a[2] * accelScale),
-            clampMotionShort(-a[0] * accelScale),
-            gyroDeadzoneShort(clampMotionShort(-g[1] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-g[2] * gyroScale)),
-            gyroDeadzoneShort(clampMotionShort(-g[0] * gyroScale)),
-            hasMotion = true
-        )
+        val sample = NativeProtocol.nativePhoneMotion(a[0], a[1], a[2], g[0], g[1], g[2])
         val pad = physicalPads[slot]
         pad.motionSamples[0] = pad.motionSamples[1]
         pad.motionSamples[1] = pad.motionSamples[2]

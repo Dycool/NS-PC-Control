@@ -121,6 +121,11 @@ void ns_set_motion_remap(int ax_input, int ax_sign,
                          int ay_input, int ay_sign,
                          int az_input, int az_sign);
 
+// Dynamic remap for ns_motion_from_android. Default: (-y, -z, -x).
+void ns_set_motion_remap_android(int ax_input, int ax_sign,
+                                 int ay_input, int ay_sign,
+                                 int az_input, int az_sign);
+
 void ns_pad_write_neutral(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE]);
 void ns_pad_set_hid(uint8_t out_pad[NS_PROTOCOL_EXT_PAD_SIZE],
                     const uint8_t hid[NS_PROTOCOL_HID_SIZE]);
