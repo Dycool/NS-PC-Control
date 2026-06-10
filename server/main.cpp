@@ -319,7 +319,7 @@ static bool server_macro_handle_ws_chunk_packet(int client_idx, const uint8_t* d
     ns::macro::MacroUdpChunkHeaderWire h{};
     memcpy(&h, data, sizeof(h));
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
-    if (h.version != PROTO_VERSION) return true;
+    if (h.version != PROTO_VERSION && h.version != WEB_PROTO_VERSION) return true;
     if (h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_index >= h.chunk_count) return true;
     if (bytes != ns::macro::CHUNK_HEADER_SIZE + (size_t)h.chunk_len) return true;
     uint64_t now = now_us();
@@ -1425,10 +1425,11 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         return false;
     }
 
-    std::printf("[gadget] %s; creating built-in %d-interface %s gadget\n",
-                reason ? reason : "HID gadget not ready",
-                HID_PORT_COUNT,
-                g_legacy_mode ? "legacy 8-byte" : "64-byte motion");
+    if (g_verbose)
+        std::printf("[gadget] %s; creating built-in %d-interface %s gadget\n",
+                    reason ? reason : "HID gadget not ready",
+                    HID_PORT_COUNT,
+                    g_legacy_mode ? "legacy 8-byte" : "64-byte motion");
 
     // Try to load and mount configfs.  Ignore failures here because both may
     // already be active on systems that previously used setup_gadget.sh.
@@ -1502,7 +1503,8 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     }
 
     if (!write_text_file(join_path(GADGET_DIR, "UDC").c_str(), udc.c_str())) return false;
-    std::printf("[gadget] Bound to UDC: %s\n", udc.c_str());
+    if (g_verbose)
+        std::printf("[gadget] Bound to UDC: %s\n", udc.c_str());
 
     // /dev/hidg* can appear shortly after binding.
     for (int tries = 0; tries < 20; ++tries) {
@@ -2274,12 +2276,12 @@ static const char INDEX_HTML[] =
     "        input[type=\"text\"], select {\n"
     "            flex: 1; padding: 4px; font-family: 'Consolas', monospace; border: 1px solid #ccc;\n"
     "        }\n"
-    "        button {\n"
-    "            padding: 6px 16px; font-family: 'Segoe UI'; font-size: 14px;\n"
-    "            background: #f0f0f0; border: 1px solid #ccc; cursor: pointer;\n"
-    "            border-radius: 4px;\n"
-    "            min-height: 30px;\n"
-    "        }\n"
+"        button {\n"
+"            padding: 6px 16px; font-family: 'Segoe UI'; font-size: 14px;\n"
+"            background: #f0f0f0; border: 1px solid #ccc; cursor: pointer;\n"
+"            border-radius: 4px;\n"
+"            min-height: 30px; text-align: center;\n"
+"        }\n"
     "        button:hover { background: #e0e0e0; }\n"
     "        .btn-group { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; }\n"
     "        hr { border: none; border-top: 2px solid #DDDDDD; margin: 20px 0; }\n"
@@ -2345,16 +2347,17 @@ static const char INDEX_HTML[] =
     "            <div id=\"bindingsScrollArea\">\n"
     "                <div id=\"bindingsList\"></div>\n"
     "            </div>\n"
-    "            <div class=\"modal-footer\">\n"
-    "                <div class=\"footer-group\">\n"
-    "                    <button id=\"btnSaveBindings\" style=\"background: #e3f2fd; border-color: #90caf9;\">Save</button>\n"
-    "                    <button id=\"btnCancelBindings\">Cancel</button>\n"
-    "                </div>\n"
-    "                <div class=\"footer-group\">\n"
-    "                    <button id=\"btnSetupBindings\">Setup Wizard</button>\n"
-    "                    <button id=\"btnResetBindings\">Reset</button>\n"
-    "                </div>\n"
-    "            </div>\n"
+"            <div class=\"modal-footer\">\n"
+"                <div class=\"footer-group\">\n"
+"                    <button id=\"btnSaveBindings\" style=\"background: #e3f2fd; border-color: #90caf9;\">Save</button>\n"
+"                    <button id=\"btnCancelBindings\">Cancel</button>\n"
+"                </div>\n"
+"                <div class=\"footer-group\">\n"
+"                    <button id=\"btnClearBindings\" style=\"background: #ffebee; border-color: #ef9a9a;\">Clear</button>\n"
+"                    <button id=\"btnSetupBindings\">Setup Wizard</button>\n"
+"                    <button id=\"btnResetBindings\">Reset</button>\n"
+"                </div>\n"
+"            </div>\n"
     "        </div>\n"
     "    </div>\n"
     "    <div id=\"macroOverlay\" style=\"display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); justify-content:center; align-items:center; z-index:10001;\">\n"
@@ -2564,8 +2567,8 @@ static const char INDEX_HTML[] =
     "function macroPrettyEntry(obj) { const m=macroPrettyObject(obj); if (!m.name) m.name='Macro'; m.hotkey=normalizeMacroKey(obj && obj.hotkey); return m; }\n"
     "function persistMacros() { savedMacros = savedMacros.map(macroPrettyEntry); localStorage.setItem('nswc_macros', JSON.stringify(savedMacros)); }\n"
     "function macroEntriesExport(entries=savedMacros) { return JSON.stringify({macros:entries.map(macroPrettyEntry)}, null, 2); }\n"
-    "function macroHotkeyConflicts(code, skip=-1) { code=normalizeMacroKey(code); if (!code) return false; if (Object.values(currentBindings).includes(code)) return 'keyboard binding'; const dup=savedMacros.find((m,i)=>i!==skip && normalizeMacroKey(m.hotkey)===code); return dup ? (dup.name || 'another macro') : false; }\n"
-    "function refreshMacroList() { const rows=document.getElementById('macroRows'); if(!rows) return; rows.innerHTML=''; if(!savedMacros.length){ const e=document.createElement('div'); e.textContent='No macros'; e.style.cssText='text-align:center; width:250px; padding:4px;'; rows.appendChild(e); } savedMacros.forEach((m,i)=>{ const r=document.createElement('div'); r.style.cssText='display:grid; grid-template-columns:minmax(0,250px) 110px 68px 64px 64px; gap:4px; margin-bottom:4px;'; const add=(txt,fn)=>{const b=document.createElement('button'); b.textContent=txt; b.onclick=fn; r.appendChild(b);}; add(macroEntryName(m,i),()=>runMacroServerSide(m)); add(normalizeMacroKey(m.hotkey),()=>beginMacroHotkeyListen(i)); add('Rename',()=>renameMacro(i)); add('Export',()=>exportOneMacro(i)); add('Delete',()=>{savedMacros.splice(i,1); persistMacros(); refreshMacroList();}); rows.appendChild(r); }); }\n"
+    "function macroHotkeyConflicts(code, skip=-1) { code=normalizeMacroKey(code); if (!code) return false; if (Object.values(currentBindings).some(v=>normalizeMacroKey(v)===code)) return 'keyboard binding'; const dup=savedMacros.find((m,i)=>i!==skip && normalizeMacroKey(m.hotkey)===code); return dup ? (dup.name || 'another macro') : false; }\n"
+    "function refreshMacroList() { const rows=document.getElementById('macroRows'); if(!rows) return; rows.innerHTML=''; if(!savedMacros.length){ const e=document.createElement('div'); e.textContent='No macros'; e.style.cssText='text-align:center; width:250px; padding:4px;'; rows.appendChild(e); } savedMacros.forEach((m,i)=>{ const r=document.createElement('div'); r.style.cssText='display:grid; grid-template-columns:minmax(0,250px) 110px 68px 64px 64px; gap:4px; margin-bottom:4px;'; const add=(txt,fn)=>{const b=document.createElement('button'); b.textContent=txt; b.onclick=fn; r.appendChild(b);}; add(macroEntryName(m,i),()=>runMacroServerSide(m)); add(formatKeyName(m.hotkey||''),()=>beginMacroHotkeyListen(i)); add('Rename',()=>renameMacro(i)); add('Export',()=>exportOneMacro(i)); add('Delete',()=>{savedMacros.splice(i,1); persistMacros(); refreshMacroList();}); rows.appendChild(r); }); }\n"
     "function startMacro(objOrText) { macroSteps = parseMacro(objOrText); if (!macroSteps.length) { alert('No usable macro commands. Example: WAIT 200; A 100; B 100'); return; } macroRunning = true; macroStepIndex = 0; macroState = getNeutralState(); macroStepUntil = performance.now(); }\n"
     "function updateMacroState() {\n"
     "    if (!macroRunning) return null; const now = performance.now();\n"
@@ -2747,8 +2750,11 @@ static const char INDEX_HTML[] =
     "    if (code === 'Escape') { isSetupMode = false; activeBindKey = null; renderBindings(); return; }\n"
     "    if (isSetupMode) {\n"
     "        for (const existingCode of Object.values(currentBindings)) if (existingCode === code) return;\n"
+    "        if (macroHotkeyConflicts(code)) return;\n"
     "        currentBindings[activeBindKey] = code; startNextSetupBind();\n"
     "    } else {\n"
+    "        const conflict = macroHotkeyConflicts(code);\n"
+    "        if (conflict) { alert('Key already used by macro: '+conflict); activeBindKey = null; renderBindings(); return; }\n"
     "        for (const [existingBtn, existingCode] of Object.entries(currentBindings)) {\n"
     "            if (existingCode === code && existingBtn !== activeBindKey) currentBindings[existingBtn] = 'Unbound';\n"
     "        }\n"
@@ -2771,10 +2777,15 @@ static const char INDEX_HTML[] =
     "    if (isSetupMode) isSetupMode = false;\n"
     "    currentBindings = { ...defaultBindings }; activeBindKey = null; renderBindings();\n"
     "};\n"
-    "document.getElementById('btnSetupBindings').onclick = () => {\n"
-    "    for (let k in currentBindings) currentBindings[k] = 'Unbound';\n"
-    "    setupQueue = Object.keys(currentBindings); isSetupMode = true; startNextSetupBind();\n"
-    "};\n"
+"document.getElementById('btnClearBindings').onclick = () => {\n"
+"    if (isSetupMode) isSetupMode = false;\n"
+"    for (let k in currentBindings) currentBindings[k] = 'Unbound';\n"
+"    activeBindKey = null; renderBindings();\n"
+"};\n"
+"document.getElementById('btnSetupBindings').onclick = () => {\n"
+"    for (let k in currentBindings) currentBindings[k] = 'Unbound';\n"
+"    setupQueue = Object.keys(currentBindings); isSetupMode = true; startNextSetupBind();\n"
+"};\n"
     "</script>\n"
     "</body>\n"
     "</html>\n";
