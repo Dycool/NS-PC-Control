@@ -60,10 +60,28 @@ struct ContentView: View {
                         }
                     }
                     .navigationBarBackButtonHidden(true)
+                    .onChange(of: page) { newPage in Self.lockOrientation(to: newPage) }
+                    .onAppear { Self.lockOrientation(to: page) }
             }
         }
         .animation(.easeInOut, value: connected)
         .animation(.easeInOut, value: page)
+        .onAppear { Self.lockOrientation(to: page) }
+    }
+
+    private static func lockOrientation(to page: Page) {
+        DispatchQueue.main.async {
+            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+            let mask: UIInterfaceOrientationMask = page == .mainMenu ? .all : .portrait
+            if #available(iOS 17.0, *) {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
+            } else {
+                if mask != .all {
+                    UIDevice.current.setValue(UIDeviceOrientation.portrait.rawValue, forKey: "orientation")
+                }
+                UIViewController.attemptRotationToDeviceOrientation()
+            }
+        }
     }
 
     var connectionView: some View {
@@ -91,6 +109,7 @@ struct ContentView: View {
                 connected = true
                 page = .mainMenu
                 status = "Loaded"
+                Self.lockOrientation(to: .mainMenu)
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
@@ -224,7 +243,10 @@ struct WebViewContainer: UIViewRepresentable {
                 BridgeManager.shared.connect(host: self.parent.host, mode: .touchControls)
             case "back":
                 BridgeManager.shared.disconnect()
-                DispatchQueue.main.async { self.parent.page = .mainMenu }
+                DispatchQueue.main.async {
+                    self.parent.page = .mainMenu
+                    ContentView.lockOrientation(to: .mainMenu)
+                }
             case "close":
                 BridgeManager.shared.disconnect()
             case "binary":
@@ -250,10 +272,16 @@ struct WebViewContainer: UIViewRepresentable {
                 break
             case "openTouch":
                 BridgeManager.shared.disconnect()
-                DispatchQueue.main.async { self.parent.page = .touchControls }
+                DispatchQueue.main.async {
+                    self.parent.page = .touchControls
+                    ContentView.lockOrientation(to: .touchControls)
+                }
             case "openEditor":
                 BridgeManager.shared.disconnect()
-                DispatchQueue.main.async { self.parent.page = .editor }
+                DispatchQueue.main.async {
+                    self.parent.page = .editor
+                    ContentView.lockOrientation(to: .editor)
+                }
             default:
                 break
             }
@@ -267,12 +295,18 @@ struct WebViewContainer: UIViewRepresentable {
                 let last = url.lastPathComponent.lowercased()
                 if last == "mobile.html", self.parent.page != .touchControls {
                     BridgeManager.shared.disconnect()
-                    DispatchQueue.main.async { self.parent.page = .touchControls }
+                    DispatchQueue.main.async {
+                        self.parent.page = .touchControls
+                        ContentView.lockOrientation(to: .touchControls)
+                    }
                     decisionHandler(.cancel); return
                 }
                 if last == "editor.html", self.parent.page != .editor {
                     BridgeManager.shared.disconnect()
-                    DispatchQueue.main.async { self.parent.page = .editor }
+                    DispatchQueue.main.async {
+                        self.parent.page = .editor
+                        ContentView.lockOrientation(to: .editor)
+                    }
                     decisionHandler(.cancel); return
                 }
             }
