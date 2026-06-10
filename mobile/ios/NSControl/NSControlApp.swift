@@ -114,7 +114,7 @@ struct ContentView: View {
 func lockOrientation(_ page: ContentView.Page) {
     DispatchQueue.main.async {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-        let mask: UIInterfaceOrientationMask = page == .mainMenu ? .all : .portrait
+        let mask: UIInterfaceOrientationMask = page == .mainMenu ? .all : .landscape
         if #available(iOS 17.0, *) {
             scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
         } else if #available(iOS 16.0, *) {
