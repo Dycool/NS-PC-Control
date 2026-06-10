@@ -281,6 +281,14 @@ static int16_t gyro_deadzone_i16(int16_t v) {
     return std::abs((int)v) <= GYRO_DEADZONE ? 0 : v;
 }
 
+enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
+static std::atomic<int> g_keyboardMode{KB_OFF};
+static std::atomic<bool> g_gyroEnabled{true};
+static std::atomic<bool> g_rumbleEnabled{true};
+static std::unordered_map<std::string, std::string> g_keyBindings;
+static std::mutex g_pressedKeysMutex;
+static std::unordered_set<std::string> g_pressedKeys;
+
 class SDLInputManager {
 public:
     bool start() {
@@ -943,14 +951,6 @@ static bool write_kv_file(const std::string& path, const std::unordered_map<std:
     for (const auto& kv : values) f << kv.first << "=" << kv.second << "\n";
     return (bool)f;
 }
-
-enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
-static std::atomic<int> g_keyboardMode{KB_OFF};
-static std::atomic<bool> g_gyroEnabled{true};
-static std::atomic<bool> g_rumbleEnabled{true};
-static std::unordered_map<std::string, std::string> g_keyBindings;
-static std::mutex g_pressedKeysMutex;
-static std::unordered_set<std::string> g_pressedKeys;
 
 static std::vector<std::pair<std::string, std::string>> binding_keys() {
     return {
