@@ -938,25 +938,36 @@ static void build_standard_report(const ExtendedHIDReport& src,
         }
     }
 
-    auto store_imu_sample = [](ProInputReport30& dst, int idx, const MotionReport& m) {
-        // ProInputReport30 is packed, so GCC does not allow binding its fields
-        // to int16_t&.  Assign fields directly instead.
-        if (idx == 0) {
-            dst.accel_y_0 = m.ay; dst.accel_x_0 = m.ax; dst.accel_z_0 = m.az;
-            dst.gyro_y_0  = m.gy; dst.gyro_x_0  = m.gx; dst.gyro_z_0  = m.gz;
-        } else if (idx == 1) {
-            dst.accel_y_1 = m.ay; dst.accel_x_1 = m.ax; dst.accel_z_1 = m.az;
-            dst.gyro_y_1  = m.gy; dst.gyro_x_1  = m.gx; dst.gyro_z_1  = m.gz;
-        } else {
-            dst.accel_y_2 = m.ay; dst.accel_x_2 = m.ax; dst.accel_z_2 = m.az;
-            dst.gyro_y_2  = m.gy; dst.gyro_x_2  = m.gx; dst.gyro_z_2  = m.gz;
-        }
-    };
 
-    store_imu_sample(out, 0, imu[0]);
-    store_imu_sample(out, 1, imu[1]);
-    store_imu_sample(out, 2, imu[2]);
-}
+auto store_imu_sample = [](ProInputReport30& dst, int idx, const MotionReport& m) {
+    if (idx == 0) {
+        dst.accel_y_0 = m.ax;
+        dst.accel_x_0 = m.ay;
+        dst.accel_z_0 = m.az;
+
+        dst.gyro_y_0  = m.gx;
+        dst.gyro_x_0  = m.gy;
+        dst.gyro_z_0  = m.gz;
+
+    } else if (idx == 1) {
+        dst.accel_y_1 = m.ax;
+        dst.accel_x_1 = m.ay;
+        dst.accel_z_1 = m.az;
+
+        dst.gyro_y_1  = m.gx;
+        dst.gyro_x_1  = m.gy;
+        dst.gyro_z_1  = m.gz;
+        
+    } else {
+        dst.accel_y_2 = m.ax;
+        dst.accel_x_2 = m.ay;
+        dst.accel_z_2 = m.az;
+
+        dst.gyro_y_2  = m.gx;
+        dst.gyro_x_2  = m.gy;
+        dst.gyro_z_2  = m.gz;
+    }
+};
 
 static int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply) {
     memset(reply->reply_data, 0, sizeof(reply->reply_data));
