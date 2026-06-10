@@ -29,6 +29,7 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -188,6 +189,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -651,11 +653,6 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun onHubRefresh() { runOnUiThread { scanPhysicalControllers(); updateHubStatusOnPage() } }
-
-        @JavascriptInterface
-        fun setMotionRemap(axInput: Int, axSign: Int, ayInput: Int, aySign: Int, azInput: Int, azSign: Int) {
-            NativeProtocol.nativeSetMotionRemap(axInput, axSign, ayInput, aySign, azInput, azSign)
-        }
 
         @JavascriptInterface
         fun onOpenTouch() { runOnUiThread { navTo(Page.TOUCH_CONTROLS) } }

@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.NSControl" parent="Theme.AppCompat.Light.NoActionBar">
+    <style name="Theme.NSControl" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="backgroundColor">#FFFFFF</item>
+        <item name="inputBackground">#F5F5F5</item>
+        <item name="inputStroke">#DDDDDD</item>
         <item name="android:statusBarColor">#FFFFFF</item>
         <item name="android:navigationBarColor">#FFFFFF</item>
         <item name="android:windowLightStatusBar">true</item>

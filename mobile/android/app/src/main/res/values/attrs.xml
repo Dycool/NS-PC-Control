@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <attr name="backgroundColor" format="color" />
+    <attr name="inputBackground" format="color" />
+    <attr name="inputStroke" format="color" />
+</resources>

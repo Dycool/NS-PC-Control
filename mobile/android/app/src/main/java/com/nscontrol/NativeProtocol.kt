@@ -25,7 +25,6 @@ object NativeProtocol {
         gx: Short, gy: Short, gz: Short,
         hasMotion: Boolean
     ): ByteArray
-    external fun nativeSetMotionRemap(axInput: Int, axSign: Int, ayInput: Int, aySign: Int, azInput: Int, azSign: Int)
     external fun nativePhoneMotion(
         accelX: Float, accelY: Float, accelZ: Float,
         gyroX: Float, gyroY: Float, gyroZ: Float

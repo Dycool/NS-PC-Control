@@ -5,7 +5,7 @@
     android:orientation="vertical"
     android:gravity="center"
     android:padding="32dp"
-    android:background="#FFFFFF">
+    android:background="?attr/backgroundColor">
 
     <ImageView
         android:layout_width="96dp"
@@ -28,7 +28,7 @@
         android:layout_height="wrap_content"
         android:text="Connect to your Raspberry Pi server"
         android:textSize="16sp"
-        android:textColor="#666666"
+        android:textColor="?android:attr/textColorSecondary"
         android:layout_marginBottom="40dp" />
 
     <EditText
@@ -60,7 +60,7 @@
         android:layout_height="wrap_content"
         android:text="Ready"
         android:textSize="14sp"
-        android:textColor="#999999"
+        android:textColor="?android:attr/textColorTertiary"
         android:layout_marginTop="16dp" />
 
 </LinearLayout>
