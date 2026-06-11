@@ -57,6 +57,7 @@ static int closesocket(SOCKET s) { return close(s); }
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStyle>
 #include <QStyleFactory>
 #include <QTimer>
@@ -699,6 +700,8 @@ private:
 };
 
 static SDLInputManager g_sdlInput;
+static std::atomic<uint64_t> g_serverLastReplyUs{0};
+
 
 class RumbleManager {
 public:
@@ -1477,7 +1480,6 @@ static std::atomic<bool> g_connected{false};
 static std::thread g_senderThread;
 static uint8_t g_hmacKey[32]{};
 static std::atomic<uint32_t> g_packetCount{0};
-static std::atomic<uint64_t> g_serverLastReplyUs{0};
 static std::mutex g_statusMutex;
 static std::string g_statusMessage = "Ready";
 static std::string g_lastError;
