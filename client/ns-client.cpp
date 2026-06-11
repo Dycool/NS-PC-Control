@@ -489,12 +489,12 @@ private:
         if (button(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) r.buttons |= ns::BTN_RSTICK;
         if (button(pad, SDL_GAMEPAD_BUTTON_GUIDE)) r.buttons |= ns::BTN_HOME;
         if (button(pad, SDL_GAMEPAD_BUTTON_MISC1)) r.buttons |= ns::BTN_CAPTURE;
-        if (g_homeShortcutEnabled.load() && should_use_combo_shortcuts(d) &&
+        if (g_homeShortcutEnabled.load() &&
             button(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK) && button(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
             r.buttons |= ns::BTN_HOME;
             r.buttons &= ~(ns::BTN_LSTICK | ns::BTN_RSTICK);
         }
-        if (g_captureShortcutEnabled.load() && should_use_combo_shortcuts(d) &&
+        if (g_captureShortcutEnabled.load() &&
             button(pad, SDL_GAMEPAD_BUTTON_BACK) && button(pad, SDL_GAMEPAD_BUTTON_START)) {
             r.buttons |= ns::BTN_CAPTURE;
             r.buttons &= ~(ns::BTN_MINUS | ns::BTN_PLUS);
