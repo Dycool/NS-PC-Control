@@ -174,7 +174,7 @@ private final class PhysicalPad {
     var rumbleUntilMs: UInt64 = 0
     var rumbleLastSetMs: UInt64 = 0
     var hapticEngine: CHHapticEngine?
-    var hapticPlayer: CHHapticAdvancedPatternPlayer?
+    var hapticPlayer: CHHapticPatternPlayer?
     var motionSamples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
     var motionSampleCount = 0
 
@@ -524,7 +524,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func setLandscapeMode(_ landscape: Bool) {
-        orientationMask = landscape ? .landscape : .allButUpsideDown
+        // Touch gyro is calibrated only for this physical pose:
+        // portrait turned to landscape with the phone top/camera/notch on the LEFT.
+        // In UIKit interface-orientation terms, that is landscapeRight.
+        orientationMask = landscape ? .landscapeRight : .allButUpsideDown
+        if landscape { currentOrientation = .landscapeRight }
         if #available(iOS 16.0, *) {
             view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: orientationMask))
         }
@@ -915,11 +919,14 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func pushPhoneMotionSample(_ motion: CMDeviceMotion) {
-        let orientation = currentOrientation
         let g0 = motion.gravity
         let r0 = motion.rotationRate
-        let g = remapForInterfaceOrientation(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z), orientation: orientation)
-        let r = remapForInterfaceOrientation(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z), orientation: orientation)
+
+        // Phone/touch gyro is intentionally NOT dynamic-orientation based.
+        // It is only meant for the locked landscape pose where the phone top is on the left.
+        let g = remapForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
+        let r = remapForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
+
         let sample = ProtocolWire.motionFromApple(gravityX: g.0, gravityY: g.1, gravityZ: g.2,
                                                   rotationX: r.0, rotationY: r.1, rotationZ: r.2)
         phoneMotion.withLock { state in
@@ -937,20 +944,10 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
     }
 
-    private func remapForInterfaceOrientation(x: Float, y: Float, z: Float, orientation: UIInterfaceOrientation) -> (Float, Float, Float) {
-        switch orientation {
-        case .landscapeLeft:
-            // iOS reports landscape orientation opposite to the Android rotation labels for this app.
-            // This fixes the observed iOS inversion: left/right and up/down were reversed.
-            return (y, -x, z)
-        case .landscapeRight:
-            // iOS reports landscape orientation opposite to the Android rotation labels for this app.
-            return (-y, x, z)
-        case .portraitUpsideDown:
-            return (-x, -y, z)
-        default:
-            return (x, y, z)
-        }
+    private func remapForLandscapeTopOnLeft(x: Float, y: Float, z: Float) -> (Float, Float, Float) {
+        // Same X/Y screen-space remap as Android Surface.ROTATION_270:
+        // top/camera/notch on the left -> (y, -x, z).
+        return (y, -x, z)
     }
 
     private func setupControllerObservers() {
@@ -978,9 +975,13 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pad.controller = controller
                 pad.name = controller.vendorName ?? "Controller \(slot + 1)"
                 pad.present = true
-                controller.motion?.sensorsActive = true
-                pad.hasGyro = controller.motion != nil
-                pad.hasRumble = controller.haptics != nil
+                if let motion = controller.motion, motion.hasRotationRate {
+                    motion.sensorsActive = true
+                    pad.hasGyro = true
+                } else {
+                    pad.hasGyro = false
+                }
+                pad.hasRumble = !(controller.haptics?.supportedLocalities.isEmpty ?? true)
                 controllerSlots[ObjectIdentifier(controller)] = slot
             }
         }
@@ -998,7 +999,9 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func configureController(_ controller: GCController) {
-        controller.motion?.sensorsActive = true
+        if controller.motion?.hasRotationRate == true {
+            controller.motion?.sensorsActive = true
+        }
 
         controller.extendedGamepad?.valueChangedHandler = { [weak self, weak controller] gamepad, _ in
             guard let self, let controller else { return }
@@ -1047,7 +1050,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         guard activeClientMode == .physical else { return }
         physicalPads.withLock { pads in
             for pad in pads {
-                guard pad.present, let motion = pad.controller?.motion else { continue }
+                guard pad.present, let motion = pad.controller?.motion, motion.hasRotationRate else { continue }
                 let g = motion.gravity
                 let r = motion.rotationRate
                 // Physical controller gyro stays in controller space. Do not apply screen-orientation remap here.
@@ -1142,19 +1145,19 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
 
     private func playControllerHaptic(pad: inout PhysicalPad, low: Int, high: Int, durationMs: UInt64) {
         guard let haptics = pad.controller?.haptics else { return }
+        let supported = haptics.supportedLocalities
+        guard !supported.isEmpty else { return }
+
         do {
             if pad.hapticEngine == nil {
-                let localities: [GCHapticsLocality] = [.default, .all, .leftHandle, .rightHandle]
-                for locality in localities {
-                    if let candidate = try? haptics.createEngine(withLocality: locality) {
-                        candidate.resetHandler = { [weak hapticEngine = candidate] in
-                            try? hapticEngine?.start()
-                        }
-                        try candidate.start()
-                        pad.hapticEngine = candidate
-                        break
-                    }
+                let preferred: [GCHapticsLocality] = [.all, .default, .leftHandle, .rightHandle]
+                let locality = preferred.first { supported.contains($0) } ?? supported.first!
+                let candidate = try haptics.createEngine(withLocality: locality)
+                candidate.resetHandler = { [weak hapticEngine = candidate] in
+                    try? hapticEngine?.start()
                 }
+                try candidate.start()
+                pad.hapticEngine = candidate
             }
             guard let engine = pad.hapticEngine else { return }
 
@@ -1166,13 +1169,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: min(1.0, max(0.2, Float(high) / 255.0)))
             let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: Double(durationMs) / 1000.0)
             let pattern = try CHHapticPattern(events: [event], parameters: [])
-            let player = try engine.makeAdvancedPlayer(with: pattern)
+            let player = try engine.makePlayer(with: pattern)
             try player.start(atTime: CHHapticTimeImmediate)
             pad.hapticPlayer = player
         } catch {
-            if pad.hapticEngine != nil {
-                pad.hapticEngine = nil
-            }
+            pad.hapticEngine = nil
         }
     }
 
