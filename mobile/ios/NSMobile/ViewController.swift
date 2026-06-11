@@ -927,10 +927,13 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
 
         // Phone/touch gyro is intentionally NOT dynamic-orientation based.
         // It is only meant for the locked landscape pose where the phone top is on the left.
-        let g = remapForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
-        let r = remapForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
+        // Keep gyro/rotation on the Splatoon-good path, but use a separate
+        // accel/gravity screen remap. Mario Kart tilt steering is much more
+        // sensitive to the gravity vector than Splatoon aiming.
+        let a = remapAccelForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
+        let r = remapGyroForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
 
-        let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
+        let sample = ProtocolWire.motionFromApple(accelX: a.0, accelY: a.1, accelZ: a.2,
                                                   rotationX: r.0, rotationY: r.1, rotationZ: r.2)
         phoneMotion.withLock { state in
             state.samples[0] = state.samples[1]
@@ -947,10 +950,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
     }
 
-    private func remapForLandscapeTopOnLeft(x: Float, y: Float, z: Float) -> (Float, Float, Float) {
-        // Same X/Y screen-space remap as Android Surface.ROTATION_270:
-        // top/camera/notch on the left -> (y, -x, z).
+    private func remapGyroForLandscapeTopOnLeft(x: Float, y: Float, z: Float) -> (Float, Float, Float) {
+        // Rotation path confirmed good enough in Splatoon for the fixed pose:
+        // portrait rotated to landscape with the phone top/camera/notch on the left.
         return (y, -x, z)
+    }
+
+    private func remapAccelForLandscapeTopOnLeft(x: Float, y: Float, z: Float) -> (Float, Float, Float) {
+        // Mario Kart tilt steering depends heavily on gravity/accel, not just
+        // angular velocity. Keep Z the same as the previous working face-up
+        // conversion, but flip screen X/Y versus the gyro path so steering-wheel
+        // roll uses the same left/right gravity sense as Android.
+        return (-y, x, z)
     }
 
     private func setupControllerObservers() {
