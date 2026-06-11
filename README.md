@@ -36,7 +36,7 @@ https://github.com/user-attachments/assets/aef8eb25-dd14-4335-a3f7-b1953800f856
 **2. PC / Mobile (Client):**
 * **Desktop** — Download the zip for your OS (Windows, Mac, or Linux), launch `ns-client`, enter your Pi's IP.
 * **Android** — Download `NS-mobile.apk` from the release and install it.
-* **iOS** — Download `NS-mobile.ipa` from the release (sideload via AltStore or similar). Supports device gyro, rumble, touch controls, and up to 4 physical controllers via Bluetooth.
+* **iOS** — Download `NS-mobile.ipa` from the release (sideload via AltStore or similar). Supports device gyro, touch controls, and up to 4 physical controllers via Bluetooth. Rumble is available for physical Bluetooth controllers when the platform exposes haptics (touch controls do not vibrate the phone).
 * **Up to 4 controllers** are supported simultaneously on a single PC or mobile device in hub mode.
 
 **3. Web App (Optional):**

@@ -38,14 +38,19 @@ else()
 endif()
 
 # Embed webapp HTML files into the binary via xxd
+find_program(XXD_EXECUTABLE xxd)
+if(NOT XXD_EXECUTABLE)
+    message(FATAL_ERROR "xxd not found. Install it with: sudo apt install xxd   (or vim-common)")
+endif()
+
 set(WEBAPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../webapp)
 set(WEBAPP_EMBED ${CMAKE_CURRENT_BINARY_DIR}/webapp_embed.h)
 
 add_custom_command(
     OUTPUT ${WEBAPP_EMBED}
-    COMMAND cd ${WEBAPP_DIR} && xxd -i index.html > ${WEBAPP_EMBED}
-    COMMAND cd ${WEBAPP_DIR} && xxd -i mobile.html >> ${WEBAPP_EMBED}
-    COMMAND cd ${WEBAPP_DIR} && xxd -i editor.html >> ${WEBAPP_EMBED}
+    COMMAND ${XXD_EXECUTABLE} -i ${WEBAPP_DIR}/index.html > ${WEBAPP_EMBED}
+    COMMAND ${XXD_EXECUTABLE} -i ${WEBAPP_DIR}/mobile.html >> ${WEBAPP_EMBED}
+    COMMAND ${XXD_EXECUTABLE} -i ${WEBAPP_DIR}/editor.html >> ${WEBAPP_EMBED}
     DEPENDS
         ${WEBAPP_DIR}/index.html
         ${WEBAPP_DIR}/mobile.html

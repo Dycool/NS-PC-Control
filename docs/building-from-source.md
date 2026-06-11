@@ -15,7 +15,7 @@ cd NS-PC-Control
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake g++ pkg-config
+sudo apt-get install -y cmake g++ pkg-config xxd
 # Optional: sudo apt-get install -y miniupnpc
 ```
 
@@ -134,7 +134,9 @@ open mobile/ios/NSMobile.xcodeproj
 
 Then select your device or simulator and press **⌘B** to build. The `.app` will be available in the Xcode build products directory.
 
-> **Note:** The iOS app uses a symlink at `mobile/ios/NSMobile/ns_mobile -> ../../../webapp` to embed the web interface assets. Xcode follows the symlink automatically during the resource copy phase.
+> **Note:** Xcode copies the `webapp/` folder into the app bundle during the build phase. If the folder is missing, run the `copy_webapp.sh` script or copy `webapp/` to `mobile/ios/NSMobile/ns_mobile/` manually.
+>
+> The Android Gradle build does the same — it copies `webapp/` into `app/src/main/assets/ns_mobile/` during the assemble step.
 >
 > Sideload the resulting `.app` or exported `.ipa` using AltStore, SideStore, or Xcode's direct device install.
 

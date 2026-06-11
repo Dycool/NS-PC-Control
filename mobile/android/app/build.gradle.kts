@@ -3,6 +3,20 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val webappDir = file("${rootDir}/../../webapp")
+val assetsNsMobile = file("${projectDir}/src/main/assets/ns_mobile")
+
+tasks.register<Copy>("copyWebApp") {
+    from(webappDir) {
+        include("**/*")
+    }
+    into(assetsNsMobile)
+}
+
+tasks.named("preBuild") {
+    dependsOn("copyWebApp")
+}
+
 android {
     namespace = "com.nscontrol"
     compileSdk = 34

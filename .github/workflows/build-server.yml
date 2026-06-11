@@ -21,7 +21,7 @@ jobs:
       - name: Install ARM Cross-Compiler and deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-aarch64-linux-gnu cmake wget
+          sudo apt-get install -y g++-aarch64-linux-gnu cmake wget xxd
 
       - name: Cross-compile miniupnpc for aarch64
         run: |

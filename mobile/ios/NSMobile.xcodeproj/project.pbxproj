@@ -10,7 +10,7 @@
 		A00000000000000000000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* AppDelegate.swift */; };
 		A00000000000000000000002 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* ViewController.swift */; };
 		A00000000000000000000003 /* ns_protocol.c in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000013 /* ns_protocol.c */; };
-		A00000000000000000000004 /* ns_mobile in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000014 /* ns_mobile */; };
+			A00000000000000000000004 /* ns_mobile in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000014 /* ns_mobile */; };
 		A00000000000000000000005 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000015 /* WebKit.framework */; };
 		A00000000000000000000006 /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000016 /* CoreMotion.framework */; };
 		A00000000000000000000007 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000017 /* GameController.framework */; };
@@ -99,6 +99,7 @@
 			buildPhases = (
 				A00000000000000000000050 /* Sources */,
 				A00000000000000000000020 /* Frameworks */,
+				A00000000000000000000051 /* Copy Web App Assets */,
 				A00000000000000000000052 /* Resources */,
 			);
 			buildRules = (
@@ -144,6 +145,20 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000051 /* Copy Web App Assets */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Web App Assets";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ ! -d \"$SRCROOT/ns_mobile\" ]; then\n  cp -R \"$SRCROOT/../../../webapp\" \"$SRCROOT/ns_mobile\"\nfi\n";
+		};
 		A00000000000000000000052 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
