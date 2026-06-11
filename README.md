@@ -58,10 +58,10 @@ The Raspberry Pi server can emulate **two different controller profiles**, selec
 | **Gyro** | **No** | **Yes** |
 | **Rumble** | **No** | **Yes** (bidirectional, console to PC) |
 
-Default mode is modern 64-byte. Use `-legacy` when you want the 8-byte mode:
+Default mode is modern 64-byte. Use `-hori` when you want the 8-byte mode:
 
 ```bash
-sudo chrt -f 99 ./ns-backend -legacy
+sudo chrt -f 99 ./ns-backend -hori
 ```
 
 ---
