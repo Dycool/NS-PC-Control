@@ -48,14 +48,15 @@ set(WEBAPP_EMBED ${CMAKE_CURRENT_BINARY_DIR}/webapp_embed.h)
 
 add_custom_command(
     OUTPUT ${WEBAPP_EMBED}
-    COMMAND ${XXD_EXECUTABLE} -i ${WEBAPP_DIR}/index.html > ${WEBAPP_EMBED}
-    COMMAND ${XXD_EXECUTABLE} -i ${WEBAPP_DIR}/mobile.html >> ${WEBAPP_EMBED}
-    COMMAND ${XXD_EXECUTABLE} -i ${WEBAPP_DIR}/editor.html >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i index.html > ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i mobile.html >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i editor.html >> ${WEBAPP_EMBED}
     DEPENDS
         ${WEBAPP_DIR}/index.html
         ${WEBAPP_DIR}/mobile.html
         ${WEBAPP_DIR}/editor.html
     COMMENT "Embedding webapp HTML files via xxd..."
+    VERBATIM
 )
 
 add_executable(ns-backend main.cpp ${WEBAPP_EMBED})
