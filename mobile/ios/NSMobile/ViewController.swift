@@ -87,13 +87,16 @@ private enum ProtocolWire {
         Int(ns_normalize_system_shortcuts(UInt16(buttons & 0xFFFF)))
     }
 
-    static func motionFromApple(gravityX: Float, gravityY: Float, gravityZ: Float,
+    static func motionFromApple(accelX: Float, accelY: Float, accelZ: Float,
                                 rotationX: Float, rotationY: Float, rotationZ: Float) -> [UInt8] {
-        // Convert gravity from G's to m/s², then use the shared android function.
+        // Apple/CoreMotion acceleration uses the opposite sign from Android/SDL for
+        // the rest vector: iPhone face-up is about z=-1G, while Android is +9.8m/s².
+        // Convert Apple G units to Android-compatible m/s² before the shared
+        // (-Z, -X, +Y) Switch mapping in ns_motion_from_android().
         let g = Float(9.80665)
         var out = [UInt8](repeating: 0, count: motionSampleSize)
         out.withUnsafeMutableBufferPointer { b in
-            ns_motion_from_android(b.baseAddress!, gravityX * g, gravityY * g, gravityZ * g,
+            ns_motion_from_android(b.baseAddress!, -accelX * g, -accelY * g, -accelZ * g,
                                    rotationX, rotationY, rotationZ)
         }
         return out
@@ -927,7 +930,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         let g = remapForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
         let r = remapForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
 
-        let sample = ProtocolWire.motionFromApple(gravityX: g.0, gravityY: g.1, gravityZ: g.2,
+        let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
                                                   rotationX: r.0, rotationY: r.1, rotationZ: r.2)
         phoneMotion.withLock { state in
             state.samples[0] = state.samples[1]
@@ -968,16 +971,21 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
 
         physicalPads.withLock { pads in
             controllerSlots.removeAll()
-            for pad in pads { pad.reset() }
+            for pad in pads {
+                if let motion = pad.controller?.motion, motion.sensorsRequireManualActivation {
+                    motion.sensorsActive = false
+                }
+                pad.reset()
+            }
 
             for (slot, controller) in controllers.enumerated() {
                 let pad = pads[slot]
                 pad.controller = controller
                 pad.name = controller.vendorName ?? "Controller \(slot + 1)"
                 pad.present = true
-                if let motion = controller.motion, motion.hasRotationRate {
-                    motion.sensorsActive = true
-                    pad.hasGyro = true
+                if let motion = controller.motion {
+                    if motion.sensorsRequireManualActivation { motion.sensorsActive = true }
+                    pad.hasGyro = (motion.hasRotationRate || motion.hasAttitudeAndRotationRate)
                 } else {
                     pad.hasGyro = false
                 }
@@ -994,13 +1002,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func clearPhysicalControllers() {
         controllerSlots.removeAll()
         physicalPads.withLock { pads in
-            for pad in pads { pad.reset() }
+            for pad in pads {
+                if let motion = pad.controller?.motion, motion.sensorsRequireManualActivation {
+                    motion.sensorsActive = false
+                }
+                pad.reset()
+            }
         }
     }
 
     private func configureController(_ controller: GCController) {
-        if controller.motion?.hasRotationRate == true {
-            controller.motion?.sensorsActive = true
+        if let motion = controller.motion, motion.sensorsRequireManualActivation {
+            motion.sensorsActive = true
         }
 
         controller.extendedGamepad?.valueChangedHandler = { [weak self, weak controller] gamepad, _ in
@@ -1050,12 +1063,35 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         guard activeClientMode == .physical else { return }
         physicalPads.withLock { pads in
             for pad in pads {
-                guard pad.present, let motion = pad.controller?.motion, motion.hasRotationRate else { continue }
-                let g = motion.gravity
+                guard pad.present, let motion = pad.controller?.motion else { continue }
+
+                if motion.sensorsRequireManualActivation && !motion.sensorsActive {
+                    motion.sensorsActive = true
+                }
+                guard motion.hasRotationRate || motion.hasAttitudeAndRotationRate else { continue }
+
+                let accel: GCAcceleration
+                if motion.hasGravityAndUserAcceleration {
+                    // Apple says controllers may either expose separated gravity/user accel
+                    // or only total acceleration. For Switch IMU packets we want accel too,
+                    // so use total accel when possible: gravity + userAcceleration.
+                    let gravity = motion.gravity
+                    let user = motion.userAcceleration
+                    accel = GCAcceleration(x: gravity.x + user.x, y: gravity.y + user.y, z: gravity.z + user.z)
+                } else {
+                    accel = motion.acceleration
+                }
+
                 let r = motion.rotationRate
-                // Physical controller gyro stays in controller space. Do not apply screen-orientation remap here.
-                let sample = ProtocolWire.motionFromApple(gravityX: Float(g.x), gravityY: Float(g.y), gravityZ: Float(g.z),
-                                                          rotationX: Float(r.x), rotationY: Float(r.y), rotationZ: Float(r.z))
+                // Apple GCController axes are not the same as SDL HIDAPI sensor axes.
+                // Convert to the SDL-style controller sensor axes first, then let the
+                // shared ns_motion_from_android() code apply the final Switch mapping.
+                let sample = ProtocolWire.motionFromApple(accelX: Float(accel.x),
+                                                          accelY: Float(accel.y),
+                                                          accelZ: Float(accel.z),
+                                                          rotationX: Float(r.x),
+                                                          rotationY: Float(r.z),
+                                                          rotationZ: -Float(r.y))
                 pad.motionSamples[0] = pad.motionSamples[1]
                 pad.motionSamples[1] = pad.motionSamples[2]
                 pad.motionSamples[2] = sample
