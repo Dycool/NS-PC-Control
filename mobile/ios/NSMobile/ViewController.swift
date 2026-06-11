@@ -1152,9 +1152,9 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             if pad.hapticEngine == nil {
                 let preferred: [GCHapticsLocality] = [.all, .default, .leftHandle, .rightHandle]
                 let locality = preferred.first { supported.contains($0) } ?? supported.first!
-                let candidate = try haptics.createEngine(withLocality: locality)
-                candidate.resetHandler = { [weak hapticEngine = candidate] in
-                    try? hapticEngine?.start()
+                guard let candidate = haptics.createEngine(withLocality: locality) else { return }
+                candidate.resetHandler = { [weak candidate] in
+                    try? candidate?.start()
                 }
                 try candidate.start()
                 pad.hapticEngine = candidate
