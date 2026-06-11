@@ -414,6 +414,12 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         edge.cancelsTouchesInView = false
         edge.delegate = self
         webView.addGestureRecognizer(edge)
+
+        let swipeRight = UISwipeGestureRecognizer(target: self, action: #selector(swipeBack(_:)))
+        swipeRight.direction = .right
+        swipeRight.cancelsTouchesInView = false
+        swipeRight.delegate = self
+        webView.addGestureRecognizer(swipeRight)
     }
 
     @objc private func hostReturnPressed() { onConnect() }
@@ -432,9 +438,21 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     @objc private func edgeBack(_ recognizer: UIScreenEdgePanGestureRecognizer) {
-        guard recognizer.state == .ended, connected else { return }
+        guard connected else { return }
+        guard recognizer.state == .ended || recognizer.state == .recognized else { return }
         let translation = recognizer.translation(in: webView)
-        guard translation.x > 40 else { return }
+        guard translation.x > 30 else { return }
+
+        if currentPage == .mainMenu {
+            disconnect()
+        } else {
+            goBack()
+        }
+    }
+
+    @objc private func swipeBack(_ recognizer: UISwipeGestureRecognizer) {
+        guard connected else { return }
+        guard recognizer.state == .ended || recognizer.state == .recognized else { return }
 
         if currentPage == .mainMenu {
             disconnect()
@@ -915,11 +933,12 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func remapForInterfaceOrientation(x: Float, y: Float, z: Float, orientation: UIInterfaceOrientation) -> (Float, Float, Float) {
         switch orientation {
         case .landscapeLeft:
-            // Match Android Surface.ROTATION_90 behavior: (-Y, +X, +Z).
-            return (-y, x, z)
-        case .landscapeRight:
-            // Match Android Surface.ROTATION_270 behavior: (+Y, -X, +Z).
+            // iOS reports landscape orientation opposite to the Android rotation labels for this app.
+            // This fixes the observed iOS inversion: left/right and up/down were reversed.
             return (y, -x, z)
+        case .landscapeRight:
+            // iOS reports landscape orientation opposite to the Android rotation labels for this app.
+            return (-y, x, z)
         case .portraitUpsideDown:
             return (-x, -y, z)
         default:
@@ -952,6 +971,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pad.controller = controller
                 pad.name = controller.vendorName ?? "Controller \(slot + 1)"
                 pad.present = true
+                controller.motion?.sensorsActive = true
                 pad.hasGyro = controller.motion != nil
                 pad.hasRumble = controller.haptics != nil
                 controllerSlots[ObjectIdentifier(controller)] = slot
@@ -971,6 +991,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func configureController(_ controller: GCController) {
+        controller.motion?.sensorsActive = true
+
         controller.extendedGamepad?.valueChangedHandler = { [weak self, weak controller] gamepad, _ in
             guard let self, let controller else { return }
             self.updateGamepadState(controller: controller, gamepad: gamepad)
@@ -1115,20 +1137,40 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func playControllerHaptic(pad: PhysicalPad, low: Int, high: Int, durationMs: UInt64) {
         guard let haptics = pad.controller?.haptics else { return }
         do {
-            pad.stopRumble()
-            guard let engine = try? haptics.createEngine(withLocality: .default) else { return }
-            try engine.start()
+            let engine: CHHapticEngine
+            if let existing = pad.hapticEngine {
+                engine = existing
+            } else {
+                let localities: [GCHapticsLocality] = [.default, .all]
+                var created: CHHapticEngine?
+                for locality in localities {
+                    if let candidate = try? haptics.createEngine(withLocality: locality) {
+                        created = candidate
+                        break
+                    }
+                }
+                guard let created else { return }
+                created.resetHandler = { [weak pad] in
+                    try? pad?.hapticEngine?.start()
+                }
+                try created.start()
+                pad.hapticEngine = created
+                engine = created
+            }
+
+            try? pad.hapticPlayer?.stop(atTime: CHHapticTimeImmediate)
+            pad.hapticPlayer = nil
+
             let strength = Float(max(low, high)) / 255.0
-            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: max(0.05, strength))
+            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: max(0.08, strength))
             let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: min(1.0, max(0.2, Float(high) / 255.0)))
             let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: Double(durationMs) / 1000.0)
             let pattern = try CHHapticPattern(events: [event], parameters: [])
             let player = try engine.makeAdvancedPlayer(with: pattern)
             try player.start(atTime: CHHapticTimeImmediate)
-            pad.hapticEngine = engine
             pad.hapticPlayer = player
         } catch {
-            // Many iOS controllers expose input but no controller haptics. Ignore quietly.
+            // Some iOS controllers expose input but no usable controller haptics.
         }
     }
 
