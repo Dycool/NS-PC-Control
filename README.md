@@ -16,6 +16,8 @@ This project was built from scratch in **C++** and uses **UDP** for low latency.
 
 **Gyroscope and Rumble** - PC clients with gyro-capable controllers (DS4, DualSense, compatible USB motion pads), Android and iOS can send motion data! Rumble is only supported on PC clients or controllers connected through the mobile apps.
 
+**Macros** - Create, record and share your own macros from any PC client!
+
 **Supports any raspberry pi with usb gadget!**
 
 > **Pre-compiled Binaries Available!**
