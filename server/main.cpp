@@ -84,6 +84,8 @@ static bool g_switch2_wake_config_loaded = false;
 static std::atomic<bool> g_switch2_wake_adv_running{false};
 static std::atomic<uint64_t> g_switch2_last_wake_adv_us{0};
 static std::atomic<bool> g_switch2_usb_host_connected{false};
+static std::atomic<uint64_t> g_switch2_last_usb_activity_us{0};
+static constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 2'000'000ULL;
 static constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 static constexpr int SWITCH2_WAKE_ADV_BURST_MS = 1000;
 
@@ -152,6 +154,23 @@ static uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
 
 static bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit) {
     return then != 0 && elapsed_us_saturated(now, then) > limit;
+}
+
+static void mark_switch2_usb_activity(uint64_t now = 0) {
+    if (now == 0) now = now_us();
+    g_switch2_last_usb_activity_us.store(now, std::memory_order_relaxed);
+    g_switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+}
+
+static bool switch2_usb_host_recently_active(uint64_t now) {
+    const uint64_t last = g_switch2_last_usb_activity_us.load(std::memory_order_relaxed);
+    if (last == 0 || elapsed_us_saturated(now, last) > SWITCH2_USB_ACTIVITY_FRESH_US) {
+        g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+        return false;
+    }
+    g_switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+    return true;
 }
 
 static bool any_recent_client_active(uint64_t now) {
@@ -1423,6 +1442,7 @@ static bool create_hid_function(int id) {
 
 static void teardown_gadget() {
     g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
     if (!path_exists(GADGET_DIR)) return;
 
     std::puts("[gadget] Closing USB gadget...");
@@ -1648,15 +1668,15 @@ static void maybe_send_switch2_wake_advert(const char* reason) {
     if (!g_switch2_wake_config_loaded)
         return;
 
-    if (g_switch2_usb_host_connected.load(std::memory_order_relaxed)) {
+    const uint64_t now = now_us();
+
+    if (switch2_usb_host_recently_active(now)) {
         if (g_verbose) {
-            std::printf("[wake] %s; Switch USB host already connected, skipping wake advert\n",
+            std::printf("[wake] %s; recent Switch USB activity seen, skipping wake advert\n",
                         reason ? reason : "client connected");
         }
         return;
     }
-
-    const uint64_t now = now_us();
 
     // Only send wake advertisements when a PC/web/mobile client is actually alive.
     if (!any_recent_client_active(now))
@@ -1673,8 +1693,9 @@ static void maybe_send_switch2_wake_advert(const char* reason) {
     g_switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
 
     if (g_verbose) {
-        std::printf("[wake] %s; sending Joy-Con 2 BLE wake advert for %dms\n",
-                    reason ? reason : "client connected", SWITCH2_WAKE_ADV_BURST_MS);
+        std::printf("[wake] %s; sending Joy-Con 2 BLE wake advert for %dms as %s\n",
+                    reason ? reason : "client connected", SWITCH2_WAKE_ADV_BURST_MS,
+                    g_switch2_wake_mac.c_str());
     }
 
     std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
@@ -1739,6 +1760,7 @@ static bool capture_switch2_wake_advert(int seconds,
         << "timeout " << std::max(1, seconds - 2) << " hcitool lescan --duplicates >/dev/null 2>&1 || true; "
         << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
 
+    (void)std::system("systemctl stop bluetooth >/dev/null 2>&1 || true");
     (void)std::system("rfkill unblock bluetooth >/dev/null 2>&1 || true");
     (void)std::system("btmgmt -i hci0 power off >/dev/null 2>&1 || true");
     (void)std::system("btmgmt -i hci0 privacy off >/dev/null 2>&1 || true");
@@ -1761,32 +1783,24 @@ static void wait_for_enter(const char* prompt) {
     std::getline(std::cin, dummy);
 }
 
-static bool pair_then_disconnect_joycon_for_setup(std::string& joycon_mac) {
-    std::puts("\n[wake] Step 1/5: Put your Joy-Con 2 in pairing mode now.");
-    std::puts("[wake] Hold the small SYNC button until it starts pairing, then press Enter.");
-    wait_for_enter("[wake] Press Enter when the Joy-Con 2 is in pairing mode... ");
+static bool auto_find_joycon_for_setup(std::string& joycon_mac) {
+    std::puts("\n[wake] Step 1/5: Finding your Joy-Con 2 automatically.");
+    std::puts("[wake] Put the Joy-Con 2 very close to the Pi and hold the small SYNC button.");
+    std::puts("[wake] Pairing with the Pi is skipped because Joy-Con 2/BlueZ pairing is flaky and not required.");
 
-    std::puts("[wake] Scanning for a Nintendo Joy-Con 2 advertisement near the Pi...");
     std::string adv;
-    if (!capture_switch2_wake_advert(25, "", joycon_mac, adv)) {
-        std::fprintf(stderr, "[wake] Could not find a Nintendo Joy-Con 2 advertisement. Keep it close to the Pi and try again.\n");
-        return false;
+    for (int attempt = 1; attempt <= 12; ++attempt) {
+        std::printf("[wake] Scanning for Nintendo/Joy-Con 2 advert... attempt %d/12\n", attempt);
+        if (capture_switch2_wake_advert(10, "", joycon_mac, adv)) {
+            std::printf("[wake] Found Nintendo controller: %s\n", joycon_mac.c_str());
+            std::puts("[wake] Continuing with this MAC. If this was not your Joy-Con 2, Ctrl+C and retry with it closer to the Pi.");
+            return true;
+        }
+        std::puts("[wake] No Nintendo advert yet. Keep holding SYNC or press it again; retrying...");
     }
 
-    std::printf("[wake] Found Nintendo controller: %s\n", joycon_mac.c_str());
-    std::puts("[wake] Attempting to pair/trust/connect to confirm the controller identity.");
-    std::puts("[wake] If BlueZ refuses pairing, setup will continue anyway; the MAC capture is the important part.");
-
-    std::ostringstream bt;
-    bt << "sh -c 'printf \"power on\\nagent on\\ndefault-agent\\nscan on\\npair " << joycon_mac
-       << "\\ntrust " << joycon_mac
-       << "\\nconnect " << joycon_mac
-       << "\\ndisconnect " << joycon_mac
-       << "\\nquit\\n\" | timeout 25 bluetoothctl'";
-    (void)std::system(bt.str().c_str());
-
-    std::puts("[wake] Joy-Con 2 disconnected from the Pi side.");
-    return true;
+    std::fprintf(stderr, "[wake] Could not find a Nintendo/Joy-Con 2 advertisement. Keep it very close to the Pi and try again.\n");
+    return false;
 }
 
 static int run_switch2_wakeup_setup() {
@@ -1795,7 +1809,7 @@ static int run_switch2_wakeup_setup() {
         return 2;
     }
 
-    const char* required[] = {"btmon", "btmgmt", "hcitool", "bluetoothctl", "rfkill", "systemctl"};
+    const char* required[] = {"btmon", "btmgmt", "hcitool", "rfkill", "systemctl"};
     for (const char* cmd : required) {
         if (!command_exists(cmd)) {
             std::fprintf(stderr, "[wake] Missing command: %s. Install BlueZ tools with: sudo apt install bluez\n", cmd);
@@ -1806,21 +1820,32 @@ static int run_switch2_wakeup_setup() {
     std::puts("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::puts("------------------------------------------------");
     std::printf("[wake] Config will be saved to: %s\n", g_switch2_wakeup_config_path.c_str());
-    std::puts("[wake] This setup temporarily pairs/scans your Joy-Con 2 on the Pi, then asks you to attach it back to the Switch 2.");
+    std::puts("[wake] This setup scans your Joy-Con 2 on the Pi, captures its HOME advert, then asks you to attach it back to the Switch 2.");
+    std::puts("[wake] Pairing with the Pi is intentionally skipped because Joy-Con 2/BlueZ pairing is flaky and not required.");
     std::puts("[wake] Use your own Joy-Con 2 that is/will be paired to this Switch 2.\n");
 
     std::string mac;
-    if (!pair_then_disconnect_joycon_for_setup(mac))
+    if (!auto_find_joycon_for_setup(mac))
         return 1;
 
     std::puts("\n[wake] Step 2/5: Capture the Joy-Con 2 HOME wake advertisement.");
-    std::puts("[wake] Keep the Joy-Con 2 close to the Pi. Press HOME on the Joy-Con 2 when asked.");
-    wait_for_enter("[wake] Press Enter, then press HOME on the Joy-Con 2 immediately... ");
+    std::puts("[wake] Keep the Joy-Con 2 very close to the Pi.");
+    std::puts("[wake] If pressing HOME wakes the Switch 2 before the Pi catches it, put the Switch 2 back to sleep and retry.");
 
     std::string cap_mac, cap_adv;
-    if (!capture_switch2_wake_advert(30, mac, cap_mac, cap_adv)) {
+    bool captured_home = false;
+    for (int attempt = 1; attempt <= 5; ++attempt) {
+        std::printf("[wake] HOME capture attempt %d/5.\n", attempt);
+        wait_for_enter("[wake] Press Enter, then press HOME on the Joy-Con 2 immediately... ");
+        if (capture_switch2_wake_advert(20, mac, cap_mac, cap_adv)) {
+            captured_home = true;
+            break;
+        }
+        std::fprintf(stderr, "[wake] Did not catch the HOME advert from %s.\n", mac.c_str());
+        std::fprintf(stderr, "[wake] Put the Switch 2 back to sleep if it woke, keep the Joy-Con close to the Pi, and retry.\n");
+    }
+    if (!captured_home) {
         std::fprintf(stderr, "[wake] Could not capture the HOME advertisement from %s.\n", mac.c_str());
-        std::fprintf(stderr, "[wake] Make sure it is close to the Pi. If needed, press HOME and gently shake it while capture is running.\n");
         return 1;
     }
 
@@ -1843,7 +1868,7 @@ static int run_switch2_wakeup_setup() {
     std::puts("\n[wake] Step 4/5: Suspend the Switch 2 now.");
     wait_for_enter("[wake] Press Enter after the Switch 2 is asleep; setup will send a test wake packet... ");
 
-    std::puts("[wake] Step 5/5: Sending test wake advert...");
+    std::puts("[wake] Step 5/5: Sending test wake advert with MAC spoofing...");
     if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1)) {
         std::fprintf(stderr, "[wake] Test wake send failed. Config was saved, but Bluetooth raw HCI send did not complete.\n");
         return 1;
@@ -2011,6 +2036,7 @@ static void legacy_writer_thread(int hz) {
 
         if (!all_open) {
             g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; }
             }
@@ -2021,7 +2047,8 @@ static void legacy_writer_thread(int hz) {
 
         if (g_verbose || !was_connected)
             std::printf("%dx legacy /dev/hidg* opened\n", HID_PORT_COUNT);
-        g_switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+        // Opening /dev/hidg* only proves the gadget exists, not that the Switch is awake.
+        // Mark the host connected only after real USB writes succeed.
         was_connected = true;
 
         auto next = Clock::now() + tick;
@@ -2167,6 +2194,7 @@ static void legacy_writer_thread(int hz) {
                 } else if (w == (ssize_t)sizeof(HIDReport)) {
                     prev[h] = out_reports[h];
                     ++g_hid_writes;
+                    mark_switch2_usb_activity(now_stamp);
                 } else if (w > 0) {
                     ok = false;
                 }
@@ -2175,6 +2203,7 @@ static void legacy_writer_thread(int hz) {
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected - waiting for reconnect..."); error_shown = true; }
                 g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; }
                 for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
@@ -2237,6 +2266,7 @@ static void writer_thread(int hz) {
 
         if (!all_open) {
             g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
             // Do not keep a partial set of opened endpoints around while the
             // gadget is being recreated/rebound.  Retry with a clean fd set.
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -2249,7 +2279,8 @@ static void writer_thread(int hz) {
 
         if (g_verbose || !was_connected)
             std::printf("%dx USB gamepad /dev/hidg* opened\n", HID_PORT_COUNT);
-        g_switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+        // Opening /dev/hidg* only proves the gadget exists, not that the Switch is awake.
+        // Mark the host connected only after real USB output/handshake activity succeeds.
         was_connected = true;
 
         auto next = Clock::now() + tick;
@@ -2496,6 +2527,7 @@ static void writer_thread(int hz) {
                 } else if (w == (ssize_t)PRO_REPORT_SIZE) {
                     if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                     writes_this_second++;
+                    mark_switch2_usb_activity(now_stamp);
                 } else if (w > 0) {
                     // Partial HID report writes should not happen.  Treat as an error so
                     // we reconnect cleanly rather than sending malformed controller data.
@@ -2526,6 +2558,7 @@ static void writer_thread(int hz) {
                     if (r < 2 || (r == 2 && read_buf[0] == 0x00 && read_buf[1] == 0x00))
                         continue;
 
+                    mark_switch2_usb_activity(now_stamp);
                     uint8_t id = read_buf[0];
                     if (id == RID_OUTPUT_CMD) {
                         if (hw_slots[h].client_idx != -1)
@@ -2572,6 +2605,7 @@ static void writer_thread(int hz) {
 
                         ssize_t w = write(fds[h], resp_81, PRO_REPORT_SIZE);
                         if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
+                        else if (w == (ssize_t)PRO_REPORT_SIZE) mark_switch2_usb_activity(now_stamp);
                         if (g_verbose) {
                             std::printf("[pro%d] usb 0x80 cmd=0x%02X -> 0x81 subtype=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X timeout=%s\n",
                                         h + 1, usb_cmd, resp_81[1],
