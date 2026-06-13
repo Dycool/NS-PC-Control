@@ -69,6 +69,17 @@ static bool g_legacy_mode = false;
 // on shutdown, so setup_gadget.sh is no longer needed at runtime.
 static std::atomic<bool> g_gadget_setup_attempted{false};
 
+// Experimental Switch 2 wake helper. When at least one client is connected
+// but the USB HID host disappears/looks asleep, briefly advertise the same
+// Nintendo manufacturer payload observed from a Joy-Con 2 HOME wake attempt.
+// This is only the BLE advertisement layer; if the console requires a full
+// bonded Joy-Con 2 GATT session, the advert alone may not be enough.
+static bool g_switch2_wake_adv_enabled = true;
+static std::atomic<bool> g_switch2_wake_adv_running{false};
+static std::atomic<uint64_t> g_switch2_last_wake_adv_us{0};
+static constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
+static constexpr int SWITCH2_WAKE_ADV_BURST_MS = 3000;
+
 static constexpr int HID_PORT_COUNT = 4;
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
@@ -134,6 +145,18 @@ static uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
 
 static bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit) {
     return then != 0 && elapsed_us_saturated(now, then) > limit;
+}
+
+static bool any_recent_client_active(uint64_t now) {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_mtx[i]);
+        const ClientSession& c = g_clients[i];
+        if (c.active && c.last_rx_us != 0 &&
+            elapsed_us_saturated(now, c.last_rx_us) <= CLIENT_TIMEOUT_US) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
@@ -1422,6 +1445,81 @@ static int run_shell_best_effort(const char* cmd) {
     return rc;
 }
 
+static void switch2_wake_adv_worker(int burst_ms) {
+    // Captured Joy-Con 2 HOME/reconnect advertisement:
+    //   Flags: 06
+    //   Manufacturer: Nintendo 0x0553, little-endian bytes 53 05
+    //   Payload: 01 00 03 7E 05 66 20 00 01 00 00 00 00 00 00 00
+    //            0F 00 00 00 00 00 00 00
+    //
+    // HCI LE Set Advertising Data command layout:
+    //   1F                                      adv data length = 31 bytes
+    //   02 01 06                                flags
+    //   1B FF 53 05 <24-byte Nintendo payload>  manufacturer data
+    //   00                                      pad to 31 bytes
+    (void)run_shell_best_effort("hciconfig hci0 up >/dev/null 2>&1 || true");
+
+    // LE Set Advertising Parameters:
+    // min/max interval 0x0060 (~60ms), connectable undirected ADV_IND.
+    (void)run_shell_best_effort(
+        "hcitool -i hci0 cmd 0x08 0x0006 "
+        "60 00 60 00 00 00 00 00 00 00 07 00 "
+        ">/dev/null 2>&1 || true"
+    );
+
+    // LE Set Advertising Data.
+    (void)run_shell_best_effort(
+        "hcitool -i hci0 cmd 0x08 0x0008 "
+        "1F "
+        "02 01 06 "
+        "1B FF 53 05 "
+        "01 00 03 7E 05 66 20 00 01 00 00 00 00 00 00 00 "
+        "0F 00 00 00 00 00 00 00 "
+        "00 "
+        ">/dev/null 2>&1 || true"
+    );
+
+    (void)run_shell_best_effort("hciconfig hci0 leadv 0 >/dev/null 2>&1 || true");
+
+    const int step_ms = 100;
+    int waited_ms = 0;
+    while (g_running.load(std::memory_order_relaxed) && waited_ms < burst_ms) {
+        std::this_thread::sleep_for(ms(step_ms));
+        waited_ms += step_ms;
+    }
+
+    (void)run_shell_best_effort("hciconfig hci0 noleadv >/dev/null 2>&1 || true");
+    g_switch2_wake_adv_running.store(false, std::memory_order_relaxed);
+}
+
+static void maybe_send_switch2_wake_advert(const char* reason) {
+    if (!g_switch2_wake_adv_enabled)
+        return;
+
+    const uint64_t now = now_us();
+
+    // Only send wake advertisements when a PC/web/mobile client is actually alive.
+    if (!any_recent_client_active(now))
+        return;
+
+    const uint64_t last = g_switch2_last_wake_adv_us.load(std::memory_order_relaxed);
+    if (last != 0 && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US)
+        return;
+
+    bool expected = false;
+    if (!g_switch2_wake_adv_running.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+        return;
+
+    g_switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
+
+    if (g_verbose) {
+        std::printf("[wake] Switch 2 USB host looks unavailable (%s); sending Joy-Con 2 BLE wake advert for %dms\n",
+                    reason ? reason : "unknown", SWITCH2_WAKE_ADV_BURST_MS);
+    }
+
+    std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
+}
+
 static bool setup_gadget_builtin(bool force, const char* reason) {
     // Non-forced calls are still cheap/retry-safe for internal recovery paths,
     // but startup passes force=true so the gadget is always torn down and
@@ -1578,6 +1676,7 @@ static void legacy_writer_thread(int hz) {
         }
 
         if (!all_open) {
+            maybe_send_switch2_wake_advert("legacy HID nodes not open");
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; }
             }
@@ -1740,6 +1839,7 @@ static void legacy_writer_thread(int hz) {
 
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected - waiting for reconnect..."); error_shown = true; }
+                maybe_send_switch2_wake_advert("legacy HID write failed");
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; }
                 for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
@@ -1801,6 +1901,7 @@ static void writer_thread(int hz) {
         }
 
         if (!all_open) {
+            maybe_send_switch2_wake_advert("HID nodes not open");
             // Do not keep a partial set of opened endpoints around while the
             // gadget is being recreated/rebound.  Retry with a clean fd set.
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -2151,6 +2252,7 @@ static void writer_thread(int hz) {
 
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected — waiting for reconnect..."); error_shown = true; }
+                maybe_send_switch2_wake_advert("HID write failed");
                 for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
                 for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
@@ -3323,6 +3425,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "-v")               g_verbose  = true;
         else if (a == "-hori")          g_legacy_mode = true;
+        else if (a == "--no-switch2-wake-adv") g_switch2_wake_adv_enabled = false;
         else if (a == "--upnp")           do_upnp    = true;
         else if (a == "-w") {
             web_mode = WebServerMode::WebApp;
@@ -3342,6 +3445,8 @@ int main(int argc, char** argv) {
             puts("  -w [PORT]       Serve the browser webapp too, using this port or 8080.");
             puts("  --upnp          Forward the UDP port via UPnP for PC clients only.");
             puts("                  Mobile/web clients connect via WebSocket and don't need this.");
+            puts("  --no-switch2-wake-adv");
+            puts("                  Disable experimental Joy-Con 2 BLE wake advertisement bursts.");
             puts("  -hori           Expose the legacy 8-byte HORI controller gadget.");
             puts("                  Default mode exposes the 64-byte motion/rumble gadget.");
             puts("");
