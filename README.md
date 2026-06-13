@@ -18,6 +18,8 @@ This project was built from scratch in **C++** and uses **UDP** for low latency.
 
 **Macros** - Create, record and share your own macros from any PC client!
 
+**Play it whenever you wish to!** With the new support of wake up packets for the switch 2, the switch can now remain asleep until you connect to the server (additional setup required)!
+
 **Supports any raspberry pi with usb gadget!**
 
 > **Pre-compiled Binaries Available!**
@@ -93,6 +95,7 @@ Detailed guides and technical information are in the `docs/` folder:
 * **[Macros](docs/macros.md)** - Recording and replaying button sequences for speedruns and TAS.
 * **[Architecture & Security](docs/architecture.md)** - Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Clients](docs/web-app.md)** - Using the embedded web interface and mobile touch controls.
+* **[My vision](docs/wakeup.md)** - How to configure the wakeup packet for the switch 2.
 * **[My vision](docs/vision.md)** - The main goal behind this project.
 
 ---
