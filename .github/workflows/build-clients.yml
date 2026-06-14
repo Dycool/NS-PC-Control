@@ -34,7 +34,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-x64-windows-static-v2
+          key: vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-x64-windows-static-v3
           restore-keys: |
             vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-x64-windows-static-
             vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-
@@ -51,6 +51,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,$env:VCPKG_DEFAULT_BINARY_CACHE,readwrite"
+
           .\_deps\vcpkg\vcpkg.exe install `
             "qtbase[widgets,png,jpeg]:x64-windows-static" `
             "sdl3:x64-windows-static" `
@@ -59,8 +60,6 @@ jobs:
       - name: Make CMake static-Qt friendly
         shell: pwsh
         run: |
-          # Static Qt usually auto-imports the default plugins, but this makes the
-          # Windows QPA platform plugin explicit when the target exists.
           Add-Content client/CMakeLists.txt @'
 
           if(WIN32 AND COMMAND qt_import_plugins AND TARGET ns-client AND TARGET Qt6::QWindowsIntegrationPlugin)
@@ -73,19 +72,21 @@ jobs:
       - name: Build client
         shell: pwsh
         run: |
-          cmake -S client -B client/build -G "Visual Studio 17 2022" -A x64 `
+          $env:VCPKG_BINARY_SOURCES = "clear;files,$env:VCPKG_DEFAULT_BINARY_CACHE,readwrite"
+
+          cmake -S client -B client/build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
-          cmake --build client/build --config Release --target ns-client --parallel
+          cmake --build client/build --target ns-client --parallel
 
       - name: Stage Windows artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force client/artifacts/windows | Out-Null
-          Copy-Item client/build/Release/ns-client.exe client/artifacts/windows/ns-client.exe
+          Copy-Item client/build/ns-client.exe client/artifacts/windows/ns-client.exe
 
       - uses: actions/upload-artifact@v6
         with:
@@ -236,10 +237,6 @@ jobs:
           echo "Build output tree:"
           find client/build -maxdepth 4 -print | sort
 
-          # Depending on CMakeLists.txt / Qt settings, macOS may produce either:
-          #   client/build/ns-client                         plain binary
-          #   client/build/ns-client.app/Contents/MacOS/...  app bundle
-          # Be robust and support both forms.
           BUILD_APP="$(find client/build -type d -name 'ns-client.app' -print -quit)"
           if [ -n "$BUILD_APP" ]; then
             echo "Found CMake-generated app bundle: $BUILD_APP"
@@ -327,11 +324,6 @@ jobs:
 
           macdeployqt "$APP" -verbose=1
 
-          # The app bundle contains the main binary plus Qt frameworks/plugins.
-          # Without a code signature macOS Gatekeeper can report the downloaded
-          # artifact as "damaged" or "corrupted". This ad-hoc signature is enough
-          # for GitHub Actions test artifacts; public distribution still needs a
-          # Developer ID signature + notarization.
           xattr -cr "$APP" || true
           codesign --force --deep --timestamp=none --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
