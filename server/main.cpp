@@ -1775,15 +1775,9 @@ static WakeCmdResult run_wake_command(const std::vector<std::string>& args,
     return res;
 }
 
-static bool wake_cmd_ok_ms(const std::vector<std::string>& args, bool verbose_output, int timeout_ms) {
-    WakeCmdResult r = run_wake_command(args, verbose_output, false, timeout_ms);
-    if (verbose_output && r.exit_code == 124 && !args.empty())
-        std::fprintf(stderr, "[wake] Command timed out: %s\n", args[0].c_str());
-    return r.exit_code == 0;
-}
-
 static bool wake_cmd_ok(const std::vector<std::string>& args, bool verbose_output) {
-    return wake_cmd_ok_ms(args, verbose_output, 8000);
+    WakeCmdResult r = run_wake_command(args, verbose_output, false);
+    return r.exit_code == 0;
 }
 
 static std::string parse_first_hci_device(const std::string& info) {
@@ -1881,39 +1875,40 @@ static bool prepare_wake_controller(std::string& hci_dev, const std::string& mac
     if (hci_dev.empty())
         hci_dev = "hci0";
 
-    // Runtime wake needs to be fast. Under a long-running systemd service some
-    // btmgmt cleanup commands (especially "bredr off" / "privacy off") can stall
-    // for several seconds. They are useful for making the adapter state neat, but
-    // they are not worth delaying the actual wake advert. Treat them as short
-    // best-effort prep and move on to the required spoof+advertise steps.
-    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 1500);
-    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 1000);
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
 
-    for (int attempt = 1; attempt <= 2; ++attempt) {
+    for (int attempt = 1; attempt <= 3; ++attempt) {
         if (verbose_output)
             std::printf("[wake] Preparing Bluetooth controller, attempt %d, device %s\n", attempt, hci_dev.c_str());
 
-        // Best-effort only. If one of these times out in service mode, do not spend
-        // 10-20 seconds resetting hciuart before we have even sent the advert.
-        wake_cmd_ok_ms({"btmgmt", "-i", hci_dev, "power", "off"}, verbose_output, 1200);
-        wake_cmd_ok_ms({"btmgmt", "-i", hci_dev, "privacy", "off"}, verbose_output, 700);
-        wake_cmd_ok_ms({"btmgmt", "-i", hci_dev, "bredr", "off"}, verbose_output, 700);
-        wake_cmd_ok_ms({"btmgmt", "-i", hci_dev, "le", "on"}, verbose_output, 700);
+        wake_cmd_ok({"btmgmt", "-i", hci_dev, "power", "off"}, verbose_output);
 
-        // These are the important bits: set the public address, power back on, then
-        // let hcitool push the raw advertising payload.
-        if (!wake_cmd_ok_ms({"btmgmt", "-i", hci_dev, "public-addr", mac_lc}, verbose_output, 2500)) {
-            wake_disable_advertising_quiet(hci_dev);
-            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "privacy", "off"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
             continue;
         }
-        if (!wake_cmd_ok_ms({"btmgmt", "-i", hci_dev, "power", "on"}, verbose_output, 2500)) {
-            wake_disable_advertising_quiet(hci_dev);
-            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "bredr", "off"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "le", "on"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "public-addr", mac_lc}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "power", "on"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
             continue;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        // Do not verify with `btmgmt info` here. Verification is nice in an
+        // interactive shell, but on the systemd service path it can hang before the
+        // advert is sent. The wake packet itself is the important operation.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (verbose_output)
             std::printf("[wake] Bluetooth controller prepared as %s\n", mac_lc.c_str());
         return true;
@@ -1977,7 +1972,11 @@ static bool start_wake_raw_advertising(const std::string& hci_dev,
     return true;
 }
 
-static bool send_switch2_wake_advert_once(const std::string& mac, const std::string& adv_hex, int seconds, bool verbose_output = false) {
+static bool send_switch2_wake_advert_once(const std::string& mac,
+                                           const std::string& adv_hex,
+                                           int seconds,
+                                           bool verbose_output = false,
+                                           bool force_prepare = false) {
     if (!valid_mac_string(mac) || !valid_adv_hex(adv_hex)) {
         std::fprintf(stderr, "[wake] Invalid wake MAC/ADV; not sending\n");
         return false;
@@ -1993,18 +1992,35 @@ static bool send_switch2_wake_advert_once(const std::string& mac, const std::str
         std::printf("[wake] Wake MAC: %s\n", mac_lc.c_str());
         std::printf("[wake] ADV bytes: %zu\n", adv_uc.size() / 2);
         std::printf("[wake] Duration: %ds\n", seconds);
+        if (!force_prepare)
+            std::printf("[wake] Fast runtime path: sending ADV directly on %s without Bluetooth prep\n", hci_dev.c_str());
     }
 
     bool ok = false;
-    if (prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+
+    if (!force_prepare) {
+        // Runtime/service wake path: the -wake setup already registered the HCI
+        // adapter and prepared/spoofed the controller identity. Do not spend
+        // several seconds on btmgmt cleanup every time a client connects; just
+        // emit the saved Joy-Con 2 advertising payload immediately.
         ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
 
+        // If raw HCI itself fails, fall back to the full prepare path once. This
+        // preserves recovery from cold/odd Bluetooth states without slowing down
+        // the normal good path.
+        if (!ok && verbose_output)
+            std::fprintf(stderr, "[wake] Fast ADV failed; falling back to full Bluetooth prepare once.\n");
+    }
+
     if (!ok) {
-        if (verbose_output)
-            std::fprintf(stderr, "[wake] Raw advertising failed. Retrying once with the fast path.\n");
-        wake_disable_advertising_quiet(hci_dev);
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
         if (prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
+    }
+
+    if (!ok && force_prepare) {
+        if (verbose_output)
+            std::fprintf(stderr, "[wake] Raw advertising failed. Trying one Bluetooth stack reset, then retrying once.\n");
+        if (reset_wake_bt_stack(hci_dev, verbose_output) && prepare_wake_controller(hci_dev, mac_lc, verbose_output))
             ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
     }
 
@@ -2021,7 +2037,7 @@ static bool send_switch2_wake_advert_once(const std::string& mac, const std::str
 
 static void switch2_wake_adv_worker(int burst_ms) {
     int seconds = std::max(1, (burst_ms + 999) / 1000);
-    send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose);
+    send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose, false);
     g_switch2_wake_adv_running.store(false, std::memory_order_relaxed);
 }
 
@@ -2236,7 +2252,7 @@ static int run_switch2_wakeup_setup() {
     std::printf("[wake] Saved wake config to %s\n", g_switch2_wakeup_config_path.c_str());
 
     std::puts("[wake] Step 4/4: Sending test wake advert with MAC spoofing...");
-    if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1, false)) {
+    if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1, false, true)) {
         std::fprintf(stderr, "[wake] Test wake send failed. Config was saved, but Bluetooth raw HCI send did not complete.\n");
         return 1;
     }
