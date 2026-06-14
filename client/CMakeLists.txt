@@ -59,6 +59,12 @@ if(WIN32)
     )
 endif()
 
+if(WIN32 AND COMMAND qt_import_plugins AND TARGET Qt6::QWindowsIntegrationPlugin)
+    qt_import_plugins(ns-client
+        INCLUDE_BY_TYPE platforms Qt6::QWindowsIntegrationPlugin
+    )
+endif()
+
 if(APPLE)
     find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 
