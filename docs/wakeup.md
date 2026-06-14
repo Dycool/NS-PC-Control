@@ -4,7 +4,7 @@
 ## Switch 1
 
 
-Switch 1 native Bluetooth wake is not currently supported. Switch 1 wake appears to rely on specific Bluetooth Classic firmware behavior used by official Joy-Con/Pro Controllers, so the server cannot wake a Switch 1 using USB HOME or a simple replay packet.
+Switch 1 native Bluetooth wake is not currently supported. It's wake protocol appears to rely on specific Bluetooth Classic firmware behavior used by official Joy-Con/Pro Controllers, so the server cannot wake the console using a simple replay packet.
 
 Workaround:
 
