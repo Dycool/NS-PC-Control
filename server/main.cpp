@@ -81,6 +81,7 @@ static bool g_switch2_wakeup_setup_requested = false;
 static std::string g_switch2_wakeup_config_path = "/etc/ns-pc-control/switch2_wakeup.conf";
 static std::string g_switch2_wake_mac;
 static std::string g_switch2_wake_adv_hex;
+static std::string g_switch2_wake_hci_dev = "hci0";
 static bool g_switch2_wake_config_loaded = false;
 static std::atomic<bool> g_switch2_wake_adv_running{false};
 static std::atomic<uint64_t> g_switch2_last_wake_adv_us{0};
@@ -1525,6 +1526,15 @@ static bool valid_adv_hex(const std::string& adv) {
     return true;
 }
 
+static bool valid_hci_dev_string(const std::string& hci) {
+    if (hci.size() < 4) return false;
+    if (hci.rfind("hci", 0) != 0) return false;
+    for (size_t i = 3; i < hci.size(); ++i) {
+        if (!std::isdigit((unsigned char)hci[i])) return false;
+    }
+    return true;
+}
+
 static bool command_exists(const char* cmd) {
     std::string test = "command -v ";
     test += cmd;
@@ -1543,7 +1553,7 @@ static bool ensure_parent_dir_for_file(const std::string& path) {
     return std::system(cmd.c_str()) == 0;
 }
 
-static bool read_switch2_wakeup_config_file(const std::string& path, std::string& mac, std::string& adv) {
+static bool read_switch2_wakeup_config_file(const std::string& path, std::string& mac, std::string& adv, std::string& hci) {
     std::ifstream f(path);
     if (!f) return false;
 
@@ -1557,14 +1567,16 @@ static bool read_switch2_wakeup_config_file(const std::string& path, std::string
         std::string val = trim_copy(line.substr(eq + 1));
         if (key == "mac") mac = lowercase_copy(val);
         else if (key == "adv") adv = uppercase_hex_copy(val);
+        else if (key == "hci") hci = trim_copy(val);
     }
 
-    return valid_mac_string(mac) && valid_adv_hex(adv);
+    if (hci.empty()) hci = "hci0";
+    return valid_mac_string(mac) && valid_adv_hex(adv) && valid_hci_dev_string(hci);
 }
 
 static bool load_switch2_wakeup_config(bool quiet_if_missing) {
-    std::string mac, adv;
-    if (!read_switch2_wakeup_config_file(g_switch2_wakeup_config_path, mac, adv)) {
+    std::string mac, adv, hci;
+    if (!read_switch2_wakeup_config_file(g_switch2_wakeup_config_path, mac, adv, hci)) {
         g_switch2_wake_config_loaded = false;
         if (!quiet_if_missing && g_verbose)
             std::printf("[wake] No valid Switch 2 wake config at %s; wake disabled\n", g_switch2_wakeup_config_path.c_str());
@@ -1573,15 +1585,17 @@ static bool load_switch2_wakeup_config(bool quiet_if_missing) {
 
     g_switch2_wake_mac = mac;
     g_switch2_wake_adv_hex = adv;
+    g_switch2_wake_hci_dev = valid_hci_dev_string(hci) ? hci : "hci0";
     g_switch2_wake_config_loaded = true;
     if (g_verbose) {
-        std::printf("[wake] Loaded Switch 2 wake config from %s (mac=%s adv_bytes=%zu)\n",
-                    g_switch2_wakeup_config_path.c_str(), g_switch2_wake_mac.c_str(), g_switch2_wake_adv_hex.size() / 2);
+        std::printf("[wake] Loaded Switch 2 wake config from %s (mac=%s adv_bytes=%zu hci=%s)\n",
+                    g_switch2_wakeup_config_path.c_str(), g_switch2_wake_mac.c_str(), g_switch2_wake_adv_hex.size() / 2,
+                    g_switch2_wake_hci_dev.c_str());
     }
     return true;
 }
 
-static bool save_switch2_wakeup_config(const std::string& mac, const std::string& adv) {
+static bool save_switch2_wakeup_config(const std::string& mac, const std::string& adv, const std::string& hci_dev = "hci0") {
     if (!ensure_parent_dir_for_file(g_switch2_wakeup_config_path)) {
         std::fprintf(stderr, "[wake] Failed to create config directory for %s\n", g_switch2_wakeup_config_path.c_str());
         return false;
@@ -1598,6 +1612,7 @@ static bool save_switch2_wakeup_config(const std::string& mac, const std::string
     f << "# Keep this private-ish: it contains your paired controller wake identity.\n";
     f << "mac=" << lowercase_copy(mac) << "\n";
     f << "adv=" << uppercase_hex_copy(adv) << "\n";
+    f << "hci=" << (valid_hci_dev_string(hci_dev) ? hci_dev : "hci0") << "\n";
     f.close();
 
     chmod(g_switch2_wakeup_config_path.c_str(), 0600);
@@ -1791,49 +1806,77 @@ static std::string parse_btmgmt_addr(const std::string& info) {
     return "";
 }
 
-static bool wait_for_wake_hci(std::string& hci_dev, bool verbose_output) {
-    for (int i = 0; i < 30; ++i) {
-        WakeCmdResult r = run_wake_command({"btmgmt", "info"}, false, true, 2000);
-        if (r.exit_code == 0) {
-            std::string dev = parse_first_hci_device(r.output);
-            if (!dev.empty()) {
-                hci_dev = dev;
-                return true;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+static std::string first_hci_from_sysfs() {
+    DIR* d = opendir("/sys/class/bluetooth");
+    if (!d) return "";
+
+    std::vector<std::string> devices;
+    while (dirent* ent = readdir(d)) {
+        std::string name = ent->d_name ? ent->d_name : "";
+        if (valid_hci_dev_string(name))
+            devices.push_back(name);
     }
+    closedir(d);
+
+    if (devices.empty()) return "";
+    std::sort(devices.begin(), devices.end());
+    return devices.front();
+}
+
+static std::string detect_wake_hci_for_setup() {
+    std::string hci = first_hci_from_sysfs();
+    if (valid_hci_dev_string(hci))
+        return hci;
+
+    WakeCmdResult r = run_wake_command({"btmgmt", "info"}, false, true, 3000);
+    if (r.exit_code == 0) {
+        hci = parse_first_hci_device(r.output);
+        if (valid_hci_dev_string(hci))
+            return hci;
+    }
+
+    return "hci0";
+}
+
+static bool wait_for_wake_hci(std::string& hci_dev, bool verbose_output) {
+    // Runtime wake path must not depend on `btmgmt info`.
+    // Under systemd service mode, `btmgmt info` can hang in the backend cgroup even
+    // though the exact same raw wake sequence works from a shell/systemd-run.
+    // The Raspberry Pi onboard Bluetooth adapter is hci0 for the supported setup, so
+    // use it directly and let the actual btmgmt/hcitool commands be the real test.
+    if (hci_dev.empty())
+        hci_dev = "hci0";
     if (verbose_output)
-        std::fprintf(stderr, "[wake] No Bluetooth HCI device appeared\n");
-    return false;
+        std::printf("[wake] Using Bluetooth controller %s\n", hci_dev.c_str());
+    return true;
 }
 
 static void wake_disable_advertising_quiet(const std::string& hci_dev) {
-    run_wake_command({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "00"}, false, false);
+    run_wake_command({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "00"}, false, false, 3000);
 }
 
 static bool reset_wake_bt_stack(std::string& hci_dev, bool verbose_output) {
+    if (hci_dev.empty())
+        hci_dev = "hci0";
     if (verbose_output)
         std::fprintf(stderr, "[wake] Resetting Bluetooth stack / hciuart\n");
+
+    // Keep this close to the working standalone wake script, but do not ask btmgmt
+    // for adapter discovery here; service mode has been observed hanging there.
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
-    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false);
-    if (!hci_dev.empty())
-        wake_disable_advertising_quiet(hci_dev);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
+    wake_disable_advertising_quiet(hci_dev);
     run_wake_command({"systemctl", "restart", "hciuart"}, false, false, 15000);
     std::this_thread::sleep_for(std::chrono::seconds(3));
-    return wait_for_wake_hci(hci_dev, verbose_output);
+    return true;
 }
 
 static bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bool verbose_output) {
-    const std::string wanted_addr = uppercase_hex_copy(mac_lc);
+    if (hci_dev.empty())
+        hci_dev = "hci0";
 
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
-    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false);
-
-    if (!wait_for_wake_hci(hci_dev, verbose_output)) {
-        if (!reset_wake_bt_stack(hci_dev, verbose_output))
-            return false;
-    }
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
 
     for (int attempt = 1; attempt <= 3; ++attempt) {
         if (verbose_output)
@@ -1857,38 +1900,18 @@ static bool prepare_wake_controller(std::string& hci_dev, const std::string& mac
             reset_wake_bt_stack(hci_dev, verbose_output);
             continue;
         }
-
-        if (!wait_for_wake_hci(hci_dev, verbose_output)) {
-            reset_wake_bt_stack(hci_dev, verbose_output);
-            continue;
-        }
-
         if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "power", "on"}, verbose_output)) {
             reset_wake_bt_stack(hci_dev, verbose_output);
             continue;
         }
 
+        // Do not verify with `btmgmt info` here. Verification is nice in an
+        // interactive shell, but on the systemd service path it can hang before the
+        // advert is sent. The wake packet itself is the important operation.
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        WakeCmdResult info = run_wake_command({"btmgmt", "-i", hci_dev, "info"}, verbose_output, true, 3000);
-        if (verbose_output && !info.output.empty())
-            std::printf("%s", info.output.c_str());
-        if (info.exit_code != 0) {
-            reset_wake_bt_stack(hci_dev, verbose_output);
-            continue;
-        }
-
-        std::string current_addr = parse_btmgmt_addr(info.output);
-        if (current_addr == wanted_addr) {
-            if (verbose_output)
-                std::printf("[wake] Controller public address is now %s\n", current_addr.c_str());
-            return true;
-        }
-
         if (verbose_output)
-            std::fprintf(stderr, "[wake] Controller address is %s, wanted %s\n",
-                         current_addr.empty() ? "<unknown>" : current_addr.c_str(), wanted_addr.c_str());
-        reset_wake_bt_stack(hci_dev, verbose_output);
+            std::printf("[wake] Bluetooth controller prepared as %s\n", mac_lc.c_str());
+        return true;
     }
 
     return false;
@@ -1959,7 +1982,7 @@ static bool send_switch2_wake_advert_once(const std::string& mac, const std::str
 
     const std::string mac_lc = lowercase_copy(mac);
     const std::string adv_uc = uppercase_hex_copy(adv_hex);
-    std::string hci_dev = "hci0";
+    std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
 
     if (verbose_output) {
         std::printf("[wake] Wake MAC: %s\n", mac_lc.c_str());
@@ -2089,19 +2112,21 @@ static bool capture_switch2_wake_advert(int seconds,
     std::snprintf(log_path, sizeof(log_path), "/tmp/ns_switch2_wake_%ld.log", (long)getpid());
 
     std::ostringstream cmd;
+    const std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+
     cmd << "sh -c 'rm -f " << log_path << "; "
         << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
         << "sleep 1; "
-        << "timeout " << std::max(1, seconds - 2) << " hcitool lescan --duplicates >/dev/null 2>&1 || true; "
+        << "timeout " << std::max(1, seconds - 2) << " hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 || true; "
         << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
 
-    (void)std::system("systemctl stop bluetooth >/dev/null 2>&1 || true");
-    (void)std::system("rfkill unblock bluetooth >/dev/null 2>&1 || true");
-    (void)std::system("btmgmt -i hci0 power off >/dev/null 2>&1 || true");
-    (void)std::system("btmgmt -i hci0 privacy off >/dev/null 2>&1 || true");
-    (void)std::system("btmgmt -i hci0 bredr off >/dev/null 2>&1 || true");
-    (void)std::system("btmgmt -i hci0 le on >/dev/null 2>&1 || true");
-    (void)std::system("btmgmt -i hci0 power on >/dev/null 2>&1 || true");
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "power", "off"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "privacy", "off"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "bredr", "off"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "le", "on"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "power", "on"}, false, false, 5000);
 
     int rc = std::system(cmd.str().c_str());
     (void)rc;
@@ -2150,9 +2175,12 @@ static int run_switch2_wakeup_setup() {
         }
     }
 
+    g_switch2_wake_hci_dev = detect_wake_hci_for_setup();
+
     std::puts("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::puts("------------------------------------------------");
     std::printf("[wake] Config will be saved to: %s\n", g_switch2_wakeup_config_path.c_str());
+    std::printf("[wake] Bluetooth adapter registered for runtime wake: %s\n", g_switch2_wake_hci_dev.c_str());
     std::puts("[wake] This setup scans your Joy-Con 2 on the Pi, captures its HOME advert, then asks you to attach it back to the Switch 2.");
     std::puts("[wake] Use your own Joy-Con 2 right joycon that is paired to this Switch 2.\n");
 
@@ -2191,11 +2219,12 @@ static int run_switch2_wakeup_setup() {
     std::puts("[wake] Then put the Switch 2 to sleep before continuing.");
     wait_for_enter("[wake] Press Enter when the Joy-Con 2 is paired back AND the Switch 2 is asleep; setup will test wake... ");
 
-    if (!save_switch2_wakeup_config(mac, cap_adv))
+    if (!save_switch2_wakeup_config(mac, cap_adv, g_switch2_wake_hci_dev))
         return 1;
 
     g_switch2_wake_mac = lowercase_copy(mac);
     g_switch2_wake_adv_hex = uppercase_hex_copy(cap_adv);
+    g_switch2_wake_hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
     g_switch2_wake_config_loaded = true;
     std::printf("[wake] Saved wake config to %s\n", g_switch2_wakeup_config_path.c_str());
 
