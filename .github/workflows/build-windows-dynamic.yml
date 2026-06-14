@@ -1,0 +1,105 @@
+name: Build Windows Client Dynamic Qt
+
+on:
+  push:
+    paths:
+      - 'client/**'
+      - 'server/include/**'
+      - '.github/workflows/build-clients-windows-dynamic.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  SDL_REF: release-3.4.10
+  QT_VERSION: '6.8.3'
+
+jobs:
+  build-windows-dynamic:
+    name: Windows dynamic Qt zip
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup MSVC
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Cache SDL3 static
+        id: cache-sdl3
+        uses: actions/cache@v5
+        with:
+          path: _cache/sdl3-static
+          key: sdl3-windows-static-msvc-${{ env.SDL_REF }}-v1
+
+      - name: Build SDL3 static
+        if: steps.cache-sdl3.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "$env:SDL_REF" https://github.com/libsdl-org/SDL.git _deps/SDL3
+
+          cmake -S _deps/SDL3 -B _deps/SDL3-build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$PWD/_cache/sdl3-static" `
+            -DSDL_SHARED=OFF `
+            -DSDL_STATIC=ON `
+            -DSDL_TEST_LIBRARY=OFF `
+            -DSDL_TESTS=OFF `
+            -DSDL_EXAMPLES=OFF
+
+          cmake --build _deps/SDL3-build --parallel
+          cmake --install _deps/SDL3-build
+
+      - name: Build client
+        shell: pwsh
+        run: |
+          cmake -S client -B client/build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$PWD/_cache/sdl3-static;$env:Qt6_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+
+          cmake --build client/build --target ns-client --parallel
+
+      - name: Stage Windows dynamic artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force client/artifacts/windows-dynamic | Out-Null
+
+          Copy-Item client/build/ns-client.exe client/artifacts/windows-dynamic/ns-client.exe
+
+          # Deploy Qt DLLs/plugins next to the exe.
+          windeployqt client/artifacts/windows-dynamic/ns-client.exe `
+            --release `
+            --no-translations `
+            --no-system-d3d-compiler `
+            --no-opengl-sw
+
+          # If SDL was linked dynamically for any reason, copy SDL3.dll if it exists.
+          $sdlDll = Get-ChildItem -Path _cache/sdl3-static -Filter SDL3.dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($sdlDll) {
+            Copy-Item $sdlDll.FullName client/artifacts/windows-dynamic/SDL3.dll
+          }
+
+          Compress-Archive `
+            -Path client/artifacts/windows-dynamic/* `
+            -DestinationPath client/artifacts/ns-client-windows-dynamic.zip `
+            -Force
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-dynamic-qt-zip
+          path: client/artifacts/ns-client-windows-dynamic.zip
