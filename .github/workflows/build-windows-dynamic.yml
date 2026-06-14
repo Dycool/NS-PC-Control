@@ -1,11 +1,6 @@
 name: Build Windows Client Dynamic Qt
 
 on:
-  push:
-    paths:
-      - 'client/**'
-      - 'server/include/**'
-      - '.github/workflows/build-clients-windows-dynamic.yml'
   workflow_dispatch:
   workflow_call:
 
