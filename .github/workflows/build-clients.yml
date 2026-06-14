@@ -15,6 +15,7 @@ permissions:
 env:
   SDL_REF: release-3.4.10
   QT_VERSION: '6.8.3'
+  VCPKG_COMMIT: 8584f4d71b35d9c82a94bd39a0d558302b3604e4ee1ae46d8eb4c38519682bb9
   VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/_cache/vcpkg-bincache
 
 jobs:
@@ -34,16 +35,20 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-x64-windows-static-v3
+          key: vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-v4
           restore-keys: |
-            vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-x64-windows-static-
+            vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-
+            vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-
             vcpkg-windows-static-qtbase-sdl3-${{ env.QT_VERSION }}-
             vcpkg-windows-static-qtbase-sdl3-
 
-      - name: Bootstrap vcpkg
+      - name: Bootstrap pinned vcpkg
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git _deps/vcpkg
+          git clone https://github.com/microsoft/vcpkg.git _deps/vcpkg
+          cd _deps/vcpkg
+          git checkout $env:VCPKG_COMMIT
+          cd ../..
           .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Build static Qt + SDL3 with vcpkg
