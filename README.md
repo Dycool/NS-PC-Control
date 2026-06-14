@@ -12,13 +12,13 @@ This project was built from scratch in **C++** and uses **UDP** for low latency.
 
 **Keyboard Support** - Desktop clients support keyboard controls, either by overriding P1 or by using the keyboard as one player.
 
-**Web App & Mobile Touch Controls** - The server includes an embedded web interface with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
+**Web App & Mobile Touch Controls** - The server includes an embedded [web interface](https://github.com/Dycool/NS-PC-Control/blob/main/docs/web-app.md) with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
 
 **Gyroscope and Rumble** - PC clients with gyro-capable controllers (DS4, DualSense, compatible USB motion pads), Android and iOS can send motion data! Rumble is only supported on PC clients or controllers connected through the mobile apps.
 
-**Macros** - Create, record and share your own macros from any PC client!
+**Macros** - Create, record and share your own [macros](https://github.com/Dycool/NS-PC-Control/blob/main/docs/macros.md) from any PC client!
 
-**Play it whenever you wish to!** With the new support of wake up packets for the switch 2, the switch can now remain asleep until you connect to the server (additional setup required, still not released, test it in actions)!
+**Play it whenever you wish to!** With the new support of [wake up packets](https://github.com/Dycool/NS-PC-Control/blob/main/docs/wakeup.md) for the switch 2, the switch can now remain asleep until you connect to the server!
 
 **Supports any raspberry pi with usb gadget!**
 
