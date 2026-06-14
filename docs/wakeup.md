@@ -38,10 +38,11 @@ The config file is at `/etc/ns-pc-control/switch2_wakeup.conf`:
 # Keep this private-ish: it contains your paired controller wake identity.
 mac=xx:xx:xx:xx:xx:xx
 adv=0201061BFF5305<48 hex chars of Nintendo data>
+hci=hci0
 ```
-
 - **mac**: The public Bluetooth address of the paired Joy-Con 2
 - **adv**: The full BLE advertising payload (Flags + manufacturer header + 24-byte Nintendo data)
+- **hci**: The Bluetooth HCI device to use (defaults to `hci0`).
 
 ### Setup Wizard (`-wake`)
 
