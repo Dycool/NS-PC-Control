@@ -271,7 +271,6 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
     uint32_t src_ip = sender.sin_addr.s_addr;
     uint64_t now = now_us();
     int client_idx = -1;
-    bool wake_on_new_client = false;
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         std::lock_guard<std::mutex> lk(g_mtx[i]);
         if (g_clients[i].active && g_clients[i].addr.sin_addr.s_addr == src_ip && g_clients[i].addr.sin_port == sender.sin_port) { client_idx = i; break; }
@@ -289,7 +288,6 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
                 g_clients[i].report.reset();
                 clear_all_motion(g_clients[i]);
                 g_clients[i].last_rx_us = now;
-                wake_on_new_client = true;
                 break;
             }
         }
@@ -300,8 +298,8 @@ static int server_macro_client_for_sender(const sockaddr_in& sender) {
         g_clients[client_idx].addr = sender;
         g_clients[client_idx].last_rx_us = now;
     }
-    if (wake_on_new_client)
-        maybe_send_switch2_wake_advert("client connected via UDP macro upload");
+    // Macro upload/start packets intentionally do not trigger Switch 2 wake.
+    // Wake is reserved for real controller/input connection edges.
     return client_idx;
 }
 
@@ -3481,7 +3479,6 @@ static size_t process_ws_frame(WebClient *c) {
         const std::string prefix = "MACRO_RUN:";
         if (text.rfind(prefix, 0) == 0) {
             uint64_t now = now_us();
-            bool wake_on_new_client = false;
             if (c->ws_slot < 0) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_mtx[i]);
@@ -3495,13 +3492,11 @@ static size_t process_ws_frame(WebClient *c) {
                         clear_udp_rumble_state(g_clients[i]);
                         for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; }
                         g_clients[i].last_rx_us = now;
-                        wake_on_new_client = true;
                         break;
                     }
                 }
             }
-            if (wake_on_new_client)
-                maybe_send_switch2_wake_advert("client connected via WebSocket macro");
+            // Macro commands intentionally do not trigger Switch 2 wake.
             if (c->ws_slot >= 0) {
                 {
                     std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
@@ -3530,7 +3525,6 @@ static size_t process_ws_frame(WebClient *c) {
         memcpy(&maybe_macro_magic, payload, 4);
         if (maybe_macro_magic == ns::macro::UDP_CHUNK_MAGIC) {
             uint64_t now = now_us();
-            bool wake_on_new_client = false;
             if (c->ws_slot < 0) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_mtx[i]);
@@ -3542,13 +3536,11 @@ static size_t process_ws_frame(WebClient *c) {
                         clear_all_motion(g_clients[i]);
                         g_clients[i].uses_pad_presence = true;
                         g_clients[i].last_rx_us = now;
-                        wake_on_new_client = true;
                         break;
                     }
                 }
             }
-            if (wake_on_new_client)
-                maybe_send_switch2_wake_advert("client connected via WebSocket macro chunk");
+            // Macro chunk uploads intentionally do not trigger Switch 2 wake.
             if (c->ws_slot >= 0) {
                 std::lock_guard<std::mutex> lk(g_mtx[c->ws_slot]);
                 g_clients[c->ws_slot].active = true;
@@ -4426,8 +4418,10 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (wake_on_new_client)
-                maybe_send_switch2_wake_advert("client connected via UDP input");
+            // Do not send wake yet. A packet from a new endpoint might still be
+            // invalid or it might be an explicit disconnect packet. Wake must be
+            // tied to a real client connection/input packet, never to disconnect
+            // cleanup.
 
             // If all 4 slots are taken by active PCs, drop the packet.
             if (client_idx == -1) {
@@ -4472,6 +4466,9 @@ int main(int argc, char** argv) {
                 ++g_pkts_rx;
                 continue;
             }
+
+            if (wake_on_new_client)
+                maybe_send_switch2_wake_advert("client connected via UDP input");
 
             // ── 5. Sequence counter + Apply to shared state ───────────────────────
             bool accepted = false;
