@@ -35,12 +35,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-core-widgets-png-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-v1-release-only
+          key: vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-v2
           restore-keys: |
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-${{ env.QT_VERSION }}-
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-
+            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-
+            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-
+            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-
+            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-
 
       - name: Bootstrap pinned vcpkg
         shell: pwsh
@@ -51,16 +51,24 @@ jobs:
           cd ../..
           .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
-      - name: Create release-only static vcpkg triplet
+      - name: Create release-only vcpkg triplets
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force triplets | Out-Null
+
           @'
           set(VCPKG_TARGET_ARCHITECTURE x64)
           set(VCPKG_CRT_LINKAGE static)
           set(VCPKG_LIBRARY_LINKAGE static)
           set(VCPKG_BUILD_TYPE release)
           '@ | Set-Content triplets/x64-windows-static-release.cmake
+
+          @'
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE dynamic)
+          set(VCPKG_LIBRARY_LINKAGE dynamic)
+          set(VCPKG_BUILD_TYPE release)
+          '@ | Set-Content triplets/x64-windows-release.cmake
 
       - name: Build static Qt + SDL3 with vcpkg
         shell: pwsh
@@ -72,6 +80,7 @@ jobs:
             "qtbase[core,widgets,png]:x64-windows-static-release" `
             "sdl3:x64-windows-static-release" `
             --overlay-triplets="$PWD/triplets" `
+            --host-triplet=x64-windows-release `
             --clean-after-build
 
       - name: Build client
@@ -83,6 +92,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-release `
+            -DVCPKG_HOST_TRIPLET=x64-windows-release `
             -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets" `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
