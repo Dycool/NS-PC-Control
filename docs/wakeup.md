@@ -1,12 +1,25 @@
-# Switch 2 Wake Setup (BLE Joy-Con 2 Spoofing)
+# Switch Wake Setup
 
-When a client connects to the server but the Switch 2 shows no recent USB HID activity (i.e. it is asleep), the server can briefly broadcast a BLE advertisement that mimics a genuine Joy-Con 2 HOME button press. The server temporarily changes the Pi's Bluetooth public address to the captured Joy-Con 2 MAC and transmits the exact manufacturer advertising data observed from that controller.
 
-This only works on a Raspberry Pi with BlueZ tools and only targets the Switch 2.
+## Switch 1
 
+
+Switch 1 native Bluetooth wake is not currently supported. Switch 1 wake appears to rely on specific Bluetooth Classic firmware behavior used by official Joy-Con/Pro Controllers, so the server cannot wake a Switch 1 using USB HOME or a simple replay packet.
+
+Workaround:
+
+1. Buy a Wi-Fi smart plug.
+2. Connect the Switch AC adapter / dock power to it.
+3. On the Switch, enable **System Settings → Sleep Mode → Wake When AC Adapter is Disconnected.**
+4. Toggle the smart plug off and back on to wake the Switch.
+
+>Note: Be careful which smart plug you buy. Use a reputable, properly rated Wi-Fi smart plug that can safely handle the Switch AC adapter/dock power. Avoid very cheap or uncertified plugs, and do not rapidly toggle power on/off repeatedly.
 ---
 
-## How it Works
+## Switch 2
+
+This server is capable of sending a BLE advertisement that mimics a genuine Joy-Con 2 HOME button press.
+
 
 ### Prerequisites
 

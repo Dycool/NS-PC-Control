@@ -4,23 +4,23 @@
 
 # NS PC Control
 
-**Control your switch or switch 2 console from a PC (Windows, Linux, macOS) or through your browser/phone with low latency using a Raspberry Pi.**
+**Control your Switch or Switch 2 console from a PC (Windows, Linux, macOS) or through your browser/phone with low latency using a Raspberry Pi.** 🎮
 
 This project was built from scratch in **C++** and uses **UDP** for low latency. It is designed for playing console games with your PC controller while avoiding the typical lag of Bluetooth or heavy script-based solutions.
 
-**Up to 4 players simultaneously** - Works with a single Raspberry Pi and a single PC.
+👥 **Up to 4 players simultaneously** - Works with a single Raspberry Pi and a single PC.
 
-**Keyboard Support** - Desktop clients support keyboard controls, either by overriding P1 or by using the keyboard as one player.
+⌨️ **Keyboard Support** - Desktop clients support keyboard controls, either by overriding P1 or by using the keyboard as one player.
 
-**Web App & Mobile Touch Controls** - The server includes an embedded [web interface](https://github.com/Dycool/NS-PC-Control/blob/main/docs/web-app.md) with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
+🌐 **Web App & Mobile Touch Controls** - The server includes an embedded [web interface](https://github.com/Dycool/NS-PC-Control/blob/main/docs/web-app.md) with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
 
-**Gyroscope and Rumble** - PC clients with gyro-capable controllers (DS4, DualSense, compatible USB motion pads), Android and iOS can send motion data! Rumble is only supported on PC clients or controllers connected through the mobile apps.
+🔄 **Gyroscope and Rumble** - PC clients with gyro-capable controllers (DS4, DualSense, compatible USB motion pads), Android and iOS can send motion data! Rumble is only supported on PC clients or controllers connected through the mobile apps.
 
-**Macros** - Create, record and share your own [macros](https://github.com/Dycool/NS-PC-Control/blob/main/docs/macros.md) from any PC client!
+⚙️ **Macros** - Create, record and share your own [macros](https://github.com/Dycool/NS-PC-Control/blob/main/docs/macros.md) from any PC client!
 
-**Play it whenever you wish to!** With the new support of [wake up packets](https://github.com/Dycool/NS-PC-Control/blob/main/docs/wakeup.md) for the switch 2, the switch can now remain asleep until you connect to the server!
+⏰ **Wake up your Switch 2 whenever you want to!** Click [here](https://github.com/Dycool/NS-PC-Control/blob/main/docs/wakeup.md) for more details.
 
-**Supports any raspberry pi with usb gadget!**
+🟢 **Supports any Raspberry Pi with USB gadget!**
 
 > **Pre-compiled Binaries Available!**
 > You can download ready-to-use GUI/CLI clients and the Raspberry Pi server directly from the **[Releases](https://github.com/Dycool/NS-PC-Control/releases)** page.
@@ -31,21 +31,21 @@ https://github.com/user-attachments/assets/aef8eb25-dd14-4335-a3f7-b1953800f856
 
 ---
 
-## Quick Start (Pre-compiled)
+## 🚀 Quick Start (Pre-compiled)
 
-**1. Raspberry Pi (Server):**
+**1. 🥧 Raspberry Pi (Server):**
 * Download `ns-pc-control-raspberry-pi.zip` to your Pi.
-* Enable usb gadget, check the [raspbery pi setup](docs/raspberry-pi-setup.md) for more details.
+* Enable USB gadget, check the [Raspberry Pi setup](docs/raspberry-pi-setup.md) for more details.
 * Start the backend: `sudo chrt -f 99 ./ns-backend`
 
-**2. PC / Mobile (Client):**
+**2. 💻 PC / Mobile (Client):**
 * **Desktop** — Download the zip for your OS (Windows, Mac, or Linux), launch `ns-client`, enter your Pi's IP.
 * **Android** — Download `NS-mobile.apk` from the release and install it.
 * **iOS** — Download `NS-mobile.ipa` from the release (sideload via iloader).
 * **Up to 4 controllers** are supported simultaneously on a single client.
 > Mobile clients do not support rumble with touch controls.
 
-**3. Web App (Optional):**
+**3. 🌐 Web App (Optional):**
 * The backend includes an embedded web server with mobile touch controls.
 * Enable it with the `-w` flag: `sudo chrt -f 99 ./ns-backend -w`
 * Open `http://<pi-ip>:8080` in your browser.
@@ -53,7 +53,7 @@ https://github.com/user-attachments/assets/aef8eb25-dd14-4335-a3f7-b1953800f856
 
 ---
 
-## Controller Emulation Modes
+## 🎛️ Controller Emulation Modes
 
 The Raspberry Pi server can emulate **two different controller profiles**:
 
@@ -72,7 +72,7 @@ sudo chrt -f 99 ./ns-backend -hori
 
 ---
 
-## Controls & Shortcuts
+## 🎮 Controls & Shortcuts
 
 Any **SDL-compatible controller** connected to your client is supported, so basically any controller on the market.
 
@@ -85,7 +85,7 @@ Any **SDL-compatible controller** connected to your client is supported, so basi
 
 ---
 
-## Documentation
+## 📚 Documentation
 
 Detailed guides and technical information are in the `docs/` folder:
 
@@ -95,12 +95,12 @@ Detailed guides and technical information are in the `docs/` folder:
 * **[Macros](docs/macros.md)** - Recording and replaying button sequences for speedruns and TAS.
 * **[Architecture & Security](docs/architecture.md)** - Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Clients](docs/web-app.md)** - Using the embedded web interface and mobile touch controls.
-* **[Wakeup Setup](docs/wakeup.md)** - How to configure the wakeup packet for the switch 2.
+* **[Wakeup Setup](docs/wakeup.md)** - Configure wake-up support for Switch 1 and Switch 2.
 * **[My vision](docs/vision.md)** - The main goal behind this project.
 
 ---
 
-## References
+## 🔗 References
 
 | Components | Sources |
 |---|---|
@@ -116,12 +116,12 @@ Detailed guides and technical information are in the `docs/` folder:
 
 ---
 
-## Reporting Issues
+## 🐛 Reporting Issues
 
 Found a bug or have a feature request? Open an issue at **[github.com/Dycool/NS-PC-Control/issues](https://github.com/Dycool/NS-PC-Control/issues)** with as much detail as possible (OS, controller model, reproduction steps).
 
 ---
 
-## License
+## 📄 License
 
 See the repository license for details.
