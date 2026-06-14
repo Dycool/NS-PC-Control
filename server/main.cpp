@@ -1625,10 +1625,13 @@ struct WakeCmdResult {
 
 static WakeCmdResult run_wake_command(const std::vector<std::string>& args,
                                       bool verbose_output,
-                                      bool capture_output = false) {
+                                      bool capture_output = false,
+                                      int timeout_ms = 8000) {
     WakeCmdResult res;
     if (args.empty())
         return res;
+    if (timeout_ms <= 0)
+        timeout_ms = 8000;
 
     int pipefd[2] = {-1, -1};
     if (capture_output) {
@@ -1636,6 +1639,9 @@ static WakeCmdResult run_wake_command(const std::vector<std::string>& args,
             res.output = std::string("pipe failed: ") + std::strerror(errno);
             return res;
         }
+        int flags = fcntl(pipefd[0], F_GETFL, 0);
+        if (flags >= 0)
+            fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
     }
 
     pid_t pid = fork();
@@ -1670,29 +1676,86 @@ static WakeCmdResult run_wake_command(const std::vector<std::string>& args,
         _exit(127);
     }
 
-    if (capture_output) {
+    if (capture_output)
         close(pipefd[1]);
+
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    int status = 0;
+    bool exited = false;
+
+    while (true) {
+        if (capture_output) {
+            char buf[4096];
+            while (true) {
+                ssize_t n = read(pipefd[0], buf, sizeof(buf));
+                if (n > 0) {
+                    res.output.append(buf, (size_t)n);
+                    continue;
+                }
+                if (n == 0)
+                    break;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    break;
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+        }
+
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            exited = true;
+            break;
+        }
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            res.output += std::string("waitpid failed: ") + std::strerror(errno);
+            break;
+        }
+
+        if (Clock::now() >= deadline) {
+            kill(pid, SIGTERM);
+            for (int i = 0; i < 10; ++i) {
+                if (waitpid(pid, &status, WNOHANG) == pid) {
+                    exited = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!exited) {
+                kill(pid, SIGKILL);
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            }
+            res.exit_code = 124;
+            res.output += "command timed out";
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (capture_output) {
         char buf[4096];
-        ssize_t n;
-        while ((n = read(pipefd[0], buf, sizeof(buf))) > 0)
-            res.output.append(buf, (size_t)n);
+        while (true) {
+            ssize_t n = read(pipefd[0], buf, sizeof(buf));
+            if (n > 0) {
+                res.output.append(buf, (size_t)n);
+                continue;
+            }
+            break;
+        }
         close(pipefd[0]);
     }
 
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR)
-            continue;
-        res.output += std::string("waitpid failed: ") + std::strerror(errno);
-        return res;
+    if (exited) {
+        if (WIFEXITED(status))
+            res.exit_code = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status))
+            res.exit_code = 128 + WTERMSIG(status);
+        else
+            res.exit_code = -1;
     }
-
-    if (WIFEXITED(status))
-        res.exit_code = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status))
-        res.exit_code = 128 + WTERMSIG(status);
-    else
-        res.exit_code = -1;
 
     return res;
 }
@@ -1730,7 +1793,7 @@ static std::string parse_btmgmt_addr(const std::string& info) {
 
 static bool wait_for_wake_hci(std::string& hci_dev, bool verbose_output) {
     for (int i = 0; i < 30; ++i) {
-        WakeCmdResult r = run_wake_command({"btmgmt", "info"}, false, true);
+        WakeCmdResult r = run_wake_command({"btmgmt", "info"}, false, true, 2000);
         if (r.exit_code == 0) {
             std::string dev = parse_first_hci_device(r.output);
             if (!dev.empty()) {
@@ -1752,11 +1815,11 @@ static void wake_disable_advertising_quiet(const std::string& hci_dev) {
 static bool reset_wake_bt_stack(std::string& hci_dev, bool verbose_output) {
     if (verbose_output)
         std::fprintf(stderr, "[wake] Resetting Bluetooth stack / hciuart\n");
-    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false);
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false);
     if (!hci_dev.empty())
         wake_disable_advertising_quiet(hci_dev);
-    run_wake_command({"systemctl", "restart", "hciuart"}, false, false);
+    run_wake_command({"systemctl", "restart", "hciuart"}, false, false, 15000);
     std::this_thread::sleep_for(std::chrono::seconds(3));
     return wait_for_wake_hci(hci_dev, verbose_output);
 }
@@ -1764,7 +1827,7 @@ static bool reset_wake_bt_stack(std::string& hci_dev, bool verbose_output) {
 static bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bool verbose_output) {
     const std::string wanted_addr = uppercase_hex_copy(mac_lc);
 
-    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false);
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false);
 
     if (!wait_for_wake_hci(hci_dev, verbose_output)) {
@@ -1807,7 +1870,7 @@ static bool prepare_wake_controller(std::string& hci_dev, const std::string& mac
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-        WakeCmdResult info = run_wake_command({"btmgmt", "-i", hci_dev, "info"}, verbose_output, true);
+        WakeCmdResult info = run_wake_command({"btmgmt", "-i", hci_dev, "info"}, verbose_output, true, 3000);
         if (verbose_output && !info.output.empty())
             std::printf("%s", info.output.c_str());
         if (info.exit_code != 0) {
