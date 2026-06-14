@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <ctype.h>
 
@@ -1617,6 +1618,274 @@ static std::string adv_hex_to_hcitool_args(const std::string& adv_hex) {
     return oss.str();
 }
 
+struct WakeCmdResult {
+    int exit_code = -1;
+    std::string output;
+};
+
+static WakeCmdResult run_wake_command(const std::vector<std::string>& args,
+                                      bool verbose_output,
+                                      bool capture_output = false) {
+    WakeCmdResult res;
+    if (args.empty())
+        return res;
+
+    int pipefd[2] = {-1, -1};
+    if (capture_output) {
+        if (pipe(pipefd) != 0) {
+            res.output = std::string("pipe failed: ") + std::strerror(errno);
+            return res;
+        }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (pipefd[0] >= 0) close(pipefd[0]);
+        if (pipefd[1] >= 0) close(pipefd[1]);
+        res.output = std::string("fork failed: ") + std::strerror(errno);
+        return res;
+    }
+
+    if (pid == 0) {
+        if (capture_output) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+            close(pipefd[1]);
+        } else if (!verbose_output) {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
+        }
+
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 1);
+        for (const auto& a : args)
+            argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+
+    if (capture_output) {
+        close(pipefd[1]);
+        char buf[4096];
+        ssize_t n;
+        while ((n = read(pipefd[0], buf, sizeof(buf))) > 0)
+            res.output.append(buf, (size_t)n);
+        close(pipefd[0]);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        res.output += std::string("waitpid failed: ") + std::strerror(errno);
+        return res;
+    }
+
+    if (WIFEXITED(status))
+        res.exit_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+        res.exit_code = 128 + WTERMSIG(status);
+    else
+        res.exit_code = -1;
+
+    return res;
+}
+
+static bool wake_cmd_ok(const std::vector<std::string>& args, bool verbose_output) {
+    WakeCmdResult r = run_wake_command(args, verbose_output, false);
+    return r.exit_code == 0;
+}
+
+static std::string parse_first_hci_device(const std::string& info) {
+    std::istringstream iss(info);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.rfind("hci", 0) == 0) {
+            size_t colon = line.find(':');
+            if (colon != std::string::npos)
+                return line.substr(0, colon);
+        }
+    }
+    return "";
+}
+
+static std::string parse_btmgmt_addr(const std::string& info) {
+    std::istringstream iss(info);
+    std::string tok;
+    while (iss >> tok) {
+        if (tok == "addr") {
+            std::string addr;
+            if (iss >> addr)
+                return uppercase_hex_copy(addr);
+        }
+    }
+    return "";
+}
+
+static bool wait_for_wake_hci(std::string& hci_dev, bool verbose_output) {
+    for (int i = 0; i < 30; ++i) {
+        WakeCmdResult r = run_wake_command({"btmgmt", "info"}, false, true);
+        if (r.exit_code == 0) {
+            std::string dev = parse_first_hci_device(r.output);
+            if (!dev.empty()) {
+                hci_dev = dev;
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    if (verbose_output)
+        std::fprintf(stderr, "[wake] No Bluetooth HCI device appeared\n");
+    return false;
+}
+
+static void wake_disable_advertising_quiet(const std::string& hci_dev) {
+    run_wake_command({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "00"}, false, false);
+}
+
+static bool reset_wake_bt_stack(std::string& hci_dev, bool verbose_output) {
+    if (verbose_output)
+        std::fprintf(stderr, "[wake] Resetting Bluetooth stack / hciuart\n");
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false);
+    if (!hci_dev.empty())
+        wake_disable_advertising_quiet(hci_dev);
+    run_wake_command({"systemctl", "restart", "hciuart"}, false, false);
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    return wait_for_wake_hci(hci_dev, verbose_output);
+}
+
+static bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bool verbose_output) {
+    const std::string wanted_addr = uppercase_hex_copy(mac_lc);
+
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false);
+
+    if (!wait_for_wake_hci(hci_dev, verbose_output)) {
+        if (!reset_wake_bt_stack(hci_dev, verbose_output))
+            return false;
+    }
+
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        if (verbose_output)
+            std::printf("[wake] Preparing Bluetooth controller, attempt %d, device %s\n", attempt, hci_dev.c_str());
+
+        wake_cmd_ok({"btmgmt", "-i", hci_dev, "power", "off"}, verbose_output);
+
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "privacy", "off"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "bredr", "off"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "le", "on"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "public-addr", mac_lc}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+
+        if (!wait_for_wake_hci(hci_dev, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+
+        if (!wake_cmd_ok({"btmgmt", "-i", hci_dev, "power", "on"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        WakeCmdResult info = run_wake_command({"btmgmt", "-i", hci_dev, "info"}, verbose_output, true);
+        if (verbose_output && !info.output.empty())
+            std::printf("%s", info.output.c_str());
+        if (info.exit_code != 0) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
+
+        std::string current_addr = parse_btmgmt_addr(info.output);
+        if (current_addr == wanted_addr) {
+            if (verbose_output)
+                std::printf("[wake] Controller public address is now %s\n", current_addr.c_str());
+            return true;
+        }
+
+        if (verbose_output)
+            std::fprintf(stderr, "[wake] Controller address is %s, wanted %s\n",
+                         current_addr.empty() ? "<unknown>" : current_addr.c_str(), wanted_addr.c_str());
+        reset_wake_bt_stack(hci_dev, verbose_output);
+    }
+
+    return false;
+}
+
+static bool start_wake_raw_advertising(const std::string& hci_dev,
+                                       const std::string& mac_lc,
+                                       const std::string& adv_uc,
+                                       int seconds,
+                                       bool verbose_output) {
+    std::vector<std::string> adv_args;
+    adv_args.reserve(32);
+    size_t adv_bytes = adv_uc.size() / 2;
+    char len_arg[8];
+    std::snprintf(len_arg, sizeof(len_arg), "%02X", (unsigned)adv_bytes);
+    adv_args.push_back(len_arg);
+    for (size_t i = 0; i < adv_bytes; ++i)
+        adv_args.push_back(adv_uc.substr(i * 2, 2));
+    while (adv_args.size() < 32)
+        adv_args.push_back("00");
+
+    if (verbose_output)
+        std::printf("[wake] Disable advertising first\n");
+    wake_disable_advertising_quiet(hci_dev);
+
+    if (verbose_output)
+        std::printf("[wake] Set advertising parameters\n");
+    if (!wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0006",
+                      "20", "00", "40", "00", "03", "00", "00",
+                      "00", "00", "00", "00", "00", "00", "07", "00"}, verbose_output))
+        return false;
+
+    if (verbose_output)
+        std::printf("[wake] Set advertising data (%zu bytes)\n", adv_bytes);
+    std::vector<std::string> set_adv = {"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0008"};
+    set_adv.insert(set_adv.end(), adv_args.begin(), adv_args.end());
+    if (!wake_cmd_ok(set_adv, verbose_output))
+        return false;
+
+    if (verbose_output)
+        std::printf("[wake] Clear scan response data\n");
+    std::vector<std::string> clear_scan = {"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0009", "00"};
+    for (int i = 0; i < 31; ++i)
+        clear_scan.push_back("00");
+    if (!wake_cmd_ok(clear_scan, verbose_output))
+        return false;
+
+    if (verbose_output)
+        std::printf("[wake] Enable advertising as %s for %ds\n", mac_lc.c_str(), seconds);
+    if (!wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "01"}, verbose_output))
+        return false;
+
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+
+    if (verbose_output)
+        std::printf("[wake] Disable advertising\n");
+    wake_disable_advertising_quiet(hci_dev);
+    return true;
+}
+
 static bool send_switch2_wake_advert_once(const std::string& mac, const std::string& adv_hex, int seconds, bool verbose_output = false) {
     if (!valid_mac_string(mac) || !valid_adv_hex(adv_hex)) {
         std::fprintf(stderr, "[wake] Invalid wake MAC/ADV; not sending\n");
@@ -1627,278 +1896,33 @@ static bool send_switch2_wake_advert_once(const std::string& mac, const std::str
 
     const std::string mac_lc = lowercase_copy(mac);
     const std::string adv_uc = uppercase_hex_copy(adv_hex);
+    std::string hci_dev = "hci0";
 
-    // Run the wake replay through an actual temporary bash script instead of
-    // embedding bash functions inside system("sh -c ...").  This intentionally
-    // mirrors wake-v4.sh as closely as possible: stop bluetoothd, set the Pi's
-    // public address to the captured Joy-Con 2 MAC, set raw advertising data,
-    // enable advertising briefly, then disable it.
-    char script_path[128];
-    std::snprintf(script_path, sizeof(script_path), "/tmp/ns_switch2_wake_replay_%ld.sh", (long)getpid());
-
-    const char* script = R"NSWAKE(#!/usr/bin/env bash
-set -euo pipefail
-export LC_ALL=C
-export LANG=C
-
-HCI_DEV="${HCI_DEV:-hci0}"
-DURATION="1"
-MAC=""
-ADV=""
-
-log() { echo "[+] $*"; }
-warn() { echo "[!] $*" >&2; }
-die() { echo "ERROR: $*" >&2; exit 1; }
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
-
-find_hci() {
-  btmgmt info 2>/dev/null | awk '/^hci[0-9]+:/{gsub(":","",$1); print $1; exit}'
-}
-
-wait_for_hci() {
-  local i dev
-  for i in $(seq 1 30); do
-    dev="$(find_hci || true)"
-    if [ -n "$dev" ]; then
-      HCI_DEV="$dev"
-      return 0
-    fi
-    sleep 0.5
-  done
-  return 1
-}
-
-reset_bt_stack() {
-  warn "Resetting Bluetooth stack / hciuart"
-  systemctl stop bluetooth >/dev/null 2>&1 || true
-  rfkill unblock bluetooth >/dev/null 2>&1 || true
-  hcitool -i "$HCI_DEV" cmd 0x08 0x000A 00 >/dev/null 2>&1 || true
-  systemctl restart hciuart >/dev/null 2>&1 || true
-  sleep 3
-  wait_for_hci
-}
-
-mgmt_cmd() {
-  local out rc
-  echo "+ btmgmt -i $HCI_DEV $*" >&2
-  set +e
-  out="$(btmgmt -i "$HCI_DEV" "$@" 2>&1)"
-  rc=$?
-  set -e
-  [ -n "$out" ] && echo "$out"
-  return "$rc"
-}
-
-hci_cmd() {
-  local out rc
-  echo "+ hcitool -i $HCI_DEV cmd $*" >&2
-  set +e
-  out="$(hcitool -i "$HCI_DEV" cmd "$@" 2>&1)"
-  rc=$?
-  set -e
-  [ -n "$out" ] && echo "$out"
-  return "$rc"
-}
-
-hex_to_args() {
-  local h="$1"
-  while [ -n "$h" ]; do
-    echo "${h:0:2}"
-    h="${h:2}"
-  done
-}
-
-cleanup() {
-  hcitool -i "$HCI_DEV" cmd 0x08 0x000A 00 >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --mac) MAC="$2"; shift 2 ;;
-    --adv) ADV="$2"; shift 2 ;;
-    --seconds) DURATION="$2"; shift 2 ;;
-    --hci) HCI_DEV="$2"; shift 2 ;;
-    *) die "Unknown option: $1" ;;
-  esac
-done
-
-[ "$(id -u)" -eq 0 ] || die "Run with sudo/root"
-need_cmd btmgmt
-need_cmd hcitool
-need_cmd rfkill
-need_cmd systemctl
-need_cmd awk
-
-MAC="$(echo "$MAC" | tr '[:upper:]' '[:lower:]')"
-ADV="$(echo "$ADV" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
-
-[[ "$MAC" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || die "Bad MAC: $MAC"
-[[ "$ADV" =~ ^[0-9A-F]+$ ]] || die "Bad ADV hex"
-[ $(( ${#ADV} % 2 )) -eq 0 ] || die "ADV hex must have even length"
-
-ADV_BYTES=$(( ${#ADV} / 2 ))
-[ "$ADV_BYTES" -le 31 ] || die "ADV is ${ADV_BYTES} bytes, max is 31"
-
-mapfile -t ADV_ARGS < <(hex_to_args "$ADV")
-while [ "${#ADV_ARGS[@]}" -lt 31 ]; do
-  ADV_ARGS+=("00")
-done
-LEN_ARG="$(printf "%02X" "$ADV_BYTES")"
-
-prepare_controller() {
-  local attempt info rc current_addr wanted_addr
-  wanted_addr="$(echo "$MAC" | tr '[:lower:]' '[:upper:]')"
-
-  systemctl stop bluetooth >/dev/null 2>&1 || true
-  rfkill unblock bluetooth >/dev/null 2>&1 || true
-
-  if ! wait_for_hci; then
-    reset_bt_stack || return 1
-  fi
-
-  for attempt in 1 2 3; do
-    log "Preparing Bluetooth controller, attempt $attempt, device $HCI_DEV"
-
-    mgmt_cmd power off >/dev/null 2>&1 || true
-
-    if ! mgmt_cmd privacy off; then
-      reset_bt_stack || true
-      continue
-    fi
-
-    if ! mgmt_cmd bredr off; then
-      reset_bt_stack || true
-      continue
-    fi
-
-    if ! mgmt_cmd le on; then
-      reset_bt_stack || true
-      continue
-    fi
-
-    if ! mgmt_cmd public-addr "$MAC"; then
-      reset_bt_stack || true
-      continue
-    fi
-
-    if ! wait_for_hci; then
-      reset_bt_stack || true
-      continue
-    fi
-
-    if ! mgmt_cmd power on; then
-      reset_bt_stack || true
-      continue
-    fi
-
-    sleep 0.5
-
-    set +e
-    info="$(btmgmt -i "$HCI_DEV" info 2>&1)"
-    rc=$?
-    set -e
-
-    if [ "$rc" -ne 0 ]; then
-      echo "$info"
-      reset_bt_stack || true
-      continue
-    fi
-
-    echo "$info"
-    current_addr="$(printf '%s\n' "$info" | awk '/addr /{print toupper($2); exit}')"
-
-    if [ "$current_addr" = "$wanted_addr" ]; then
-      log "Controller public address is now $current_addr"
-      return 0
-    fi
-
-    warn "Controller address is $current_addr, wanted $wanted_addr"
-    reset_bt_stack || true
-  done
-
-  return 1
-}
-
-start_raw_advertising() {
-  log "Disable advertising first"
-  hci_cmd 0x08 0x000A 00 >/dev/null 2>&1 || true
-
-  log "Set advertising parameters"
-  hci_cmd 0x08 0x0006 \
-    20 00 \
-    40 00 \
-    03 \
-    00 \
-    00 \
-    00 00 00 00 00 00 \
-    07 \
-    00 || return 1
-
-  log "Set advertising data (${ADV_BYTES} bytes)"
-  hci_cmd 0x08 0x0008 "$LEN_ARG" "${ADV_ARGS[@]}" || return 1
-
-  log "Clear scan response data"
-  hci_cmd 0x08 0x0009 \
-    00 \
-    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 \
-    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 || return 1
-
-  log "Enable advertising as $MAC for ${DURATION}s"
-  hci_cmd 0x08 0x000A 01 || return 1
-
-  sleep "$DURATION"
-
-  log "Disable advertising"
-  cleanup
-
-  return 0
-}
-
-log "Wake MAC: $MAC"
-log "ADV bytes: $ADV_BYTES"
-log "Duration: ${DURATION}s"
-
-if ! prepare_controller; then
-  die "Could not prepare Bluetooth controller. Try: sudo systemctl restart hciuart || sudo reboot"
-fi
-
-if ! start_raw_advertising; then
-  warn "Raw advertising failed. Trying one Bluetooth stack reset, then retrying once."
-  reset_bt_stack || die "Bluetooth reset failed"
-  if ! prepare_controller; then
-    die "Could not prepare Bluetooth controller after reset"
-  fi
-  start_raw_advertising || die "Raw advertising failed after retry"
-fi
-
-log "Done"
-)NSWAKE";
-
-    {
-        std::ofstream f(script_path, std::ios::trunc);
-        if (!f) {
-            std::fprintf(stderr, "[wake] Failed to create temporary wake script: %s\n", script_path);
-            return false;
-        }
-        f << script;
+    if (verbose_output) {
+        std::printf("[wake] Wake MAC: %s\n", mac_lc.c_str());
+        std::printf("[wake] ADV bytes: %zu\n", adv_uc.size() / 2);
+        std::printf("[wake] Duration: %ds\n", seconds);
     }
-    chmod(script_path, 0700);
 
-    std::ostringstream cmd;
-    cmd << "bash " << script_path
-        << " --mac " << mac_lc
-        << " --adv " << adv_uc
-        << " --seconds " << seconds;
-    if (!verbose_output)
-        cmd << " >/dev/null 2>&1";
+    bool ok = false;
+    if (prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+        ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
 
-    int rc = std::system(cmd.str().c_str());
-    unlink(script_path);
-    if (rc != 0) {
-        std::fprintf(stderr, "[wake] Raw HCI wake advert failed with status %d\n", rc);
+    if (!ok) {
+        if (verbose_output)
+            std::fprintf(stderr, "[wake] Raw advertising failed. Trying one Bluetooth stack reset, then retrying once.\n");
+        if (reset_wake_bt_stack(hci_dev, verbose_output) && prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
+    }
+
+    wake_disable_advertising_quiet(hci_dev);
+
+    if (!ok) {
+        std::fprintf(stderr, "[wake] Raw HCI wake advert failed\n");
         return false;
     }
+    if (verbose_output)
+        std::printf("[wake] Done\n");
     return true;
 }
 
@@ -1942,6 +1966,8 @@ static void maybe_send_switch2_wake_advert(const char* reason) {
         std::printf("[wake] %s; sending Joy-Con 2 BLE wake advert for %dms as %s\n",
                     reason ? reason : "client connected", SWITCH2_WAKE_ADV_BURST_MS,
                     g_switch2_wake_mac.c_str());
+    } else {
+        std::printf("[wake] waking up Switch 2\n");
     }
 
     std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
