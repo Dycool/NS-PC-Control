@@ -34,7 +34,12 @@ https://github.com/user-attachments/assets/aef8eb25-dd14-4335-a3f7-b1953800f856
 ## 🚀 Quick Start (Pre-compiled)
 
 **1. 🥧 Raspberry Pi (Server):**
-* Download `ns-pc-control-raspberry-pi.zip` to your Pi.
+* Download `ns-pc-control-raspberry-pi.zip` to your Pi:
+```
+wget https://github.com/Dycool/NS-PC-Control/releases/latest/download/ns-pc-control-raspberry-pi.zip
+unzip ns-pc-control-raspberry-pi.zip
+```
+
 * Enable USB gadget, check the [Raspberry Pi setup](docs/raspberry-pi-setup.md) for more details.
 * Start the backend: `sudo chrt -f 99 ./ns-backend`
 
