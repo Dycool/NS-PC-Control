@@ -43,6 +43,20 @@ sudo chrt -f 99 ./ns-backend -b 0.0.0.0:7332
 sudo chrt -f 99 ./ns-backend -b :7332
 ```
 
+To enable the web server:
+```bash
+sudo chrt -f 99 ./ns-backend -w
+```
+
+To setup wake for the switch 2:
+```bash
+sudo ./ns-backend -wake
+```
+
+If you want to debug a specific issue:
+```bash
+sudo ./ns-backend -v
+```
 ---
 
 ## Automate on Boot (Optional Systemd Service)
