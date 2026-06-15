@@ -52,8 +52,7 @@ The wizard runs 4 steps:
 2. **Capture HOME advert**: Prompts you to press HOME on the Joy-Con 2 while `btmon` captures the raw advertisement for 20 seconds. You will need to wake up and suspend the switch 2 up to 5-6 times until the raspberry actually picks up the data. This is normal.
 3. **Save config**: Writes the MAC and ADV hex to the config file.
 4. **Test**: Immediately sends a 1-second test wake advert to verify the setup works.
-
-
+>Note: Taking the joycon from the switch 2 might make this configuration stop working. Make sure to reconfigure it.
 
 ### Important Notes
 
