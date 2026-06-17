@@ -35,7 +35,7 @@ Learn how to setup your raspberry pi [here](https://www.raspberrypi.com/document
 
 #### Capture Card
 
-Plug the switch or switch 2 hdmi to the HDMI input port, and connect the usb cable to a 3.0 usb port on your PC.
+Plug the switch or switch 2 hdmi to the HDMI input port, and connect the usb cable to a 3.0 or faster usb port on your PC.
 
 - OBS: add a Video Capture Device source, and select your capture card from the dropdown. Make sure to also add a Audio Capture source and make it playback.
 
