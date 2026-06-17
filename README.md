@@ -4,9 +4,9 @@
 
 # NS PC Control
 
-**Control your Switch or Switch 2 console from a PC (Windows, Linux, macOS) or through your browser/phone with low latency using a Raspberry Pi.** 🎮
+**Control your Switch or Switch 2 console from a PC (Windows, Linux, macOS) or through your browser/phone with low latency using a Raspberry Pi.** 
 
-This project was built from scratch in **C++** and uses **UDP** for low latency. It is designed for playing console games with your PC controller while avoiding the typical lag of Bluetooth or heavy script-based solutions.
+🎮 **Switch Cloud Streaming** - Play your favorite games with your friends just like GameShare! Click [here](docs/cloud.md) for more details.
 
 👥 **Up to 4 players simultaneously** - Works with a single Raspberry Pi and a single PC.
 
@@ -101,6 +101,7 @@ Detailed guides and technical information are in the `docs/` folder:
 * **[Architecture & Security](docs/architecture.md)** - Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Clients](docs/web-app.md)** - Using the embedded web interface and mobile touch controls.
 * **[Wakeup Setup](docs/wakeup.md)** - Configure wake-up support for Switch 1 and Switch 2.
+* **[Cloud Streaming Setup](docs/cloud.md)** - My personal cloud streaming setup.
 * **[My vision](docs/vision.md)** - The main goal behind this project.
 
 ---
