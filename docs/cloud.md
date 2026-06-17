@@ -31,7 +31,7 @@ OBS let's you configure your capture card exactly how you want it, VideoGameCapt
 
 #### Raspberry Pi
 
-Learn how to setup your raspberry pi [here](https://www.raspberrypi.com/documentation/computers/getting-started.html#install) and install the server software [here.](docs/raspberry-pi-setup.md)
+Learn how to setup your raspberry pi [here](https://www.raspberrypi.com/documentation/computers/getting-started.html#install) and install the server software [here.](../docs/raspberry-pi-setup.md)
 
 #### Capture Card
 
