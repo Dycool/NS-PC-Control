@@ -18,12 +18,12 @@ For 4k streaming, use an RTX 2000 series gpu or higher. You can check if your ha
 ## Software Needed
 
 - [Sunshine](https://app.lizardbyte.dev/Sunshine/) with [Moonlight](https://moonlight-stream.org) or [Parsec](https://parsec.app) for streaming
-- [OBS](https://obsproject.com/) or [VideoGameCapture](https://immernochnoah.itch.io/videogamecapture) to get the capture card feed
+- [OBS](https://obsproject.com/) or [NitLink](https://github.com/nitlink-dev/nitlink) to get the capture card feed
 - [NS-PC-Control](https://github.com/Dycool/NS-PC-Control) server and client
 
 Sunshine has lower latency than parsec in my experience, however parsec is easier to setup and safer to play with friends.
 
-OBS let's you configure your capture card exactly how you want it, VideoGameCapture has a much simpler interface and is straightforward to use.
+OBS let's you configure your capture card exactly how you want it, NitLink has a much simpler interface and is straightforward to use.
 
 ---
 
@@ -39,7 +39,7 @@ Plug the switch or switch 2 hdmi to the HDMI input port, and connect the usb cab
 
 - OBS: add a Video Capture Device source, and select your capture card from the dropdown. Make sure to also add a Audio Capture source and make it playback.
 
-- VideoGameCapture: just launch it and select your capture card on both menus, capture card and audio input. If audio is not synchronized, click on the sync audio button, however this might increase latency.
+- Nitlink: just launch it and select your capture card, and prefered resolution. Then press f1 to switch to the capture card feed.
 
 #### Streaming
 
@@ -58,7 +58,7 @@ You can also just leave the app running on your PC and your streaming app will s
 I got really good results with this setup, I almost never notice the latency while I'm playing with it.  <br>
 Your experience might differ depending on these factors:
 
-- Your capture card or capture card settings (make sure to use a raw format, like YUY2)
+- Your capture card or capture card settings
 - The encoder you use (the NVIDIA nvenc encoder is always the best when it comes to latency)
 - The decoder you use (make sure to use your hardware decoder)
 - Your internet connection (ethernet is recommended for PC, and wifi 5Ghz for your client)
