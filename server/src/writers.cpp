@@ -35,8 +35,7 @@ void legacy_writer_thread(int hz) {
         }
 
         if (!all_open) {
-            g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+            clear_switch2_usb_activity();
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; }
             }
@@ -202,8 +201,7 @@ void legacy_writer_thread(int hz) {
 
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected - waiting for reconnect..."); error_shown = true; }
-                g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+                mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; }
                 for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
@@ -265,8 +263,7 @@ void writer_thread(int hz) {
         }
 
         if (!all_open) {
-            g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+            clear_switch2_usb_activity();
             // Do not keep a partial set of opened endpoints around while the
             // gadget is being recreated/rebound.  Retry with a clean fd set.
             for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -622,8 +619,7 @@ void writer_thread(int hz) {
 
             if (!ok) {
                 if (!error_shown) { std::puts("Host disconnected — waiting for reconnect..."); error_shown = true; }
-                g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-                g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+                mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
                 for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
@@ -689,4 +685,3 @@ bool rate_allow(uint32_t ip) {
     if (s.count < UINT32_MAX) s.count++;
     return s.count <= RATE_MAX_PKT;
 }
-

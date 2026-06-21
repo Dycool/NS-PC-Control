@@ -45,6 +45,7 @@ extern std::atomic<bool> g_switch2_wake_adv_running;
 extern std::atomic<uint64_t> g_switch2_last_wake_adv_us;
 extern std::atomic<bool> g_switch2_usb_host_connected;
 extern std::atomic<uint64_t> g_switch2_last_usb_activity_us;
+extern std::atomic<bool> g_switch2_force_next_wake;
 extern uint8_t g_hmac_key[32];
 
 struct RateSlot {
@@ -106,6 +107,9 @@ extern ServerMacroUploadRuntime g_server_macro_uploads[MAX_CLIENTS];
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then);
 bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit);
 void mark_switch2_usb_activity(uint64_t now = 0);
+void clear_switch2_usb_activity();
+void mark_switch2_usb_host_disconnected();
+void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
 bool any_recent_client_active(uint64_t now);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);

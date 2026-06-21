@@ -167,6 +167,7 @@ int main(int argc, char** argv) {
         g_switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
         if (g_switch2_wake_adv_enabled) {
             bluetooth_enabled = false;
+            enter_switch2_wake_runtime_mode();
             if (g_verbose)
                 std::printf("[wake] Switch 2 wake config loaded; wake mode active, Bluetooth disabled\n");
         } else {
@@ -433,6 +434,7 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
                     reset_udp_client_session_locked(g_clients[client_idx]);
                 }
+                rearm_switch2_wake_after_client_disconnect();
                 if (g_verbose) std::printf("UDP client %d sent disconnect and was released.\n", client_idx + 1);
                 ++g_pkts_rx;
                 continue;

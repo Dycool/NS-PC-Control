@@ -37,6 +37,7 @@ std::atomic<bool> g_switch2_wake_adv_running{false};
 std::atomic<uint64_t> g_switch2_last_wake_adv_us{0};
 std::atomic<bool> g_switch2_usb_host_connected{false};
 std::atomic<uint64_t> g_switch2_last_usb_activity_us{0};
+std::atomic<bool> g_switch2_force_next_wake{false};
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 uint8_t  g_hmac_key[32];
@@ -65,15 +66,29 @@ void mark_switch2_usb_activity(uint64_t now) {
     g_switch2_usb_host_connected.store(true, std::memory_order_relaxed);
 }
 
+void clear_switch2_usb_activity() {
+    g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+    g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+}
+
+void mark_switch2_usb_host_disconnected() {
+    clear_switch2_usb_activity();
+    g_switch2_force_next_wake.store(true, std::memory_order_relaxed);
+}
+
 bool switch2_usb_host_recently_active(uint64_t now) {
     const uint64_t last = g_switch2_last_usb_activity_us.load(std::memory_order_relaxed);
     if (last == 0 || elapsed_us_saturated(now, last) > SWITCH2_USB_ACTIVITY_FRESH_US) {
-        g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+        clear_switch2_usb_activity();
         return false;
     }
     g_switch2_usb_host_connected.store(true, std::memory_order_relaxed);
     return true;
+}
+
+void rearm_switch2_wake_after_client_disconnect() {
+    if (!switch2_usb_host_recently_active(now_us()))
+        g_switch2_force_next_wake.store(true, std::memory_order_relaxed);
 }
 
 bool any_recent_client_active(uint64_t now) {

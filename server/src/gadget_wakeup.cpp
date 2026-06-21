@@ -466,6 +466,17 @@ bool wake_cmd_ok(const std::vector<std::string>& args, bool verbose_output) {
     return r.exit_code == 0;
 }
 
+void enter_switch2_wake_runtime_mode() {
+    if (!g_switch2_wake_adv_enabled || !g_switch2_wake_config_loaded)
+        return;
+
+    // Wake mode owns the Bluetooth adapter for raw HCI advertising. Stop BlueZ
+    // so local BT controllers cannot connect in the background, but avoid the
+    // heavier power/MAC preparation that made service-start wake unreliable.
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
+}
+
 static std::string read_hci_address(const std::string& hci_dev) {
     std::string path = "/sys/class/bluetooth/" + hci_dev + "/address";
     std::ifstream f(path);
@@ -478,13 +489,20 @@ static std::string read_hci_address(const std::string& hci_dev) {
 
 void wait_for_wake_advert_idle() {
     // The wake advert worker is detached, so shutdown must not restore BREDR/MAC
-    // while the worker is still advertising or about to power the adapter off.
+    // while the worker is still advertising.
     for (int i = 0; i < 50 && g_switch2_wake_adv_running.load(std::memory_order_relaxed); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+bool wake_bt_state_was_modified() {
+    return g_bt_modified_for_wake.load(std::memory_order_relaxed);
+}
+
 void restore_wake_bt_state() {
     wait_for_wake_advert_idle();
+
+    if (!g_switch2_wake_adv_enabled && !wake_bt_state_was_modified())
+        return;
 
     std::string hci = !g_saved_bt_hci.empty() ? g_saved_bt_hci :
                       (valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0");
@@ -509,8 +527,7 @@ void restore_wake_bt_state() {
 
 void teardown_gadget() {
     restore_wake_bt_state();
-    g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+    clear_switch2_usb_activity();
     if (!path_exists(GADGET_DIR)) return;
 
     std::puts("[gadget] Closing USB gadget...");
@@ -571,7 +588,7 @@ std::string first_hci_from_sysfs() {
 
     std::vector<std::string> devices;
     while (dirent* ent = readdir(d)) {
-        std::string name = ent->d_name ? ent->d_name : "";
+        std::string name = ent->d_name;
         if (valid_hci_dev_string(name))
             devices.push_back(name);
     }
@@ -824,8 +841,10 @@ void maybe_send_switch2_wake_advert(const char* reason) {
         return;
 
     const uint64_t now = now_us();
+    const bool force_after_disconnect =
+        g_switch2_force_next_wake.exchange(false, std::memory_order_relaxed);
 
-    if (switch2_usb_host_recently_active(now)) {
+    if (!force_after_disconnect && switch2_usb_host_recently_active(now)) {
         if (g_verbose) {
             std::printf("[wake] %s; recent Switch USB activity seen, skipping wake advert\n",
                         reason ? reason : "client connected");
@@ -838,7 +857,7 @@ void maybe_send_switch2_wake_advert(const char* reason) {
         return;
 
     const uint64_t last = g_switch2_last_wake_adv_us.load(std::memory_order_relaxed);
-    if (last != 0 && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US)
+    if (!force_after_disconnect && last != 0 && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US)
         return;
 
     bool expected = false;

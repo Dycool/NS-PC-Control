@@ -939,6 +939,7 @@ void web_server_thread(int web_port, uint16_t udp_port, bool serve_http_webapp) 
             if (clients[i].state == WebClient::CLOSED && clients[i].fd >= 0) {
                 free(clients[i].wbuf);
                 clients[i].wbuf = nullptr;
+                bool released_input_slot = false;
                 if (clients[i].ws_slot >= 0) {
                     std::lock_guard<std::mutex> lk(g_mtx[clients[i].ws_slot]);
                     if (g_clients[clients[i].ws_slot].last_rx_us == clients[i].ws_last_rx) {
@@ -950,8 +951,11 @@ void web_server_thread(int web_port, uint16_t udp_port, bool serve_http_webapp) 
                             g_clients[clients[i].ws_slot].pad_present[s] = false;
                             g_clients[clients[i].ws_slot].pad_last_present_us[s] = 0;
                         }
+                        released_input_slot = true;
                     }
                 }
+                if (released_input_slot)
+                    rearm_switch2_wake_after_client_disconnect();
                 if (g_verbose) std::printf("[web] client %d closed\n", clients[i].fd);
                 close(clients[i].fd);
                 clients[i].fd = -1;
@@ -968,6 +972,7 @@ void web_server_thread(int web_port, uint16_t udp_port, bool serve_http_webapp) 
     for (int i = 0; i < n_clients; i++) {
         if (clients[i].fd >= 0) {
             free(clients[i].wbuf);
+            bool released_input_slot = false;
             if (clients[i].ws_slot >= 0) {
                 std::lock_guard<std::mutex> lk(g_mtx[clients[i].ws_slot]);
                 if (g_clients[clients[i].ws_slot].last_rx_us == clients[i].ws_last_rx) {
@@ -980,12 +985,14 @@ void web_server_thread(int web_port, uint16_t udp_port, bool serve_http_webapp) 
                         g_clients[clients[i].ws_slot].pad_present[s] = false;
                         g_clients[clients[i].ws_slot].pad_last_present_us[s] = 0;
                     }
+                    released_input_slot = true;
                 }
             }
+            if (released_input_slot)
+                rearm_switch2_wake_after_client_disconnect();
             close(clients[i].fd);
         }
     }
     close(srv);
     std::printf("[web] server stopped\n");
 }
-
