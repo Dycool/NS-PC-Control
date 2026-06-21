@@ -39,7 +39,7 @@ static void run_pairing_window_script(const char* script) {
 
     setpgid(pid, pid);
     int status = 0;
-    while (g_running.load(std::memory_order_relaxed)) {
+    while (g_ctx.running.load(std::memory_order_relaxed)) {
         pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid)
             return;
@@ -69,7 +69,7 @@ static void start_bluetooth_pairing_window() {
         return;
 
     g_bt_pair_window_thread = std::thread([] {
-        std::std::println("[bt] pairing window open for 2 minutes");
+        std::println("[bt] pairing window open for 2 minutes");
 
         // Service-mode friendly: use bluetoothctl non-interactively, avoid TTY
         // assumptions, and keep the pairing/scanning helper separate from SDL's
@@ -119,7 +119,7 @@ static void start_bluetooth_pairing_window() {
 
         run_pairing_window_script(script);
         std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
-        std::std::println("[bt] pairing/reconnect helper stopped");
+        std::println("[bt] pairing/reconnect helper stopped");
     });
 }
 
@@ -165,41 +165,41 @@ static void clear_bluetooth_slot_rumble_state(ClientSession& c) {
 
 static void reset_bluetooth_client_slot(int client_idx) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS) return;
-    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-    g_clients[client_idx].active = false;
-    g_clients[client_idx].first_pkt = true;
-    g_clients[client_idx].expected_seq = 0;
-    g_clients[client_idx].last_rx_us = 0;
-    g_clients[client_idx].report.reset();
-    clear_all_motion(g_clients[client_idx]);
-    g_clients[client_idx].uses_pad_presence = false;
-    g_clients[client_idx].udp_rumble_enabled = false;
-    clear_bluetooth_slot_rumble_state(g_clients[client_idx]);
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    g_ctx.clients[client_idx].active = false;
+    g_ctx.clients[client_idx].first_pkt = true;
+    g_ctx.clients[client_idx].expected_seq = 0;
+    g_ctx.clients[client_idx].last_rx_us = 0;
+    g_ctx.clients[client_idx].report.reset();
+    clear_all_motion(g_ctx.clients[client_idx]);
+    g_ctx.clients[client_idx].uses_pad_presence = false;
+    g_ctx.clients[client_idx].udp_rumble_enabled = false;
+    clear_bluetooth_slot_rumble_state(g_ctx.clients[client_idx]);
     for (int s = 0; s < 4; ++s) {
-        g_clients[client_idx].pad_present[s] = false;
-        g_clients[client_idx].pad_last_present_us[s] = 0;
+        g_ctx.clients[client_idx].pad_present[s] = false;
+        g_ctx.clients[client_idx].pad_last_present_us[s] = 0;
     }
     server_macro_stop_all_for_client(client_idx);
 }
 
 static int find_free_bluetooth_client_slot(uint64_t now) {
     for (int i = 0; i < MAX_CLIENTS; ++i) {
-        std::lock_guard<std::mutex> lk(g_mtx[i]);
-        repair_future_client_timestamp(g_clients[i], now);
-        if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
-            g_clients[i].active = true;
-            g_clients[i].first_pkt = true;
-            g_clients[i].expected_seq = 0;
-            g_clients[i].last_rx_us = now;
-            g_clients[i].addr = sockaddr_in{};
-            g_clients[i].report.reset();
-            clear_all_motion(g_clients[i]);
-            g_clients[i].uses_pad_presence = true;
-            g_clients[i].udp_rumble_enabled = false;
-            clear_bluetooth_slot_rumble_state(g_clients[i]);
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        repair_future_client_timestamp(g_ctx.clients[i], now);
+        if (!g_ctx.clients[i].active || elapsed_us_over(now, g_ctx.clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
+            g_ctx.clients[i].active = true;
+            g_ctx.clients[i].first_pkt = true;
+            g_ctx.clients[i].expected_seq = 0;
+            g_ctx.clients[i].last_rx_us = now;
+            g_ctx.clients[i].addr = sockaddr_in{};
+            g_ctx.clients[i].report.reset();
+            clear_all_motion(g_ctx.clients[i]);
+            g_ctx.clients[i].uses_pad_presence = true;
+            g_ctx.clients[i].udp_rumble_enabled = false;
+            clear_bluetooth_slot_rumble_state(g_ctx.clients[i]);
             for (int s = 0; s < 4; ++s) {
-                g_clients[i].pad_present[s] = false;
-                g_clients[i].pad_last_present_us[s] = 0;
+                g_ctx.clients[i].pad_present[s] = false;
+                g_ctx.clients[i].pad_last_present_us[s] = 0;
             }
             return i;
         }
@@ -208,31 +208,31 @@ static int find_free_bluetooth_client_slot(uint64_t now) {
 }
 
 static void publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
-    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-    if (!g_clients[client_idx].active)
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    if (!g_ctx.clients[client_idx].active)
         return;
 
-    g_clients[client_idx].uses_pad_presence = true;
-    g_clients[client_idx].udp_rumble_enabled = false;
-    g_clients[client_idx].last_rx_us = now;
+    g_ctx.clients[client_idx].uses_pad_presence = true;
+    g_ctx.clients[client_idx].udp_rumble_enabled = false;
+    g_ctx.clients[client_idx].last_rx_us = now;
 
-    g_clients[client_idx].report.reset();
-    g_clients[client_idx].report.p1.input = pad.input;
-    g_clients[client_idx].report.p1.has_motion = pad.has_motion ? 1 : 0;
-    g_clients[client_idx].report.p1.motion = pad.has_motion ? pad.motion : ns::MotionReport{};
-    g_clients[client_idx].pad_present[0] = true;
-    g_clients[client_idx].pad_last_present_us[0] = now;
+    g_ctx.clients[client_idx].report.reset();
+    g_ctx.clients[client_idx].report.p1.input = pad.input;
+    g_ctx.clients[client_idx].report.p1.has_motion = pad.has_motion ? 1 : 0;
+    g_ctx.clients[client_idx].report.p1.motion = pad.has_motion ? pad.motion : ns::MotionReport{};
+    g_ctx.clients[client_idx].pad_present[0] = true;
+    g_ctx.clients[client_idx].pad_last_present_us[0] = now;
 
     if (pad.has_motion) {
-        set_motion_samples(g_clients[client_idx], 0, pad.motion_samples);
+        set_motion_samples(g_ctx.clients[client_idx], 0, pad.motion_samples);
     } else {
-        clear_motion(g_clients[client_idx], 0);
+        clear_motion(g_ctx.clients[client_idx], 0);
     }
 
     for (int s = 1; s < 4; ++s) {
-        g_clients[client_idx].pad_present[s] = false;
-        g_clients[client_idx].pad_last_present_us[s] = 0;
-        clear_motion(g_clients[client_idx], s);
+        g_ctx.clients[client_idx].pad_present[s] = false;
+        g_ctx.clients[client_idx].pad_last_present_us[s] = 0;
+        clear_motion(g_ctx.clients[client_idx], s);
     }
 }
 
@@ -247,9 +247,9 @@ static void apply_bluetooth_rumble(SDLInputManager& input,
     RumblePacket ev{};
     uint32_t seq = 0;
     {
-        std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-        if (!g_clients[client_idx].active) return;
-        seq = g_clients[client_idx].rumble_seq[0];
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+        if (!g_ctx.clients[client_idx].active) return;
+        seq = g_ctx.clients[client_idx].rumble_seq[0];
         if (seq == last_seq) {
             if (rumble_until_us != 0 && now_us() > rumble_until_us) {
                 rumble_until_us = 0;
@@ -257,7 +257,7 @@ static void apply_bluetooth_rumble(SDLInputManager& input,
             }
             return;
         }
-        ev = g_clients[client_idx].rumble[0];
+        ev = g_ctx.clients[client_idx].rumble[0];
     }
 
     last_seq = seq;
@@ -285,11 +285,11 @@ void bluetooth_input_thread(std::stop_token stoken) {
     std::array<uint32_t, 4> last_rumble_seq{};
     std::array<uint64_t, 4> rumble_until_us{};
     bool waiting_logged = false;
-    uint64_t seen_suspend_disconnect_seq = g_switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
+    uint64_t seen_suspend_disconnect_seq = g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
     bool switch_suspend_disconnect_active = false;
     uint64_t last_bt_disconnect_us = 0;
 
-    std::std::println("[bt] Bluetooth/local controller input enabled");
+    std::println("[bt] Bluetooth/local controller input enabled");
 
     while (!stoken.stop_requested()) {
         input.poll();
@@ -297,16 +297,16 @@ void bluetooth_input_thread(std::stop_token stoken) {
         const uint64_t now = now_us();
         bool any_waiting = false;
 
-        const uint64_t suspend_seq = g_switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
+        const uint64_t suspend_seq = g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
         if (suspend_seq != seen_suspend_disconnect_seq) {
             seen_suspend_disconnect_seq = suspend_seq;
             switch_suspend_disconnect_active = true;
             last_bt_disconnect_us = 0;
             std::println("[bt] Switch USB host suspended/disconnected; disconnecting local Bluetooth controllers");
         }
-        if (switch_suspend_disconnect_active && g_switch2_usb_host_connected.load(std::memory_order_relaxed)) {
+        if (switch_suspend_disconnect_active && g_ctx.switch2_usb_host_connected.load(std::memory_order_relaxed)) {
             switch_suspend_disconnect_active = false;
-            if (g_verbose)
+            if (g_ctx.verbose)
                 std::println("[bt] Switch USB host activity returned; local Bluetooth controllers may reconnect");
         }
 
@@ -316,7 +316,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     input.set_rumble(i, 0, 0, 0);
                     if (client_for_sdl[i] >= 0) {
                         reset_bluetooth_client_slot(client_for_sdl[i]);
-                        if (g_verbose)
+                        if (g_ctx.verbose)
                             std::println("[bt] controller {} removed from server slot {} due to Switch suspend",
                                         i + 1, client_for_sdl[i] + 1);
                     }
@@ -331,7 +331,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 if (client_for_sdl[i] >= 0) {
                     input.set_rumble(i, 0, 0, 0);
                     reset_bluetooth_client_slot(client_for_sdl[i]);
-                    if (g_verbose)
+                    if (g_ctx.verbose)
                         std::println("[bt] controller {} disconnected from server slot {}", i + 1, client_for_sdl[i] + 1);
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
@@ -343,8 +343,8 @@ void bluetooth_input_thread(std::stop_token stoken) {
             if (client_for_sdl[i] >= 0) {
                 bool still_active = false;
                 {
-                    std::lock_guard<std::mutex> lk(g_mtx[client_for_sdl[i]]);
-                    still_active = g_clients[client_for_sdl[i]].active;
+                    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
+                    still_active = g_ctx.clients[client_for_sdl[i]].active;
                 }
                 if (!still_active) {
                     client_for_sdl[i] = -1;
@@ -360,10 +360,10 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     input.set_rumble(i, 0, 0, 0);
                     rumble_until_us[i] = 0;
                     {
-                        std::lock_guard<std::mutex> lk(g_mtx[client_for_sdl[i]]);
-                        last_rumble_seq[i] = g_clients[client_for_sdl[i]].rumble_seq[0];
+                        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
+                        last_rumble_seq[i] = g_ctx.clients[client_for_sdl[i]].rumble_seq[0];
                     }
-                    if (g_verbose)
+                    if (g_ctx.verbose)
                         std::println("[bt] controller {} ({}) assigned to server slot {}",
                                     i + 1,
                                     pads[i].name.empty() ? "SDL3 Gamepad" : pads[i].name,

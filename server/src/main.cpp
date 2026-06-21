@@ -51,7 +51,7 @@ using ms    = std::chrono::milliseconds;
 #include "app_state.hpp"
 
 // ── Signal ────────────────────────────────────────────────────────────────────
-static void on_signal(int) { g_running.store(false, std::memory_order_relaxed); }
+static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxed); }
 
 #include "virtual_controller.hpp"
 #include "gadget_wakeup.hpp"
@@ -103,9 +103,9 @@ int main(int argc, char** argv) {
 
     std::string bind_arg;
     app.add_option("-b", bind_arg, "Bind UDP to an address and optional port (ADDR[:PORT] or PORT).");
-    app.add_flag("-v", g_verbose, "Enable verbose output");
-    app.add_flag("-wake", g_switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup, save config, test wake, then exit");
-    app.add_flag("-hori", g_legacy_mode, "Expose the legacy 8-byte HORI controller gadget (default exposes 64-byte mode)");
+    app.add_flag("-v", g_ctx.verbose, "Enable verbose output");
+    app.add_flag("-wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup, save config, test wake, then exit");
+    app.add_flag("-hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget (default exposes 64-byte mode)");
     app.add_flag("-bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth/controller input and disable Switch 2 wake");
     app.add_flag("--upnp", do_upnp, "Forward the UDP port via UPnP for PC clients only");
     
@@ -134,29 +134,29 @@ int main(int argc, char** argv) {
     serve_http_webapp = *opt_w;
 
     // -wake setup mode: run interactive config and exit (takes priority)
-    if (g_switch2_wakeup_setup_requested)
+    if (g_ctx.switch2_wakeup_setup_requested)
         return run_switch2_wakeup_setup();
 
     // Determine operating mode:
     //   * -bt  →  Bluetooth mode, wake disabled (explicit user choice)
     //   * else →  auto-detect: wake mode if config exists, Bluetooth mode otherwise
     if (bt_explicit) {
-        g_switch2_wake_adv_enabled = false;
+        g_ctx.switch2_wake_adv_enabled = false;
         if (!bluetooth_input_available()) {
             std::println(stderr, "error: -bt requested, but ns-backend was built without SDL3 support");
             return 1;
         }
         enter_bluetooth_runtime_mode();
     } else {
-        g_switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
-        if (g_switch2_wake_adv_enabled) {
+        g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
+        if (g_ctx.switch2_wake_adv_enabled) {
             bluetooth_enabled = false;
             enter_switch2_wake_runtime_mode();
-            if (g_verbose)
+            if (g_ctx.verbose)
                 std::println("[wake] Switch 2 wake config loaded; wake mode active, Bluetooth disabled");
         } else {
             bluetooth_enabled = bluetooth_input_available();
-            if (g_verbose && bluetooth_enabled)
+            if (g_ctx.verbose && bluetooth_enabled)
                 std::println("[bt] No Switch 2 wake config found; Bluetooth controller mode active");
         }
     }
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     // the console.
     run_gadget_setup_if_needed(true, "startup gadget recreation requested");
 
-    derive_key(DEFAULT_SECRET, g_hmac_key);
+    derive_key(DEFAULT_SECRET, g_ctx.hmac_key);
     signal(SIGINT,  on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
 
     if (do_upnp) upnp_add_mapping(port);
@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
     
     std::println("UDP {}:{} writer={} Hz mode={}",
                 bind_addr, port, PRO_WRITER_HZ,
-                g_legacy_mode ? "hori" : "modern");
+                g_ctx.legacy_mode ? "hori" : "modern");
     std::jthread wt(writer_thread, PRO_WRITER_HZ);
     std::jthread st(stats_thread);
 
@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
     epoll_event evs[4];
 
-    while (g_running.load(std::memory_order_relaxed)) {
+    while (g_ctx.running.load(std::memory_order_relaxed)) {
         int n = epoll_wait(ep, evs, 4, 200);
         if (n <= 0) continue;
 
@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
         //   1) legacy Packet: input only, unchanged, authenticated with HMAC.
         //   2) ExtendedUdpPacket: ExtendedMultiReport with motion/gyro, authenticated
         //      with HMAC, and opted into UDP rumble replies.
-        while (g_running.load(std::memory_order_relaxed)) {
+        while (g_ctx.running.load(std::memory_order_relaxed)) {
             slen = sizeof(sender);
             bytes = recvfrom(sock, udp_rx.data(), udp_rx.size(), 0, (sockaddr*)&sender, &slen);
             if (bytes <= 0) break; // EAGAIN or error — ring is drained
@@ -244,9 +244,9 @@ int main(int argc, char** argv) {
                 memcpy(&probe, udp_rx.data(), sizeof(probe));
                 if (probe.magic == SERVER_INFO_MAGIC && probe.version == SERVER_INFO_VERSION) {
                     ServerInfoReply reply{};
-                    reply.backend = g_legacy_mode ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO;
-                    reply.udp_interval_ms = g_legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS;
-                    reply.udp_hz = g_legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ;
+                    reply.backend = g_ctx.legacy_mode ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO;
+                    reply.udp_interval_ms = g_ctx.legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS;
+                    reply.udp_hz = g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ;
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen);
                     continue;
                 }
@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
                 uint32_t mmagic = 0;
                 memcpy(&mmagic, udp_rx.data(), 4);
                 if (mmagic == ns::macro::UDP_CHUNK_MAGIC) {
-                    server_macro_handle_chunk_packet(udp_rx.data(), (size_t)bytes, sender);
+                    server_macro_handle_chunk_packet(std::span<const uint8_t>(udp_rx.data(), bytes), sender);
                     continue;
                 }
             }
@@ -271,22 +271,22 @@ int main(int argc, char** argv) {
                     uint32_t text_len = mh.text_len;
                     if (text_len <= ns::macro::UDP_TEXT_MAX && bytes == (ssize_t)(ns::macro::UDP_HEADER_SIZE + text_len + HMAC_TAG_SIZE)) {
                         const uint8_t* recv_hmac = udp_rx.data() + ns::macro::UDP_HEADER_SIZE + text_len;
-                        if (hmac_verify(std::span<const uint8_t>(g_hmac_key, 32), std::span<const uint8_t>(udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len), std::span<const uint8_t>(recv_hmac, HMAC_TAG_SIZE)) == 0) {
+                        if (hmac_verify(std::span<const uint8_t>(g_ctx.hmac_key, 32), std::span<const uint8_t>(udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len), std::span<const uint8_t>(recv_hmac, HMAC_TAG_SIZE)) == 0) {
                             if (!rate_allow(sender.sin_addr.s_addr)) continue;
                             int client_idx = server_macro_client_for_sender(sender);
                             if (client_idx >= 0) {
                                 {
-                                    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-                                    g_clients[client_idx].uses_pad_presence = true;
+                                    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+                                    g_ctx.clients[client_idx].uses_pad_presence = true;
                                     int sp = mh.subpad < 4 ? mh.subpad : 0;
-                                    g_clients[client_idx].pad_present[sp] = true;
-                                    g_clients[client_idx].pad_last_present_us[sp] = now_us();
+                                    g_ctx.clients[client_idx].pad_present[sp] = true;
+                                    g_ctx.clients[client_idx].pad_last_present_us[sp] = now_us();
                                 }
                                 std::string text(reinterpret_cast<char*>(udp_rx.data() + ns::macro::UDP_HEADER_SIZE), text_len);
                                 server_macro_start(client_idx, mh.subpad < 4 ? mh.subpad : 0, text);
                             }
-                        } else if (g_verbose) std::println("bad macro HMAC, dropped");
-                    } else if (g_verbose) std::println("bad macro packet size, dropped");
+                        } else if (g_ctx.verbose) std::println("bad macro HMAC, dropped");
+                    } else if (g_ctx.verbose) std::println("bad macro packet size, dropped");
                     continue;
                 }
             }
@@ -307,30 +307,30 @@ int main(int argc, char** argv) {
                 is_extended_udp3 = true;
             }
             if (bytes < (ssize_t)sizeof(ns::Packet)) {
-                if (g_verbose) std::println("[udp] unexpected packet size={}, dropped", bytes);
+                if (g_ctx.verbose) std::println("[udp] unexpected packet size={}, dropped", bytes);
                 continue;
             }
 
             // ── 1. Per-IP rate limiter ────────────────────────────────────────────
             uint32_t src_ip = sender.sin_addr.s_addr;
             if (!rate_allow(src_ip)) {
-                if (g_verbose) std::println("rate limit exceeded, dropped");
+                if (g_ctx.verbose) std::println("rate limit exceeded, dropped");
                 continue;
             }
 
             // ── 2. Magic + version check ──────────────────────────────────────────
             if (is_extended_udp) {
                 if (!extended_udp_packet_ok(ext_pkt)) {
-                    if (g_verbose) std::println("bad extended UDP magic/version, dropped");
+                    if (g_ctx.verbose) std::println("bad extended UDP magic/version, dropped");
                     continue;
                 }
             } else if (is_extended_udp3) {
                 if (!extended_udp3_packet_ok(ext3_pkt)) {
-                    if (g_verbose) std::println("bad extended UDP v3 magic/version, dropped");
+                    if (g_ctx.verbose) std::println("bad extended UDP v3 magic/version, dropped");
                     continue;
                 }
             } else if (!packet_ok(pkt)) {
-                if (g_verbose) std::println("bad magic/version, dropped");
+                if (g_ctx.verbose) std::println("bad magic/version, dropped");
                 continue;
             }
 
@@ -340,10 +340,10 @@ int main(int argc, char** argv) {
             bool wake_on_new_client = false;
 
             for (int i = 0; i < MAX_CLIENTS; ++i) {
-                std::lock_guard<std::mutex> lk(g_mtx[i]);
-                if (g_clients[i].active &&
-                    g_clients[i].addr.sin_addr.s_addr == src_ip &&
-                    g_clients[i].addr.sin_port == sender.sin_port) {
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                if (g_ctx.clients[i].active &&
+                    g_ctx.clients[i].addr.sin_addr.s_addr == src_ip &&
+                    g_ctx.clients[i].addr.sin_port == sender.sin_port) {
                     client_idx = i;
                     break;
                 }
@@ -352,24 +352,24 @@ int main(int argc, char** argv) {
             // If not found, assign to a free/timed-out slot.
             if (client_idx == -1) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
-                    std::lock_guard<std::mutex> lk(g_mtx[i]);
-                    if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
+                    std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                    if (!g_ctx.clients[i].active || elapsed_us_over(now, g_ctx.clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
                         client_idx = i;
-                        g_clients[i].active = true;
-                        g_clients[i].addr = sender;
-                        g_clients[i].first_pkt = true;
-                        g_clients[i].expected_seq = 0;
-                        g_clients[i].report.reset();
-                        clear_all_motion(g_clients[i]);
-                        g_clients[i].uses_pad_presence = false;
-                        clear_udp_rumble_state(g_clients[i]);
+                        g_ctx.clients[i].active = true;
+                        g_ctx.clients[i].addr = sender;
+                        g_ctx.clients[i].first_pkt = true;
+                        g_ctx.clients[i].expected_seq = 0;
+                        g_ctx.clients[i].report.reset();
+                        clear_all_motion(g_ctx.clients[i]);
+                        g_ctx.clients[i].uses_pad_presence = false;
+                        clear_udp_rumble_state(g_ctx.clients[i]);
                         for (int s = 0; s < 4; ++s) {
-                            g_clients[i].pad_present[s] = false;
-                            g_clients[i].pad_last_present_us[s] = 0;
+                            g_ctx.clients[i].pad_present[s] = false;
+                            g_ctx.clients[i].pad_last_present_us[s] = 0;
                         }
-                        g_clients[i].last_rx_us = now;
+                        g_ctx.clients[i].last_rx_us = now;
                         wake_on_new_client = true;
-                        if (g_verbose) std::println("New UDP client accepted into Server Slot {}/4", i+1);
+                        if (g_ctx.verbose) std::println("New UDP client accepted into Server Slot {}/4", i+1);
                         break;
                     }
                 }
@@ -382,27 +382,27 @@ int main(int argc, char** argv) {
 
             // If all 4 slots are taken by active PCs, drop the packet.
             if (client_idx == -1) {
-                if (g_verbose) std::println("server is full (4 PCs already active), dropped");
+                if (g_ctx.verbose) std::println("server is full (4 PCs already active), dropped");
                 continue;
             }
 
             // ── 4. HMAC authentication ────────────────────────────────────────────
             int hmac_ok = 0;
             if (is_extended_udp) {
-                hmac_ok = hmac_verify(std::span<const uint8_t>(g_hmac_key, 32),
+                hmac_ok = hmac_verify(std::span<const uint8_t>(g_ctx.hmac_key, 32),
                                       std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext_pkt), EXT_UDP_PACKET_AUTH_SIZE),
                                       std::span<const uint8_t>(ext_pkt.hmac, HMAC_TAG_SIZE));
             } else if (is_extended_udp3) {
-                hmac_ok = hmac_verify(std::span<const uint8_t>(g_hmac_key, 32),
+                hmac_ok = hmac_verify(std::span<const uint8_t>(g_ctx.hmac_key, 32),
                                       std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext3_pkt), EXT3_UDP_PACKET_AUTH_SIZE),
                                       std::span<const uint8_t>(ext3_pkt.hmac, HMAC_TAG_SIZE));
             } else {
-                hmac_ok = hmac_verify(std::span<const uint8_t>(g_hmac_key, 32),
+                hmac_ok = hmac_verify(std::span<const uint8_t>(g_ctx.hmac_key, 32),
                                       std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), PACKET_AUTH_SIZE),
                                       std::span<const uint8_t>(pkt.hmac, HMAC_TAG_SIZE));
             }
             if (hmac_ok != 0) {
-                if (g_verbose) std::println("bad HMAC, dropped");
+                if (g_ctx.verbose) std::println("bad HMAC, dropped");
                 continue;
             }
 
@@ -410,12 +410,12 @@ int main(int argc, char** argv) {
             if (packet_flags & FLAG_DISCONNECT) {
                 server_macro_stop_all_for_client(client_idx);
                 {
-                    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-                    reset_udp_client_session_locked(g_clients[client_idx]);
+                    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+                    reset_udp_client_session_locked(g_ctx.clients[client_idx]);
                 }
                 rearm_switch2_wake_after_client_disconnect();
-                if (g_verbose) std::println("UDP client {} sent disconnect and was released.", client_idx + 1);
-                ++g_pkts_rx;
+                if (g_ctx.verbose) std::println("UDP client {} sent disconnect and was released.", client_idx + 1);
+                ++g_ctx.pkts_rx;
                 continue;
             }
 
@@ -425,44 +425,44 @@ int main(int argc, char** argv) {
             // ── 5. Sequence counter + Apply to shared state ───────────────────────
             bool accepted = false;
             {
-                std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
 
                 // Re-validate: writer may have deactivated the slot during HMAC.
-                if (!g_clients[client_idx].active) continue;
+                if (!g_ctx.clients[client_idx].active) continue;
 
                 uint8_t flags = is_extended_udp3 ? ext3_pkt.flags : (is_extended_udp ? ext_pkt.flags : pkt.flags);
                 uint32_t seq = is_extended_udp3 ? ext3_pkt.seq : (is_extended_udp ? ext_pkt.seq : pkt.seq);
                 bool is_reset = (flags & FLAG_RESET);
-                bool sequence_jump = (g_clients[client_idx].expected_seq > seq) &&
-                                     ((g_clients[client_idx].expected_seq - seq) > 100);
+                bool sequence_jump = (g_ctx.clients[client_idx].expected_seq > seq) &&
+                                     ((g_ctx.clients[client_idx].expected_seq - seq) > 100);
 
-                if (!g_clients[client_idx].first_pkt && seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
-                    if (g_verbose)
+                if (!g_ctx.clients[client_idx].first_pkt && seq < g_ctx.clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
+                    if (g_ctx.verbose)
                         std::println("UDP client {} out-of-order seq={}, dropped", client_idx+1, seq);
                     continue;
                 }
-                g_clients[client_idx].first_pkt = false;
-                g_clients[client_idx].expected_seq = seq + 1;
+                g_ctx.clients[client_idx].first_pkt = false;
+                g_ctx.clients[client_idx].expected_seq = seq + 1;
 
                 if (is_reset) {
-                    g_clients[client_idx].report.reset();
-                    clear_all_motion(g_clients[client_idx]);
+                    g_ctx.clients[client_idx].report.reset();
+                    clear_all_motion(g_ctx.clients[client_idx]);
                     for (int s = 0; s < 4; ++s) {
-                        g_clients[client_idx].pad_present[s] = false;
-                        g_clients[client_idx].pad_last_present_us[s] = 0;
+                        g_ctx.clients[client_idx].pad_present[s] = false;
+                        g_ctx.clients[client_idx].pad_last_present_us[s] = 0;
                     }
                 } else if (is_extended_udp || is_extended_udp3) {
                     // Extended UDP carries motion/gyro and pad-present flags, so
                     // neutral-but-connected pads can still receive rumble.  Version 6
                     // also carries the three Pro-controller IMU samples explicitly.
-                    g_clients[client_idx].uses_pad_presence = true;
-                    enable_udp_rumble_state(g_clients[client_idx]);
+                    g_ctx.clients[client_idx].uses_pad_presence = true;
+                    enable_udp_rumble_state(g_ctx.clients[client_idx]);
 
                     ExtendedHIDReport* dst_pads[4] = {
-                        &g_clients[client_idx].report.p1,
-                        &g_clients[client_idx].report.p2,
-                        &g_clients[client_idx].report.p3,
-                        &g_clients[client_idx].report.p4,
+                        &g_ctx.clients[client_idx].report.p1,
+                        &g_ctx.clients[client_idx].report.p2,
+                        &g_ctx.clients[client_idx].report.p3,
+                        &g_ctx.clients[client_idx].report.p4,
                     };
                     const ExtendedHIDReport* src_pads[4] = {
                         &ext_pkt.report.p1, &ext_pkt.report.p2,
@@ -481,46 +481,46 @@ int main(int argc, char** argv) {
                             if (is_extended_udp3) {
                                 extended3_to_extended_latest(*src_pads3[s], *dst_pads[s]);
                                 if (src_pads3[s]->has_motion)
-                                    set_motion_samples(g_clients[client_idx], s, src_pads3[s]->motion);
+                                    set_motion_samples(g_ctx.clients[client_idx], s, src_pads3[s]->motion);
                                 else
-                                    clear_motion(g_clients[client_idx], s);
+                                    clear_motion(g_ctx.clients[client_idx], s);
                             } else {
                                 *dst_pads[s] = *src_pads[s];
                                 if (src_pads[s]->has_motion)
-                                    set_motion(g_clients[client_idx], s, src_pads[s]->motion);
+                                    set_motion(g_ctx.clients[client_idx], s, src_pads[s]->motion);
                                 else
-                                    clear_motion(g_clients[client_idx], s);
+                                    clear_motion(g_ctx.clients[client_idx], s);
                             }
-                            g_clients[client_idx].pad_present[s] = true;
-                            g_clients[client_idx].pad_last_present_us[s] = now;
+                            g_ctx.clients[client_idx].pad_present[s] = true;
+                            g_ctx.clients[client_idx].pad_last_present_us[s] = now;
                         } else {
-                            g_clients[client_idx].pad_present[s] = false;
-                            uint64_t last_seen = g_clients[client_idx].pad_last_present_us[s];
+                            g_ctx.clients[client_idx].pad_present[s] = false;
+                            uint64_t last_seen = g_ctx.clients[client_idx].pad_last_present_us[s];
                             if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US) {
                                 dst_pads[s]->reset();
-                                clear_motion(g_clients[client_idx], s);
+                                clear_motion(g_ctx.clients[client_idx], s);
                             }
                         }
                     }
                 } else {
                     // Legacy UDP remains 100% compatible: input-only, no pad-present
                     // tracking, no gyro, and no UDP rumble replies.
-                    g_clients[client_idx].uses_pad_presence = false;
-                    clear_udp_rumble_state(g_clients[client_idx]);
+                    g_ctx.clients[client_idx].uses_pad_presence = false;
+                    clear_udp_rumble_state(g_ctx.clients[client_idx]);
                     for (int s = 0; s < 4; ++s) {
-                        g_clients[client_idx].pad_present[s] = false;
-                        g_clients[client_idx].pad_last_present_us[s] = 0;
+                        g_ctx.clients[client_idx].pad_present[s] = false;
+                        g_ctx.clients[client_idx].pad_last_present_us[s] = 0;
                     }
-                    clear_all_motion(g_clients[client_idx]);
-                    legacy_multi_to_extended(pkt.report, g_clients[client_idx].report);
+                    clear_all_motion(g_ctx.clients[client_idx]);
+                    legacy_multi_to_extended(pkt.report, g_ctx.clients[client_idx].report);
                 }
 
-                g_clients[client_idx].last_rx_us = now_us();
+                g_ctx.clients[client_idx].last_rx_us = now_us();
                 accepted = true;
             }
 
             if (!accepted) continue;
-            ++g_pkts_rx;
+            ++g_ctx.pkts_rx;
 
             // Extended UDP clients opted into rumble by using the new packet
             // format.  Legacy clients are not sent unexpected traffic.

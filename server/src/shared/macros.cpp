@@ -35,47 +35,45 @@ std::string upper(std::string s) {
 
 
 
-bool extract_commands_text(const std::string& raw_in, std::string& out, std::string& err) {
-    if (raw_in.size() > JSON_MAX_BYTES) { err = "macro JSON exceeds 50MB limit"; return false; }
+std::expected<std::string, std::string> extract_commands_text(const std::string& raw_in) {
+    std::string out;
+    if (raw_in.size() > JSON_MAX_BYTES) { return std::unexpected("macro JSON exceeds 50MB limit"); }
     std::string raw = trim(raw_in);
     out.clear();
-    if (raw.empty()) { err = "empty macro"; return false; }
+    if (raw.empty()) { return std::unexpected("empty macro"); }
 
-    if (raw[0] != '{' && raw[0] != '[') { out = raw; return true; }
+    if (raw[0] != '{' && raw[0] != '[') { out = raw; return out; }
 
     try {
         json j = json::parse(raw);
         if (j.is_array()) {
-            if (j.empty()) { err = "commands array is empty"; return false; }
+            if (j.empty()) { return std::unexpected("commands array is empty"); }
             for (const auto& item : j) {
-                if (!item.is_string()) { err = "commands array must contain only strings"; return false; }
+                if (!item.is_string()) { return std::unexpected("commands array must contain only strings"); }
                 if (!out.empty()) out += ";";
                 out += item.get<std::string>();
             }
-            return true;
+            return out;
         } else if (j.is_object()) {
-            if (!j.contains("commands")) { err = "macro object is missing commands"; return false; }
+            if (!j.contains("commands")) { return std::unexpected("macro object is missing commands"); }
             auto& cmds = j["commands"];
             if (cmds.is_string()) {
                 out = cmds.get<std::string>();
             } else if (cmds.is_array()) {
-                if (cmds.empty()) { err = "commands array is empty"; return false; }
+                if (cmds.empty()) { return std::unexpected("commands array is empty"); }
                 for (const auto& item : cmds) {
-                    if (!item.is_string()) { err = "commands array must contain only strings"; return false; }
+                    if (!item.is_string()) { return std::unexpected("commands array must contain only strings"); }
                     if (!out.empty()) out += ";";
                     out += item.get<std::string>();
                 }
             } else {
-                err = "commands must be a string or an array of strings";
-                return false;
+                return std::unexpected("commands must be a string or an array of strings");
             }
-            return true;
+            return out;
         }
-        err = "macro JSON must be an object or commands array";
-        return false;
+        return std::unexpected("macro JSON must be an object or commands array");
     } catch (const json::exception& e) {
-        err = "JSON parse error: " + std::string(e.what());
-        return false;
+        return std::unexpected("JSON parse error: " + std::string(e.what()));
     }
 }
 
@@ -111,37 +109,36 @@ std::uint16_t button_bit(const std::string& token) {
     return 0;
 }
 
-bool apply_token(const std::string& raw_tok, Step& st, std::string& err,
+std::expected<void, std::string> apply_token(const std::string& raw_tok, Step& st,
                         bool& du, bool& dd, bool& dl, bool& dr,
                         bool& llu, bool& lld, bool& lll, bool& llr,
                         bool& rru, bool& rrd, bool& rrl, bool& rrr) {
     std::string tok = upper(trim(raw_tok));
-    if (tok.empty()) return true;
+    if (tok.empty()) return {};
     std::uint16_t bit = button_bit(tok);
-    if (bit) { st.buttons |= bit; return true; }
+    if (bit) { st.buttons |= bit; return {}; }
 
-    if (tok == "DPAD_UP" || tok == "DUP" || tok == "UP") { du = true; return true; }
-    if (tok == "DPAD_DOWN" || tok == "DDOWN" || tok == "DOWN") { dd = true; return true; }
-    if (tok == "DPAD_LEFT" || tok == "DLEFT" || tok == "LEFT") { dl = true; return true; }
-    if (tok == "DPAD_RIGHT" || tok == "DRIGHT" || tok == "RIGHT") { dr = true; return true; }
+    if (tok == "DPAD_UP" || tok == "DUP" || tok == "UP") { du = true; return {}; }
+    if (tok == "DPAD_DOWN" || tok == "DDOWN" || tok == "DOWN") { dd = true; return {}; }
+    if (tok == "DPAD_LEFT" || tok == "DLEFT" || tok == "LEFT") { dl = true; return {}; }
+    if (tok == "DPAD_RIGHT" || tok == "DRIGHT" || tok == "RIGHT") { dr = true; return {}; }
 
-    if (tok == "LSTICK_UP" || tok == "LS_UP") { llu = true; st.has_lstick = true; return true; }
-    if (tok == "LSTICK_DOWN" || tok == "LS_DOWN") { lld = true; st.has_lstick = true; return true; }
-    if (tok == "LSTICK_LEFT" || tok == "LS_LEFT") { lll = true; st.has_lstick = true; return true; }
-    if (tok == "LSTICK_RIGHT" || tok == "LS_RIGHT") { llr = true; st.has_lstick = true; return true; }
+    if (tok == "LSTICK_UP" || tok == "LS_UP") { llu = true; st.has_lstick = true; return {}; }
+    if (tok == "LSTICK_DOWN" || tok == "LS_DOWN") { lld = true; st.has_lstick = true; return {}; }
+    if (tok == "LSTICK_LEFT" || tok == "LS_LEFT") { lll = true; st.has_lstick = true; return {}; }
+    if (tok == "LSTICK_RIGHT" || tok == "LS_RIGHT") { llr = true; st.has_lstick = true; return {}; }
 
-    if (tok == "RSTICK_UP" || tok == "RS_UP") { rru = true; st.has_rstick = true; return true; }
-    if (tok == "RSTICK_DOWN" || tok == "RS_DOWN") { rrd = true; st.has_rstick = true; return true; }
-    if (tok == "RSTICK_LEFT" || tok == "RS_LEFT") { rrl = true; st.has_rstick = true; return true; }
-    if (tok == "RSTICK_RIGHT" || tok == "RS_RIGHT") { rrr = true; st.has_rstick = true; return true; }
+    if (tok == "RSTICK_UP" || tok == "RS_UP") { rru = true; st.has_rstick = true; return {}; }
+    if (tok == "RSTICK_DOWN" || tok == "RS_DOWN") { rrd = true; st.has_rstick = true; return {}; }
+    if (tok == "RSTICK_LEFT" || tok == "RS_LEFT") { rrl = true; st.has_rstick = true; return {}; }
+    if (tok == "RSTICK_RIGHT" || tok == "RS_RIGHT") { rrr = true; st.has_rstick = true; return {}; }
 
-    err = "unknown macro input: " + raw_tok;
-    return false;
+    return std::unexpected("unknown macro input: " + raw_tok);
 }
 
-bool parse_one_command(const std::string& part, Step& st, std::string& err) {
+std::expected<void, std::string> parse_one_command(const std::string& part, Step& st) {
     std::size_t last_space = part.find_last_of(" \t");
-    if (last_space == std::string::npos) { err = "missing duration in command: " + part; return false; }
+    if (last_space == std::string::npos) return std::unexpected("missing duration in command: " + part);
     std::string cmd = trim(part.substr(0, last_space));
     std::string ms_s = trim(part.substr(last_space + 1));
     std::uint32_t ms = 0;
@@ -149,8 +146,8 @@ bool parse_one_command(const std::string& part, Step& st, std::string& err) {
     st = Step{};
     st.duration_ms = ms;
     std::string up = upper(cmd);
-    if (up == "WAIT") return true;
-    if (cmd.empty()) { err = "missing input before duration in command: " + part; return false; }
+    if (up == "WAIT") return {};
+    if (cmd.empty()) return std::unexpected("missing input before duration in command: " + part);
 
     for (char& c : cmd) if (c == '+' || c == ',' || c == '|') c = ' ';
     std::istringstream iss(cmd);
@@ -161,15 +158,16 @@ bool parse_one_command(const std::string& part, Step& st, std::string& err) {
     int token_count = 0;
     while (iss >> tok) {
         ++token_count;
-        if (!apply_token(tok, st, err, du, dd, dl, dr, llu, lld, lll, llr, rru, rrd, rrl, rrr)) return false;
+        auto apply_res = apply_token(tok, st, du, dd, dl, dr, llu, lld, lll, llr, rru, rrd, rrl, rrr);
+        if (!apply_res) return std::unexpected(apply_res.error());
     }
-    if (token_count == 0) { err = "empty input in command: " + part; return false; }
-    if (du && dd) { err = "DPAD_UP and DPAD_DOWN conflict in command: " + part; return false; }
-    if (dl && dr) { err = "DPAD_LEFT and DPAD_RIGHT conflict in command: " + part; return false; }
-    if (llu && lld) { err = "LSTICK_UP and LSTICK_DOWN conflict in command: " + part; return false; }
-    if (lll && llr) { err = "LSTICK_LEFT and LSTICK_RIGHT conflict in command: " + part; return false; }
-    if (rru && rrd) { err = "RSTICK_UP and RSTICK_DOWN conflict in command: " + part; return false; }
-    if (rrl && rrr) { err = "RSTICK_LEFT and RSTICK_RIGHT conflict in command: " + part; return false; }
+    if (token_count == 0) return std::unexpected("empty input in command: " + part);
+    if (du && dd) return std::unexpected("DPAD_UP and DPAD_DOWN conflict in command: " + part);
+    if (dl && dr) return std::unexpected("DPAD_LEFT and DPAD_RIGHT conflict in command: " + part);
+    if (llu && lld) return std::unexpected("LSTICK_UP and LSTICK_DOWN conflict in command: " + part);
+    if (lll && llr) return std::unexpected("LSTICK_LEFT and LSTICK_RIGHT conflict in command: " + part);
+    if (rru && rrd) return std::unexpected("RSTICK_UP and RSTICK_DOWN conflict in command: " + part);
+    if (rrl && rrr) return std::unexpected("RSTICK_LEFT and RSTICK_RIGHT conflict in command: " + part);
 
     if (du && dr) st.hat = ns::HAT_NE;
     else if (du && dl) st.hat = ns::HAT_NW;
@@ -182,7 +180,7 @@ bool parse_one_command(const std::string& part, Step& st, std::string& err) {
 
     if (st.has_lstick) { st.lx = lll ? 0 : (llr ? 255 : 128); st.ly = llu ? 0 : (lld ? 255 : 128); }
     if (st.has_rstick) { st.rx = rrl ? 0 : (rrr ? 255 : 128); st.ry = rru ? 0 : (rrd ? 255 : 128); }
-    return true;
+    return {};
 }
 
 bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
@@ -191,8 +189,10 @@ bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
     steps.clear();
     if (normalized) normalized->clear();
 
-    std::string text, err;
-    if (!extract_commands_text(raw_text, text, err)) { set_error(err); return false; }
+    std::string text;
+    auto ext_res = extract_commands_text(raw_text);
+    if (!ext_res) { set_error(ext_res.error()); return false; }
+    text = *ext_res;
     for (char& c : text) if (c == '\n' || c == '\r') c = ';';
 
     std::size_t pos = 0;
@@ -223,7 +223,8 @@ bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
         }
 
         Step st;
-        if (!parse_one_command(part, st, err)) { set_error(err); return false; }
+        auto parse_res = parse_one_command(part, st);
+        if (!parse_res) { set_error(parse_res.error()); return false; }
         if (steps.size() + 1 > MAX_EXPANDED_STEPS) { set_error("macro expands to too many steps"); return false; }
         steps.push_back(st);
         if (normalized) normalized->push_back(part);

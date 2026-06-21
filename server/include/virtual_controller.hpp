@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <span>
 #include <sys/types.h>
 #include <string>
 
@@ -113,5 +115,5 @@ void build_standard_report(const ns::ExtendedHIDReport& src,
                            bool imu_enabled,
                            uint8_t timer,
                            ProInputReport30& out);
-int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply);
+int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);

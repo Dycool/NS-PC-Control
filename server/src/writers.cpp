@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <print>
+#include <span>
 
 #include <algorithm>
 #include <cerrno>
@@ -45,7 +46,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
             continue;
         }
 
-        if (g_verbose || !was_connected)
+        if (g_ctx.verbose || !was_connected)
             std::println("{}x legacy /dev/hidg* opened", HID_PORT_COUNT);
         // Opening /dev/hidg* only proves the gadget exists, not that the Switch is awake.
         // Mark the host connected only after real USB writes succeed.
@@ -73,44 +74,44 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
                     report_snap[c][s].reset();
 
             for (int c = 0; c < MAX_CLIENTS; ++c) {
-                std::lock_guard<std::mutex> lk(g_mtx[c]);
-                repair_future_client_timestamp(g_clients[c], now_stamp);
-                const uint64_t client_idle_us = elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us);
-                if (g_clients[c].active && g_clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
-                    g_clients[c].active = false;
-                    g_clients[c].report.reset();
-                    clear_all_motion(g_clients[c]);
-                    g_clients[c].uses_pad_presence = false;
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[c]);
+                repair_future_client_timestamp(g_ctx.clients[c], now_stamp);
+                const uint64_t client_idle_us = elapsed_us_saturated(now_stamp, g_ctx.clients[c].last_rx_us);
+                if (g_ctx.clients[c].active && g_ctx.clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
+                    g_ctx.clients[c].active = false;
+                    g_ctx.clients[c].report.reset();
+                    clear_all_motion(g_ctx.clients[c]);
+                    g_ctx.clients[c].uses_pad_presence = false;
                     for (int s = 0; s < 4; ++s) {
-                        g_clients[c].pad_present[s] = false;
-                        g_clients[c].pad_last_present_us[s] = 0;
+                        g_ctx.clients[c].pad_present[s] = false;
+                        g_ctx.clients[c].pad_last_present_us[s] = 0;
                     }
-                    if (g_verbose && !timeout_printed[c]) {
+                    if (g_ctx.verbose && !timeout_printed[c]) {
                         std::println("PC {} timed out after {:.1f}s without UDP input and was disconnected.",
                                     c + 1, (double)client_idle_us / 1000000.0);
                         timeout_printed[c] = true;
                     }
-                } else if (g_clients[c].active) {
+                } else if (g_ctx.clients[c].active) {
                     timeout_printed[c] = false;
                 }
 
-                active_snap[c] = g_clients[c].active;
-                uses_presence_snap[c] = g_clients[c].uses_pad_presence;
+                active_snap[c] = g_ctx.clients[c].active;
+                uses_presence_snap[c] = g_ctx.clients[c].uses_pad_presence;
                 const bool input_stream_stale =
-                    g_clients[c].active &&
-                    g_clients[c].last_rx_us != 0 &&
+                    g_ctx.clients[c].active &&
+                    g_ctx.clients[c].last_rx_us != 0 &&
                     client_idle_us > CLIENT_STALE_NEUTRAL_US;
 
                 for (int s = 0; s < 4; ++s) {
-                    present_snap[c][s] = g_clients[c].pad_present[s];
-                    last_present_snap[c][s] = g_clients[c].pad_last_present_us[s];
+                    present_snap[c][s] = g_ctx.clients[c].pad_present[s];
+                    last_present_snap[c][s] = g_ctx.clients[c].pad_last_present_us[s];
                 }
 
                 if (!input_stream_stale) {
-                    report_snap[c][0] = g_clients[c].report.p1;
-                    report_snap[c][1] = g_clients[c].report.p2;
-                    report_snap[c][2] = g_clients[c].report.p3;
-                    report_snap[c][3] = g_clients[c].report.p4;
+                    report_snap[c][0] = g_ctx.clients[c].report.p1;
+                    report_snap[c][1] = g_ctx.clients[c].report.p2;
+                    report_snap[c][2] = g_ctx.clients[c].report.p3;
+                    report_snap[c][3] = g_ctx.clients[c].report.p4;
                 }
             }
 
@@ -166,7 +167,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
                     if (chosen != -1) {
                         hw_slots[chosen].client_idx = c;
                         hw_slots[chosen].sub_idx = s;
-                        if (g_verbose)
+                        if (g_ctx.verbose)
                             std::println("Map -> PC {} (Pad {}) took console legacy Port {}", c + 1, s + 1, chosen + 1);
                     }
                 }
@@ -193,7 +194,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
                     if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                 } else if (w == (ssize_t)sizeof(HIDReport)) {
                     prev[h] = out_reports[h];
-                    ++g_hid_writes;
+                    ++g_ctx.hid_writes;
                     // Only count writes for an active client as USB host
                     // activity.  Idle neutral writes succeed even when the
                     // Switch is asleep and would poison the wake detector.
@@ -226,7 +227,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    if (g_legacy_mode) {
+    if (g_ctx.legacy_mode) {
         legacy_writer_thread(stoken, hz);
         return;
     }
@@ -279,7 +280,7 @@ void writer_thread(std::stop_token stoken, int hz) {
             continue;
         }
 
-        if (g_verbose || !was_connected)
+        if (g_ctx.verbose || !was_connected)
             std::println("{}x USB gamepad /dev/hidg* opened", HID_PORT_COUNT);
         // Opening /dev/hidg* only proves the gadget exists, not that the Switch is awake.
         // Mark the host connected only after real USB output/handshake activity succeeds.
@@ -312,36 +313,36 @@ void writer_thread(std::stop_token stoken, int hz) {
             }
 
             for (int c = 0; c < MAX_CLIENTS; ++c) {
-                std::lock_guard<std::mutex> lk(g_mtx[c]);
-                repair_future_client_timestamp(g_clients[c], now_stamp);
-                const uint64_t client_idle_us = elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us);
-                if (g_clients[c].active && g_clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
-                    g_clients[c].active = false;
-                    g_clients[c].report.reset();
-                    clear_all_motion(g_clients[c]);
-                    g_clients[c].uses_pad_presence = false;
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[c]);
+                repair_future_client_timestamp(g_ctx.clients[c], now_stamp);
+                const uint64_t client_idle_us = elapsed_us_saturated(now_stamp, g_ctx.clients[c].last_rx_us);
+                if (g_ctx.clients[c].active && g_ctx.clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US && !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
+                    g_ctx.clients[c].active = false;
+                    g_ctx.clients[c].report.reset();
+                    clear_all_motion(g_ctx.clients[c]);
+                    g_ctx.clients[c].uses_pad_presence = false;
                     for (int s = 0; s < 4; ++s) {
-                        g_clients[c].pad_present[s] = false;
-                        g_clients[c].pad_last_present_us[s] = 0;
+                        g_ctx.clients[c].pad_present[s] = false;
+                        g_ctx.clients[c].pad_last_present_us[s] = 0;
                     }
-                    if (g_verbose && !timeout_printed[c]) {
+                    if (g_ctx.verbose && !timeout_printed[c]) {
                         std::println("PC {} timed out after {:.1f}s without UDP input and was disconnected.",
-                                    c + 1, (double)elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us) / 1000000.0);
+                                    c + 1, (double)elapsed_us_saturated(now_stamp, g_ctx.clients[c].last_rx_us) / 1000000.0);
                         timeout_printed[c] = true;
                     }
-                } else if (g_clients[c].active) {
+                } else if (g_ctx.clients[c].active) {
                     timeout_printed[c] = false;
                 }
-                active_snap[c] = g_clients[c].active;
-                uses_presence_snap[c] = g_clients[c].uses_pad_presence;
+                active_snap[c] = g_ctx.clients[c].active;
+                uses_presence_snap[c] = g_ctx.clients[c].uses_pad_presence;
                 const bool input_stream_stale =
-                    g_clients[c].active &&
-                    g_clients[c].last_rx_us != 0 &&
+                    g_ctx.clients[c].active &&
+                    g_ctx.clients[c].last_rx_us != 0 &&
                     client_idle_us > CLIENT_STALE_NEUTRAL_US;
 
                 for (int s = 0; s < 4; ++s) {
-                    present_snap[c][s] = g_clients[c].pad_present[s];
-                    last_present_snap[c][s] = g_clients[c].pad_last_present_us[s];
+                    present_snap[c][s] = g_ctx.clients[c].pad_present[s];
+                    last_present_snap[c][s] = g_ctx.clients[c].pad_last_present_us[s];
                 }
 
                 if (input_stream_stale) {
@@ -355,14 +356,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                     for (int s = 0; s < 4; ++s)
                         has_motion_snap[c][s] = false;
                 } else {
-                    report_snap[c][0] = g_clients[c].report.p1;
-                    report_snap[c][1] = g_clients[c].report.p2;
-                    report_snap[c][2] = g_clients[c].report.p3;
-                    report_snap[c][3] = g_clients[c].report.p4;
+                    report_snap[c][0] = g_ctx.clients[c].report.p1;
+                    report_snap[c][1] = g_ctx.clients[c].report.p2;
+                    report_snap[c][2] = g_ctx.clients[c].report.p3;
+                    report_snap[c][3] = g_ctx.clients[c].report.p4;
                     for (int s = 0; s < 4; ++s) {
                         for (int i = 0; i < 3; ++i)
-                            motion_snap[c][s][i] = g_clients[c].motion_samples[s][i];
-                        has_motion_snap[c][s] = g_clients[c].has_motion[s];
+                            motion_snap[c][s][i] = g_ctx.clients[c].motion_samples[s][i];
+                        has_motion_snap[c][s] = g_ctx.clients[c].has_motion[s];
                     }
                 }
             }
@@ -433,7 +434,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     if (chosen != -1) {
                         hw_slots[chosen].client_idx = c;
                         hw_slots[chosen].sub_idx = s;
-                        if (g_verbose)
+                        if (g_ctx.verbose)
                             std::println("Map -> PC {} (Pad {}) took console Pro Port {}", c + 1, s + 1, chosen + 1);
                     }
                 }
@@ -576,12 +577,11 @@ void writer_thread(std::stop_token stoken, int hz) {
                         memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
                         int reply_len = handle_subcommand(
                             rt[h], subcmd_id,
-                            subcmd_data_len > 0 ? read_buf + 11 : nullptr,
-                            subcmd_data_len,
+                            std::span<const uint8_t>(read_buf + 11, subcmd_data_len),
                             &rt[h].pending_reply
                         );
                         rt[h].pending_subcmd_reply = (reply_len >= 0);
-                        if (g_verbose) {
+                        if (g_ctx.verbose) {
                             std::print("[pro{}] subcmd 0x{:02X} reply=0x{:02X} 0x{:02X}",
                                         h + 1, subcmd_id, rt[h].pending_reply.ack, rt[h].pending_reply.subcmd_id);
                             if ((subcmd_id == CMD_SET_DATA_FORMAT || subcmd_id == CMD_ENABLE_IMU ||
@@ -613,7 +613,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         ssize_t w = write(fds[h], resp_81, PRO_REPORT_SIZE);
                         if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                         else if (w == (ssize_t)PRO_REPORT_SIZE) mark_switch2_usb_activity(now_stamp);
-                        if (g_verbose) {
+                        if (g_ctx.verbose) {
                             std::println("[pro{}] usb 0x80 cmd=0x{:02X} -> 0x81 subtype=0x{:02X} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} timeout={}",
                                         h + 1, usb_cmd, resp_81[1],
                                         CTRL_MAC_BE[h][0], CTRL_MAC_BE[h][1], CTRL_MAC_BE[h][2],
@@ -621,7 +621,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         rt[h].usb_timeout_disabled ? "disabled" : "enabled");
                         }
                     } else {
-                        if (g_verbose && id != 0x00)
+                        if (g_ctx.verbose && id != 0x00)
                             std::println("[pro{}] unknown output report id=0x{:02X} len={}", h + 1, id, r);
                     }
                 }
@@ -636,12 +636,12 @@ void writer_thread(std::stop_token stoken, int hz) {
             }
 
             auto now_log = Clock::now();
-            if (g_verbose && now_log - last_rate_log >= ms(1000)) {
+            if (g_ctx.verbose && now_log - last_rate_log >= ms(1000)) {
                 std::println("pro_hid_writes/sec={}", (unsigned long long)writes_this_second);
                 writes_this_second = 0;
                 last_rate_log = now_log;
             }
-            if (writes_this_second) ++g_hid_writes;
+            if (writes_this_second) ++g_ctx.hid_writes;
         }
     }
 
@@ -667,16 +667,16 @@ void stats_thread(std::stop_token stoken) {
             last_cleanup = now;
             std::lock_guard<std::mutex> lk(g_rate_mtx);
             for (int i = 0; i < RATE_TABLE; ++i) {
-                if (g_rate_table[i].ip != 0 &&
-                    now - g_rate_table[i].window_start > RATE_WINDOW_US * 2)
-                    g_rate_table[i].ip = 0;
+                if (g_ctx.rate_table[i].ip != 0 &&
+                    now - g_ctx.rate_table[i].window_start > RATE_WINDOW_US * 2)
+                    g_ctx.rate_table[i].ip = 0;
             }
         }
 
-        if (!g_verbose) continue;
+        if (!g_ctx.verbose) continue;
         std::println("pkts_rx={:<8}  hid_writes={:<8}",
-            (unsigned long long)g_pkts_rx.load(),
-            (unsigned long long)g_hid_writes.load());
+            (unsigned long long)g_ctx.pkts_rx.load(),
+            (unsigned long long)g_ctx.hid_writes.load());
     }
 }
 
@@ -685,7 +685,7 @@ bool rate_allow(uint32_t ip) {
     std::lock_guard<std::mutex> lk(g_rate_mtx);
     uint64_t now = now_us();
     uint32_t idx = ip % RATE_TABLE;
-    RateSlot &s = g_rate_table[idx];
+    RateSlot &s = g_ctx.rate_table[idx];
     if (s.ip != ip) {
         s.ip = ip; s.count = 1; s.window_start = now; return true;
     }

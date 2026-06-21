@@ -6,9 +6,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
+#include <chrono>
 #include <print>
 #include <format>
+#include <span>
+#include <algorithm>
+#include <cstring>
 
 using namespace ns;
 
@@ -101,7 +104,7 @@ void randomize_controller_identity() {
                       CTRL_MAC_BE[i][2], CTRL_MAC_BE[i][3], CTRL_MAC_BE[i][4], CTRL_MAC_BE[i][5]);
     }
 
-    g_usb_serial = std::format("{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+    g_ctx.usb_serial = std::format("{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
                   rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5]);
 }
 
@@ -459,7 +462,7 @@ void build_standard_report(const ExtendedHIDReport& src,
         imu[2] = motion_samples[2];
     }
 
-    if (g_verbose && (!input_is_neutral(in) || has_imu)) {
+    if (g_ctx.verbose && (!input_is_neutral(in) || has_imu)) {
         static uint64_t last_log_us = 0;
         uint64_t t = now_us();
         if (t - last_log_us > 250000) {
@@ -509,8 +512,8 @@ store_imu_sample(out, 1, imu[1]);
 store_imu_sample(out, 2, imu[2]);
 }
 
-int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_data, size_t cmd_len, ProInputReport21* reply) {
-    memset(reply->reply_data, 0, sizeof(reply->reply_data));
+int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply) {
+    std::ranges::fill(reply->reply_data, 0);
     reply->ack = 0x80;
     reply->subcmd_id = subcmd;
 
@@ -519,12 +522,12 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_
         // Public/synthetic pairing pages.  Keep the shape but do not embed any
         // private pairing material.
         reply->ack = 0x81;
-        if (cmd_len > 0 && cmd_data[0] == 0x02) {
-            memset(reply->reply_data, 0x00, 16);
+        if (!cmd_data.empty() && cmd_data[0] == 0x02) {
+            std::ranges::fill_n(reply->reply_data, 16, 0x00);
             return 16;
         }
-        if (cmd_len > 0 && cmd_data[0] == 0x03) {
-            memset(reply->reply_data, 0x00, 16);
+        if (!cmd_data.empty() && cmd_data[0] == 0x03) {
+            std::ranges::fill_n(reply->reply_data, 16, 0x00);
             return 16;
         }
         return 0;
@@ -552,7 +555,7 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_
         uint8_t info[36];
         build_get_device_info_response(info, rt.ctrl);
         reply->ack = 0x82;
-        memcpy(reply->reply_data, info, 36);
+        std::ranges::copy(info, reply->reply_data);
         return 36;
     }
 
@@ -562,7 +565,7 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_
         return 0;
 
     case CMD_SPI_FLASH_READ: {
-        if (cmd_len < 5) {
+        if (cmd_data.size() < 5) {
             reply->ack = 0x00;
             return 0;
         }
@@ -588,7 +591,7 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_
         } else {
             memset(reply->reply_data + 5, 0xFF, size);
         }
-        if (g_verbose) {
+        if (g_ctx.verbose) {
             std::print("[pro{}] SPI read addr=0x{:04X} size={}", rt.ctrl + 1, addr, size);
             if (addr == 0x6020 || addr == 0x8026 || addr == 0x8028 || addr == 0x6080 || addr == 0x6086 || addr == 0x6098) {
                 std::print(" data=");
@@ -609,12 +612,12 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_
         return 0;
 
     case CMD_ENABLE_IMU:
-        rt.imu_enabled = (cmd_len == 0) || cmd_data[0] != 0;
+        rt.imu_enabled = (cmd_data.size() == 0) || cmd_data[0] != 0;
         reply->ack = 0x80;
         return 0;
 
     case CMD_ENABLE_VIBRATION:
-        rt.vibration_enabled = (cmd_len == 0) || cmd_data[0] != 0;
+        rt.vibration_enabled = (cmd_data.size() == 0) || cmd_data[0] != 0;
         reply->ack = 0x80;
         return 0;
 
@@ -725,14 +728,14 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
     if (neutral && !publish_neutral)
         return;
 
-    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
-    if (neutral && !g_clients[client_idx].rumble_active[sub_idx]) {
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    if (neutral && !g_ctx.clients[client_idx].rumble_active[sub_idx]) {
         // The console sends the neutral carrier constantly. Forwarding every
         // neutral frame creates haptic spam.
         return;
     }
 
-    RumblePacket& ev = g_clients[client_idx].rumble[sub_idx];
+    RumblePacket& ev = g_ctx.clients[client_idx].rumble[sub_idx];
     ev.magic = RUMBLE_MAGIC;
     ev.subpad = (uint8_t)sub_idx;
     ev.low_freq = neutral ? 0 : low;
@@ -741,7 +744,7 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
     // small precision packets do not smear into a long full-power buzz on classic clients.
     ev.duration_10ms = neutral ? 0 : 1;
 
-    PrecisionRumblePacket& precision_ev = g_clients[client_idx].precision_rumble[sub_idx];
+    PrecisionRumblePacket& precision_ev = g_ctx.clients[client_idx].precision_rumble[sub_idx];
     precision_ev.magic = PRECISION_RUMBLE_MAGIC;
     precision_ev.subpad = (uint8_t)sub_idx;
     precision_ev.low_freq = ev.low_freq;
@@ -749,10 +752,10 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
     precision_ev.duration_10ms = ev.duration_10ms;
     memcpy(precision_ev.precision, rb, sizeof(precision_ev.precision));
 
-    g_clients[client_idx].rumble_active[sub_idx] = !neutral;
-    g_clients[client_idx].rumble_seq[sub_idx]++;
+    g_ctx.clients[client_idx].rumble_active[sub_idx] = !neutral;
+    g_ctx.clients[client_idx].rumble_seq[sub_idx]++;
 
-    if (g_verbose) {
+    if (g_ctx.verbose) {
         std::println("[rumble] client={} pad={} low={} high={} duration={} neutral={} raw={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
                     client_idx + 1, sub_idx + 1, ev.low_freq, ev.high_freq,
                     ev.duration_10ms, neutral ? "yes" : "no",

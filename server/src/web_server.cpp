@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <mutex>
+#include <print>
 #include <vector>
 
 using namespace ns;
@@ -61,7 +62,7 @@ struct SessionData {
 };
 
 static bool g_serve_http_webapp = false;
-static struct lws_context *g_lws_context = nullptr;
+
 
 static int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     (void)user;
@@ -128,16 +129,16 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 sd->last_rumble_seq[i] = 0;
                 sd->has_pending_rumble[i] = false;
             }
-            lws_set_timer_usecs(wsi, 10 * LWS_USEC_PER_MSEC); // Poll rumble every 10ms
+            lws_set_timer_usecs(wsi, 10 * 1000); // Poll rumble every 10ms
             break;
         }
 
         case LWS_CALLBACK_CLOSED: {
             if (sd->ws_slot >= 0) {
-                std::lock_guard<std::mutex> lk(g_mtx[sd->ws_slot]);
-                if (g_clients[sd->ws_slot].active) {
-                    reset_udp_client_session_locked(g_clients[sd->ws_slot]);
-                    g_clients[sd->ws_slot].active = false;
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
+                if (g_ctx.clients[sd->ws_slot].active) {
+                    reset_udp_client_session_locked(g_ctx.clients[sd->ws_slot]);
+                    g_ctx.clients[sd->ws_slot].active = false;
                 }
             }
             break;
@@ -155,29 +156,29 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     uint64_t now = now_us();
                     if (sd->ws_slot < 0) {
                         for (int i = 0; i < MAX_CLIENTS; ++i) {
-                            std::lock_guard<std::mutex> lk(g_mtx[i]);
-                            if (!g_clients[i].active) {
+                            std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                            if (!g_ctx.clients[i].active) {
                                 sd->ws_slot = i;
-                                g_clients[i].active = true;
-                                g_clients[i].first_pkt = true;
-                                g_clients[i].report.reset();
-                                clear_all_motion(g_clients[i]);
-                                g_clients[i].uses_pad_presence = true;
-                                clear_udp_rumble_state(g_clients[i]);
-                                for (int s = 0; s < 4; ++s) { g_clients[i].pad_present[s] = false; g_clients[i].pad_last_present_us[s] = 0; }
-                                g_clients[i].last_rx_us = now;
+                                g_ctx.clients[i].active = true;
+                                g_ctx.clients[i].first_pkt = true;
+                                g_ctx.clients[i].report.reset();
+                                clear_all_motion(g_ctx.clients[i]);
+                                g_ctx.clients[i].uses_pad_presence = true;
+                                clear_udp_rumble_state(g_ctx.clients[i]);
+                                for (int s = 0; s < 4; ++s) { g_ctx.clients[i].pad_present[s] = false; g_ctx.clients[i].pad_last_present_us[s] = 0; }
+                                g_ctx.clients[i].last_rx_us = now;
                                 break;
                             }
                         }
                     }
                     if (sd->ws_slot >= 0) {
                         {
-                            std::lock_guard<std::mutex> lk(g_mtx[sd->ws_slot]);
-                            g_clients[sd->ws_slot].active = true;
-                            g_clients[sd->ws_slot].uses_pad_presence = true;
-                            g_clients[sd->ws_slot].pad_present[0] = true;
-                            g_clients[sd->ws_slot].pad_last_present_us[0] = now;
-                            g_clients[sd->ws_slot].last_rx_us = now;
+                            std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
+                            g_ctx.clients[sd->ws_slot].active = true;
+                            g_ctx.clients[sd->ws_slot].uses_pad_presence = true;
+                            g_ctx.clients[sd->ws_slot].pad_present[0] = true;
+                            g_ctx.clients[sd->ws_slot].pad_last_present_us[0] = now;
+                            g_ctx.clients[sd->ws_slot].last_rx_us = now;
                         }
                         server_macro_start(sd->ws_slot, 0, text.substr(prefix.size()));
                     }
@@ -193,28 +194,28 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     uint64_t now = now_us();
                     if (sd->ws_slot < 0) {
                         for (int i = 0; i < MAX_CLIENTS; ++i) {
-                            std::lock_guard<std::mutex> lk(g_mtx[i]);
-                            if (!g_clients[i].active) {
+                            std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                            if (!g_ctx.clients[i].active) {
                                 sd->ws_slot = i;
-                                g_clients[i].active = true;
-                                g_clients[i].first_pkt = true;
-                                g_clients[i].report.reset();
-                                clear_all_motion(g_clients[i]);
-                                g_clients[i].uses_pad_presence = true;
-                                g_clients[i].last_rx_us = now;
+                                g_ctx.clients[i].active = true;
+                                g_ctx.clients[i].first_pkt = true;
+                                g_ctx.clients[i].report.reset();
+                                clear_all_motion(g_ctx.clients[i]);
+                                g_ctx.clients[i].uses_pad_presence = true;
+                                g_ctx.clients[i].last_rx_us = now;
                                 break;
                             }
                         }
                     }
                     if (sd->ws_slot >= 0) {
-                        std::lock_guard<std::mutex> lk(g_mtx[sd->ws_slot]);
-                        g_clients[sd->ws_slot].active = true;
-                        g_clients[sd->ws_slot].uses_pad_presence = true;
-                        g_clients[sd->ws_slot].pad_present[0] = true;
-                        g_clients[sd->ws_slot].pad_last_present_us[0] = now;
-                        g_clients[sd->ws_slot].last_rx_us = now;
+                        std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
+                        g_ctx.clients[sd->ws_slot].active = true;
+                        g_ctx.clients[sd->ws_slot].uses_pad_presence = true;
+                        g_ctx.clients[sd->ws_slot].pad_present[0] = true;
+                        g_ctx.clients[sd->ws_slot].pad_last_present_us[0] = now;
+                        g_ctx.clients[sd->ws_slot].last_rx_us = now;
                     }
-                    if (sd->ws_slot >= 0) server_macro_handle_ws_chunk_packet(sd->ws_slot, payload, (size_t)flen);
+                    if (sd->ws_slot >= 0) server_macro_handle_ws_chunk_packet(sd->ws_slot, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload), flen));
                     break;
                 }
             }
@@ -279,29 +280,29 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             bool wake_on_new_client = false;
 
             if (sd->ws_slot >= 0) {
-                std::lock_guard<std::mutex> lk(g_mtx[sd->ws_slot]);
-                if (!g_clients[sd->ws_slot].active)
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
+                if (!g_ctx.clients[sd->ws_slot].active)
                     sd->ws_slot = -1;
             }
             if (sd->ws_slot < 0) {
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
-                    std::lock_guard<std::mutex> lk(g_mtx[i]);
-                    if (!g_clients[i].active) {
+                    std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                    if (!g_ctx.clients[i].active) {
                         sd->ws_slot = i;
-                        g_clients[i].active = true;
-                        g_clients[i].first_pkt = true;
-                        g_clients[i].report.reset();
-                        clear_all_motion(g_clients[i]);
-                        g_clients[i].uses_pad_presence = true;
-                        clear_udp_rumble_state(g_clients[i]);
+                        g_ctx.clients[i].active = true;
+                        g_ctx.clients[i].first_pkt = true;
+                        g_ctx.clients[i].report.reset();
+                        clear_all_motion(g_ctx.clients[i]);
+                        g_ctx.clients[i].uses_pad_presence = true;
+                        clear_udp_rumble_state(g_ctx.clients[i]);
                         for (int s = 0; s < 4; ++s) {
-                            g_clients[i].pad_present[s] = false;
-                            g_clients[i].pad_last_present_us[s] = 0;
+                            g_ctx.clients[i].pad_present[s] = false;
+                            g_ctx.clients[i].pad_last_present_us[s] = 0;
                         }
-                        g_clients[i].last_rx_us = now;
+                        g_ctx.clients[i].last_rx_us = now;
                         wake_on_new_client = true;
                         for (int s = 0; s < 4; ++s)
-                            sd->last_rumble_seq[s] = g_clients[i].rumble_seq[s];
+                            sd->last_rumble_seq[s] = g_ctx.clients[i].rumble_seq[s];
                         break;
                     }
                 }
@@ -311,45 +312,45 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 maybe_send_switch2_wake_advert("client connected via WebSocket input");
 
             if (sd->ws_slot >= 0) {
-                std::lock_guard<std::mutex> lk(g_mtx[sd->ws_slot]);
-                g_clients[sd->ws_slot].active = true;
-                g_clients[sd->ws_slot].uses_pad_presence = true;
-                g_clients[sd->ws_slot].last_rx_us = now;
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
+                g_ctx.clients[sd->ws_slot].active = true;
+                g_ctx.clients[sd->ws_slot].uses_pad_presence = true;
+                g_ctx.clients[sd->ws_slot].last_rx_us = now;
 
                 if (is_reset) {
-                    g_clients[sd->ws_slot].report.reset();
-                    g_clients[sd->ws_slot].first_pkt = true;
-                    clear_all_motion(g_clients[sd->ws_slot]);
+                    g_ctx.clients[sd->ws_slot].report.reset();
+                    g_ctx.clients[sd->ws_slot].first_pkt = true;
+                    clear_all_motion(g_ctx.clients[sd->ws_slot]);
                     for (int s = 0; s < 4; ++s) {
-                        g_clients[sd->ws_slot].pad_present[s] = false;
-                        g_clients[sd->ws_slot].pad_last_present_us[s] = 0;
+                        g_ctx.clients[sd->ws_slot].pad_present[s] = false;
+                        g_ctx.clients[sd->ws_slot].pad_last_present_us[s] = 0;
                     }
                 }
 
                 if (is_report3) {
-                    if (g_clients[sd->ws_slot].first_pkt ||
-                        memcmp(&g_clients[sd->ws_slot].report3, &report3, sizeof(ExtendedMultiReport3)) != 0) {
-                        g_clients[sd->ws_slot].report3 = report3;
-                        g_clients[sd->ws_slot].has_new_report3 = true;
-                        g_clients[sd->ws_slot].has_new_report = true;
-                        g_clients[sd->ws_slot].first_pkt = false;
-                        g_clients[sd->ws_slot].report = report;
-                        enable_udp_rumble_state(g_clients[sd->ws_slot]);
+                    if (g_ctx.clients[sd->ws_slot].first_pkt ||
+                        memcmp(&g_ctx.clients[sd->ws_slot].report3, &report3, sizeof(ExtendedMultiReport3)) != 0) {
+                        g_ctx.clients[sd->ws_slot].report3 = report3;
+                        g_ctx.clients[sd->ws_slot].has_new_report3 = true;
+                        g_ctx.clients[sd->ws_slot].has_new_report = true;
+                        g_ctx.clients[sd->ws_slot].first_pkt = false;
+                        g_ctx.clients[sd->ws_slot].report = report;
+                        enable_udp_rumble_state(g_ctx.clients[sd->ws_slot]);
                     }
                 } else {
-                    if (g_clients[sd->ws_slot].first_pkt ||
-                        memcmp(&g_clients[sd->ws_slot].report, &report, sizeof(ExtendedMultiReport)) != 0) {
-                        g_clients[sd->ws_slot].report = report;
-                        g_clients[sd->ws_slot].has_new_report = true;
-                        g_clients[sd->ws_slot].first_pkt = false;
-                        enable_udp_rumble_state(g_clients[sd->ws_slot]);
+                    if (g_ctx.clients[sd->ws_slot].first_pkt ||
+                        memcmp(&g_ctx.clients[sd->ws_slot].report, &report, sizeof(ExtendedMultiReport)) != 0) {
+                        g_ctx.clients[sd->ws_slot].report = report;
+                        g_ctx.clients[sd->ws_slot].has_new_report = true;
+                        g_ctx.clients[sd->ws_slot].first_pkt = false;
+                        enable_udp_rumble_state(g_ctx.clients[sd->ws_slot]);
                     }
                 }
 
                 for (int s = 0; s < 4; ++s) {
                     if (pad_present[s]) {
-                        g_clients[sd->ws_slot].pad_present[s] = true;
-                        g_clients[sd->ws_slot].pad_last_present_us[s] = now;
+                        g_ctx.clients[sd->ws_slot].pad_present[s] = true;
+                        g_ctx.clients[sd->ws_slot].pad_last_present_us[s] = now;
                     }
                 }
             }
@@ -383,11 +384,11 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         case LWS_CALLBACK_TIMER: {
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
-                std::lock_guard<std::mutex> lk(g_mtx[sd->ws_slot]);
+                std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 for (int s = 0; s < 4; ++s) {
-                    uint32_t seq = g_clients[sd->ws_slot].rumble_seq[s];
+                    uint32_t seq = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                     if (seq != sd->last_rumble_seq[s]) {
-                        memcpy(sd->pending_rumble[s], &g_clients[sd->ws_slot].rumble[s], sizeof(RumblePacket));
+                        memcpy(sd->pending_rumble[s], &g_ctx.clients[sd->ws_slot].rumble[s], sizeof(RumblePacket));
                         sd->has_pending_rumble[s] = true;
                         sd->last_rumble_seq[s] = seq;
                         new_rumble = true;
@@ -395,7 +396,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 }
                 if (new_rumble) lws_callback_on_writable(wsi);
             }
-            lws_set_timer_usecs(wsi, 10 * LWS_USEC_PER_MSEC);
+            lws_set_timer_usecs(wsi, 10 * 1000);
             break;
         }
 
@@ -424,8 +425,8 @@ void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, 
     info.protocols = protocols;
     info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT | LWS_SERVER_OPTION_VALIDATE_UTF8;
 
-    g_lws_context = lws_create_context(&info);
-    if (!g_lws_context) {
+    g_ctx.lws_context = lws_create_context(&info);
+    if (!g_ctx.lws_context) {
         std::println("libwebsockets init failed");
         return;
     }
@@ -436,9 +437,9 @@ void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, 
         std::println("[ws] WebSocket proxy listening on port {}; HTTP webapp disabled (use -w to enable)", web_port);
 
     while (!stoken.stop_requested()) {
-        lws_service(g_lws_context, 50); // wait up to 50ms
+        lws_service(g_ctx.lws_context, 50); // wait up to 50ms
     }
 
-    lws_context_destroy(g_lws_context);
-    g_lws_context = nullptr;
+    lws_context_destroy(g_ctx.lws_context);
+    g_ctx.lws_context = nullptr;
 }

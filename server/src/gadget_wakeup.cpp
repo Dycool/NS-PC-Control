@@ -106,10 +106,10 @@ bool create_hid_function(int id) {
     if (!write_text_file(path, "0")) return false;
 
     std::snprintf(path, sizeof(path), "%s/report_length", func);
-    if (!write_text_file(path, g_legacy_mode ? "8" : "64")) return false;
+    if (!write_text_file(path, g_ctx.legacy_mode ? "8" : "64")) return false;
 
     std::snprintf(path, sizeof(path), "%s/report_desc", func);
-    if (g_legacy_mode) {
+    if (g_ctx.legacy_mode) {
         if (!write_bytes_file(path, LEGACY_REPORT_DESC, sizeof(LEGACY_REPORT_DESC))) return false;
     } else {
         if (!write_bytes_file(path, VIRTUAL_CONTROLLER_REPORT_DESC, sizeof(VIRTUAL_CONTROLLER_REPORT_DESC))) return false;
@@ -230,22 +230,22 @@ bool read_switch2_wakeup_config_file(const std::string& path,
 
 bool load_switch2_wakeup_config(bool quiet_if_missing) {
     std::string mac, adv, hci, original_bt_mac;
-    if (!read_switch2_wakeup_config_file(g_switch2_wakeup_config_path, mac, adv, hci, &original_bt_mac)) {
-        g_switch2_wake_config_loaded = false;
-        if (!quiet_if_missing && g_verbose)
-            std::println("[wake] No valid Switch 2 wake config at {}; wake disabled", g_switch2_wakeup_config_path);
+    if (!read_switch2_wakeup_config_file(g_ctx.switch2_wakeup_config_path, mac, adv, hci, &original_bt_mac)) {
+        g_ctx.switch2_wake_config_loaded = false;
+        if (!quiet_if_missing && g_ctx.verbose)
+            std::println("[wake] No valid Switch 2 wake config at {}; wake disabled", g_ctx.switch2_wakeup_config_path);
         return false;
     }
 
-    g_switch2_wake_mac = mac;
-    g_switch2_wake_adv_hex = adv;
-    g_switch2_wake_hci_dev = valid_hci_dev_string(hci) ? hci : "hci0";
+    g_ctx.switch2_wake_mac = mac;
+    g_ctx.switch2_wake_adv_hex = adv;
+    g_ctx.switch2_wake_hci_dev = valid_hci_dev_string(hci) ? hci : "hci0";
     g_switch2_wake_original_bt_mac = original_bt_mac;
-    g_switch2_wake_config_loaded = true;
-    if (g_verbose) {
+    g_ctx.switch2_wake_config_loaded = true;
+    if (g_ctx.verbose) {
         std::println("[wake] Loaded Switch 2 wake config from {} (mac={} adv_bytes={} hci={})",
-                    g_switch2_wakeup_config_path.c_str(), g_switch2_wake_mac.c_str(), g_switch2_wake_adv_hex.size() / 2,
-                    g_switch2_wake_hci_dev.c_str());
+                    g_ctx.switch2_wakeup_config_path.c_str(), g_ctx.switch2_wake_mac.c_str(), g_ctx.switch2_wake_adv_hex.size() / 2,
+                    g_ctx.switch2_wake_hci_dev.c_str());
     }
     return true;
 }
@@ -254,14 +254,14 @@ bool save_switch2_wakeup_config(const std::string& mac,
                                 const std::string& adv,
                                 const std::string& hci_dev = "hci0",
                                 const std::string& original_bt_mac = "") {
-    if (!ensure_parent_dir_for_file(g_switch2_wakeup_config_path)) {
-        std::println(stderr, "[wake] Failed to create config directory for {}", g_switch2_wakeup_config_path);
+    if (!ensure_parent_dir_for_file(g_ctx.switch2_wakeup_config_path)) {
+        std::println(stderr, "[wake] Failed to create config directory for {}", g_ctx.switch2_wakeup_config_path);
         return false;
     }
 
-    std::ofstream f(g_switch2_wakeup_config_path, std::ios::trunc);
+    std::ofstream f(g_ctx.switch2_wakeup_config_path, std::ios::trunc);
     if (!f) {
-        std::println(stderr, "[wake] Failed to open {} for writing", g_switch2_wakeup_config_path);
+        std::println(stderr, "[wake] Failed to open {} for writing", g_ctx.switch2_wakeup_config_path);
         return false;
     }
 
@@ -275,7 +275,7 @@ bool save_switch2_wakeup_config(const std::string& mac,
         f << "original_mac=" << lowercase_copy(original_bt_mac) << "\n";
     f.close();
 
-    chmod(g_switch2_wakeup_config_path.c_str(), 0600);
+    chmod(g_ctx.switch2_wakeup_config_path.c_str(), 0600);
     return true;
 }
 
@@ -449,7 +449,7 @@ bool running_under_systemd_service() {
 bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bool verbose_output);
 
 void enter_switch2_wake_runtime_mode() {
-    if (!g_switch2_wake_adv_enabled || !g_switch2_wake_config_loaded)
+    if (!g_ctx.switch2_wake_adv_enabled || !g_ctx.switch2_wake_config_loaded)
         return;
 
     // Wake mode owns the Bluetooth adapter for raw HCI advertising. Stop BlueZ
@@ -457,14 +457,14 @@ void enter_switch2_wake_runtime_mode() {
     // heavier power/MAC preparation that made service-start wake unreliable.
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
-    run_wake_command({"hciconfig", g_switch2_wake_hci_dev, "up"}, false, false, 5000);
+    run_wake_command({"hciconfig", g_ctx.switch2_wake_hci_dev, "up"}, false, false, 5000);
 
     std::thread([] {
-        std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
-        const std::string mac = lowercase_copy(g_switch2_wake_mac);
-        if (g_verbose)
+        std::string hci = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
+        const std::string mac = lowercase_copy(g_ctx.switch2_wake_mac);
+        if (g_ctx.verbose)
             std::println("[wake] Preparing Bluetooth wake identity in background on {}", hci);
-        if (!prepare_wake_controller(hci, mac, g_verbose) && g_verbose)
+        if (!prepare_wake_controller(hci, mac, g_ctx.verbose) && g_ctx.verbose)
             std::println(stderr, "[wake] Background wake identity preparation failed; runtime wake will still use raw ADV");
     }).detach();
 }
@@ -504,13 +504,13 @@ std::string original_bt_mac_for_runtime(const std::string& hci) {
         return g_switch2_wake_original_bt_mac;
 
     std::string mac, adv, cfg_hci, original;
-    if (read_switch2_wakeup_config_file(g_switch2_wakeup_config_path, mac, adv, cfg_hci, &original) &&
+    if (read_switch2_wakeup_config_file(g_ctx.switch2_wakeup_config_path, mac, adv, cfg_hci, &original) &&
         valid_mac_string(original)) {
         g_switch2_wake_original_bt_mac = original;
         return original;
     }
 
-    std::string paired = paired_adapter_mac_from_bluez_store(g_switch2_wake_mac);
+    std::string paired = paired_adapter_mac_from_bluez_store(g_ctx.switch2_wake_mac);
     if (valid_mac_string(paired))
         return paired;
 
@@ -542,7 +542,7 @@ void restore_bluetooth_controller_state(const std::string& hci, bool restart_blu
 }
 
 void wait_for_bluetooth_runtime_ready(bool verbose_output) {
-    for (int i = 0; i < 20 && g_running.load(std::memory_order_relaxed); ++i) {
+    for (int i = 0; i < 20 && g_ctx.running.load(std::memory_order_relaxed); ++i) {
         WakeCmdResult show = run_wake_command({"bluetoothctl", "show"}, false, true, 2000);
         if (show.exit_code == 0 && show.output.find("Powered: yes") != std::string::npos) {
             if (verbose_output)
@@ -558,18 +558,18 @@ void wait_for_bluetooth_runtime_ready(bool verbose_output) {
 }
 
 void enter_bluetooth_runtime_mode() {
-    if (!g_switch2_wake_config_loaded)
+    if (!g_ctx.switch2_wake_config_loaded)
         load_switch2_wakeup_config(true);
 
-    const std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+    const std::string hci = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
     restore_bluetooth_controller_state(hci, true);
-    wait_for_bluetooth_runtime_ready(g_verbose);
+    wait_for_bluetooth_runtime_ready(g_ctx.verbose);
 }
 
 void wait_for_wake_advert_idle() {
     // The wake advert worker is detached, so shutdown must not restore BREDR/MAC
     // while the worker is still advertising.
-    for (int i = 0; i < 50 && g_switch2_wake_adv_running.load(std::memory_order_relaxed); ++i)
+    for (int i = 0; i < 50 && g_ctx.switch2_wake_adv_running.load(std::memory_order_relaxed); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
@@ -580,11 +580,11 @@ bool wake_bt_state_was_modified() {
 void restore_wake_bt_state() {
     wait_for_wake_advert_idle();
 
-    if (!g_switch2_wake_adv_enabled && !wake_bt_state_was_modified())
+    if (!g_ctx.switch2_wake_adv_enabled && !wake_bt_state_was_modified())
         return;
 
     std::string hci = !g_saved_bt_hci.empty() ? g_saved_bt_hci :
-                      (valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0");
+                      (valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0");
 
     if (g_bt_modified_for_wake.load() && !g_saved_bt_mac.empty())
         g_switch2_wake_original_bt_mac = g_saved_bt_mac;
@@ -862,7 +862,7 @@ bool send_switch2_wake_advert_once(const std::string& mac,
 
     const std::string mac_lc = lowercase_copy(mac);
     const std::string adv_uc = uppercase_hex_copy(adv_hex);
-    std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+    std::string hci_dev = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
 
     if (verbose_output) {
         std::println("[wake] Wake MAC: {}", mac_lc);
@@ -909,29 +909,29 @@ void switch2_delayed_wake_check_worker(const char* reason) {
     // seconds before the host finally goes idle/disconnects. Treat that as a
     // transitional state: if USB goes quiet while the client is still alive,
     // send wake; if USB stays active, the console is awake and wake is skipped.
-    for (int i = 0; i < 32 && g_running.load(std::memory_order_relaxed); ++i) {
+    for (int i = 0; i < 32 && g_ctx.running.load(std::memory_order_relaxed); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
         const uint64_t now = now_us();
         if (!any_recent_client_active(now)) {
-            g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+            g_ctx.switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
             return;
         }
 
         if (!switch2_usb_host_recently_active(now)) {
             bool expected = false;
-            if (!g_switch2_wake_adv_running.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
-                g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+            if (!g_ctx.switch2_wake_adv_running.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                g_ctx.switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
                 return;
             }
 
-            g_switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
-            g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+            g_ctx.switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
+            g_ctx.switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
 
-            if (g_verbose) {
+            if (g_ctx.verbose) {
                 std::println("[wake] {}; USB activity went idle after connect, sending Joy-Con 2 BLE wake advert for {}ms as {}",
                             wake_reason.c_str(), SWITCH2_WAKE_ADV_BURST_MS,
-                            g_switch2_wake_mac.c_str());
+                            g_ctx.switch2_wake_mac.c_str());
             } else {
                 std::println("[wake] waking up Switch 2");
             }
@@ -941,38 +941,38 @@ void switch2_delayed_wake_check_worker(const char* reason) {
         }
     }
 
-    if (g_verbose)
+    if (g_ctx.verbose)
         std::println("[wake] {}; USB activity stayed active, treating Switch as awake", wake_reason);
-    g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+    g_ctx.switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
 }
 
 void schedule_switch2_delayed_wake_check(const char* reason) {
     bool expected = false;
-    if (!g_switch2_delayed_wake_check_running.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+    if (!g_ctx.switch2_delayed_wake_check_running.compare_exchange_strong(expected, true, std::memory_order_relaxed))
         return;
     std::thread(switch2_delayed_wake_check_worker, reason ? reason : "client connected").detach();
 }
 
 void switch2_wake_adv_worker(int burst_ms) {
     int seconds = std::max(1, (burst_ms + 999) / 1000);
-    const bool ok = send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose);
+    const bool ok = send_switch2_wake_advert_once(g_ctx.switch2_wake_mac, g_ctx.switch2_wake_adv_hex, seconds, g_ctx.verbose);
     if (!ok)
-        g_switch2_last_wake_adv_us.store(0, std::memory_order_relaxed);
-    g_switch2_wake_adv_running.store(false, std::memory_order_relaxed);
+        g_ctx.switch2_last_wake_adv_us.store(0, std::memory_order_relaxed);
+    g_ctx.switch2_wake_adv_running.store(false, std::memory_order_relaxed);
 }
 
 void maybe_send_switch2_wake_advert(const char* reason) {
-    if (!g_switch2_wake_adv_enabled)
+    if (!g_ctx.switch2_wake_adv_enabled)
         return;
-    if (!g_switch2_wake_config_loaded)
+    if (!g_ctx.switch2_wake_config_loaded)
         return;
 
     const uint64_t now = now_us();
     const bool force_after_disconnect =
-        g_switch2_force_next_wake.exchange(false, std::memory_order_relaxed);
+        g_ctx.switch2_force_next_wake.exchange(false, std::memory_order_relaxed);
 
     if (!force_after_disconnect && switch2_usb_host_recently_active(now)) {
-        if (g_verbose) {
+        if (g_ctx.verbose) {
             std::println("[wake] {}; recent Switch USB activity seen, delaying wake evaluation",
                         reason ? reason : "client connected");
         }
@@ -984,20 +984,20 @@ void maybe_send_switch2_wake_advert(const char* reason) {
     if (!any_recent_client_active(now))
         return;
 
-    const uint64_t last = g_switch2_last_wake_adv_us.load(std::memory_order_relaxed);
+    const uint64_t last = g_ctx.switch2_last_wake_adv_us.load(std::memory_order_relaxed);
     if (!force_after_disconnect && last != 0 && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US)
         return;
 
     bool expected = false;
-    if (!g_switch2_wake_adv_running.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+    if (!g_ctx.switch2_wake_adv_running.compare_exchange_strong(expected, true, std::memory_order_relaxed))
         return;
 
-    g_switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
+    g_ctx.switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
 
-    if (g_verbose) {
+    if (g_ctx.verbose) {
         std::println("[wake] {}; sending Joy-Con 2 BLE wake advert for {}ms as {}",
                     reason ? reason : "client connected", SWITCH2_WAKE_ADV_BURST_MS,
-                    g_switch2_wake_mac.c_str());
+                    g_ctx.switch2_wake_mac.c_str());
     } else {
         std::println("[wake] waking up Switch 2");
     }
@@ -1059,7 +1059,7 @@ bool capture_switch2_wake_advert(int seconds,
     std::snprintf(log_path, sizeof(log_path), "/tmp/ns_switch2_wake_%ld.log", (long)getpid());
 
     std::ostringstream cmd;
-    const std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+    const std::string hci_dev = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
 
     cmd << "sh -c 'rm -f " << log_path << "; "
         << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
@@ -1122,10 +1122,10 @@ int run_switch2_wakeup_setup() {
         }
     }
 
-    g_switch2_wake_hci_dev = detect_wake_hci_for_setup();
+    g_ctx.switch2_wake_hci_dev = detect_wake_hci_for_setup();
     std::string setup_original_bt_mac = paired_adapter_mac_from_bluez_store("");
     if (!valid_mac_string(setup_original_bt_mac))
-        setup_original_bt_mac = read_hci_address(valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0");
+        setup_original_bt_mac = read_hci_address(valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0");
     g_switch2_wake_original_bt_mac = valid_mac_string(setup_original_bt_mac) ? setup_original_bt_mac : "";
 
     // Paired/trusted Bluetooth controllers can leave hci0 in a reconnecting or
@@ -1134,12 +1134,12 @@ int run_switch2_wakeup_setup() {
     // loop identical to the known-good v5.3.1 flow, but reset hciuart once before
     // setup starts so -wake owns a clean adapter.
     {
-        std::string setup_hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
-        reset_wake_bt_stack(setup_hci, g_verbose);
-        g_switch2_wake_hci_dev = setup_hci;
+        std::string setup_hci = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
+        reset_wake_bt_stack(setup_hci, g_ctx.verbose);
+        g_ctx.switch2_wake_hci_dev = setup_hci;
     }
     auto restore_setup_bt_state = [&] {
-        const std::string setup_hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+        const std::string setup_hci = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
         restore_bluetooth_controller_state(setup_hci, true);
     };
 
@@ -1148,8 +1148,8 @@ int run_switch2_wakeup_setup() {
 
     std::println("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::println("------------------------------------------------");
-    std::println("[wake] Config will be saved to: {}", g_switch2_wakeup_config_path);
-    std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_switch2_wake_hci_dev);
+    std::println("[wake] Config will be saved to: {}", g_ctx.switch2_wakeup_config_path);
+    std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_ctx.switch2_wake_hci_dev);
     std::println("[wake] This setup scans your Joy-Con 2 on the Pi, captures its HOME advert, then asks you to attach it back to the Switch 2.");
     std::println("[wake] Use your own Joy-Con 2 right joycon that is paired to this Switch 2.\n");
 
@@ -1191,20 +1191,20 @@ int run_switch2_wakeup_setup() {
     std::println("[wake] Then put the Switch 2 to sleep before continuing.");
     wait_for_enter("[wake] Press Enter when the Joy-Con 2 is paired back AND the Switch 2 is asleep; setup will test wake... ");
 
-    if (!save_switch2_wakeup_config(mac, cap_adv, g_switch2_wake_hci_dev, setup_original_bt_mac)) {
+    if (!save_switch2_wakeup_config(mac, cap_adv, g_ctx.switch2_wake_hci_dev, setup_original_bt_mac)) {
         restore_setup_bt_state();
         return 1;
     }
 
-    g_switch2_wake_mac = lowercase_copy(mac);
-    g_switch2_wake_adv_hex = uppercase_hex_copy(cap_adv);
-    g_switch2_wake_hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+    g_ctx.switch2_wake_mac = lowercase_copy(mac);
+    g_ctx.switch2_wake_adv_hex = uppercase_hex_copy(cap_adv);
+    g_ctx.switch2_wake_hci_dev = valid_hci_dev_string(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
     g_switch2_wake_original_bt_mac = valid_mac_string(setup_original_bt_mac) ? setup_original_bt_mac : "";
-    g_switch2_wake_config_loaded = true;
-    std::println("[wake] Saved wake config to {}", g_switch2_wakeup_config_path);
+    g_ctx.switch2_wake_config_loaded = true;
+    std::println("[wake] Saved wake config to {}", g_ctx.switch2_wakeup_config_path);
 
     std::println("[wake] Step 4/4: Sending test wake advert with MAC spoofing...");
-    if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1, false)) {
+    if (!send_switch2_wake_advert_once(g_ctx.switch2_wake_mac, g_ctx.switch2_wake_adv_hex, 1, false)) {
         std::println(stderr, "[wake] Test wake send failed. Config was saved, but Bluetooth raw HCI send did not complete.");
         restore_setup_bt_state();
         return 1;
@@ -1223,10 +1223,10 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     if (!force && hidg_nodes_ready())
         return true;
 
-    if (!force && g_gadget_setup_attempted.exchange(true))
+    if (!force && g_ctx.gadget_setup_attempted.exchange(true))
         return hidg_nodes_ready();
     if (force)
-        g_gadget_setup_attempted.store(true);
+        g_ctx.gadget_setup_attempted.store(true);
 
     if (geteuid() != 0) {
         std::println(stderr,
@@ -1235,11 +1235,11 @@ bool setup_gadget_builtin(bool force, const char* reason) {
         return false;
     }
 
-    if (g_verbose)
+    if (g_ctx.verbose)
         std::println("[gadget] {}; creating built-in {}-interface {} gadget",
                     reason ? reason : "HID gadget not ready",
                     HID_PORT_COUNT,
-                    g_legacy_mode ? "legacy 8-byte" : "64-byte motion");
+                    g_ctx.legacy_mode ? "legacy 8-byte" : "64-byte motion");
 
     // Try to load and mount configfs.  Ignore failures here because both may
     // already be active on systems that previously used setup_gadget.sh.
@@ -1276,28 +1276,28 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     if (!mkdir_if_needed(strings_dir.c_str())) return false;
     if (!mkdir_if_needed(join_path(GADGET_DIR, "configs").c_str())) return false;
     if (!mkdir_if_needed(configs_dir.c_str())) return false;
-    if (g_legacy_mode) {
+    if (g_ctx.legacy_mode) {
         if (!mkdir_if_needed(join_path(configs_dir, "strings").c_str())) return false;
         if (!mkdir_if_needed(config_strings_dir.c_str())) return false;
     }
     if (!mkdir_if_needed(functions_dir.c_str())) return false;
 
-    if (!write_text_file(join_path(GADGET_DIR, "bcdDevice").c_str(), g_legacy_mode ? "0x0200" : "0x0210")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bcdDevice").c_str(), g_ctx.legacy_mode ? "0x0200" : "0x0210")) return false;
     if (!write_text_file(join_path(GADGET_DIR, "bcdUSB").c_str(), "0x0200")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "idVendor").c_str(), g_legacy_mode ? "0x0F0D" : "0x057e")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "idProduct").c_str(), g_legacy_mode ? "0x0092" : "0x2009")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "bDeviceClass").c_str(), g_legacy_mode ? "0xFF" : "0x00")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "bDeviceSubClass").c_str(), g_legacy_mode ? "0xFF" : "0x00")) return false;
-    if (!write_text_file(join_path(GADGET_DIR, "bDeviceProtocol").c_str(), g_legacy_mode ? "0xFF" : "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "idVendor").c_str(), g_ctx.legacy_mode ? "0x0F0D" : "0x057e")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "idProduct").c_str(), g_ctx.legacy_mode ? "0x0092" : "0x2009")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceClass").c_str(), g_ctx.legacy_mode ? "0xFF" : "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceSubClass").c_str(), g_ctx.legacy_mode ? "0xFF" : "0x00")) return false;
+    if (!write_text_file(join_path(GADGET_DIR, "bDeviceProtocol").c_str(), g_ctx.legacy_mode ? "0xFF" : "0x00")) return false;
 
     // USB descriptor serial belongs here, not in the controller SPI area.
-    if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), g_legacy_mode ? "000000000001" : g_usb_serial.c_str())) return false;
+    if (!write_text_file(join_path(strings_dir, "serialnumber").c_str(), g_ctx.legacy_mode ? "000000000001" : g_ctx.usb_serial.c_str())) return false;
     if (!write_text_file(join_path(strings_dir, "manufacturer").c_str(), "NS Bridge")) return false;
-    if (!write_text_file(join_path(strings_dir, "product").c_str(), g_legacy_mode ? "Legacy USB Gamepad" : "Motion USB Gamepad")) return false;
+    if (!write_text_file(join_path(strings_dir, "product").c_str(), g_ctx.legacy_mode ? "Legacy USB Gamepad" : "Motion USB Gamepad")) return false;
 
     if (!write_text_file(join_path(configs_dir, "MaxPower").c_str(), "500")) return false;
-    if (!write_text_file(join_path(configs_dir, "bmAttributes").c_str(), g_legacy_mode ? "0x80" : "0xA0")) return false;
-    if (g_legacy_mode) {
+    if (!write_text_file(join_path(configs_dir, "bmAttributes").c_str(), g_ctx.legacy_mode ? "0x80" : "0xA0")) return false;
+    if (g_ctx.legacy_mode) {
         if (!write_text_file(join_path(config_strings_dir, "configuration").c_str(), "USB 4-Player Hub Config")) return false;
     }
 
@@ -1313,7 +1313,7 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     }
 
     if (!write_text_file(join_path(GADGET_DIR, "UDC").c_str(), udc.c_str())) return false;
-    if (g_verbose)
+    if (g_ctx.verbose)
         std::println("[gadget] Bound to UDC: {}", udc);
 
     // /dev/hidg* can appear shortly after binding.

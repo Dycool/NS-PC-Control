@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <expected>
 
 namespace ns {
 namespace macro {
@@ -99,14 +100,14 @@ const std::string& last_error();
 
 std::string trim(std::string s);
 std::string upper(std::string s);
-bool extract_commands_text(const std::string& raw_in, std::string& out, std::string& err);
+std::expected<std::string, std::string> extract_commands_text(const std::string& raw_in);
 bool parse_uint32_strict(const std::string& s, std::uint32_t& out);
 std::uint16_t button_bit(const std::string& token);
-bool apply_token(const std::string& raw_tok, Step& st, std::string& err,
+std::expected<void, std::string> apply_token(const std::string& raw_tok, Step& st,
                  bool& du, bool& dd, bool& dl, bool& dr,
                  bool& llu, bool& lld, bool& lll, bool& llr,
                  bool& rru, bool& rrd, bool& rrl, bool& rrr);
-bool parse_one_command(const std::string& part, Step& st, std::string& err);
+std::expected<void, std::string> parse_one_command(const std::string& part, Step& st);
 bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
                    std::vector<std::string>* normalized = nullptr);
 std::vector<Step> parse_text(const std::string& raw_text);
