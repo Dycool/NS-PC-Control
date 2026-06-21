@@ -289,24 +289,24 @@ class MainActivity : AppCompatActivity() {
             val wsUrl = normalizeWsUrl(host)
             val req = Request.Builder().url(wsUrl).build()
             ws = client.newWebSocket(req, object : WebSocketListener() {
-    override fun onOpen(w: WebSocket, r: Response) {
-        runOnUiThread {
-            if (!controlClientActive || ws !== w) return@runOnUiThread
-            statusText.text = "Connected"
-            if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
-            startSending()
-        }
-    }
-
-                override fun onClosed(w: WebSocket, code: Int, reason: String) {
-                    runOnUiThread { handleWsClosed(w, "Disconnected") }
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    runOnUiThread {
+                        if (!controlClientActive || ws !== webSocket) return@runOnUiThread
+                        statusText.text = "Connected"
+                        if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
+                        startSending()
+                    }
                 }
 
-                override fun onFailure(w: WebSocket, t: Throwable, r: Response?) {
-                    runOnUiThread { handleWsClosed(w, "Connection failed") }
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    runOnUiThread { handleWsClosed(webSocket, "Disconnected") }
                 }
 
-                override fun onMessage(w: WebSocket, bytes: ByteString) {
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    runOnUiThread { handleWsClosed(webSocket, "Connection failed") }
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                     // Server -> mobile rumble normally uses classic 8-byte ns::RumblePacket:
                     // magic 'NSVR', subpad, low_freq, high_freq, duration_10ms.
                     // Keep a tiny NSVH fallback too, because older backend/client builds may
@@ -532,11 +532,10 @@ class MainActivity : AppCompatActivity() {
             latestMotionSampleCount = 0
             for (i in 0 until Protocol.MOTION_SAMPLE_COUNT) latestMotionSamples[i].fill(0)
         }
-        var opened = false
         val gravityOpened = gravitySensor?.let {
             sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME)
         } ?: false
-        opened = gravityOpened
+        var opened = gravityOpened
         if (!gravityOpened) {
             accelSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
         }
@@ -1050,7 +1049,7 @@ class MainActivity : AppCompatActivity() {
     private fun startPhysicalControllerSensorsLocked(slot: Int, device: InputDevice) {
         if (Build.VERSION.SDK_INT < 31) return
         try {
-            val sm = device.sensorManager ?: return
+            val sm = device.sensorManager
             val gravity = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
             val accel = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
             val gyro = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE) ?: return
