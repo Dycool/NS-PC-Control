@@ -238,9 +238,16 @@ static void apply_bluetooth_rumble(SDLInputManager& input,
 
     last_seq = seq;
     const bool neutral = (ev.low_freq == 0 && ev.high_freq == 0) || ev.duration_10ms == 0;
-    const uint32_t duration_ms = neutral ? 0 : std::max<uint32_t>(120, (uint32_t)ev.duration_10ms * 10U);
+    auto scale_bt_motor = [](uint8_t v) -> uint8_t {
+        int scaled = ((int)v * RUMBLE_BT_GAIN_PERCENT) / 100;
+        if (scaled == 0 && v != 0) scaled = 1;
+        return (uint8_t)std::clamp(scaled, 0, 255);
+    };
+    const uint32_t duration_ms = neutral ? 0 : std::max<uint32_t>(RUMBLE_BT_MIN_DURATION_MS, (uint32_t)ev.duration_10ms * 10U);
+    const uint8_t low = neutral ? 0 : scale_bt_motor(ev.low_freq);
+    const uint8_t high = neutral ? 0 : scale_bt_motor(ev.high_freq);
     rumble_until_us = neutral ? 0 : now_us() + (uint64_t)duration_ms * 1000ULL;
-    input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
+    input.set_rumble(sdl_slot, low, high, duration_ms);
 }
 
 void bluetooth_input_thread() {

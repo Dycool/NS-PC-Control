@@ -852,8 +852,7 @@ bool start_wake_raw_advertising(const std::string& hci_dev,
 bool send_switch2_wake_advert_once(const std::string& mac,
                                            const std::string& adv_hex,
                                            int seconds,
-                                           bool verbose_output = false,
-                                           bool force_prepare = false) {
+                                           bool verbose_output = false) {
     if (!valid_mac_string(mac) || !valid_adv_hex(adv_hex)) {
         std::fprintf(stderr, "[wake] Invalid wake MAC/ADV; not sending\n");
         return false;
@@ -869,32 +868,13 @@ bool send_switch2_wake_advert_once(const std::string& mac,
         std::printf("[wake] Wake MAC: %s\n", mac_lc.c_str());
         std::printf("[wake] ADV bytes: %zu\n", adv_uc.size() / 2);
         std::printf("[wake] Duration: %ds\n", seconds);
-        if (!force_prepare)
-            std::printf("[wake] Fast runtime path: sending ADV directly on %s without Bluetooth prep\n", hci_dev.c_str());
+        std::printf("[wake] Preparing %s with wake identity before advertising\n", hci_dev.c_str());
     }
 
     bool ok = false;
 
-    if (!force_prepare) {
-        // Runtime/service wake path: match the v5.3.1 fix. Do not do full
-        // Bluetooth prepare/spoof at backend startup; under systemd that made
-        // wake unreliable. First try the direct raw ADV path on the configured
-        // HCI device, then fall back to full prepare only if raw ADV fails.
-        const std::string current_mac = read_hci_address(hci_dev);
-        const bool adapter_already_spoofed = current_mac.empty() || current_mac == mac_lc;
-        if (adapter_already_spoofed)
-            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
-        else if (verbose_output)
-            std::printf("[wake] Adapter is %s; preparing wake MAC before advertising\n", current_mac.c_str());
-
-        if (!ok && verbose_output)
-            std::fprintf(stderr, "[wake] Fast ADV failed; falling back to full Bluetooth prepare once.\n");
-    }
-
-    if (!ok) {
-        if (prepare_wake_controller(hci_dev, mac_lc, verbose_output))
-            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
-    }
+    if (prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+        ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
 
     if (!ok) {
         if (verbose_output)
@@ -969,7 +949,7 @@ void schedule_switch2_delayed_wake_check(const char* reason) {
 
 void switch2_wake_adv_worker(int burst_ms) {
     int seconds = std::max(1, (burst_ms + 999) / 1000);
-    const bool ok = send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose, false);
+    const bool ok = send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose);
     if (!ok)
         g_switch2_last_wake_adv_us.store(0, std::memory_order_relaxed);
     g_switch2_wake_adv_running.store(false, std::memory_order_relaxed);
@@ -1218,7 +1198,7 @@ int run_switch2_wakeup_setup() {
     std::printf("[wake] Saved wake config to %s\n", g_switch2_wakeup_config_path.c_str());
 
     std::puts("[wake] Step 4/4: Sending test wake advert with MAC spoofing...");
-    if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1, false, true)) {
+    if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1, false)) {
         std::fprintf(stderr, "[wake] Test wake send failed. Config was saved, but Bluetooth raw HCI send did not complete.\n");
         restore_setup_bt_state();
         return 1;

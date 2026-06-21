@@ -20,8 +20,10 @@ extern bool g_verbose;
 
 constexpr uint64_t CLIENT_TIMEOUT_US = 30'000'000ULL;
 constexpr uint64_t CLIENT_STALE_NEUTRAL_US = 350'000ULL;
-constexpr uint8_t RUMBLE_MIN_NONZERO = 2;
-constexpr int RUMBLE_GAIN_PERCENT = 60;
+constexpr uint8_t RUMBLE_MIN_NONZERO = 1;
+constexpr int RUMBLE_GAIN_PERCENT = 35;
+constexpr int RUMBLE_BT_GAIN_PERCENT = 50;
+constexpr uint32_t RUMBLE_BT_MIN_DURATION_MS = 40;
 constexpr int HID_PORT_COUNT = 4;
 constexpr int MAX_CLIENTS = 4;
 constexpr uint64_t RATE_WINDOW_US = 1'000'000;
