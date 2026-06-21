@@ -220,6 +220,8 @@ jobs:
           cache: true
 
       - name: Install dependencies
+        env:
+          HOMEBREW_REQUIRE_TAP_TRUST: 1
         run: brew install cmake ninja pkg-config qt@6 openssl
 
       - name: Cache SDL3 static
