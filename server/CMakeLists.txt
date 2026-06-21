@@ -1,11 +1,29 @@
 cmake_minimum_required(VERSION 3.16)
 project(ns-control CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_options(-O3 -Wall -Wextra)
+
+include(FetchContent)
+
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
+    cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG v2.4.1
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(cli11)
 
 option(USE_UPNP "Enable UPnP port forwarding via miniupnpc" ON)
 option(USE_SDL_BT "Enable local Bluetooth/controller input via SDL3" ON)
@@ -51,6 +69,13 @@ else()
     message(STATUS "Bluetooth/local controller support disabled by user")
 endif()
 
+find_package(OpenSSL REQUIRED)
+find_package(libwebsockets CONFIG)
+if(NOT libwebsockets_FOUND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LWS REQUIRED libwebsockets)
+endif()
+
 # Embed webapp HTML files into the binary via xxd
 find_program(XXD_EXECUTABLE xxd)
 if(NOT XXD_EXECUTABLE)
@@ -93,7 +118,13 @@ target_include_directories(ns-backend PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}
 )
-target_link_libraries(ns-backend PRIVATE pthread)
+target_link_libraries(ns-backend PRIVATE pthread nlohmann_json::nlohmann_json CLI11::CLI11 OpenSSL::SSL OpenSSL::Crypto)
+if(libwebsockets_FOUND)
+    target_link_libraries(ns-backend PRIVATE websockets)
+else()
+    target_include_directories(ns-backend PRIVATE ${LWS_INCLUDE_DIRS})
+    target_link_libraries(ns-backend PRIVATE ${LWS_LIBRARIES})
+endif()
 
 if(SDL3_FOUND)
     target_link_libraries(ns-backend PRIVATE SDL3::SDL3)

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <netinet/in.h>
+#include <span>
 
 constexpr int MAX_WS_CLIENTS = 32;
 
@@ -46,7 +47,6 @@ constexpr size_t UDP_RX_MAX_PACKET_SIZE =
 static_assert(sizeof(ExtendedUdpPacket) == EXT_UDP_PACKET_SIZE, "ExtendedUdpPacket size must match its wire format");
 static_assert(sizeof(ExtendedUdpPacket3) == EXT3_UDP_PACKET_SIZE, "ExtendedUdpPacket3 size must match its wire format");
 
-void base64_encode(const uint8_t* in, size_t len, char* out);
 void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out);
 bool extended_udp_packet_ok(const ExtendedUdpPacket& p);
 bool extended_udp3_packet_ok(const ExtendedUdpPacket3& p);
@@ -57,10 +57,5 @@ void clear_udp_rumble_state(ClientSession& c);
 void reset_udp_client_session_locked(ClientSession& c);
 void enable_udp_rumble_state(ClientSession& c);
 void flush_rumble_to_udp(int sock, int client_idx);
-bool send_ws_binary_frame(WebClient* c, const uint8_t* payload, size_t len);
-void flush_rumble_to_ws(WebClient* c);
-size_t process_ws_frame(WebClient* c);
-int ws_upgrade(const char* key_line, char* resp, size_t resp_sz);
-bool has_header(const char* buf, const char* header);
-bool req_match(const char* buf, const char* path);
-void web_server_thread(int web_port, uint16_t udp_port, bool serve_http_webapp);
+#include <stop_token>
+void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, bool serve_http_webapp);

@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 
+#include <CLI/CLI.hpp>
+
 std::atomic<bool> g_cliRunning{true};
 
 #ifdef _WIN32
@@ -29,13 +31,7 @@ void cli_signal_handler(int) {
 }
 #endif
 
-void print_cli_usage(const char* exe) {
-    std::cerr << "Usage: " << exe << " --cli <RASPBERRY_PI_IP[:PORT]> [-k [single|override]] [--hori] [--macro file.json]\n";
-    std::cerr << "  --cli      Run the terminal client from this unified executable\n";
-    std::cerr << "  -k         Enable keyboard mode where supported (default: single)\n";
-    std::cerr << "  --hori     Send old input-only HORI-compatible UDP packets; disables UDP rumble/gyro\n";
-    std::cerr << "  --macro    Upload a P1 server-side macro JSON/string, wait for it, then exit\n";
-}
+
 
 int cli_main(const std::vector<std::string>& original_args) {
     NetworkRuntime net;
@@ -68,47 +64,48 @@ int cli_main(const std::vector<std::string>& original_args) {
     std::string macro_path;
     int cli_keyboard_mode = KB_OFF;
 
-    for (size_t i = 1; i < args.size(); ++i) {
-        const std::string& a = args[i];
-        if (a == "--hori") {
-            legacy_udp = true;
-        } else if (a == "--macro" || a == "--upload-macro" || a == "--server-macro" || a == "-m") {
-            if (i + 1 >= args.size()) {
-                std::cerr << a << " requires a macro JSON/commands file path\n";
-                return 1;
-            }
-            macro_mode = true;
-            macro_path = args[++i];
-        } else if (a == "-k" || a == "--keyboard") {
-            cli_keyboard_mode = KB_SINGLE;
-            if (i + 1 < args.size() && !args[i + 1].empty() && args[i + 1][0] != '-') {
-                if (args[i + 1] == "override") cli_keyboard_mode = KB_OVERRIDE;
-                else if (args[i + 1] == "single") cli_keyboard_mode = KB_SINGLE;
-                else {
-                    std::cerr << "Unknown keyboard mode: " << args[i + 1] << "\n";
-                    return 1;
-                }
-                ++i;
-            }
-        } else if (a == "--help" || a == "-h" || a == "/?") {
-            print_cli_usage(args[0].c_str());
-            return 0;
-        } else if (host.empty()) {
-            std::string target = a;
-            if (!parse_host_port(target, host, port)) {
-                std::cerr << "Invalid host: " << a << "\n";
-                return 1;
-            }
-        } else {
-            std::cerr << "Unknown argument: " << a << "\n";
-            print_cli_usage(args[0].c_str());
-            return 1;
-        }
+    CLI::App app{"ns-client --cli\nRun the terminal client from this unified executable"};
+
+    std::string host_arg;
+    app.add_option("host", host_arg, "Target RASPBERRY_PI_IP[:PORT]");
+    
+    app.add_flag("--hori", legacy_udp, "Send old input-only HORI-compatible UDP packets; disables UDP rumble/gyro");
+    
+    auto opt_m = app.add_option("-m,--macro,--upload-macro,--server-macro", macro_path, "Upload a P1 server-side macro JSON/string, wait for it, then exit");
+    
+    std::string k_val = "single";
+    auto opt_k = app.add_option("-k,--keyboard", k_val, "Enable keyboard mode where supported (single|override)")->expected(0, 1);
+
+    std::vector<const char*> argv_ptrs;
+    for (const auto& a : args) argv_ptrs.push_back(a.c_str());
+
+    try {
+        app.parse(argv_ptrs.size(), argv_ptrs.data());
+    } catch (const CLI::ParseError &e) {
+        return app.exit(e);
     }
 
-    if (host.empty()) {
-        print_cli_usage(args[0].c_str());
+    if (host_arg.empty()) {
+        std::cerr << app.help();
         return 1;
+    }
+    
+    if (!parse_host_port(host_arg, host, port)) {
+        std::cerr << "Invalid host: " << host_arg << "\n";
+        return 1;
+    }
+    
+    if (*opt_m) {
+        macro_mode = true;
+    }
+    
+    if (*opt_k) {
+        if (k_val == "single") cli_keyboard_mode = KB_SINGLE;
+        else if (k_val == "override") cli_keyboard_mode = KB_OVERRIDE;
+        else {
+            std::cerr << "Unknown keyboard mode: " << k_val << "\n";
+            return 1;
+        }
     }
 
     load_saved_bindings();

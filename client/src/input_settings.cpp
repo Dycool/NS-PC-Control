@@ -3,8 +3,12 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QDir>
+#include <QString>
+#include <QCoreApplication>
 
 std::atomic<int> g_keyboardMode{KB_OFF};
 std::atomic<bool> g_gyroEnabled{true};
@@ -24,100 +28,10 @@ void sync_sdl_input_options() {
 }
 
 
-std::string path_join(const std::string& a, const std::string& b) {
-    if (a.empty()) return b;
-    char sep =
-#ifdef _WIN32
-        '\\';
-#else
-        '/';
-#endif
-    if (a.back() == '/' || a.back() == '\\') return a + b;
-    return a + sep + b;
-}
-
-std::string dirname_of(std::string path) {
-    size_t slash = path.find_last_of("\\/");
-    if (slash == std::string::npos) return ".";
-    return path.substr(0, slash);
-}
-
-std::string executable_dir() {
-#ifdef _WIN32
-    char buf[MAX_PATH]{};
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) return dirname_of(buf);
-    return ".";
-#elif defined(__APPLE__)
-    char buf[PATH_MAX]{};
-    uint32_t size = sizeof(buf);
-    if (_NSGetExecutablePath(buf, &size) == 0) return dirname_of(buf);
-    std::vector<char> big(size + 1);
-    if (_NSGetExecutablePath(big.data(), &size) == 0) {
-        big[size] = '\0';
-        return dirname_of(big.data());
-    }
-    return ".";
-#else
-    char buf[PATH_MAX]{};
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n > 0) { buf[n] = '\0'; return dirname_of(buf); }
-    return ".";
-#endif
-}
-
-void make_dir_if_needed(const std::string& dir) {
-#ifdef _WIN32
-    CreateDirectoryA(dir.c_str(), nullptr);
-#else
-    mkdir(dir.c_str(), 0755);
-#endif
-}
-
-std::string user_config_dir() {
-#ifdef _WIN32
-    char appdata[MAX_PATH]{};
-    DWORD n = GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
-    std::string dir = (n > 0 && n < MAX_PATH) ? path_join(appdata, "NSPCControl") : "NSPCControl";
-    make_dir_if_needed(dir);
-    return dir;
-#elif defined(__APPLE__)
-    const char* home = std::getenv("HOME");
-    std::string base = home ? path_join(home, "Library/Application Support") : ".";
-    std::string dir = path_join(base, "NSPCControl");
-    make_dir_if_needed(dir);
-    return dir;
-#else
-    const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    const char* home = std::getenv("HOME");
-    std::string base = xdg && *xdg ? xdg : (home ? path_join(home, ".config") : ".");
-    std::string dir = path_join(base, "NSPCControl");
-    make_dir_if_needed(dir);
-    return dir;
-#endif
-}
-
-std::string settings_path() { return path_join(user_config_dir(), "settings.ini"); }
-std::string bindings_path() { return path_join(user_config_dir(), "bindings.ini"); }
-std::string macros_path() { return path_join(user_config_dir(), "macros.json"); }
-
-std::unordered_map<std::string, std::string> read_kv_file(const std::string& path) {
-    std::unordered_map<std::string, std::string> out;
-    std::ifstream f(path);
-    std::string line;
-    while (std::getline(f, line)) {
-        size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        out[ns::macro::trim(line.substr(0, eq))] = ns::macro::trim(line.substr(eq + 1));
-    }
-    return out;
-}
-
-bool write_kv_file(const std::string& path, const std::unordered_map<std::string, std::string>& values) {
-    std::ofstream f(path, std::ios::trunc);
-    if (!f) return false;
-    for (const auto& kv : values) f << kv.first << "=" << kv.second << "\n";
-    return (bool)f;
+std::string macros_path() {
+    QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+    return QDir(configDir).filePath("macros.json").toStdString();
 }
 
 std::vector<std::pair<std::string, std::string>> binding_keys() {
@@ -170,71 +84,62 @@ std::string normalize_macro_hotkey_for_io(const std::string& s) {
 
 void load_saved_bindings() {
     g_keyBindings = default_key_bindings();
-    auto kv = read_kv_file(bindings_path());
-    for (auto& it : g_keyBindings) {
-        auto found = kv.find(it.first);
-        if (found != kv.end()) it.second = normalize_key_name(found->second);
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    settings.beginGroup("Bindings");
+    for (const auto& key : settings.childKeys()) {
+        auto it = g_keyBindings.find(key.toStdString());
+        if (it != g_keyBindings.end()) {
+            it->second = normalize_key_name(settings.value(key).toString().toStdString());
+        }
     }
+    settings.endGroup();
 }
 
 void save_bindings() {
-    write_kv_file(bindings_path(), g_keyBindings);
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    settings.beginGroup("Bindings");
+    for (const auto& kv : g_keyBindings) {
+        settings.setValue(QString::fromStdString(kv.first), QString::fromStdString(kv.second));
+    }
+    settings.endGroup();
 }
 
 std::string load_saved_ip() {
-    auto kv = read_kv_file(settings_path());
-    auto it = kv.find("LastIP");
-    if (it != kv.end() && !it->second.empty()) return it->second;
-    return "192.168.1.100";
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    return settings.value("LastIP", "192.168.1.100").toString().toStdString();
 }
 
 void save_last_ip(const std::string& ip) {
-    auto kv = read_kv_file(settings_path());
-    kv["LastIP"] = ip;
-    write_kv_file(settings_path(), kv);
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    settings.setValue("LastIP", QString::fromStdString(ip));
 }
 
 int load_saved_keyboard_mode() {
-    auto kv = read_kv_file(settings_path());
-    auto it = kv.find("KeyboardMode");
-    if (it == kv.end()) return KB_OFF;
-    int mode = std::atoi(it->second.c_str());
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    int mode = settings.value("KeyboardMode", KB_OFF).toInt();
     return (mode >= KB_OFF && mode <= KB_OVERRIDE) ? mode : KB_OFF;
 }
 
 void save_keyboard_mode(int mode) {
-    auto kv = read_kv_file(settings_path());
-    kv["KeyboardMode"] = std::to_string(mode);
-    write_kv_file(settings_path(), kv);
-}
-
-bool parse_bool_setting(const std::unordered_map<std::string, std::string>& kv,
-                               const std::string& key,
-                               bool fallback) {
-    auto it = kv.find(key);
-    if (it == kv.end()) return fallback;
-    std::string v = ns::macro::upper(ns::macro::trim(it->second));
-    if (v == "1" || v == "TRUE" || v == "YES" || v == "ON") return true;
-    if (v == "0" || v == "FALSE" || v == "NO" || v == "OFF") return false;
-    return fallback;
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    settings.setValue("KeyboardMode", mode);
 }
 
 void load_saved_feature_toggles() {
-    auto kv = read_kv_file(settings_path());
-    g_gyroEnabled.store(parse_bool_setting(kv, "GyroEnabled", true));
-    g_rumbleEnabled.store(parse_bool_setting(kv, "RumbleEnabled", true));
-    g_homeShortcutEnabled.store(parse_bool_setting(kv, "HomeShortcutEnabled", true));
-    g_captureShortcutEnabled.store(parse_bool_setting(kv, "CaptureShortcutEnabled", true));
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    g_gyroEnabled.store(settings.value("GyroEnabled", true).toBool());
+    g_rumbleEnabled.store(settings.value("RumbleEnabled", true).toBool());
+    g_homeShortcutEnabled.store(settings.value("HomeShortcutEnabled", true).toBool());
+    g_captureShortcutEnabled.store(settings.value("CaptureShortcutEnabled", true).toBool());
     sync_sdl_input_options();
 }
 
 void save_feature_toggles() {
-    auto kv = read_kv_file(settings_path());
-    kv["GyroEnabled"] = g_gyroEnabled.load() ? "1" : "0";
-    kv["RumbleEnabled"] = g_rumbleEnabled.load() ? "1" : "0";
-    kv["HomeShortcutEnabled"] = g_homeShortcutEnabled.load() ? "1" : "0";
-    kv["CaptureShortcutEnabled"] = g_captureShortcutEnabled.load() ? "1" : "0";
-    write_kv_file(settings_path(), kv);
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
+    settings.setValue("GyroEnabled", g_gyroEnabled.load());
+    settings.setValue("RumbleEnabled", g_rumbleEnabled.load());
+    settings.setValue("HomeShortcutEnabled", g_homeShortcutEnabled.load());
+    settings.setValue("CaptureShortcutEnabled", g_captureShortcutEnabled.load());
 }
 
 void set_key_pressed(const std::string& key, bool down) {

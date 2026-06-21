@@ -214,7 +214,7 @@ bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, const s
     if (h.chunk_count == 0 || h.chunk_index >= h.chunk_count) { if (g_verbose) puts("bad macro chunk index/count, dropped"); return true; }
     if (bytes != ns::macro::CHUNK_HEADER_SIZE + (size_t)h.chunk_len + HMAC_TAG_SIZE) { if (g_verbose) puts("bad macro chunk packet size, dropped"); return true; }
     const uint8_t* recv_hmac = data + ns::macro::CHUNK_HEADER_SIZE + h.chunk_len;
-    if (hmac_verify(g_hmac_key, 32, data, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len, recv_hmac, HMAC_TAG_SIZE) != 0) { if (g_verbose) puts("bad macro chunk HMAC, dropped"); return true; }
+    if (hmac_verify(std::span<const uint8_t>(g_hmac_key, 32), std::span<const uint8_t>(data, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len), std::span<const uint8_t>(recv_hmac, HMAC_TAG_SIZE)) != 0) { if (g_verbose) puts("bad macro chunk HMAC, dropped"); return true; }
     if (!rate_allow(sender.sin_addr.s_addr)) return true;
 
     uint64_t now = now_us();

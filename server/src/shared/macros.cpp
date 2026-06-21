@@ -7,6 +7,9 @@
 #include <sstream>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
 namespace ns {
 namespace macro {
 
@@ -30,114 +33,7 @@ std::string upper(std::string s) {
     return s;
 }
 
-bool is_hex4(const std::string& s, std::size_t pos) {
-    if (pos + 4 > s.size()) return false;
-    for (std::size_t i = 0; i < 4; ++i) {
-        if (!std::isxdigit(static_cast<unsigned char>(s[pos + i]))) return false;
-    }
-    return true;
-}
 
-bool read_json_string_at(const std::string& raw, std::size_t& pos, std::string& out, std::string& err) {
-    if (pos >= raw.size() || raw[pos] != '"') { err = "expected JSON string"; return false; }
-    out.clear();
-    ++pos;
-    while (pos < raw.size()) {
-        char c = raw[pos++];
-        if (static_cast<unsigned char>(c) < 0x20) { err = "unescaped control character in JSON string"; return false; }
-        if (c == '"') return true;
-        if (c != '\\') { out += c; continue; }
-        if (pos >= raw.size()) { err = "unfinished JSON escape"; return false; }
-        char e = raw[pos++];
-        switch (e) {
-            case '"': out += '"'; break;
-            case '\\': out += '\\'; break;
-            case '/': out += '/'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'n': out += '\n'; break;
-            case 'r': out += '\r'; break;
-            case 't': out += '\t'; break;
-            case 'u':
-                if (!is_hex4(raw, pos)) { err = "invalid JSON unicode escape"; return false; }
-                // Macro commands are ASCII; preserve unicode names as '?' rather than failing the whole file.
-                out += '?';
-                pos += 4;
-                break;
-            default:
-                err = "invalid JSON escape";
-                return false;
-        }
-    }
-    err = "unterminated JSON string";
-    return false;
-}
-
-void skip_ws(const std::string& raw, std::size_t& pos) {
-    while (pos < raw.size() && std::isspace(static_cast<unsigned char>(raw[pos]))) ++pos;
-}
-
-bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err);
-
-bool skip_json_array(const std::string& raw, std::size_t& pos, std::string& err) {
-    if (pos >= raw.size() || raw[pos] != '[') { err = "expected JSON array"; return false; }
-    ++pos;
-    skip_ws(raw, pos);
-    if (pos < raw.size() && raw[pos] == ']') { ++pos; return true; }
-    while (pos < raw.size()) {
-        if (!skip_json_value(raw, pos, err)) return false;
-        skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ',') { ++pos; skip_ws(raw, pos); continue; }
-        if (pos < raw.size() && raw[pos] == ']') { ++pos; return true; }
-        err = "expected ',' or ']' in JSON array";
-        return false;
-    }
-    err = "unterminated JSON array";
-    return false;
-}
-
-bool skip_json_object(const std::string& raw, std::size_t& pos, std::string& err) {
-    if (pos >= raw.size() || raw[pos] != '{') { err = "expected JSON object"; return false; }
-    ++pos;
-    skip_ws(raw, pos);
-    if (pos < raw.size() && raw[pos] == '}') { ++pos; return true; }
-    while (pos < raw.size()) {
-        std::string key;
-        if (!read_json_string_at(raw, pos, key, err)) return false;
-        skip_ws(raw, pos);
-        if (pos >= raw.size() || raw[pos] != ':') { err = "expected ':' after JSON key"; return false; }
-        ++pos;
-        skip_ws(raw, pos);
-        if (!skip_json_value(raw, pos, err)) return false;
-        skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ',') { ++pos; skip_ws(raw, pos); continue; }
-        if (pos < raw.size() && raw[pos] == '}') { ++pos; return true; }
-        err = "expected ',' or '}' in JSON object";
-        return false;
-    }
-    err = "unterminated JSON object";
-    return false;
-}
-
-bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err) {
-    skip_ws(raw, pos);
-    if (pos >= raw.size()) { err = "missing JSON value"; return false; }
-    if (raw[pos] == '"') { std::string tmp; return read_json_string_at(raw, pos, tmp, err); }
-    if (raw[pos] == '{') return skip_json_object(raw, pos, err);
-    if (raw[pos] == '[') return skip_json_array(raw, pos, err);
-    if (raw.compare(pos, 4, "true") == 0) { pos += 4; return true; }
-    if (raw.compare(pos, 5, "false") == 0) { pos += 5; return true; }
-    if (raw.compare(pos, 4, "null") == 0) { pos += 4; return true; }
-    if (raw[pos] == '-' || std::isdigit(static_cast<unsigned char>(raw[pos]))) {
-        ++pos;
-        while (pos < raw.size() &&
-               (std::isdigit(static_cast<unsigned char>(raw[pos])) || raw[pos] == '.' || raw[pos] == 'e' ||
-                raw[pos] == 'E' || raw[pos] == '+' || raw[pos] == '-')) ++pos;
-        return true;
-    }
-    err = "invalid JSON value";
-    return false;
-}
 
 bool extract_commands_text(const std::string& raw_in, std::string& out, std::string& err) {
     if (raw_in.size() > JSON_MAX_BYTES) { err = "macro JSON exceeds 50MB limit"; return false; }
@@ -147,76 +43,40 @@ bool extract_commands_text(const std::string& raw_in, std::string& out, std::str
 
     if (raw[0] != '{' && raw[0] != '[') { out = raw; return true; }
 
-    std::size_t pos = 0;
-    skip_ws(raw, pos);
-    if (pos < raw.size() && raw[pos] == '[') {
-        ++pos;
-        skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ']') { err = "commands array is empty"; return false; }
-        while (pos < raw.size()) {
-            std::string item;
-            if (!read_json_string_at(raw, pos, item, err)) return false;
-            if (!out.empty()) out += ";";
-            out += item;
-            skip_ws(raw, pos);
-            if (pos < raw.size() && raw[pos] == ',') { ++pos; skip_ws(raw, pos); continue; }
-            if (pos < raw.size() && raw[pos] == ']') { ++pos; break; }
-            err = "expected ',' or ']' in commands array";
-            return false;
-        }
-        skip_ws(raw, pos);
-        if (pos != raw.size()) { err = "extra data after JSON array"; return false; }
-        return true;
-    }
-
-    if (pos >= raw.size() || raw[pos] != '{') { err = "macro JSON must be an object or commands array"; return false; }
-    ++pos;
-    skip_ws(raw, pos);
-    bool found_commands = false;
-    if (pos < raw.size() && raw[pos] == '}') { err = "macro object is missing commands"; return false; }
-    while (pos < raw.size()) {
-        std::string key;
-        if (!read_json_string_at(raw, pos, key, err)) return false;
-        skip_ws(raw, pos);
-        if (pos >= raw.size() || raw[pos] != ':') { err = "expected ':' after JSON key"; return false; }
-        ++pos;
-        skip_ws(raw, pos);
-        if (key == "commands") {
-            found_commands = true;
-            if (pos < raw.size() && raw[pos] == '"') {
-                if (!read_json_string_at(raw, pos, out, err)) return false;
-            } else if (pos < raw.size() && raw[pos] == '[') {
-                ++pos;
-                skip_ws(raw, pos);
-                if (pos < raw.size() && raw[pos] == ']') { err = "commands array is empty"; return false; }
-                while (pos < raw.size()) {
-                    std::string item;
-                    if (!read_json_string_at(raw, pos, item, err)) { err = "commands array must contain only strings"; return false; }
+    try {
+        json j = json::parse(raw);
+        if (j.is_array()) {
+            if (j.empty()) { err = "commands array is empty"; return false; }
+            for (const auto& item : j) {
+                if (!item.is_string()) { err = "commands array must contain only strings"; return false; }
+                if (!out.empty()) out += ";";
+                out += item.get<std::string>();
+            }
+            return true;
+        } else if (j.is_object()) {
+            if (!j.contains("commands")) { err = "macro object is missing commands"; return false; }
+            auto& cmds = j["commands"];
+            if (cmds.is_string()) {
+                out = cmds.get<std::string>();
+            } else if (cmds.is_array()) {
+                if (cmds.empty()) { err = "commands array is empty"; return false; }
+                for (const auto& item : cmds) {
+                    if (!item.is_string()) { err = "commands array must contain only strings"; return false; }
                     if (!out.empty()) out += ";";
-                    out += item;
-                    skip_ws(raw, pos);
-                    if (pos < raw.size() && raw[pos] == ',') { ++pos; skip_ws(raw, pos); continue; }
-                    if (pos < raw.size() && raw[pos] == ']') { ++pos; break; }
-                    err = "expected ',' or ']' in commands array";
-                    return false;
+                    out += item.get<std::string>();
                 }
             } else {
                 err = "commands must be a string or an array of strings";
                 return false;
             }
-        } else {
-            if (!skip_json_value(raw, pos, err)) return false;
+            return true;
         }
-        skip_ws(raw, pos);
-        if (pos < raw.size() && raw[pos] == ',') { ++pos; skip_ws(raw, pos); continue; }
-        if (pos < raw.size() && raw[pos] == '}') { ++pos; break; }
-        err = "expected ',' or '}' in macro object";
+        err = "macro JSON must be an object or commands array";
+        return false;
+    } catch (const json::exception& e) {
+        err = "JSON parse error: " + std::string(e.what());
         return false;
     }
-    skip_ws(raw, pos);
-    if (pos != raw.size()) { err = "extra data after JSON object"; return false; }
-    if (!found_commands) { err = "macro object is missing commands"; return false; }
-    return true;
 }
 
 bool parse_uint32_strict(const std::string& s, std::uint32_t& out) {
@@ -393,53 +253,16 @@ std::string read_text_file_limited(const std::string& path, std::string* err) {
     return raw;
 }
 
-std::string escape_json(const std::string& s) {
-    std::string out;
-    for (unsigned char c : s) {
-        switch (c) {
-            case '\\': out += "\\\\"; break;
-            case '"': out += "\\\""; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20) out += '?';
-                else out += static_cast<char>(c);
-                break;
-        }
-    }
-    return out;
-}
-
-bool json_find_string_value(const std::string& raw, const std::string& key, std::string& out) {
-    std::size_t pos = 0;
-    std::string err;
-    while (pos < raw.size()) {
-        if (raw[pos] == '"') {
-            std::size_t key_pos = pos;
-            std::string k;
-            if (!read_json_string_at(raw, pos, k, err)) return false;
-            skip_ws(raw, pos);
-            if (k == key && pos < raw.size() && raw[pos] == ':') {
-                ++pos;
-                skip_ws(raw, pos);
-                if (pos < raw.size() && raw[pos] == '"') return read_json_string_at(raw, pos, out, err);
-                return false;
-            }
-            pos = key_pos + 1;
-        } else {
-            ++pos;
-        }
-    }
-    return false;
-}
-
 std::string extract_name_or_default(const std::string& raw, const std::string& fallback_name) {
-    std::string name;
-    if (json_find_string_value(raw, "name", name)) {
-        name = trim(name);
-        if (!name.empty()) return name;
-    }
+    std::string raw_trim = trim(raw);
+    if (raw_trim.empty() || (raw_trim[0] != '{' && raw_trim[0] != '[')) return fallback_name;
+    try {
+        json j = json::parse(raw_trim);
+        if (j.is_object() && j.contains("name") && j["name"].is_string()) {
+            std::string name = trim(j["name"].get<std::string>());
+            if (!name.empty()) return name;
+        }
+    } catch (...) {}
     return fallback_name;
 }
 
@@ -453,36 +276,22 @@ std::string pretty_json(const std::string& raw_text,
         lines = {"WAIT 200"};
     }
     std::string name = extract_name_or_default(raw_text, fallback_name);
-    std::string out;
-    out += "{\n";
-    out += "  \"name\": \"" + escape_json(name) + "\",\n";
-    out += "  \"commands\": [\n";
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        out += "    \"" + escape_json(lines[i]) + "\"";
-        if (i + 1 < lines.size()) out += ",";
-        out += "\n";
-    }
-    out += "  ]\n";
-    out += "}";
-    return out;
+    
+    json j;
+    j["name"] = name;
+    j["commands"] = lines;
+    return j.dump(2);
 }
 
 std::string pretty_json_with_forced_name(const std::string& raw_text, const std::string& forced_name) {
     std::vector<Step> steps;
     std::vector<std::string> lines;
     if (!validate_text(raw_text, steps, &lines)) return raw_text;
-    std::string out;
-    out += "{\n";
-    out += "  \"name\": \"" + escape_json(forced_name) + "\",\n";
-    out += "  \"commands\": [\n";
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        out += "    \"" + escape_json(lines[i]) + "\"";
-        if (i + 1 < lines.size()) out += ",";
-        out += "\n";
-    }
-    out += "  ]\n";
-    out += "}";
-    return out;
+    
+    json j;
+    j["name"] = forced_name;
+    j["commands"] = lines;
+    return j.dump(2);
 }
 
 bool validate_to_pretty_json(const std::string& raw_text,
@@ -530,155 +339,80 @@ std::string normalize_hotkey_or_trim(const std::string& s, NormalizeHotkeyFn nor
     return normalize ? normalize(s) : trim(s);
 }
 
-bool find_json_array_range_for_key(const std::string& raw, const std::string& key,
-                                          std::size_t& begin, std::size_t& end) {
-    std::size_t pos = 0;
-    std::string err;
-    while (pos < raw.size()) {
-        if (raw[pos] == '"') {
-            std::string k;
-            if (!read_json_string_at(raw, pos, k, err)) return false;
-            skip_ws(raw, pos);
-            if (k == key && pos < raw.size() && raw[pos] == ':') {
-                ++pos;
-                skip_ws(raw, pos);
-                if (pos >= raw.size() || raw[pos] != '[') return false;
-                begin = pos;
-                int depth = 0;
-                bool in_str = false;
-                bool esc = false;
-                for (; pos < raw.size(); ++pos) {
-                    char c = raw[pos];
-                    if (in_str) {
-                        if (esc) esc = false;
-                        else if (c == '\\') esc = true;
-                        else if (c == '"') in_str = false;
-                        continue;
-                    }
-                    if (c == '"') in_str = true;
-                    else if (c == '[') ++depth;
-                    else if (c == ']') {
-                        if (--depth == 0) { end = pos; return true; }
-                    }
-                }
-                return false;
-            }
-        } else {
-            ++pos;
-        }
-    }
-    return false;
-}
-
-std::vector<std::string> split_top_level_objects(const std::string& raw,
-                                                        std::size_t begin,
-                                                        std::size_t end) {
-    std::vector<std::string> out;
-    int depth = 0;
-    bool in_str = false;
-    bool esc = false;
-    std::size_t obj_start = std::string::npos;
-    for (std::size_t i = begin + 1; i < end; ++i) {
-        char c = raw[i];
-        if (in_str) {
-            if (esc) esc = false;
-            else if (c == '\\') esc = true;
-            else if (c == '"') in_str = false;
-            continue;
-        }
-        if (c == '"') in_str = true;
-        else if (c == '{') {
-            if (depth++ == 0) obj_start = i;
-        } else if (c == '}') {
-            if (--depth == 0 && obj_start != std::string::npos) {
-                out.push_back(raw.substr(obj_start, i - obj_start + 1));
-                obj_start = std::string::npos;
-            }
-        }
-    }
-    return out;
-}
-
 std::string entry_to_object_json(const Entry& e, NormalizeHotkeyFn normalize, int indent_spaces) {
     std::vector<Step> steps;
     std::vector<std::string> lines;
     if (!validate_text(e.json, steps, &lines)) lines = {"WAIT 200"};
-    std::string pad(static_cast<std::size_t>(indent_spaces), ' ');
-    std::string pad2(static_cast<std::size_t>(indent_spaces + 2), ' ');
     std::string name = trim(e.name).empty() ? extract_name_or_default(e.json, "Macro") : e.name;
-    std::string out;
-    out += pad + "{\n";
-    out += pad2 + "\"name\": \"" + escape_json(name) + "\",\n";
-    out += pad2 + "\"hotkey\": \"" + escape_json(normalize_hotkey_or_trim(e.hotkey, normalize)) + "\",\n";
-    out += pad2 + "\"commands\": [\n";
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        out += pad2 + "  \"" + escape_json(lines[i]) + "\"";
-        if (i + 1 < lines.size()) out += ",";
-        out += "\n";
-    }
-    out += pad2 + "]\n";
-    out += pad + "}";
-    return out;
+    
+    json j;
+    j["name"] = name;
+    j["hotkey"] = normalize_hotkey_or_trim(e.hotkey, normalize);
+    j["commands"] = lines;
+    return j.dump(indent_spaces);
 }
 
 std::string entries_to_json(const std::vector<Entry>& entries, NormalizeHotkeyFn normalize) {
-    std::string out;
-    out += "{\n";
-    out += "  \"macros\": [\n";
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        out += entry_to_object_json(entries[i], normalize, 4);
-        if (i + 1 < entries.size()) out += ",";
-        out += "\n";
+    json arr = json::array();
+    for (const auto& e : entries) {
+        std::vector<Step> steps;
+        std::vector<std::string> lines;
+        if (!validate_text(e.json, steps, &lines)) lines = {"WAIT 200"};
+        std::string name = trim(e.name).empty() ? extract_name_or_default(e.json, "Macro") : e.name;
+        
+        json j;
+        j["name"] = name;
+        j["hotkey"] = normalize_hotkey_or_trim(e.hotkey, normalize);
+        j["commands"] = lines;
+        arr.push_back(j);
     }
-    out += "  ]\n";
-    out += "}\n";
-    return out;
+    json root;
+    root["macros"] = arr;
+    return root.dump(2);
 }
 
 bool parse_entries_text(const std::string& raw,
-                               std::vector<Entry>& out,
-                               std::string& err,
-                               NormalizeHotkeyFn normalize) {
+                        std::vector<Entry>& out,
+                        std::string& err,
+                        NormalizeHotkeyFn normalize) {
     out.clear();
     err.clear();
     if (raw.size() > JSON_MAX_BYTES) { err = "macro JSON exceeds 50MB limit"; return false; }
     std::string t = trim(raw);
     if (t.empty()) return true;
 
-    std::size_t arr_begin = 0, arr_end = 0;
-    if (find_json_array_range_for_key(t, "macros", arr_begin, arr_end)) {
-        auto objects = split_top_level_objects(t, arr_begin, arr_end);
-        for (const std::string& obj : objects) {
+    try {
+        json j = json::parse(t);
+        json arr = j;
+        if (j.is_object() && j.contains("macros") && j["macros"].is_array()) {
+            arr = j["macros"];
+        } else if (!j.is_array()) {
+            arr = json::array({ j });
+        }
+        
+        for (const auto& item : arr) {
+            std::string obj_str = item.is_string() ? item.get<std::string>() : item.dump();
             std::string pretty;
-            if (!validate_to_pretty_json(obj, pretty, err, "Macro")) return false;
+            if (!validate_to_pretty_json(obj_str, pretty, err, "Macro")) return false;
+            
             Entry e;
             e.json = pretty;
-            e.name = extract_name_or_default(obj, "Macro");
-            json_find_string_value(obj, "hotkey", e.hotkey);
+            e.name = extract_name_or_default(obj_str, "Macro");
+            if (item.is_object() && item.contains("hotkey") && item["hotkey"].is_string()) {
+                e.hotkey = item["hotkey"].get<std::string>();
+            }
             e.hotkey = normalize_hotkey_or_trim(e.hotkey, normalize);
             out.push_back(std::move(e));
         }
         return true;
+    } catch (const json::exception& e) {
+        err = "JSON parse error: " + std::string(e.what());
+        return false;
     }
-
-    std::string pretty;
-    if (!validate_to_pretty_json(t, pretty, err, "Macro")) return false;
-    Entry e;
-    e.json = pretty;
-    e.name = extract_name_or_default(t, "Macro");
-    json_find_string_value(t, "hotkey", e.hotkey);
-    e.hotkey = normalize_hotkey_or_trim(e.hotkey, normalize);
-    out.push_back(std::move(e));
-    return true;
 }
 
 
-bool operator==(const RecordFrame& a, const RecordFrame& b) {
-    return a.buttons == b.buttons && a.hat == b.hat &&
-           a.lx == b.lx && a.ly == b.ly && a.rx == b.rx && a.ry == b.ry;
-}
 
-bool operator!=(const RecordFrame& a, const RecordFrame& b) { return !(a == b); }
 
 std::string buttons_to_text(std::uint16_t buttons) {
     struct BtnName { std::uint16_t bit; const char* name; };

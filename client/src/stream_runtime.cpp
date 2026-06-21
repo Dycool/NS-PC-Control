@@ -13,9 +13,8 @@
 #include <iostream>
 #include <utility>
 
-std::atomic<bool> g_senderRunning{false};
 std::atomic<bool> g_connected{false};
-std::thread g_senderThread;
+std::jthread g_senderThread;
 uint8_t g_hmacKey[32]{};
 std::atomic<uint32_t> g_packetCount{0};
 std::mutex g_statusMutex;
@@ -144,9 +143,9 @@ void send_client_frame(SOCKET sock,
         for (int i = 0; i < 4; ++i) *pads[i] = frame.reports[i];
 
         uint8_t full_hmac[32];
-        hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE, full_hmac);
+        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
         std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-        send_all_udp(sock, dest, &pkt, ns::PACKET_SIZE);
+        send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_SIZE));
         return;
     }
 
@@ -165,13 +164,13 @@ void send_client_frame(SOCKET sock,
     }
 
     uint8_t full_hmac[32];
-    hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE, full_hmac);
+    hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
     std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-    send_all_udp(sock, dest, &pkt, sizeof(pkt));
+    send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
 }
 
 int run_client_stream(const ClientStreamConfig& cfg,
-                             std::atomic<bool>& running,
+                             std::stop_token stoken,
                              std::string* err_out) {
     if (!cfg.hmac_key) {
         if (err_out) *err_out = "Missing HMAC key.";
@@ -216,7 +215,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
 
     uint64_t last_probe_us = 0;
 
-    while (running.load(std::memory_order_relaxed)) {
+    while (!stoken.stop_requested()) {
         if (cfg.gui_features) {
             std::string upload;
             {
@@ -252,12 +251,11 @@ int run_client_stream(const ClientStreamConfig& cfg,
         const uint64_t now = ns::now_us();
         if (now - last_probe_us >= 5000000ULL) {
             ns::ServerInfoProbe probe{};
-            send_all_udp(sock, dest, &probe, sizeof(probe));
+            send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe)));
             last_probe_us = now;
         }
         if (last_probe_us != 0 && now - g_serverLastReplyUs.load(std::memory_order_relaxed) > 15000000ULL) {
             set_status_message("Lost connection to server");
-            running.store(false);
             break;
         }
 
@@ -279,7 +277,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
     return 0;
 }
 
-void sender_thread_main(std::string host, uint16_t port, bool legacy_udp) {
+void sender_thread_main(std::stop_token stoken, std::string host, uint16_t port, bool legacy_udp) {
     ClientStreamConfig cfg{};
     cfg.host = std::move(host);
     cfg.port = port;
@@ -289,18 +287,16 @@ void sender_thread_main(std::string host, uint16_t port, bool legacy_udp) {
     cfg.idle_sleep_ms = 50;
     cfg.hmac_key = g_hmacKey;
 
-    g_senderRunning.store(true);
     set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
 
     std::string err;
-    int rc = run_client_stream(cfg, g_senderRunning, &err);
+    int rc = run_client_stream(cfg, stoken, &err);
     if (rc != 0 && !err.empty()) {
         g_lastError = err;
         set_status_message(err);
     }
 
     g_connected.store(false);
-    g_senderRunning.store(false);
 }
 
 bool start_connection(const std::string& target, std::string* err_out) {
@@ -326,17 +322,21 @@ bool start_connection(const std::string& target, std::string* err_out) {
     g_serverLastReplyUs.store(0);
     g_lastError.clear();
     g_connected.store(true);
-    g_senderRunning.store(true);
-    if (g_senderThread.joinable()) g_senderThread.join();
-    g_senderThread = std::thread(sender_thread_main, host, (uint16_t)port, false);
+    if (g_senderThread.joinable()) {
+        g_senderThread.request_stop();
+        g_senderThread.join();
+    }
+    g_senderThread = std::jthread(sender_thread_main, host, (uint16_t)port, false);
     return true;
 }
 
 void stop_connection() {
     if (!g_connected.load()) return;
     g_connected.store(false);
-    g_senderRunning.store(false);
-    if (g_senderThread.joinable()) g_senderThread.join();
+    if (g_senderThread.joinable()) {
+        g_senderThread.request_stop();
+        g_senderThread.join();
+    }
     set_status_message("Disconnected");
 }
 

@@ -55,8 +55,8 @@ bool resolve_udp_destination(const std::string& host, int port, sockaddr_in& des
     return true;
 }
 
-int send_all_udp(SOCKET sock, const sockaddr_in& dest, const void* data, size_t len) {
-    return sendto(sock, reinterpret_cast<const char*>(data), (int)len, 0,
+int send_all_udp(SOCKET sock, const sockaddr_in& dest, std::span<const uint8_t> data) {
+    return sendto(sock, reinterpret_cast<const char*>(data.data()), (int)data.size(), 0,
                   reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
 }
 
@@ -72,10 +72,10 @@ void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
         pkt.ts_us = ns::now_us();
         pkt.report.reset();
         uint8_t full_hmac[32];
-        hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE, full_hmac);
+        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
         std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
         for (int i = 0; i < 3; ++i) {
-            send_all_udp(sock, dest, &pkt, ns::PACKET_SIZE);
+            send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_SIZE));
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         return;
@@ -88,10 +88,10 @@ void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
     pkt.timestamp_us = ns::now_us();
     pkt.report.reset();
     uint8_t full_hmac[32];
-    hmac_sha256(hmac_key, 32, reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE, full_hmac);
+    hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
     std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
     for (int i = 0; i < 3; ++i) {
-        send_all_udp(sock, dest, &pkt, sizeof(pkt));
+        send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 }

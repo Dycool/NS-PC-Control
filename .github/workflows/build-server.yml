@@ -90,6 +90,15 @@ jobs:
           make -j"$(nproc)"
           make install
 
+      - name: Cross-compile OpenSSL for aarch64
+        run: |
+          wget -q https://github.com/openssl/openssl/releases/download/openssl-3.0.13/openssl-3.0.13.tar.gz
+          tar xzf openssl-3.0.13.tar.gz
+          cd openssl-3.0.13
+          ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
+          make -j"$(nproc)"
+          make install
+
       - name: Build Unified Pi Server
         run: |
           cd server
@@ -102,7 +111,8 @@ jobs:
             -DUSE_SDL_BT=ON \
             -DREQUIRE_SDL_BT=ON \
             -DMINIUPNPC_INCLUDE_DIRS=/tmp/miniupnpc/include \
-            -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a
+            -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a \
+            -DOPENSSL_ROOT_DIR=/tmp/openssl
 
           make -j"$(nproc)"
 

@@ -32,9 +32,9 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
             std::memcpy(buf.data() + sizeof(hdr), json_or_commands.data(), json_or_commands.size());
         }
         uint8_t full_hmac[32];
-        hmac_sha256(hmac_key, 32, buf.data(), sizeof(hdr) + json_or_commands.size(), full_hmac);
+        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(buf.data(), sizeof(hdr) + json_or_commands.size()), std::span<uint8_t, 32>(full_hmac));
         std::memcpy(buf.data() + sizeof(hdr) + json_or_commands.size(), full_hmac, ns::HMAC_TAG_SIZE);
-        return send_all_udp(sock, dest, buf.data(), buf.size()) != SOCKET_ERROR;
+        return send_all_udp(sock, dest, std::span<const uint8_t>(buf.data(), buf.size())) != SOCKET_ERROR;
     }
 
     const uint32_t upload_id = next_macro_upload_id();
@@ -58,9 +58,9 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
         std::memcpy(buf.data(), &hdr, sizeof(hdr));
         if (n > 0) std::memcpy(buf.data() + sizeof(hdr), json_or_commands.data() + off, n);
         uint8_t full_hmac[32];
-        hmac_sha256(hmac_key, 32, buf.data(), ns::macro::CHUNK_HEADER_SIZE + n, full_hmac);
+        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(buf.data(), ns::macro::CHUNK_HEADER_SIZE + n), std::span<uint8_t, 32>(full_hmac));
         std::memcpy(buf.data() + ns::macro::CHUNK_HEADER_SIZE + n, full_hmac, ns::HMAC_TAG_SIZE);
-        if (send_all_udp(sock, dest, buf.data(), buf.size()) == SOCKET_ERROR) return false;
+        if (send_all_udp(sock, dest, std::span<const uint8_t>(buf.data(), buf.size())) == SOCKET_ERROR) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return true;

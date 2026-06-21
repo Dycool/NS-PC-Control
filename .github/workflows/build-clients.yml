@@ -121,7 +121,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config git file wget desktop-file-utils patchelf \
+            build-essential cmake ninja-build pkg-config git file wget desktop-file-utils patchelf libssl-dev \
             qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins \
             libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev libglu1-mesa-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev \
@@ -213,8 +213,8 @@ jobs:
           version: ${{ env.QT_VERSION }}
           cache: true
 
-      - name: Install build tools
-        run: brew install ninja
+      - name: Install dependencies
+        run: brew install cmake ninja pkg-config qt@6 openssl
 
       - name: Cache SDL3 static
         id: cache-sdl3

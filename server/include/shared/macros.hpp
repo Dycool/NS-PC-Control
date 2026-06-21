@@ -99,12 +99,6 @@ const std::string& last_error();
 
 std::string trim(std::string s);
 std::string upper(std::string s);
-bool is_hex4(const std::string& s, std::size_t pos);
-bool read_json_string_at(const std::string& raw, std::size_t& pos, std::string& out, std::string& err);
-void skip_ws(const std::string& raw, std::size_t& pos);
-bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err);
-bool skip_json_array(const std::string& raw, std::size_t& pos, std::string& err);
-bool skip_json_object(const std::string& raw, std::size_t& pos, std::string& err);
 bool extract_commands_text(const std::string& raw_in, std::string& out, std::string& err);
 bool parse_uint32_strict(const std::string& s, std::uint32_t& out);
 std::uint16_t button_bit(const std::string& token);
@@ -117,8 +111,6 @@ bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
                    std::vector<std::string>* normalized = nullptr);
 std::vector<Step> parse_text(const std::string& raw_text);
 std::string read_text_file_limited(const std::string& path, std::string* err = nullptr);
-std::string escape_json(const std::string& s);
-bool json_find_string_value(const std::string& raw, const std::string& key, std::string& out);
 std::string extract_name_or_default(const std::string& raw, const std::string& fallback_name);
 
 enum class InvalidPrettyMode {
@@ -141,11 +133,6 @@ bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HID
 using NormalizeHotkeyFn = std::string (*)(const std::string&);
 
 std::string normalize_hotkey_or_trim(const std::string& s, NormalizeHotkeyFn normalize);
-bool find_json_array_range_for_key(const std::string& raw, const std::string& key,
-                                   std::size_t& begin, std::size_t& end);
-std::vector<std::string> split_top_level_objects(const std::string& raw,
-                                                 std::size_t begin,
-                                                 std::size_t end);
 std::string entry_to_object_json(const Entry& e, NormalizeHotkeyFn normalize = nullptr, int indent_spaces = 4);
 std::string entries_to_json(const std::vector<Entry>& entries, NormalizeHotkeyFn normalize = nullptr);
 bool parse_entries_text(const std::string& raw,
@@ -157,10 +144,8 @@ struct RecordFrame {
     std::uint16_t buttons = 0;
     std::uint8_t hat = ns::HAT_NEUTRAL;
     std::int8_t lx = 0, ly = 0, rx = 0, ry = 0;
+    bool operator==(const RecordFrame&) const = default;
 };
-
-bool operator==(const RecordFrame& a, const RecordFrame& b);
-bool operator!=(const RecordFrame& a, const RecordFrame& b);
 std::string buttons_to_text(std::uint16_t buttons);
 RecordFrame record_frame_from_report(const ns::HIDReport& report);
 void append_token(std::string& out, const char* token);

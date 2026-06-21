@@ -113,10 +113,7 @@ struct HIDReport {
         vendor = 0;
     }
 
-    bool operator==(const HIDReport& o) const noexcept {
-        return std::memcmp(this, &o, sizeof(*this)) == 0;
-    }
-    bool operator!=(const HIDReport& o) const noexcept { return !(*this == o); }
+    bool operator==(const HIDReport&) const = default;
 } NS_PACKED_ATTR;
 
 struct MultiReport {

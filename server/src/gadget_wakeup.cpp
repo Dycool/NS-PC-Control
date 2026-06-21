@@ -21,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <filesystem>
 
 using namespace ns;
 
@@ -43,50 +44,20 @@ bool hidg_nodes_ready() {
     return true;
 }
 
-bool dir_exists(const char* path) {
-    struct stat st{};
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-bool path_exists(const char* path) {
-    struct stat st{};
-    return stat(path, &st) == 0;
-}
+bool dir_exists(const char* path) { return std::filesystem::is_directory(path); }
+bool path_exists(const char* path) { return std::filesystem::exists(path); }
 
 bool mkdir_if_needed(const char* path) {
-    if (mkdir(path, 0755) == 0 || errno == EEXIST) return true;
-    std::fprintf(stderr, "[gadget] mkdir %s failed: %s\n", path, std::strerror(errno));
-    return false;
-}
-
-bool write_all_fd(int fd, const void* data, size_t len, const char* path) {
-    const uint8_t* p = static_cast<const uint8_t*>(data);
-    while (len > 0) {
-        ssize_t w = write(fd, p, len);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            std::fprintf(stderr, "[gadget] write %s failed: %s\n", path, std::strerror(errno));
-            return false;
-        }
-        if (w == 0) {
-            std::fprintf(stderr, "[gadget] write %s wrote 0 bytes\n", path);
-            return false;
-        }
-        p += w;
-        len -= (size_t)w;
-    }
-    return true;
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    return !ec || ec.value() == EEXIST;
 }
 
 bool write_bytes_file(const char* path, const void* data, size_t len) {
-    int fd = open(path, O_WRONLY);
-    if (fd < 0) {
-        std::fprintf(stderr, "[gadget] open %s failed: %s\n", path, std::strerror(errno));
-        return false;
-    }
-    bool ok = write_all_fd(fd, data, len, path);
-    close(fd);
-    return ok;
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.write(static_cast<const char*>(data), len);
+    return f.good();
 }
 
 bool write_text_file(const char* path, const char* text) {
@@ -94,26 +65,17 @@ bool write_text_file(const char* path, const char* text) {
 }
 
 void remove_link_if_exists(const char* path) {
-    if (unlink(path) != 0) {
-        if (errno != ENOENT && errno != EISDIR && errno != EPERM) {
-            if (g_verbose) {
-                std::fprintf(stderr, "[gadget] unlink %s failed: %s\n",
-                             path, std::strerror(errno));
-            }
-        }
-    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
 }
 
 void rmdir_if_exists(const char* path) {
-    if (rmdir(path) != 0 && errno != ENOENT) {
-        if (g_verbose)
-            std::fprintf(stderr, "[gadget] rmdir %s failed: %s\n", path, std::strerror(errno));
-    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
 }
 
 std::string join_path(const std::string& a, const std::string& b) {
-    if (a.empty() || a.back() == '/') return a + b;
-    return a + "/" + b;
+    return (std::filesystem::path(a) / b).string();
 }
 
 std::string first_udc_name() {
@@ -230,14 +192,9 @@ bool command_exists(const char* cmd) {
 }
 
 bool ensure_parent_dir_for_file(const std::string& path) {
-    size_t slash = path.find_last_of('/');
-    if (slash == std::string::npos || slash == 0) {
-        if (slash == 0) return true;
-        return true;
-    }
-    std::string dir = path.substr(0, slash);
-    std::string cmd = "mkdir -p '" + dir + "'";
-    return std::system(cmd.c_str()) == 0;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    return !ec;
 }
 
 bool read_switch2_wakeup_config_file(const std::string& path,
@@ -672,7 +629,7 @@ std::string parse_first_hci_device(const std::string& info) {
     std::istringstream iss(info);
     std::string line;
     while (std::getline(iss, line)) {
-        if (line.rfind("hci", 0) == 0) {
+        if (line.starts_with("hci")) {
             size_t colon = line.find(':');
             if (colon != std::string::npos)
                 return line.substr(0, colon);

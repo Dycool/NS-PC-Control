@@ -1,13 +1,32 @@
 cmake_minimum_required(VERSION 3.20)
 project(ns_clients LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(OpenSSL REQUIRED)
+
+include(FetchContent)
+
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
+    cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG v2.4.1
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(cli11)
 
 set(NS_CLIENT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/main.cpp")
 set(NS_CLIENT_EXTRA_SOURCES
@@ -53,6 +72,10 @@ target_link_libraries(ns-client PRIVATE
     Qt6::Widgets
     SDL3::SDL3
     Threads::Threads
+    nlohmann_json::nlohmann_json
+    CLI11::CLI11
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 if(WIN32 AND TARGET Qt6::EntryPoint)

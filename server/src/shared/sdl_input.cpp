@@ -417,15 +417,14 @@ void SDLInputManager::scan_locked(bool initial) {
         (void)initial;
         force_scan = false;
         last_scan_us = ns::now_us();
-        for (auto it = devices.begin(); it != devices.end();) {
-            if (!it->pad || !SDL_GamepadConnected(it->pad)) {
-                if (it->slot >= 0 && it->slot < 4) states[it->slot] = SdlPadState{};
-                close_device_locked(*it);
-                it = devices.erase(it);
-            } else {
-                ++it;
+        std::erase_if(devices, [this](Device& d) {
+            if (!d.pad || !SDL_GamepadConnected(d.pad)) {
+                if (d.slot >= 0 && d.slot < 4) states[d.slot] = SdlPadState{};
+                close_device_locked(d);
+                return true;
             }
-        }
+            return false;
+        });
         int count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
         if (!ids) return;

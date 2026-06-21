@@ -4,6 +4,8 @@
 
 #include <QIcon>
 #include <QKeyEvent>
+#include <QCoreApplication>
+#include <QDir>
 
 #include <string>
 #include <vector>
@@ -58,25 +60,26 @@ QIcon app_icon() {
         return cached;
     }
 
-    const std::string exe_dir = executable_dir();
+    const QString exe_dir = QCoreApplication::applicationDirPath();
+    QDir d(exe_dir);
 
-    std::vector<std::string> candidates = {
+    std::vector<QString> candidates = {
 #ifdef __APPLE__
-        path_join(path_join(exe_dir, "../Resources"), "icon.icns"),
-        path_join(path_join(exe_dir, "../Resources"), "icon.png"),
+        QDir(d.filePath("../Resources")).filePath("icon.icns"),
+        QDir(d.filePath("../Resources")).filePath("icon.png"),
 #endif
 #ifndef _WIN32
-        path_join(path_join(exe_dir, "../share/icons/hicolor/256x256/apps"), "ns-client.png"),
-        path_join(path_join(exe_dir, "../share/pixmaps"), "ns-client.png"),
+        QDir(d.filePath("../share/icons/hicolor/256x256/apps")).filePath("ns-client.png"),
+        QDir(d.filePath("../share/pixmaps")).filePath("ns-client.png"),
 #endif
-        path_join(exe_dir, "icon.ico"),
-        path_join(exe_dir, "icon.png"),
-        path_join(NS_CLIENT_SOURCE_DIR, "icon.ico"),
-        path_join(NS_CLIENT_SOURCE_DIR, "icon.png")
+        d.filePath("icon.ico"),
+        d.filePath("icon.png"),
+        QDir(NS_CLIENT_SOURCE_DIR).filePath("icon.ico"),
+        QDir(NS_CLIENT_SOURCE_DIR).filePath("icon.png")
     };
 
-    for (const std::string& p : candidates) {
-        QIcon icon(std_to_q(p));
+    for (const QString& p : candidates) {
+        QIcon icon(p);
         if (!icon.isNull()) {
             cached = icon;
             return cached;

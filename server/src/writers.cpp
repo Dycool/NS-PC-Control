@@ -16,7 +16,7 @@
 using namespace ns;
 
 // ── Smart Multiplexer HID Writer Thread ───────────────────────────────────────
-void legacy_writer_thread(int hz) {
+void legacy_writer_thread(std::stop_token stoken, int hz) {
     const auto tick = us(1'000'000 / hz);
     int fds[HID_PORT_COUNT] = {-1, -1, -1, -1};
     std::string devs[HID_PORT_COUNT] = {"/dev/hidg0", "/dev/hidg1", "/dev/hidg2", "/dev/hidg3"};
@@ -25,7 +25,7 @@ void legacy_writer_thread(int hz) {
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[HID_PORT_COUNT];
 
-    while (g_running.load(std::memory_order_relaxed)) {
+    while (!stoken.stop_requested()) {
         bool all_open = true;
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
             if (fds[i] < 0) {
@@ -40,7 +40,7 @@ void legacy_writer_thread(int hz) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; }
             }
             run_gadget_setup_if_needed(false, "requested legacy /dev/hidg* nodes could not all be opened");
-            for (int wait_i = 0; wait_i < 50 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
+            for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
 
@@ -56,7 +56,7 @@ void legacy_writer_thread(int hz) {
         bool error_shown = false;
         bool timeout_printed[MAX_CLIENTS] = {};
 
-        while (g_running.load(std::memory_order_relaxed)) {
+        while (!stoken.stop_requested()) {
             std::this_thread::sleep_until(next);
             auto now = Clock::now();
             next = std::max(next + tick, now + tick);
@@ -207,7 +207,7 @@ void legacy_writer_thread(int hz) {
                 if (!error_shown) { std::puts("Host disconnected - waiting for reconnect..."); error_shown = true; }
                 mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; }
-                for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
+                for (int wait_i = 0; wait_i < 100 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
             }
         }
@@ -224,9 +224,9 @@ void legacy_writer_thread(int hz) {
     }
 }
 
-void writer_thread(int hz) {
+void writer_thread(std::stop_token stoken, int hz) {
     if (g_legacy_mode) {
-        legacy_writer_thread(hz);
+        legacy_writer_thread(stoken, hz);
         return;
     }
 
@@ -242,7 +242,7 @@ void writer_thread(int hz) {
     ControllerRuntime rt[4];
     for (int i = 0; i < HID_PORT_COUNT; ++i) rt[i].ctrl = i;
 
-    while (g_running.load(std::memory_order_relaxed)) {
+    while (!stoken.stop_requested()) {
         bool all_open = true;
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
             if (fds[i] < 0) {
@@ -274,7 +274,7 @@ void writer_thread(int hz) {
                 if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
             }
             run_gadget_setup_if_needed(false, "requested /dev/hidg* nodes could not all be opened");
-            for (int wait_i = 0; wait_i < 50 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
+            for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
 
@@ -290,7 +290,7 @@ void writer_thread(int hz) {
         uint64_t writes_this_second = 0;
         auto last_rate_log = Clock::now();
 
-        while (g_running.load(std::memory_order_relaxed)) {
+        while (!stoken.stop_requested()) {
             std::this_thread::sleep_until(next);
             auto now = Clock::now();
             next = std::max(next + tick, now + tick);
@@ -630,7 +630,7 @@ void writer_thread(int hz) {
                 if (!error_shown) { std::puts("Host disconnected — waiting for reconnect..."); error_shown = true; }
                 mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
-                for (int wait_i = 0; wait_i < 100 && g_running.load(std::memory_order_relaxed); ++wait_i) std::this_thread::sleep_for(ms(10));
+                for (int wait_i = 0; wait_i < 100 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
             }
 
@@ -653,12 +653,12 @@ void writer_thread(int hz) {
 std::mutex g_rate_mtx;
 
 // ── Stats thread ──────────────────────────────────────────────────────────────
-void stats_thread() {
+void stats_thread(std::stop_token stoken) {
     uint64_t last_cleanup = 0;
-    while (g_running.load(std::memory_order_relaxed)) {
-        for (int wait_i = 0; wait_i < 50 && g_running.load(std::memory_order_relaxed); ++wait_i)
+    while (!stoken.stop_requested()) {
+        for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i)
             std::this_thread::sleep_for(ms(100));
-        if (!g_running.load(std::memory_order_relaxed)) break;
+        if (stoken.stop_requested()) break;
 
         // Periodic rate limiter cleanup (every 60s)
         uint64_t now = now_us();

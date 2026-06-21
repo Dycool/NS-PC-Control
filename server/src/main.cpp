@@ -17,6 +17,7 @@
 #include <sstream>
 #include <fstream>
 #include <iostream>
+#include <CLI/CLI.hpp>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -96,59 +97,39 @@ int main(int argc, char** argv) {
     bool        bluetooth_enabled = false;
     bool        bt_explicit       = false;
 
-    for (int i = 1; i < argc; ++i) {
-        std::string a(argv[i]);
-        if (a == "-p") {
-            std::fprintf(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead\n");
-            return 1;
-        }
-        else if (a == "-b") {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "error: -b requires ADDR, PORT, or ADDR:PORT\n");
-                return 1;
-            }
-            if (!parse_bind_arg(argv[++i], bind_addr, port)) {
-                std::fprintf(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT\n");
-                return 1;
-            }
-        }
-        else if (a == "-v")               g_verbose  = true;
-        else if (a == "-wake")          g_switch2_wakeup_setup_requested = true;
-        else if (a == "-hori")          g_legacy_mode = true;
-        else if (a == "-bt")            { bluetooth_enabled = true; bt_explicit = true; }
-        else if (a == "--upnp")           do_upnp    = true;
-        else if (a == "-w") {
-            serve_http_webapp = true;
-            if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
-                web_port = std::atoi(argv[++i]);
-            else
-                web_port = 8080;
-        }
-        else if (a == "-h") {
-            puts("ns-backend  [-b ADDR[:PORT]|PORT] [--upnp] [-w [WEB_PORT]] [-v] [-hori] [-wake] [-bt]");
-            puts("");
-            puts("  By default, UDP and WebSocket input are both enabled.");
-            puts("  WebSocket listens on port 8080 and does not serve the browser webapp.");
-            puts("");
-            puts("  -b ADDR[:PORT]  Bind UDP to an address and optional port.");
-            puts("  -b PORT         Keep 0.0.0.0 with a custom UDP port.");
-            puts("  -w [PORT]       Serve the browser webapp too, using this port or 8080.");
-            puts("  --upnp          Forward the UDP port via UPnP for PC clients only.");
-            puts("                  Mobile/web clients connect via WebSocket and don't need this.");
-            puts("  -wake           Run interactive Joy-Con 2 wake setup, save switch2_wakeup.conf, test wake, then exit.");
-            puts("  -bt             Explicitly enable local SDL3 Bluetooth/controller input and disable Switch 2 wake.");
-            puts("                  By default, the backend auto-detects: Bluetooth is used unless a valid");
-            puts("                  Switch 2 wake config is present at /etc/ns-pc-control/switch2_wakeup.conf.");
-            puts("  -hori           Expose the legacy 8-byte HORI controller gadget.");
-            puts("                  Default mode exposes the 64-byte motion/rumble gadget.");
-            puts("");
-            return 0;
-        }
-        else {
-            std::fprintf(stderr, "error: unknown argument: %s\n", a.c_str());
-            return 1;
-        }
+    CLI::App app{"ns-backend - Switch Input Server\n\n  By default, UDP and WebSocket input are both enabled.\n  WebSocket listens on port 8080 and does not serve the browser webapp."};
+
+    std::string bind_arg;
+    app.add_option("-b", bind_arg, "Bind UDP to an address and optional port (ADDR[:PORT] or PORT).");
+    app.add_flag("-v", g_verbose, "Enable verbose output");
+    app.add_flag("-wake", g_switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup, save config, test wake, then exit");
+    app.add_flag("-hori", g_legacy_mode, "Expose the legacy 8-byte HORI controller gadget (default exposes 64-byte mode)");
+    app.add_flag("-bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth/controller input and disable Switch 2 wake");
+    app.add_flag("--upnp", do_upnp, "Forward the UDP port via UPnP for PC clients only");
+    
+    auto opt_w = app.add_option("-w", web_port, "Serve the browser webapp too, using this port or 8080")
+                   ->expected(0, 1);
+                   
+    bool legacy_p = false;
+    app.add_flag("-p", legacy_p, "")->group("");
+
+    try {
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError &e) {
+        return app.exit(e);
     }
+
+    if (legacy_p) {
+        std::fprintf(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead\n");
+        return 1;
+    }
+
+    if (!bind_arg.empty() && !parse_bind_arg(bind_arg, bind_addr, port)) {
+        std::fprintf(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT\n");
+        return 1;
+    }
+    
+    serve_http_webapp = *opt_w;
 
     // -wake setup mode: run interactive config and exit (takes priority)
     if (g_switch2_wakeup_setup_requested)
@@ -222,16 +203,16 @@ int main(int argc, char** argv) {
 
     // Start the WebSocket proxy after UDP is bound. The HTTP webapp is only
     // served when -w is passed.
-    std::thread web_thread(web_server_thread, web_port, port, serve_http_webapp);
-    std::thread bluetooth_thread;
+    std::jthread web_thread(web_server_thread, web_port, port, serve_http_webapp);
+    std::jthread bluetooth_thread;
     if (bluetooth_enabled)
-        bluetooth_thread = std::thread(bluetooth_input_thread);
+        bluetooth_thread = std::jthread(bluetooth_input_thread);
     
     std::printf("UDP %s:%u writer=%d Hz mode=%s\n",
                 bind_addr.c_str(), port, PRO_WRITER_HZ,
                 g_legacy_mode ? "hori" : "modern");
-    std::thread wt(writer_thread, PRO_WRITER_HZ);
-    std::thread st(stats_thread);
+    std::jthread wt(writer_thread, PRO_WRITER_HZ);
+    std::jthread st(stats_thread);
 
     int ep = epoll_create1(0); epoll_event ev{}; ev.events = EPOLLIN; ev.data.fd = sock; epoll_ctl(ep, EPOLL_CTL_ADD, sock, &ev);
 
@@ -288,7 +269,7 @@ int main(int argc, char** argv) {
                     uint32_t text_len = mh.text_len;
                     if (text_len <= ns::macro::UDP_TEXT_MAX && bytes == (ssize_t)(ns::macro::UDP_HEADER_SIZE + text_len + HMAC_TAG_SIZE)) {
                         const uint8_t* recv_hmac = udp_rx.data() + ns::macro::UDP_HEADER_SIZE + text_len;
-                        if (hmac_verify(g_hmac_key, 32, udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len, recv_hmac, HMAC_TAG_SIZE) == 0) {
+                        if (hmac_verify(std::span<const uint8_t>(g_hmac_key, 32), std::span<const uint8_t>(udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len), std::span<const uint8_t>(recv_hmac, HMAC_TAG_SIZE)) == 0) {
                             if (!rate_allow(sender.sin_addr.s_addr)) continue;
                             int client_idx = server_macro_client_for_sender(sender);
                             if (client_idx >= 0) {
@@ -405,23 +386,17 @@ int main(int argc, char** argv) {
             // ── 4. HMAC authentication ────────────────────────────────────────────
             int hmac_ok = 0;
             if (is_extended_udp) {
-                hmac_ok = hmac_verify(g_hmac_key, 32,
-                                      reinterpret_cast<const uint8_t*>(&ext_pkt),
-                                      EXT_UDP_PACKET_AUTH_SIZE,
-                                      ext_pkt.hmac,
-                                      HMAC_TAG_SIZE);
+                hmac_ok = hmac_verify(std::span<const uint8_t>(g_hmac_key, 32),
+                                      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext_pkt), EXT_UDP_PACKET_AUTH_SIZE),
+                                      std::span<const uint8_t>(ext_pkt.hmac, HMAC_TAG_SIZE));
             } else if (is_extended_udp3) {
-                hmac_ok = hmac_verify(g_hmac_key, 32,
-                                      reinterpret_cast<const uint8_t*>(&ext3_pkt),
-                                      EXT3_UDP_PACKET_AUTH_SIZE,
-                                      ext3_pkt.hmac,
-                                      HMAC_TAG_SIZE);
+                hmac_ok = hmac_verify(std::span<const uint8_t>(g_hmac_key, 32),
+                                      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&ext3_pkt), EXT3_UDP_PACKET_AUTH_SIZE),
+                                      std::span<const uint8_t>(ext3_pkt.hmac, HMAC_TAG_SIZE));
             } else {
-                hmac_ok = hmac_verify(g_hmac_key, 32,
-                                      reinterpret_cast<const uint8_t*>(&pkt),
-                                      PACKET_AUTH_SIZE,
-                                      pkt.hmac,
-                                      HMAC_TAG_SIZE);
+                hmac_ok = hmac_verify(std::span<const uint8_t>(g_hmac_key, 32),
+                                      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), PACKET_AUTH_SIZE),
+                                      std::span<const uint8_t>(pkt.hmac, HMAC_TAG_SIZE));
             }
             if (hmac_ok != 0) {
                 if (g_verbose) puts("bad HMAC, dropped");
@@ -555,9 +530,11 @@ int main(int argc, char** argv) {
     puts("[backend] shutting down");
     upnp_remove_mapping(port);
     close(ep); close(sock);
-    wt.join(); st.join();
-    if (web_thread.joinable()) web_thread.join();
-    if (bluetooth_thread.joinable()) bluetooth_thread.join();
+    // std::jthread auto-joins and requests stop on destruction.
+    // Ensure all loop threads terminate.
+    wt.request_stop(); st.request_stop();
+    if (web_thread.joinable()) web_thread.request_stop();
+    if (bluetooth_thread.joinable()) bluetooth_thread.request_stop();
 
     teardown_gadget();
 

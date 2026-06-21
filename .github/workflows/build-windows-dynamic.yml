@@ -59,11 +59,17 @@ jobs:
           cmake --build _deps/SDL3-build --parallel
           cmake --install _deps/SDL3-build
 
+      - name: Install OpenSSL
+        shell: pwsh
+        run: vcpkg install openssl:x64-windows
+
       - name: Build client
         shell: pwsh
         run: |
           cmake -S client -B client/build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DCMAKE_PREFIX_PATH="$PWD/_cache/sdl3-static;$env:Qt6_DIR" `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
 

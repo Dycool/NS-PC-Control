@@ -266,7 +266,7 @@ static void apply_bluetooth_rumble(SDLInputManager& input,
     input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
 }
 
-void bluetooth_input_thread() {
+void bluetooth_input_thread(std::stop_token stoken) {
     SDLInputManager input;
     input.set_motion_enabled(true);
     input.set_home_shortcut_enabled(true);
@@ -290,7 +290,7 @@ void bluetooth_input_thread() {
 
     std::puts("[bt] Bluetooth/local controller input enabled");
 
-    while (g_running.load(std::memory_order_relaxed)) {
+    while (!stoken.stop_requested()) {
         input.poll();
         auto pads = input.snapshot();
         const uint64_t now = now_us();
@@ -410,7 +410,7 @@ bool bluetooth_input_available() {
     return false;
 }
 
-void bluetooth_input_thread() {
+void bluetooth_input_thread(std::stop_token) {
     std::fprintf(stderr, "[bt] ns-backend was built without SDL3 Bluetooth/local controller support\n");
 }
 #endif

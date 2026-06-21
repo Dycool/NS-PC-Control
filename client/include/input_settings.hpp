@@ -26,16 +26,7 @@ extern SDLInputManager g_sdlInput;
 extern std::atomic<uint64_t> g_serverLastReplyUs;
 
 void sync_sdl_input_options();
-std::string path_join(const std::string& a, const std::string& b);
-std::string dirname_of(std::string path);
-std::string executable_dir();
-void make_dir_if_needed(const std::string& dir);
-std::string user_config_dir();
-std::string settings_path();
-std::string bindings_path();
 std::string macros_path();
-std::unordered_map<std::string, std::string> read_kv_file(const std::string& path);
-bool write_kv_file(const std::string& path, const std::unordered_map<std::string, std::string>& values);
 std::vector<std::pair<std::string, std::string>> binding_keys();
 std::unordered_map<std::string, std::string> default_key_bindings();
 std::string normalize_key_name(std::string s);
