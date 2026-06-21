@@ -22,7 +22,7 @@ private:
         uint64_t suppress_classic_until_us = 0;
     } states[4];
 
-    void set_output(int slot, uint8_t low, uint8_t high, int pad_idx);
+    void set_output(int slot, uint8_t low, uint8_t high, uint32_t duration_ms, int pad_idx);
 };
 
 void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_for_slot[4]);

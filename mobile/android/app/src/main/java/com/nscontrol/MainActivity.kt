@@ -985,7 +985,7 @@ class MainActivity : AppCompatActivity() {
 
         val now = SystemClock.uptimeMillis()
         val neutral = (low == 0 && high == 0) || duration10Ms == 0
-        val durationMs = if (neutral) 0L else maxOf(120L, duration10Ms.coerceIn(1, 255) * 10L)
+        val durationMs = if (neutral) 0L else maxOf(40L, duration10Ms.coerceIn(1, 255) * 10L)
         val strength = maxOf(low, high).coerceIn(1, 255)
 
         val deviceId = synchronized(physicalLock) {

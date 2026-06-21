@@ -4,6 +4,18 @@
 #include <cmath>
 #include <cstdlib>
 
+namespace {
+constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 85;
+constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 100;
+constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 35;
+
+uint8_t scale_sdl_rumble_motor(uint8_t v, int gain_percent) {
+    int scaled = ((int)v * gain_percent) / 100;
+    if (scaled == 0 && v != 0) scaled = 1;
+    return (uint8_t)std::clamp(scaled, 0, 255);
+}
+}
+
 void DigitalReleaseFilter::reset() {
     last_buttons = 0;
     std::fill(std::begin(button_until), std::end(button_until), 0);
@@ -169,11 +181,20 @@ void SDLInputManager::set_capture_shortcut_enabled(bool enabled) {
         capture_shortcut_enabled.store(enabled, std::memory_order_relaxed);
     }
 
-void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms) {
+void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble) {
         std::lock_guard<std::mutex> lk(mtx);
         if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return;
         Device* d = device_for_slot_locked(sdl_slot);
         if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
+        int gain_percent = SDL_RUMBLE_DEFAULT_GAIN_PERCENT;
+        if (d->vid == 0x054c) {
+            gain_percent = SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT;
+        } else if (d->vid == 0x045e) {
+            gain_percent = SDL_RUMBLE_XBOX_GAIN_PERCENT;
+            allow_trigger_rumble = false;
+        }
+        low = scale_sdl_rumble_motor(low, gain_percent);
+        high = scale_sdl_rumble_motor(high, gain_percent);
         const Uint16 low_word = motor_word(low);
         const Uint16 high_word = motor_word(high);
         const bool stop = (low_word == 0 && high_word == 0) || duration_ms == 0;
@@ -181,7 +202,7 @@ void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32
         bool ok_trigger = true;
         SDL_PropertiesID props = SDL_GetGamepadProperties(d->pad);
         bool trigger_capable = props && SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
-        if (trigger_capable || !ok_main || stop) {
+        if ((allow_trigger_rumble && trigger_capable) || !ok_main || stop) {
             ok_trigger = SDL_RumbleGamepadTriggers(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
         }
         if (!stop && !ok_main && !ok_trigger) {
@@ -425,4 +446,3 @@ void SDLInputManager::refresh_states_locked(uint64_t now) {
             states[d.slot] = st;
         }
     }
-

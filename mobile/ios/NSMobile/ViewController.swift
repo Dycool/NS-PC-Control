@@ -1286,7 +1286,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pads[subpad].stopRumble()
                 return
             }
-            let duration = UInt64(max(120, min(max(duration10Ms, 1), 255) * 10))
+            let duration = UInt64(max(40, min(max(duration10Ms, 1), 255) * 10))
             if pads[subpad].rumbleLow == low && pads[subpad].rumbleHigh == high && now - pads[subpad].rumbleLastSetMs < 100 {
                 pads[subpad].rumbleUntilMs = now + duration
                 return
