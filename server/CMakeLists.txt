@@ -94,11 +94,25 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i index.html > ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i mobile.html >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i editor.html >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/index.css >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/mobile.css >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/editor.css >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/bridge.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/index.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/mobile.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/editor.js >> ${WEBAPP_EMBED}
     DEPENDS
         ${WEBAPP_DIR}/index.html
         ${WEBAPP_DIR}/mobile.html
         ${WEBAPP_DIR}/editor.html
-    COMMENT "Embedding webapp HTML files via xxd..."
+        ${WEBAPP_DIR}/css/index.css
+        ${WEBAPP_DIR}/css/mobile.css
+        ${WEBAPP_DIR}/css/editor.css
+        ${WEBAPP_DIR}/js/bridge.js
+        ${WEBAPP_DIR}/js/index.js
+        ${WEBAPP_DIR}/js/mobile.js
+        ${WEBAPP_DIR}/js/editor.js
+    COMMENT "Embedding webapp files via xxd..."
     VERBATIM
 )
 
@@ -111,15 +125,16 @@ add_executable(ns-backend
     src/writers.cpp
     src/bluetooth_input.cpp
     src/upnp.cpp
-    src/shared/macros.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
     ${WEBAPP_EMBED}
 )
 
 if(SDL3_FOUND)
-    target_sources(ns-backend PRIVATE src/shared/sdl_input.cpp)
+    target_sources(ns-backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/sdl_input.cpp)
 endif()
 target_include_directories(ns-backend PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 target_link_libraries(ns-backend PRIVATE pthread nlohmann_json::nlohmann_json CLI11::CLI11 OpenSSL::SSL OpenSSL::Crypto)

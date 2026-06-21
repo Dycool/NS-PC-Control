@@ -143,35 +143,65 @@ static int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void
                 return -1;
             }
             const char* url = (const char*)in;
-            const unsigned char* html = nullptr;
-            size_t html_len = 0;
+            const unsigned char* content = nullptr;
+            size_t content_len = 0;
+            const char* mime = "text/html; charset=utf-8";
+
             if (strcmp(url, "/") == 0 || strcmp(url, "/index.html") == 0) {
-                html = index_html;
-                html_len = index_html_len - 1;
+                content = index_html;
+                content_len = index_html_len - 1;
             } else if (strcmp(url, "/mobile.html") == 0) {
-                html = mobile_html;
-                html_len = mobile_html_len - 1;
+                content = mobile_html;
+                content_len = mobile_html_len - 1;
             } else if (strcmp(url, "/editor.html") == 0) {
-                html = editor_html;
-                html_len = editor_html_len - 1;
+                content = editor_html;
+                content_len = editor_html_len - 1;
+            } else if (strcmp(url, "/css/index.css") == 0) {
+                content = css_index_css;
+                content_len = css_index_css_len - 1;
+                mime = "text/css; charset=utf-8";
+            } else if (strcmp(url, "/css/mobile.css") == 0) {
+                content = css_mobile_css;
+                content_len = css_mobile_css_len - 1;
+                mime = "text/css; charset=utf-8";
+            } else if (strcmp(url, "/css/editor.css") == 0) {
+                content = css_editor_css;
+                content_len = css_editor_css_len - 1;
+                mime = "text/css; charset=utf-8";
+            } else if (strcmp(url, "/js/bridge.js") == 0) {
+                content = js_bridge_js;
+                content_len = js_bridge_js_len - 1;
+                mime = "application/javascript; charset=utf-8";
+            } else if (strcmp(url, "/js/index.js") == 0) {
+                content = js_index_js;
+                content_len = js_index_js_len - 1;
+                mime = "application/javascript; charset=utf-8";
+            } else if (strcmp(url, "/js/mobile.js") == 0) {
+                content = js_mobile_js;
+                content_len = js_mobile_js_len - 1;
+                mime = "application/javascript; charset=utf-8";
+            } else if (strcmp(url, "/js/editor.js") == 0) {
+                content = js_editor_js;
+                content_len = js_editor_js_len - 1;
+                mime = "application/javascript; charset=utf-8";
             }
 
-            if (html) {
+            if (content) {
                 uint8_t buffer[2048 + LWS_PRE];
                 uint8_t *start = &buffer[LWS_PRE];
                 uint8_t *p = start;
                 uint8_t *end = &buffer[sizeof(buffer) - 1];
 
-                if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK, "text/html; charset=utf-8", html_len, &p, end))
+                if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK, mime, content_len, &p, end))
                     return -1;
                 
                 if (lws_finalize_write_http_header(wsi, start, &p, end))
                     return -1;
 
-                unsigned char* body = (unsigned char*)malloc(LWS_PRE + html_len);
+                unsigned char* body = (unsigned char*)malloc(LWS_PRE + content_len);
                 if (!body) return -1;
-                memcpy(body + LWS_PRE, html, html_len);
-                lws_write(wsi, body + LWS_PRE, html_len, LWS_WRITE_HTTP_FINAL);
+                memcpy(body + LWS_PRE, content, content_len);
+                lws_write(wsi, body + LWS_PRE, content_len, LWS_WRITE_HTTP_FINAL);
                 free(body);
                 
                 // HTTP transaction finished, close connection

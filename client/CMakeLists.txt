@@ -43,8 +43,8 @@ set(NS_CLIENT_EXTRA_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/rumble_client.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/stream_runtime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/udp_protocol.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/../server/src/shared/macros.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/../server/src/shared/sdl_input.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../shared/src/macros.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../shared/src/sdl_input.cpp"
 )
 set(NS_CLIENT_QRC "${CMAKE_CURRENT_LIST_DIR}/resources.qrc")
 
@@ -69,7 +69,7 @@ target_compile_definitions(ns-client PRIVATE
 
 target_include_directories(ns-client PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/include"
-    "${CMAKE_CURRENT_LIST_DIR}/../server/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../shared/include"
 )
 
 target_link_libraries(ns-client PRIVATE

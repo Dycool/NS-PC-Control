@@ -1,0 +1,54 @@
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #111111;
+    color: #E0E0E0;
+    padding: 20px;
+    max-width: 480px;
+}
+h2 { color: #CC0000; margin-top: 0; font-size: 20px; }
+.row { display: flex; align-items: center; margin-bottom: 12px; }
+.row label { width: 140px; text-align: right; margin-right: 10px; font-size: 14px; }
+input[type="text"], select {
+    flex: 1; padding: 4px; font-family: 'Consolas', monospace; border: 1px solid #444; background: #222; color: #E0E0E0;
+}
+button {
+    padding: 6px 16px; font-family: 'Segoe UI'; font-size: 14px;
+    background: #333; border: 1px solid #555; cursor: pointer;
+    border-radius: 4px;
+    min-height: 30px;
+    color: #E0E0E0;
+}
+button:hover { background: #444; }
+.btn-group { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; }
+hr { border: none; border-top: 2px solid #333; margin: 20px 0; }
+.status { font-size: 13px; margin-bottom: 4px; }
+
+#modalOverlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5); justify-content: center; align-items: center;
+    z-index: 10000;
+}
+#modalContent {
+    background: #1E1E1E; padding: 20px; border-radius: 8px; width: 90%; max-width: 440px;
+    max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+#modalContent h3 { margin-top: 0; margin-bottom: 15px; color: #CC0000; flex-shrink: 0; }
+
+#bindingsScrollArea {
+    overflow-y: auto; flex-grow: 1; padding-right: 10px;
+}
+
+.bind-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; }
+.bind-btn { width: 120px; font-family: 'Consolas'; font-size: 12px; transition: background 0.2s; }
+.listening { background: #ffeb3b !important; border-color: #fbc02d !important; color: #000; transform: scale(1.02); }
+
+.modal-footer {
+    display: flex; justify-content: space-between; margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; flex-shrink: 0;
+}
+.footer-group { display: flex; gap: 8px; }
+
+@media (max-width: 480px) {
+    .row { flex-direction: column; align-items: flex-start; }
+    .row label { width: auto; text-align: left; margin-bottom: 5px; }
+    select, button { padding: 10px; min-height: 44px; }
+}
