@@ -217,9 +217,14 @@ int run_client_stream(const ClientStreamConfig& cfg,
     bool no_controllers_printed = false;
 
     uint64_t last_probe_us = 0;
+    uint64_t last_kb_poll_us = 0;
 
     while (running.load(std::memory_order_relaxed)) {
-        if (cfg.gui_features) {
+        const uint64_t loop_start_us = ns::now_us();
+
+        if (cfg.gui_features && (loop_start_us - last_kb_poll_us >= 10000ULL)) {
+            update_keyboard_state_cache();
+
             std::string upload;
             {
                 std::lock_guard<std::mutex> lk(g_macro_mtx);
@@ -228,6 +233,8 @@ int run_client_stream(const ClientStreamConfig& cfg,
             if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
 
             poll_macro_entry_hotkeys();
+
+            last_kb_poll_us = loop_start_us;
         }
 
         g_sdlInput.poll();
@@ -236,9 +243,13 @@ int run_client_stream(const ClientStreamConfig& cfg,
         build_client_frame(frame, sdl_filters, send_motion, g_keyboardMode.load());
 
         if (cfg.gui_features) {
-            macro_record_sample(frame.reports[0]);
-            if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) {
-                frame.active_count = 1;
+            if (g_macro_recording.load(std::memory_order_relaxed)) {
+                macro_record_sample(frame.reports[0]);
+            }
+            if (g_macro_running.load(std::memory_order_relaxed)) {
+                if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) {
+                    frame.active_count = 1;
+                }
             }
         }
 

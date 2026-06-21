@@ -240,7 +240,16 @@ int main(int argc, char** argv) {
     while (g_ctx.running.load(std::memory_order_relaxed)) {
         udp_poll.revents = 0;
         int n = poll(&udp_poll, 1, 200);
-        if (n <= 0) continue;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            std::println(stderr, "[udp] poll error: {}", std::strerror(errno));
+            break;
+        }
+        if (n == 0) continue;
+        if (udp_poll.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            std::println(stderr, "[udp] socket error in poll: revents=0x{:02X}", udp_poll.revents);
+            break;
+        }
         if ((udp_poll.revents & POLLIN) == 0) continue;
 
         sockaddr_in sender{};

@@ -20,6 +20,8 @@ std::mutex g_pressedKeysMutex;
 std::unordered_set<std::string> g_pressedKeys;
 SDLInputManager g_sdlInput;
 std::atomic<uint64_t> g_serverLastReplyUs{0};
+std::mutex g_kbCacheMutex;
+std::unordered_map<std::string, bool> g_kbStateCache;
 
 void sync_sdl_input_options() {
     g_sdlInput.set_motion_enabled(g_gyroEnabled.load());
@@ -193,9 +195,33 @@ int mac_keycode_for_key(const std::string& name) {
 }
 #endif
 
+void update_keyboard_state_cache() {
+    std::lock_guard<std::mutex> lk(g_kbCacheMutex);
+    for (const auto& kv : g_keyBindings) {
+        std::string key = normalize_key_name(kv.second);
+        if (key.empty()) continue;
+        bool down = false;
+#ifdef _WIN32
+        int vk = windows_vk_for_key(key);
+        if (vk && (GetAsyncKeyState(vk) & 0x8000)) down = true;
+#endif
+#ifdef __APPLE__
+        int kc = mac_keycode_for_key(key);
+        if (kc >= 0 && CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, (CGKeyCode)kc)) down = true;
+#endif
+        if (!down) down = pressed_key_cache_contains(key);
+        g_kbStateCache[key] = down;
+    }
+}
+
 bool key_is_down(const std::string& name_raw) {
     std::string name = normalize_key_name(name_raw);
     if (name.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_kbCacheMutex);
+        auto it = g_kbStateCache.find(name);
+        if (it != g_kbStateCache.end()) return it->second;
+    }
 #ifdef _WIN32
     int vk = windows_vk_for_key(name);
     if (vk && (GetAsyncKeyState(vk) & 0x8000)) return true;

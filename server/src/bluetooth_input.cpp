@@ -21,6 +21,7 @@
 
 static std::atomic<bool> g_bt_pair_window_started{false};
 static std::thread g_bt_pair_window_thread;
+static std::atomic<bool> g_bt_pair_window_stop{false};
 
 static void run_pairing_window_script(const char* script) {
     pid_t pid = fork();
@@ -39,7 +40,7 @@ static void run_pairing_window_script(const char* script) {
 
     setpgid(pid, pid);
     int status = 0;
-    while (g_ctx.running.load(std::memory_order_relaxed)) {
+    while (g_ctx.running.load(std::memory_order_relaxed) && !g_bt_pair_window_stop.load(std::memory_order_relaxed)) {
         pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid)
             return;
@@ -68,6 +69,7 @@ static void start_bluetooth_pairing_window() {
     if (!g_bt_pair_window_started.compare_exchange_strong(expected, true))
         return;
 
+    g_bt_pair_window_stop.store(false, std::memory_order_relaxed);
     g_bt_pair_window_thread = std::thread([] {
         std::println("[bt] pairing window open for 2 minutes");
 
@@ -102,20 +104,7 @@ static void start_bluetooth_pairing_window() {
             "bluetoothctl scan off >/dev/null 2>&1 || true; "
             "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true; "
             "kill $agent >/dev/null 2>&1 || true; wait $agent >/dev/null 2>&1 || true; "
-            "bluetoothctl discoverable off >/dev/null 2>&1 || true; "
-            "while true; do "
-                "bluetoothctl paired-devices | while read -r kind mac name_rest; do "
-                    "[ \"$kind\" = \"Device\" ] || continue; "
-                    "name=\"$name_rest\"; "
-                    "case \"$name\" in "
-                        "*Wireless\\ Controller*|*Xbox\\ Wireless\\ Controller*|*Xbox\\ One\\ Wireless\\ Controller*|*Pro\\ Controller*|*Nintendo\\ Switch\\ Pro\\ Controller*|*Joy-Con*|*8BitDo*) "
-                            "bluetoothctl trust \"$mac\" >/dev/null 2>&1 || true; "
-                            "bluetoothctl connect \"$mac\" >/dev/null 2>&1 || true; "
-                            ";; "
-                    "esac; "
-                "done; "
-                "sleep 10; "
-            "done; ";
+            "bluetoothctl discoverable off >/dev/null 2>&1 || true; ";
 
         run_pairing_window_script(script);
         int r1 = std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
@@ -403,6 +392,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
         if (client_for_sdl[i] >= 0)
             reset_bluetooth_client_slot(client_for_sdl[i]);
     }
+    g_bt_pair_window_stop.store(true, std::memory_order_relaxed);
     if (g_bt_pair_window_thread.joinable())
         g_bt_pair_window_thread.join();
     input.stop();

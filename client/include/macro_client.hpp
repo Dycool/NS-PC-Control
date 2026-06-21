@@ -4,6 +4,7 @@
 #include "shared/macros.hpp"
 #include "udp_protocol.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -14,7 +15,8 @@
 extern uint32_t g_macro_udp_seq;
 extern std::mutex g_macro_mtx;
 extern std::vector<ns::macro::Step> g_macro_steps;
-extern bool g_macro_running;
+extern std::atomic<bool> g_macro_running;
+extern std::atomic<bool> g_macro_recording;
 extern uint64_t g_macro_start_us;
 extern std::string g_macro_upload_pending;
 extern std::vector<ns::macro::Entry> g_macro_entries;

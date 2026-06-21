@@ -12,6 +12,7 @@ static inline void hmac_sha256(std::span<const uint8_t> key, std::span<const uin
 }
 
 static inline int hmac_verify(std::span<const uint8_t> key, std::span<const uint8_t> msg, std::span<const uint8_t> tag) {
+    if (tag.size() != 16 && tag.size() != 32) return -1;
     uint8_t computed[32];
     hmac_sha256(key, msg, computed);
     uint8_t diff = 0;

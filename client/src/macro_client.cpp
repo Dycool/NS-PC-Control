@@ -68,7 +68,8 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
 
 std::mutex g_macro_mtx;
 std::vector<ns::macro::Step> g_macro_steps;
-bool g_macro_running = false;
+std::atomic<bool> g_macro_running{false};
+std::atomic<bool> g_macro_recording{false};
 uint64_t g_macro_start_us = 0;
 std::string g_macro_upload_pending;
 std::vector<ns::macro::Entry> g_macro_entries;
@@ -160,7 +161,7 @@ std::expected<void, std::string> start_macro_text(const std::string& txt) {
     std::lock_guard<std::mutex> lk(g_macro_mtx);
     g_macro_upload_pending = pretty;
     g_macro_steps = std::move(parsed);
-    g_macro_running = false;
+    g_macro_running.store(false, std::memory_order_relaxed);
     g_macro_start_us = ns::now_us();
     return {};
 }
@@ -210,16 +211,18 @@ ns::macro::Recorder g_macro_recorder;
 void macro_record_start() {
     std::lock_guard<std::mutex> lk(g_macro_mtx);
     g_macro_recorder.start(ns::now_us());
+    g_macro_recording.store(true, std::memory_order_relaxed);
 }
 
 std::string macro_record_stop() {
     std::lock_guard<std::mutex> lk(g_macro_mtx);
+    g_macro_recording.store(false, std::memory_order_relaxed);
     return g_macro_recorder.stop(ns::now_us());
 }
 
 void macro_record_sample(const ns::HIDReport& report) {
     std::lock_guard<std::mutex> lk(g_macro_mtx);
-    g_macro_recorder.sample(report, ns::now_us(), g_macro_running);
+    g_macro_recorder.sample(report, ns::now_us(), g_macro_running.load(std::memory_order_relaxed));
 }
 
 bool poll_macro_record_p1(ns::HIDReport& report) {
@@ -246,7 +249,7 @@ void macro_record_sample_p1() {
 bool apply_macro_override(ns::HIDReport logical_reports[4], bool present[4], bool has_motion[4]) {
     (void)has_motion;
     std::lock_guard<std::mutex> lk(g_macro_mtx);
-    if (!g_macro_running) return false;
+    if (!g_macro_running.load(std::memory_order_relaxed)) return false;
     uint64_t elapsed_ms = (ns::now_us() - g_macro_start_us) / 1000ULL;
     ns::HIDReport mr;
     bool active = ns::macro::report_at(g_macro_steps, elapsed_ms, mr);
@@ -257,6 +260,6 @@ bool apply_macro_override(ns::HIDReport logical_reports[4], bool present[4], boo
     }
     logical_reports[0] = mr;
     present[0] = true;
-    if (!active && elapsed_ms > ns::macro::total_ms(g_macro_steps) + 120) g_macro_running = false;
+    if (!active && elapsed_ms > ns::macro::total_ms(g_macro_steps) + 120) g_macro_running.store(false, std::memory_order_relaxed);
     return true;
 }
