@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/openssl
-          key: openssl-aarch64-3.0.13-v1
+          key: openssl-aarch64-3.0.13-v2
 
       - name: Cross-compile OpenSSL for aarch64
         if: steps.cache-openssl-aarch64.outputs.cache-hit != 'true'
@@ -103,7 +103,7 @@ jobs:
           wget -q https://github.com/openssl/openssl/releases/download/openssl-3.0.13/openssl-3.0.13.tar.gz
           tar xzf openssl-3.0.13.tar.gz
           cd openssl-3.0.13
-          CC=gcc-14 CXX=g++-14 ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
+          CC=gcc-14 CXX=g++-14 ./Configure linux-aarch64 no-shared --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
           make -j"$(nproc)"
           make install
 
@@ -112,7 +112,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/libwebsockets
-          key: lws-aarch64-4.3.3-v1
+          key: lws-aarch64-4.3.3-v2
 
       - name: Cross-compile libwebsockets for aarch64
         if: steps.cache-lws-aarch64.outputs.cache-hit != 'true'
@@ -128,6 +128,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14 \
             -DCMAKE_INSTALL_PREFIX=/tmp/libwebsockets \
             -DLWS_WITH_SSL=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR=/tmp/openssl \
             -DLWS_WITHOUT_TESTAPPS=ON
           make -j"$(nproc)"
@@ -146,6 +147,7 @@ jobs:
             -DREQUIRE_SDL_BT=ON \
             -DMINIUPNPC_INCLUDE_DIRS=/tmp/miniupnpc/include \
             -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR=/tmp/openssl \
             -Dlibwebsockets_DIR=/tmp/libwebsockets/lib/cmake/libwebsockets
 

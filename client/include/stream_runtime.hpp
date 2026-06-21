@@ -7,13 +7,13 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <stop_token>
 #include <string>
 #include <thread>
 #include <expected>
 
 extern std::atomic<bool> g_connected;
-extern std::jthread g_senderThread;
+extern std::thread g_senderThread;
+extern std::atomic<bool> g_senderRunning;
 extern uint8_t g_hmacKey[32];
 extern std::atomic<uint32_t> g_packetCount;
 extern std::mutex g_statusMutex;
@@ -58,9 +58,9 @@ void send_client_frame(SOCKET sock,
                        bool legacy_packet,
                        const ClientFrame& frame);
 int run_client_stream(const ClientStreamConfig& cfg,
-                      std::stop_token stoken,
+                      std::atomic<bool>& running,
                       std::string* err_out = nullptr);
-void sender_thread_main(std::stop_token stoken, std::string host, uint16_t port, bool legacy_udp);
+void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port, bool legacy_udp);
 std::expected<void, std::string> start_connection(const std::string& target);
 void stop_connection();
 

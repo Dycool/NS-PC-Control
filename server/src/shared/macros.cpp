@@ -142,7 +142,7 @@ std::expected<void, std::string> parse_one_command(const std::string& part, Step
     std::string cmd = trim(part.substr(0, last_space));
     std::string ms_s = trim(part.substr(last_space + 1));
     std::uint32_t ms = 0;
-    if (!parse_uint32_strict(ms_s, ms)) { err = "invalid duration in command: " + part; return false; }
+    if (!parse_uint32_strict(ms_s, ms)) return std::unexpected("invalid duration in command: " + part);
     st = Step{};
     st.duration_ms = ms;
     std::string up = upper(cmd);

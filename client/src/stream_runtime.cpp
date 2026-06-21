@@ -13,9 +13,11 @@
 #include <print>
 #include <iostream>
 #include <utility>
+#include <functional>
 
 std::atomic<bool> g_connected{false};
-std::jthread g_senderThread;
+std::thread g_senderThread;
+std::atomic<bool> g_senderRunning{false};
 uint8_t g_hmacKey[32]{};
 std::atomic<uint32_t> g_packetCount{0};
 std::mutex g_statusMutex;
@@ -171,7 +173,7 @@ void send_client_frame(SOCKET sock,
 }
 
 int run_client_stream(const ClientStreamConfig& cfg,
-                             std::stop_token stoken,
+                             std::atomic<bool>& running,
                              std::string* err_out) {
     if (!cfg.hmac_key) {
         if (err_out) *err_out = "Missing HMAC key.";
@@ -216,7 +218,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
 
     uint64_t last_probe_us = 0;
 
-    while (!stoken.stop_requested()) {
+    while (running.load(std::memory_order_relaxed)) {
         if (cfg.gui_features) {
             std::string upload;
             {
@@ -257,6 +259,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
         }
         if (last_probe_us != 0 && now - g_serverLastReplyUs.load(std::memory_order_relaxed) > 15000000ULL) {
             set_status_message("Lost connection to server");
+            running.store(false, std::memory_order_relaxed);
             break;
         }
 
@@ -278,7 +281,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
     return 0;
 }
 
-void sender_thread_main(std::stop_token stoken, std::string host, uint16_t port, bool legacy_udp) {
+void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port, bool legacy_udp) {
     ClientStreamConfig cfg{};
     cfg.host = std::move(host);
     cfg.port = port;
@@ -291,13 +294,14 @@ void sender_thread_main(std::stop_token stoken, std::string host, uint16_t port,
     set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
 
     std::string err;
-    int rc = run_client_stream(cfg, stoken, &err);
+    int rc = run_client_stream(cfg, running, &err);
     if (rc != 0 && !err.empty()) {
         g_lastError = err;
         set_status_message(err);
     }
 
     g_connected.store(false);
+    running.store(false, std::memory_order_relaxed);
 }
 
 std::expected<void, std::string> start_connection(const std::string& target) {
@@ -321,21 +325,21 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     g_lastError.clear();
     g_connected.store(true);
     if (g_senderThread.joinable()) {
-        g_senderThread.request_stop();
+        g_senderRunning = false;
         g_senderThread.join();
     }
-    g_senderThread = std::jthread(sender_thread_main, host, (uint16_t)port, false);
-    return true;
+    g_senderRunning = true;
+    g_senderThread = std::thread(sender_thread_main, std::ref(g_senderRunning), host, (uint16_t)port, false);
+    return {};
 }
 
 void stop_connection() {
-    if (!g_connected.load()) return;
-    g_connected.store(false);
+    const bool was_connected = g_connected.exchange(false);
     if (g_senderThread.joinable()) {
-        g_senderThread.request_stop();
+        g_senderRunning = false;
         g_senderThread.join();
     }
-    set_status_message("Disconnected");
+    if (was_connected) set_status_message("Disconnected");
 }
 
 NetworkRuntime::NetworkRuntime() {

@@ -17,6 +17,12 @@
 
 std::atomic<bool> g_cliRunning{true};
 
+void print_cli_usage(const char* exe) {
+    std::println(stderr,
+                 "Usage: {} --cli <RASPBERRY_PI_IP[:PORT]> [--hori] [-m MACRO] [-k [single|override]]",
+                 exe ? exe : "ns-client");
+}
+
 #ifdef _WIN32
 BOOL WINAPI cli_console_ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT ||
@@ -171,18 +177,7 @@ int cli_main(const std::vector<std::string>& original_args) {
     std::println("Started unified CLI client. Press Ctrl+C to stop.");
     std::string err;
     
-    std::stop_source ss;
-    std::thread monitor([&ss]() {
-        while (g_cliRunning.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        ss.request_stop();
-    });
-
-    int rc = run_client_stream(cfg, ss.get_token(), &err);
-    
-    g_cliRunning.store(false, std::memory_order_relaxed);
-    monitor.join();
+    int rc = run_client_stream(cfg, g_cliRunning, &err);
 
     if (rc != 0 && !err.empty()) std::println(stderr, "ERROR: {}", err);
     std::println("\nShutting down...");

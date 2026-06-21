@@ -450,12 +450,12 @@ void SDLInputManager::scan_locked(bool initial) {
                 d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
-            std::print("[sdl] controller slot={} name=\"%s\" vid=%04x pid=%04x rumble=%s trigger_rumble=%s profile=%s\n",
-                        d.slot + 1, d.name.c_str(), d.vid, d.pid,
-                        d.rumble_capable ? "yes" : "no",
-                        d.trigger_rumble_capable ? "yes" : "no",
-                        is_xbox_controller(d.name, d.vid) ? "xbox" :
-                        (is_playstation_controller(d.name, d.vid) ? "playstation" : "default"));
+            std::println("[sdl] controller slot={} name=\"{}\" vid={:04x} pid={:04x} rumble={} trigger_rumble={} profile={}",
+                         d.slot + 1, d.name, d.vid, d.pid,
+                         d.rumble_capable ? "yes" : "no",
+                         d.trigger_rumble_capable ? "yes" : "no",
+                         is_xbox_controller(d.name, d.vid) ? "xbox" :
+                         (is_playstation_controller(d.name, d.vid) ? "playstation" : "default"));
             const bool enable_motion = motion_enabled.load(std::memory_order_relaxed);
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) d.accel_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, enable_motion);
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) d.gyro_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, enable_motion);

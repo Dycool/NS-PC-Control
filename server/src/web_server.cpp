@@ -8,6 +8,7 @@
 #include <libwebsockets.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -19,21 +20,64 @@
 
 using namespace ns;
 
-void clear_udp_rumble_state(ClientSession& c) {
-    for (int i = 0; i < 4; i++) {
-        c.rumble[i] = {};
-        c.rumble_seq[i] = 0;
-        c.rumble_pending[i] = false;
+void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out) {
+    out.reset();
+    const ns::HIDReport* src[4] = {&in.p1, &in.p2, &in.p3, &in.p4};
+    ns::ExtendedHIDReport* dst[4] = {&out.p1, &out.p2, &out.p3, &out.p4};
+    for (int i = 0; i < 4; ++i) {
+        dst[i]->input = *src[i];
+        dst[i]->motion.reset();
+        dst[i]->has_motion = 0;
     }
 }
 
+bool extended_udp_packet_ok(const ExtendedUdpPacket& p) {
+    return p.magic == ns::PROTO_MAGIC &&
+           (p.version == ns::WEB_PROTO_VERSION || p.version == ns::PROTO_VERSION);
+}
+
+bool extended_udp3_packet_ok(const ExtendedUdpPacket3& p) {
+    return p.magic == ns::PROTO_MAGIC && p.version == ns::WEB_PROTO_VERSION_3;
+}
+
+bool extended_report_pad_present(const ns::ExtendedMultiReport& report, int subpad) {
+    const ns::ExtendedHIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    return subpad >= 0 && subpad < 4 && (pads[subpad]->input.vendor & ns::EXT_PAD_PRESENT) != 0;
+}
+
+bool extended3_report_pad_present(const ns::ExtendedMultiReport3& report, int subpad) {
+    const ns::ExtendedHIDReport3* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    return subpad >= 0 && subpad < 4 && (pads[subpad]->input.vendor & ns::EXT_PAD_PRESENT) != 0;
+}
+
+void extended3_to_extended_latest(const ns::ExtendedHIDReport3& in, ns::ExtendedHIDReport& out) {
+    out.reset();
+    out.input = in.input;
+    out.has_motion = in.has_motion;
+    if (in.has_motion) {
+        out.motion = in.motion[2];
+    }
+}
+
+void clear_udp_rumble_state(ClientSession& c) {
+    c.udp_rumble_enabled = false;
+    for (int i = 0; i < 4; i++)
+        c.udp_last_rumble_seq[i] = c.rumble_seq[i];
+}
+
 void enable_udp_rumble_state(ClientSession& c) {
-    c.rumble_enabled = true;
+    if (!c.udp_rumble_enabled) {
+        c.udp_rumble_enabled = true;
+        for (int i = 0; i < 4; i++)
+            c.udp_last_rumble_seq[i] = c.rumble_seq[i];
+    }
 }
 
 void reset_udp_client_session_locked(ClientSession& c) {
     c.active = false;
     c.first_pkt = true;
+    c.expected_seq = 0;
+    c.last_rx_us = 0;
     c.report.reset();
     clear_all_motion(c);
     c.uses_pad_presence = false;
@@ -45,11 +89,35 @@ void reset_udp_client_session_locked(ClientSession& c) {
 }
 
 void flush_rumble_to_udp(int sock, int client_idx) {
-    (void)sock;
-    (void)client_idx;
-    // UDP rumble pushing logic is intentionally separate from WebSocket server logic.
-    // However, it is required for UDP clients to receive rumble, but since this
-    // module handles both, UDP is managed in writers.cpp.
+    if (sock < 0 || client_idx < 0 || client_idx >= MAX_CLIENTS) return;
+
+    sockaddr_in dest{};
+    ns::RumblePacket pending[4]{};
+    bool has[4]{};
+
+    {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+        ClientSession& c = g_ctx.clients[client_idx];
+        if (!c.active || !c.udp_rumble_enabled) return;
+
+        dest = c.addr;
+        for (int s = 0; s < 4; ++s) {
+            uint32_t seq = c.rumble_seq[s];
+            if (seq != c.udp_last_rumble_seq[s]) {
+                pending[s] = c.rumble[s];
+                c.udp_last_rumble_seq[s] = seq;
+                has[s] = true;
+            }
+        }
+    }
+
+    for (int s = 0; s < 4; ++s) {
+        if (!has[s]) continue;
+        ssize_t sent = sendto(sock, &pending[s], sizeof(ns::RumblePacket), 0,
+                              reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+        if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::RumblePacket)))
+            std::println(stderr, "[udp] failed to send rumble packet: {}", std::strerror(errno));
+    }
 }
 
 struct SessionData {
@@ -57,6 +125,7 @@ struct SessionData {
     uint32_t ws_seq = 0;
     bool ws_first = true;
     uint32_t last_rumble_seq[4] = {};
+    uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
     bool has_pending_rumble[4] = {};
 };
@@ -127,6 +196,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->ws_first = true;
             for (int i = 0; i < 4; ++i) {
                 sd->last_rumble_seq[i] = 0;
+                sd->pending_rumble_seq[i] = 0;
                 sd->has_pending_rumble[i] = false;
             }
             lws_set_timer_usecs(wsi, 10 * 1000); // Poll rumble every 10ms
@@ -360,14 +430,14 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         case LWS_CALLBACK_SERVER_WRITEABLE: {
             if (sd->ws_slot < 0) break;
             
-            bool sent_any = false;
             for (int s = 0; s < 4; ++s) {
                 if (sd->has_pending_rumble[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(RumblePacket)];
                     memcpy(buffer + LWS_PRE, sd->pending_rumble[s], sizeof(RumblePacket));
-                    lws_write(wsi, buffer + LWS_PRE, sizeof(RumblePacket), LWS_WRITE_BINARY);
+                    int written = lws_write(wsi, buffer + LWS_PRE, sizeof(RumblePacket), LWS_WRITE_BINARY);
+                    if (written != static_cast<int>(sizeof(RumblePacket))) return -1;
                     sd->has_pending_rumble[s] = false;
-                    sent_any = true;
+                    sd->last_rumble_seq[s] = sd->pending_rumble_seq[s];
                     break; 
                 }
             }
@@ -389,8 +459,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     uint32_t seq = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                     if (seq != sd->last_rumble_seq[s]) {
                         memcpy(sd->pending_rumble[s], &g_ctx.clients[sd->ws_slot].rumble[s], sizeof(RumblePacket));
+                        sd->pending_rumble_seq[s] = seq;
                         sd->has_pending_rumble[s] = true;
-                        sd->last_rumble_seq[s] = seq;
                         new_rumble = true;
                     }
                 }

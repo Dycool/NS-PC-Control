@@ -3,7 +3,6 @@
 #include "shared/sha256.h"
 
 #include <print>
-#include <bit>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -25,7 +24,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -91,6 +89,15 @@ static bool parse_bind_arg(const std::string& raw, std::string& bind_addr, uint1
 }
 
 int main(int argc, char** argv) {
+    std::vector<std::string> cli_args;
+    cli_args.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        cli_args.emplace_back(argv[i] ? argv[i] : "");
+        if (cli_args.back() == "-wake") cli_args.back() = "--wake";
+        else if (cli_args.back() == "-hori") cli_args.back() = "--hori";
+        else if (cli_args.back() == "-bt") cli_args.back() = "--bt";
+    }
+
     uint16_t    port      = DEFAULT_PORT;
     std::string bind_addr = "0.0.0.0";
     bool        do_upnp   = false;
@@ -104,9 +111,9 @@ int main(int argc, char** argv) {
     std::string bind_arg;
     app.add_option("-b", bind_arg, "Bind UDP to an address and optional port (ADDR[:PORT] or PORT).");
     app.add_flag("-v", g_ctx.verbose, "Enable verbose output");
-    app.add_flag("-wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup, save config, test wake, then exit");
-    app.add_flag("-hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget (default exposes 64-byte mode)");
-    app.add_flag("-bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth/controller input and disable Switch 2 wake");
+    app.add_flag("--wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup, save config, test wake, then exit");
+    app.add_flag("--hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget (default exposes 64-byte mode)");
+    app.add_flag("--bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth/controller input and disable Switch 2 wake");
     app.add_flag("--upnp", do_upnp, "Forward the UDP port via UPnP for PC clients only");
     
     auto opt_w = app.add_option("-w", web_port, "Serve the browser webapp too, using this port or 8080")
@@ -116,7 +123,10 @@ int main(int argc, char** argv) {
     app.add_flag("-p", legacy_p, "")->group("");
 
     try {
-        app.parse(argc, argv);
+        std::vector<char*> cli_argv;
+        cli_argv.reserve(cli_args.size());
+        for (std::string& arg : cli_args) cli_argv.push_back(arg.data());
+        app.parse(static_cast<int>(cli_argv.size()), cli_argv.data());
     } catch (const CLI::ParseError &e) {
         return app.exit(e);
     }
@@ -131,7 +141,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    serve_http_webapp = *opt_w;
+    serve_http_webapp = opt_w->count() > 0;
 
     // -wake setup mode: run interactive config and exit (takes priority)
     if (g_ctx.switch2_wakeup_setup_requested)
@@ -186,8 +196,14 @@ int main(int argc, char** argv) {
 
     if (do_upnp) upnp_add_mapping(port);
 
-    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) { perror("socket"); return 1; }
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("fcntl");
+        close(sock);
+        return 1;
+    }
 
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -195,7 +211,7 @@ int main(int argc, char** argv) {
     int rbuf = 2 * 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf));
 
-    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = std::byteswap((uint16_t)port);
+    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(port);
     if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
         std::println(stderr, "error: invalid IPv4 bind address: {}", bind_addr);
         close(sock);
@@ -216,14 +232,16 @@ int main(int argc, char** argv) {
     std::jthread wt(writer_thread, PRO_WRITER_HZ);
     std::jthread st(stats_thread);
 
-    int ep = epoll_create1(0); epoll_event ev{}; ev.events = EPOLLIN; ev.data.fd = sock; epoll_ctl(ep, EPOLL_CTL_ADD, sock, &ev);
-
     std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
-    epoll_event evs[4];
+    pollfd udp_poll{};
+    udp_poll.fd = sock;
+    udp_poll.events = POLLIN;
 
     while (g_ctx.running.load(std::memory_order_relaxed)) {
-        int n = epoll_wait(ep, evs, 4, 200);
+        udp_poll.revents = 0;
+        int n = poll(&udp_poll, 1, 200);
         if (n <= 0) continue;
+        if ((udp_poll.revents & POLLIN) == 0) continue;
 
         sockaddr_in sender{};
         socklen_t slen;
@@ -528,11 +546,11 @@ int main(int argc, char** argv) {
                 flush_rumble_to_udp(sock, client_idx);
             }
         } // drain loop
-    } // epoll loop
+    } // poll loop
 
     std::println("[backend] shutting down");
     upnp_remove_mapping(port);
-    close(ep); close(sock);
+    close(sock);
     // std::jthread auto-joins and requests stop on destruction.
     // Ensure all loop threads terminate.
     wt.request_stop(); st.request_stop();

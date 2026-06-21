@@ -105,7 +105,7 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
 
 bool detect_server_is_legacy(SOCKET sock, const sockaddr_in& dest) {
     ns::ServerInfoProbe probe{};
-    send_all_udp(sock, dest, &probe, sizeof(probe));
+    send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe)));
     const uint64_t deadline = ns::now_us() + 150000ULL;
     while (ns::now_us() < deadline) {
         ns::ServerInfoReply reply{};
@@ -149,7 +149,7 @@ bool probe_server_sync(const std::string& host, int port) {
     while (ns::now_us() < deadline) {
         // Retransmit probe periodically in case of packet loss
         if (send_count < max_sends) {
-            send_all_udp(sock, dest, &probe, sizeof(probe));
+            send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe)));
             send_count++;
         }
 

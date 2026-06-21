@@ -12,48 +12,11 @@
 
 using namespace ns;
 
-ServerContext g_ctx;
-
-// ── Global flags ──────────────────────────────────────────────────────────────
-std::atomic<bool> g_ctx.running{true};
-bool g_ctx.verbose = false;
-
-// Normal-rumble build: decode console rumble into classic low/high packets only.
-std::string g_ctx.usb_serial = "NSBRIDGE000001";
-bool g_ctx.legacy_mode = false;
-
-// Built-in USB gadget lifecycle.  ns-backend can now create/bind the
-// USB gamepad gadget itself on startup and unbind/remove it
-// on shutdown, so setup_gadget.sh is no longer needed at runtime.
-std::atomic<bool> g_ctx.gadget_setup_attempted{false};
-
-// Experimental Switch 2 wake helper. When at least one client is connected
-// but the USB HID host disappears/looks asleep, briefly advertise the same
-// Nintendo manufacturer payload observed from a Joy-Con 2 HOME wake attempt.
-// This is only the BLE advertisement layer; if the console requires a full
-// bonded Joy-Con 2 GATT session, the advert alone may not be enough.
-bool g_ctx.switch2_wake_adv_enabled = false;
-bool g_ctx.switch2_wakeup_setup_requested = false;
-std::string g_ctx.switch2_wakeup_config_path = "/etc/ns-pc-control/switch2_wakeup.conf";
-std::string g_ctx.switch2_wake_mac;
-std::string g_ctx.switch2_wake_adv_hex;
-std::string g_ctx.switch2_wake_hci_dev = "hci0";
-bool g_ctx.switch2_wake_config_loaded = false;
-std::atomic<bool> g_ctx.switch2_wake_adv_running{false};
-std::atomic<uint64_t> g_ctx.switch2_last_wake_adv_us{0};
-std::atomic<bool> g_ctx.switch2_usb_host_connected{false};
-std::atomic<uint64_t> g_ctx.switch2_last_usb_activity_us{0};
-std::atomic<bool> g_ctx.switch2_force_next_wake{false};
-std::atomic<bool> g_ctx.switch2_delayed_wake_check_running{false};
-std::atomic<uint64_t> g_ctx.switch2_suspend_disconnect_seq{0};
-
-// HMAC authentication (key derived from DEFAULT_SECRET at startup)
-uint8_t  g_ctx.hmac_key[32];
-
-RateSlot g_ctx.rate_table[RATE_TABLE];
-
-std::mutex    g_ctx.mtx[MAX_CLIENTS];
-ClientSession g_ctx.clients[MAX_CLIENTS];
+ServerContext g_ctx{
+    .usb_serial = "NSBRIDGE000001",
+    .switch2_wakeup_config_path = "/etc/ns-pc-control/switch2_wakeup.conf",
+    .switch2_wake_hci_dev = "hci0",
+};
 
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
     // All runtime timestamps should come from ns::now_us()/steady_clock, but
@@ -153,20 +116,9 @@ void set_motion_samples(ClientSession& c, int subpad, const MotionReport samples
     c.motion_last_collect_us[subpad] = now_us();
 }
 
-// Diagnostics
-std::atomic<uint64_t> g_ctx.pkts_rx{0};
-std::atomic<uint64_t> g_ctx.hid_writes{0};
-
-
 // ── Server-side macro playback ───────────────────────────────────────────────────────────
 // Shared parser/export/playback helpers live in include/shared/macros.hpp.
 // This file keeps only server-specific runtime/upload wiring.
-std::mutex g_ctx.server_macro_mtx;
-ServerMacroRuntime g_ctx.server_macros[MAX_CLIENTS][4];
-
-std::mutex g_ctx.server_macro_upload_mtx;
-ServerMacroUploadRuntime g_ctx.server_macro_uploads[MAX_CLIENTS];
-
 bool rate_allow(uint32_t ip);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);
 void maybe_send_switch2_wake_advert(const char* reason);
