@@ -26,7 +26,11 @@ bool upnp_add_mapping(uint16_t port) {
     struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, nullptr);
     if (!devlist) return false;
     
+#if MINIUPNPC_API_VERSION >= 18
     int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data, g_upnp_lan_addr, sizeof(g_upnp_lan_addr), nullptr, 0);
+#else
+    int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data, g_upnp_lan_addr, sizeof(g_upnp_lan_addr));
+#endif
     freeUPNPDevlist(devlist);
     
     if (igd != 1 && igd != 2) { FreeUPNPUrls(&g_upnp_urls); return false; }
