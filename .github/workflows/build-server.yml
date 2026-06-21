@@ -112,7 +112,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/libwebsockets
-          key: lws-aarch64-4.3.10-v2
+          key: lws-aarch64-4.3.10-openssl-3.0.13-v3
 
       - name: Cross-compile libwebsockets for aarch64
         if: steps.cache-lws-aarch64.outputs.cache-hit != 'true'
@@ -121,6 +121,7 @@ jobs:
           tar xzf v4.3.10.tar.gz
           cd libwebsockets-4.3.10
           mkdir build && cd build
+          OPENSSL_LIB_DIR="$(dirname "$(find /tmp/openssl -type f -name libcrypto.a -print -quit)")"
           cmake .. \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
@@ -130,6 +131,9 @@ jobs:
             -DLWS_WITH_SSL=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR=/tmp/openssl \
+            -DOPENSSL_INCLUDE_DIR=/tmp/openssl/include \
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_LIB_DIR/libssl.a" \
+            -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_LIB_DIR/libcrypto.a" \
             -DLWS_WITHOUT_TESTAPPS=ON
           make -j"$(nproc)"
           make install
@@ -149,6 +153,7 @@ jobs:
             -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR=/tmp/openssl \
+            -DOPENSSL_INCLUDE_DIR=/tmp/openssl/include \
             -Dlibwebsockets_DIR=/tmp/libwebsockets/lib/cmake/libwebsockets
 
           make -j"$(nproc)"
