@@ -87,7 +87,7 @@ int cli_main(const std::vector<std::string>& original_args) {
     for (const auto& a : args) argv_ptrs.push_back(a.c_str());
 
     try {
-        app.parse(argv_ptrs.size(), argv_ptrs.data());
+        app.parse((int)argv_ptrs.size(), argv_ptrs.data());
     } catch (const CLI::ParseError &e) {
         return app.exit(e);
     }

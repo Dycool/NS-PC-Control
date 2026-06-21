@@ -12,11 +12,14 @@
 
 using namespace ns;
 
-ServerContext g_ctx{
-    .usb_serial = "NSBRIDGE000001",
-    .switch2_wakeup_config_path = "/etc/ns-pc-control/switch2_wakeup.conf",
-    .switch2_wake_hci_dev = "hci0",
-};
+ServerContext create_default_ctx() {
+    ServerContext ctx;
+    ctx.usb_serial = "NSBRIDGE000001";
+    ctx.switch2_wakeup_config_path = "/etc/ns-pc-control/switch2_wakeup.conf";
+    ctx.switch2_wake_hci_dev = "hci0";
+    return ctx;
+}
+ServerContext g_ctx = create_default_ctx();
 
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
     // All runtime timestamps should come from ns::now_us()/steady_clock, but

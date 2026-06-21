@@ -531,7 +531,7 @@ void MacroDialog::toggleRecord() {
                 e.name = "Recorded Macro";
                 e.hotkey = "";
                 e.json = recorded;
-                upsert_macro_entry(e, true);
+                (void)upsert_macro_entry(e, true);
                 save_macro_entries_to_disk();
             }
             rebuild();

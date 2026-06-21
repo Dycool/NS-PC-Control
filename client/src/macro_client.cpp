@@ -202,7 +202,7 @@ void poll_macro_entry_hotkeys() {
             if (down && !was_down) to_run.push_back(e.json);
         }
     }
-    for (const auto& json : to_run) start_macro_text(json);
+    for (const auto& json : to_run) (void)start_macro_text(json);
 }
 
 ns::macro::Recorder g_macro_recorder;

@@ -118,7 +118,8 @@ static void start_bluetooth_pairing_window() {
             "done; ";
 
         run_pairing_window_script(script);
-        std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
+        int r1 = std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
+        (void)r1;
         std::println("[bt] pairing/reconnect helper stopped");
     });
 }
@@ -143,7 +144,8 @@ static void disconnect_connected_bluetooth_gamepads() {
             "bluetoothctl info \"$mac\" 2>/dev/null | grep -q 'Connected: yes' || continue; "
             "disconnect_gamepad \"$mac\" \"$name_rest\"; "
         "done";
-    std::system(script);
+    int r2 = std::system(script);
+    (void)r2;
 }
 
 using namespace ns;

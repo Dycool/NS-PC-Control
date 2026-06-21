@@ -159,7 +159,6 @@ jobs:
       - name: Build client
         run: |
           cmake -S client -B client/build -G Ninja \
-            -DCMAKE_C_COMPILER=gcc-14 \
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static"
@@ -236,6 +235,7 @@ jobs:
         run: |
           git clone --depth 1 --branch "$SDL_REF" https://github.com/libsdl-org/SDL.git /tmp/SDL3
           cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="14.0" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$HOME/.local/sdl3-static" \
             -DSDL_SHARED=OFF \

@@ -8,7 +8,7 @@
 
 static inline void hmac_sha256(std::span<const uint8_t> key, std::span<const uint8_t> msg, std::span<uint8_t, 32> out) {
     unsigned int len = 32;
-    HMAC(EVP_sha256(), key.data(), key.size(), msg.data(), msg.size(), out.data(), &len);
+    HMAC(EVP_sha256(), key.data(), (int)key.size(), msg.data(), (int)msg.size(), out.data(), &len);
 }
 
 static inline int hmac_verify(std::span<const uint8_t> key, std::span<const uint8_t> msg, std::span<const uint8_t> tag) {
