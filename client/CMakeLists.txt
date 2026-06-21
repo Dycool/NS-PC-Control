@@ -9,7 +9,20 @@ find_package(Threads REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-set(NS_CLIENT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/ns-client.cpp")
+set(NS_CLIENT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/main.cpp")
+set(NS_CLIENT_EXTRA_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/cli.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/dialogs.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/input_settings.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/macro_client.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/main_window.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/qt_helpers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/rumble_client.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/stream_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/udp_protocol.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../server/src/shared/macros.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../server/src/shared/sdl_input.cpp"
+)
 set(NS_CLIENT_QRC "${CMAKE_CURRENT_LIST_DIR}/resources.qrc")
 
 set(CMAKE_AUTORCC ON)
@@ -18,6 +31,7 @@ add_executable(ns-client
     WIN32
     MACOSX_BUNDLE
     "${NS_CLIENT_SOURCE}"
+    ${NS_CLIENT_EXTRA_SOURCES}
     "${NS_CLIENT_QRC}"
 )
 
@@ -28,6 +42,11 @@ set_target_properties(ns-client PROPERTIES
 target_compile_definitions(ns-client PRIVATE
     SDL_MAIN_HANDLED
     NS_CLIENT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}"
+)
+
+target_include_directories(ns-client PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../server/include"
 )
 
 target_link_libraries(ns-client PRIVATE

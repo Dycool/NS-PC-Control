@@ -5,6 +5,8 @@ on:
     paths:
       - 'client/**'
       - 'server/include/**'
+      - 'server/src/shared/**'
+      - '.github/workflows/build-clients.yml'
   workflow_dispatch:
   workflow_call:
 

@@ -1,0 +1,40 @@
+#pragma once
+
+#include "platform.hpp"
+#include "shared/macros.hpp"
+#include "udp_protocol.hpp"
+
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+extern uint32_t g_macro_udp_seq;
+extern std::mutex g_macro_mtx;
+extern std::vector<ns::macro::Step> g_macro_steps;
+extern bool g_macro_running;
+extern uint64_t g_macro_start_us;
+extern std::string g_macro_upload_pending;
+extern std::vector<ns::macro::Entry> g_macro_entries;
+extern std::unordered_map<std::string, bool> g_macro_hotkey_down;
+
+uint32_t next_macro_upload_id();
+bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                           const std::string& json_or_commands, uint8_t subpad = 0);
+int find_macro_entry_by_name(const std::string& name);
+std::string unique_macro_name(const std::string& base_raw);
+bool macro_hotkey_conflicts(const std::string& hotkey, std::string* conflict_name = nullptr);
+bool macro_entry_hotkey_conflicts(const std::string& hotkey, int skip_index, std::string* conflict_name = nullptr);
+void rebuild_macro_hotkey_state();
+void load_macro_entries();
+bool save_macro_entries_to_disk();
+bool start_macro_text(const std::string& txt, std::string* err_out = nullptr);
+bool upsert_macro_entry(ns::macro::Entry e, bool force_unique_name, std::string* err_out = nullptr);
+void poll_macro_entry_hotkeys();
+void macro_record_start();
+std::string macro_record_stop();
+void macro_record_sample(const ns::HIDReport& report);
+bool poll_macro_record_p1(ns::HIDReport& report);
+void macro_record_sample_p1();
+bool apply_macro_override(ns::HIDReport logical_reports[4], bool present[4], bool has_motion[4]);

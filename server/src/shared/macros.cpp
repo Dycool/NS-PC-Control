@@ -1,125 +1,36 @@
-#pragma once
-
-// Shared macro helpers for NS-PC-Control clients/server.
-
-#include "protocol.hpp"
+#include "shared/macros.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <cstddef>
-#include <cstdint>
 #include <fstream>
 #include <limits>
 #include <sstream>
-#include <string>
 #include <utility>
-#include <vector>
 
 namespace ns {
 namespace macro {
 
-// Grammar:
-//   WAIT 100                         -> release macro inputs for 100ms
-//   A 100                            -> hold A for 100ms
-//   R+LSTICK_LEFT 450                -> hold R and steer left for 450ms
-//   LOOP 200                         -> repeat the block since previous LOOP/start 200 times
-// Accepted JSON:
-//   {"name":"...","commands":"WAIT 100; A 100"}
-//   {"name":"...","commands":["WAIT 100", "A 100"]}
-//   ["WAIT 100", "A 100"]
-inline constexpr std::size_t JSON_MAX_BYTES = 50ULL * 1024ULL * 1024ULL;
-inline constexpr std::size_t MAX_EXPANDED_STEPS = 1000000ULL;
-
-inline constexpr std::uint32_t UDP_MAGIC       = 0x4E534D43u; // 'NSMC' legacy one-datagram upload
-inline constexpr std::uint32_t UDP_CHUNK_MAGIC = 0x4E534D4Bu; // 'NSMK' chunked upload
-inline constexpr std::size_t   UDP_TEXT_MAX    = JSON_MAX_BYTES;
-inline constexpr std::size_t   UDP_CHUNK_MAX   = 1200;
-inline constexpr std::uint8_t  CHUNK_FLAG_LAST = 0x01;
-
-struct Step {
-    std::uint16_t buttons = 0;
-    std::uint8_t hat = ns::HAT_NEUTRAL;
-    std::uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
-    bool has_lstick = false;
-    bool has_rstick = false;
-    std::uint32_t duration_ms = 0;
-};
-
-struct Entry {
-    std::string name;
-    std::string hotkey;
-    std::string json;
-};
-
-#ifdef _MSC_VER
-#pragma pack(push, 1)
-#endif
-struct MacroUdpHeaderWire {
-    std::uint32_t magic;
-    std::uint8_t version;
-    std::uint8_t subpad;
-    std::uint32_t text_len;
-    std::uint32_t seq;
-}
-#ifndef _MSC_VER
-__attribute__((packed))
-#endif
-;
-#ifdef _MSC_VER
-#pragma pack(pop)
-#endif
-
-inline constexpr std::size_t UDP_HEADER_SIZE = sizeof(MacroUdpHeaderWire);
-inline constexpr std::size_t udp_auth_size(std::size_t text_len) { return UDP_HEADER_SIZE + text_len; }
-
-#ifdef _MSC_VER
-#pragma pack(push, 1)
-#endif
-struct MacroUdpChunkHeaderWire {
-    std::uint32_t magic;
-    std::uint8_t version;
-    std::uint8_t subpad;
-    std::uint8_t flags;
-    std::uint8_t reserved;
-    std::uint32_t upload_id;
-    std::uint32_t chunk_index;
-    std::uint32_t chunk_count;
-    std::uint32_t total_len;
-    std::uint16_t chunk_len;
-    std::uint32_t seq;
-}
-#ifndef _MSC_VER
-__attribute__((packed))
-#endif
-;
-#ifdef _MSC_VER
-#pragma pack(pop)
-#endif
-
-inline constexpr std::size_t CHUNK_HEADER_SIZE = sizeof(MacroUdpChunkHeaderWire);
-static_assert(CHUNK_HEADER_SIZE == 30, "Macro chunk header must stay 30 bytes");
-
-inline std::string& last_error_storage() {
+std::string& last_error_storage() {
     static thread_local std::string err;
     return err;
 }
 
-inline void set_error(const std::string& e) { last_error_storage() = e; }
-inline const std::string& last_error() { return last_error_storage(); }
+void set_error(const std::string& e) { last_error_storage() = e; }
+const std::string& last_error() { return last_error_storage(); }
 
-inline std::string trim(std::string s) {
+std::string trim(std::string s) {
     auto not_space = [](unsigned char c) { return !std::isspace(c); };
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
     s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
     return s;
 }
 
-inline std::string upper(std::string s) {
+std::string upper(std::string s) {
     for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     return s;
 }
 
-inline bool is_hex4(const std::string& s, std::size_t pos) {
+bool is_hex4(const std::string& s, std::size_t pos) {
     if (pos + 4 > s.size()) return false;
     for (std::size_t i = 0; i < 4; ++i) {
         if (!std::isxdigit(static_cast<unsigned char>(s[pos + i]))) return false;
@@ -127,7 +38,7 @@ inline bool is_hex4(const std::string& s, std::size_t pos) {
     return true;
 }
 
-inline bool read_json_string_at(const std::string& raw, std::size_t& pos, std::string& out, std::string& err) {
+bool read_json_string_at(const std::string& raw, std::size_t& pos, std::string& out, std::string& err) {
     if (pos >= raw.size() || raw[pos] != '"') { err = "expected JSON string"; return false; }
     out.clear();
     ++pos;
@@ -162,13 +73,13 @@ inline bool read_json_string_at(const std::string& raw, std::size_t& pos, std::s
     return false;
 }
 
-inline void skip_ws(const std::string& raw, std::size_t& pos) {
+void skip_ws(const std::string& raw, std::size_t& pos) {
     while (pos < raw.size() && std::isspace(static_cast<unsigned char>(raw[pos]))) ++pos;
 }
 
-inline bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err);
+bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err);
 
-inline bool skip_json_array(const std::string& raw, std::size_t& pos, std::string& err) {
+bool skip_json_array(const std::string& raw, std::size_t& pos, std::string& err) {
     if (pos >= raw.size() || raw[pos] != '[') { err = "expected JSON array"; return false; }
     ++pos;
     skip_ws(raw, pos);
@@ -185,7 +96,7 @@ inline bool skip_json_array(const std::string& raw, std::size_t& pos, std::strin
     return false;
 }
 
-inline bool skip_json_object(const std::string& raw, std::size_t& pos, std::string& err) {
+bool skip_json_object(const std::string& raw, std::size_t& pos, std::string& err) {
     if (pos >= raw.size() || raw[pos] != '{') { err = "expected JSON object"; return false; }
     ++pos;
     skip_ws(raw, pos);
@@ -208,7 +119,7 @@ inline bool skip_json_object(const std::string& raw, std::size_t& pos, std::stri
     return false;
 }
 
-inline bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err) {
+bool skip_json_value(const std::string& raw, std::size_t& pos, std::string& err) {
     skip_ws(raw, pos);
     if (pos >= raw.size()) { err = "missing JSON value"; return false; }
     if (raw[pos] == '"') { std::string tmp; return read_json_string_at(raw, pos, tmp, err); }
@@ -228,7 +139,7 @@ inline bool skip_json_value(const std::string& raw, std::size_t& pos, std::strin
     return false;
 }
 
-inline bool extract_commands_text(const std::string& raw_in, std::string& out, std::string& err) {
+bool extract_commands_text(const std::string& raw_in, std::string& out, std::string& err) {
     if (raw_in.size() > JSON_MAX_BYTES) { err = "macro JSON exceeds 50MB limit"; return false; }
     std::string raw = trim(raw_in);
     out.clear();
@@ -308,7 +219,7 @@ inline bool extract_commands_text(const std::string& raw_in, std::string& out, s
     return true;
 }
 
-inline bool parse_uint32_strict(const std::string& s, std::uint32_t& out) {
+bool parse_uint32_strict(const std::string& s, std::uint32_t& out) {
     if (s.empty()) return false;
     std::uint64_t v = 0;
     for (char c : s) {
@@ -321,7 +232,7 @@ inline bool parse_uint32_strict(const std::string& s, std::uint32_t& out) {
     return true;
 }
 
-inline std::uint16_t button_bit(const std::string& token) {
+std::uint16_t button_bit(const std::string& token) {
     std::string name = upper(trim(token));
     if (name == "A" || name == "BTN_A") return ns::BTN_A;
     if (name == "B" || name == "BTN_B") return ns::BTN_B;
@@ -340,7 +251,7 @@ inline std::uint16_t button_bit(const std::string& token) {
     return 0;
 }
 
-inline bool apply_token(const std::string& raw_tok, Step& st, std::string& err,
+bool apply_token(const std::string& raw_tok, Step& st, std::string& err,
                         bool& du, bool& dd, bool& dl, bool& dr,
                         bool& llu, bool& lld, bool& lll, bool& llr,
                         bool& rru, bool& rrd, bool& rrl, bool& rrr) {
@@ -368,7 +279,7 @@ inline bool apply_token(const std::string& raw_tok, Step& st, std::string& err,
     return false;
 }
 
-inline bool parse_one_command(const std::string& part, Step& st, std::string& err) {
+bool parse_one_command(const std::string& part, Step& st, std::string& err) {
     std::size_t last_space = part.find_last_of(" \t");
     if (last_space == std::string::npos) { err = "missing duration in command: " + part; return false; }
     std::string cmd = trim(part.substr(0, last_space));
@@ -414,8 +325,8 @@ inline bool parse_one_command(const std::string& part, Step& st, std::string& er
     return true;
 }
 
-inline bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
-                          std::vector<std::string>* normalized = nullptr) {
+bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
+                          std::vector<std::string>* normalized) {
     last_error_storage().clear();
     steps.clear();
     if (normalized) normalized->clear();
@@ -462,13 +373,13 @@ inline bool validate_text(const std::string& raw_text, std::vector<Step>& steps,
     return true;
 }
 
-inline std::vector<Step> parse_text(const std::string& raw_text) {
+std::vector<Step> parse_text(const std::string& raw_text) {
     std::vector<Step> steps;
     validate_text(raw_text, steps, nullptr);
     return steps;
 }
 
-inline std::string read_text_file_limited(const std::string& path, std::string* err = nullptr) {
+std::string read_text_file_limited(const std::string& path, std::string* err) {
     if (err) err->clear();
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) { if (err) *err = "could not open file"; set_error("cannot open macro file"); return {}; }
@@ -482,7 +393,7 @@ inline std::string read_text_file_limited(const std::string& path, std::string* 
     return raw;
 }
 
-inline std::string escape_json(const std::string& s) {
+std::string escape_json(const std::string& s) {
     std::string out;
     for (unsigned char c : s) {
         switch (c) {
@@ -500,7 +411,7 @@ inline std::string escape_json(const std::string& s) {
     return out;
 }
 
-inline bool json_find_string_value(const std::string& raw, const std::string& key, std::string& out) {
+bool json_find_string_value(const std::string& raw, const std::string& key, std::string& out) {
     std::size_t pos = 0;
     std::string err;
     while (pos < raw.size()) {
@@ -523,7 +434,7 @@ inline bool json_find_string_value(const std::string& raw, const std::string& ke
     return false;
 }
 
-inline std::string extract_name_or_default(const std::string& raw, const std::string& fallback_name) {
+std::string extract_name_or_default(const std::string& raw, const std::string& fallback_name) {
     std::string name;
     if (json_find_string_value(raw, "name", name)) {
         name = trim(name);
@@ -532,14 +443,9 @@ inline std::string extract_name_or_default(const std::string& raw, const std::st
     return fallback_name;
 }
 
-enum class InvalidPrettyMode {
-    ReturnRaw,
-    FallbackWait
-};
-
-inline std::string pretty_json(const std::string& raw_text,
-                               const std::string& fallback_name = "Macro",
-                               InvalidPrettyMode invalid_mode = InvalidPrettyMode::ReturnRaw) {
+std::string pretty_json(const std::string& raw_text,
+                               const std::string& fallback_name,
+                               InvalidPrettyMode invalid_mode) {
     std::vector<Step> steps;
     std::vector<std::string> lines;
     if (!validate_text(raw_text, steps, &lines)) {
@@ -561,7 +467,7 @@ inline std::string pretty_json(const std::string& raw_text,
     return out;
 }
 
-inline std::string pretty_json_with_forced_name(const std::string& raw_text, const std::string& forced_name) {
+std::string pretty_json_with_forced_name(const std::string& raw_text, const std::string& forced_name) {
     std::vector<Step> steps;
     std::vector<std::string> lines;
     if (!validate_text(raw_text, steps, &lines)) return raw_text;
@@ -579,10 +485,10 @@ inline std::string pretty_json_with_forced_name(const std::string& raw_text, con
     return out;
 }
 
-inline bool validate_to_pretty_json(const std::string& raw_text,
+bool validate_to_pretty_json(const std::string& raw_text,
                                     std::string& pretty,
                                     std::string& err,
-                                    const std::string& fallback_name = "Macro") {
+                                    const std::string& fallback_name) {
     std::vector<Step> steps;
     if (!validate_text(raw_text, steps, nullptr)) { err = last_error(); return false; }
     pretty = pretty_json(raw_text, fallback_name);
@@ -590,7 +496,7 @@ inline bool validate_to_pretty_json(const std::string& raw_text,
     return true;
 }
 
-inline std::uint64_t total_ms(const std::vector<Step>& steps) {
+std::uint64_t total_ms(const std::vector<Step>& steps) {
     std::uint64_t total = 0;
     for (const auto& st : steps) {
         if (std::numeric_limits<std::uint64_t>::max() - total < st.duration_ms) return std::numeric_limits<std::uint64_t>::max();
@@ -599,7 +505,7 @@ inline std::uint64_t total_ms(const std::vector<Step>& steps) {
     return total;
 }
 
-inline bool step_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, Step& out) {
+bool step_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, Step& out) {
     std::uint64_t cursor = 0;
     for (const auto& st : steps) {
         std::uint64_t next = cursor + st.duration_ms;
@@ -609,7 +515,7 @@ inline bool step_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, St
     return false;
 }
 
-inline bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HIDReport& out) {
+bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HIDReport& out) {
     out.reset();
     Step st{};
     if (!step_at(steps, elapsed_ms, st)) return false;
@@ -620,13 +526,11 @@ inline bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, 
     return true;
 }
 
-using NormalizeHotkeyFn = std::string (*)(const std::string&);
-
-inline std::string normalize_hotkey_or_trim(const std::string& s, NormalizeHotkeyFn normalize) {
+std::string normalize_hotkey_or_trim(const std::string& s, NormalizeHotkeyFn normalize) {
     return normalize ? normalize(s) : trim(s);
 }
 
-inline bool find_json_array_range_for_key(const std::string& raw, const std::string& key,
+bool find_json_array_range_for_key(const std::string& raw, const std::string& key,
                                           std::size_t& begin, std::size_t& end) {
     std::size_t pos = 0;
     std::string err;
@@ -666,7 +570,7 @@ inline bool find_json_array_range_for_key(const std::string& raw, const std::str
     return false;
 }
 
-inline std::vector<std::string> split_top_level_objects(const std::string& raw,
+std::vector<std::string> split_top_level_objects(const std::string& raw,
                                                         std::size_t begin,
                                                         std::size_t end) {
     std::vector<std::string> out;
@@ -695,7 +599,7 @@ inline std::vector<std::string> split_top_level_objects(const std::string& raw,
     return out;
 }
 
-inline std::string entry_to_object_json(const Entry& e, NormalizeHotkeyFn normalize = nullptr, int indent_spaces = 4) {
+std::string entry_to_object_json(const Entry& e, NormalizeHotkeyFn normalize, int indent_spaces) {
     std::vector<Step> steps;
     std::vector<std::string> lines;
     if (!validate_text(e.json, steps, &lines)) lines = {"WAIT 200"};
@@ -717,7 +621,7 @@ inline std::string entry_to_object_json(const Entry& e, NormalizeHotkeyFn normal
     return out;
 }
 
-inline std::string entries_to_json(const std::vector<Entry>& entries, NormalizeHotkeyFn normalize = nullptr) {
+std::string entries_to_json(const std::vector<Entry>& entries, NormalizeHotkeyFn normalize) {
     std::string out;
     out += "{\n";
     out += "  \"macros\": [\n";
@@ -731,10 +635,10 @@ inline std::string entries_to_json(const std::vector<Entry>& entries, NormalizeH
     return out;
 }
 
-inline bool parse_entries_text(const std::string& raw,
+bool parse_entries_text(const std::string& raw,
                                std::vector<Entry>& out,
                                std::string& err,
-                               NormalizeHotkeyFn normalize = nullptr) {
+                               NormalizeHotkeyFn normalize) {
     out.clear();
     err.clear();
     if (raw.size() > JSON_MAX_BYTES) { err = "macro JSON exceeds 50MB limit"; return false; }
@@ -768,20 +672,15 @@ inline bool parse_entries_text(const std::string& raw,
     return true;
 }
 
-struct RecordFrame {
-    std::uint16_t buttons = 0;
-    std::uint8_t hat = ns::HAT_NEUTRAL;
-    std::int8_t lx = 0, ly = 0, rx = 0, ry = 0;
-};
 
-inline bool operator==(const RecordFrame& a, const RecordFrame& b) {
+bool operator==(const RecordFrame& a, const RecordFrame& b) {
     return a.buttons == b.buttons && a.hat == b.hat &&
            a.lx == b.lx && a.ly == b.ly && a.rx == b.rx && a.ry == b.ry;
 }
 
-inline bool operator!=(const RecordFrame& a, const RecordFrame& b) { return !(a == b); }
+bool operator!=(const RecordFrame& a, const RecordFrame& b) { return !(a == b); }
 
-inline std::string buttons_to_text(std::uint16_t buttons) {
+std::string buttons_to_text(std::uint16_t buttons) {
     struct BtnName { std::uint16_t bit; const char* name; };
     static const BtnName names[] = {
         {ns::BTN_A, "A"}, {ns::BTN_B, "B"}, {ns::BTN_X, "X"}, {ns::BTN_Y, "Y"},
@@ -799,7 +698,7 @@ inline std::string buttons_to_text(std::uint16_t buttons) {
     return out;
 }
 
-inline RecordFrame record_frame_from_report(const ns::HIDReport& report) {
+RecordFrame record_frame_from_report(const ns::HIDReport& report) {
     auto axis_dir = [](std::uint8_t v) -> std::int8_t {
         if (v < 80) return -1;
         if (v > 176) return 1;
@@ -815,12 +714,12 @@ inline RecordFrame record_frame_from_report(const ns::HIDReport& report) {
     return f;
 }
 
-inline void append_token(std::string& out, const char* token) {
+void append_token(std::string& out, const char* token) {
     if (!out.empty()) out += "+";
     out += token;
 }
 
-inline std::string record_frame_to_text(const RecordFrame& f) {
+std::string record_frame_to_text(const RecordFrame& f) {
     std::string out = buttons_to_text(f.buttons);
     switch (f.hat) {
         case ns::HAT_N:  append_token(out, "DPAD_UP"); break;
@@ -844,102 +743,90 @@ inline std::string record_frame_to_text(const RecordFrame& f) {
     return out;
 }
 
-struct Recorder {
-    bool recording = false;
-    RecordFrame last_frame{};
-    bool have_frame = false;
-    bool has_input = false;
-    std::uint64_t last_change_us = 0;
-    std::string commands;
 
-    void start(std::uint64_t now_us) {
-        recording = true;
-        last_frame = RecordFrame{};
-        have_frame = false;
-        has_input = false;
-        last_change_us = now_us;
-        commands.clear();
-    }
 
-    void append(const RecordFrame& frame, std::uint64_t duration_ms) {
-        if (duration_ms < 10) return;
-        if (!commands.empty()) commands += "; ";
-        std::string combo = record_frame_to_text(frame);
-        if (combo.empty()) {
-            commands += "WAIT " + std::to_string(duration_ms);
-        } else {
-            has_input = true;
-            commands += combo + " " + std::to_string(duration_ms);
-        }
-    }
-
-    void sample(const ns::HIDReport& report, std::uint64_t now_us, bool macro_playback_running = false) {
-        if (!recording || macro_playback_running) return;
-        RecordFrame frame = record_frame_from_report(report);
-        if (!have_frame) {
-            last_frame = frame;
-            have_frame = true;
-            last_change_us = now_us;
-            return;
-        }
-        if (frame != last_frame) {
-            append(last_frame, (now_us - last_change_us) / 1000ULL);
-            last_frame = frame;
-            last_change_us = now_us;
-        }
-    }
-
-    std::string stop(std::uint64_t now_us) {
-        if (recording && have_frame) append(last_frame, (now_us - last_change_us) / 1000ULL);
-        recording = false;
-        have_frame = false;
-        if (!has_input) {
-            commands.clear();
-            return "";
-        }
-        return pretty_json(commands, "Recorded Macro");
-    }
-};
-
-struct Runtime {
-    std::vector<Step> steps;
-    bool running = false;
-    std::uint64_t start_us = 0;
-};
-
-inline void runtime_start(Runtime& rt, std::vector<Step> parsed_steps, std::uint64_t now_us) {
+void runtime_start(Runtime& rt, std::vector<Step> parsed_steps, std::uint64_t now_us) {
     rt.steps = std::move(parsed_steps);
     rt.running = true;
     rt.start_us = now_us;
 }
 
-inline bool runtime_start_text(Runtime& rt, const std::string& raw_text, std::uint64_t now_us) {
+bool runtime_start_text(Runtime& rt, const std::string& raw_text, std::uint64_t now_us) {
     std::vector<Step> steps;
     if (!validate_text(raw_text, steps, nullptr)) return false;
     runtime_start(rt, std::move(steps), now_us);
     return true;
 }
 
-inline bool runtime_running(Runtime& rt, std::uint64_t now_us, std::uint64_t grace_ms = 120) {
+bool runtime_running(Runtime& rt, std::uint64_t now_us, std::uint64_t grace_ms) {
     if (!rt.running) return false;
     std::uint64_t elapsed_ms = (now_us - rt.start_us) / 1000ULL;
     if (elapsed_ms > total_ms(rt.steps) + grace_ms) { rt.running = false; return false; }
     return true;
 }
 
-inline bool runtime_step(Runtime& rt, std::uint64_t now_us, Step& out) {
+bool runtime_step(Runtime& rt, std::uint64_t now_us, Step& out) {
     if (!rt.running) return false;
     std::uint64_t elapsed_ms = (now_us - rt.start_us) / 1000ULL;
     if (!step_at(rt.steps, elapsed_ms, out)) { rt.running = false; return false; }
     return true;
 }
 
-inline bool runtime_report(Runtime& rt, std::uint64_t now_us, ns::HIDReport& out) {
+bool runtime_report(Runtime& rt, std::uint64_t now_us, ns::HIDReport& out) {
     if (!rt.running) return false;
     std::uint64_t elapsed_ms = (now_us - rt.start_us) / 1000ULL;
     bool active = report_at(rt.steps, elapsed_ms, out);
     if (!active) rt.running = false;
     return active;
+}
+
+
+void Recorder::start(std::uint64_t now_us) {
+    recording = true;
+    last_frame = RecordFrame{};
+    have_frame = false;
+    has_input = false;
+    last_change_us = now_us;
+    commands.clear();
+}
+
+void Recorder::append(const RecordFrame& frame, std::uint64_t duration_ms) {
+    if (duration_ms < 10) return;
+    if (!commands.empty()) commands += "; ";
+    std::string combo = record_frame_to_text(frame);
+    if (combo.empty()) {
+        commands += "WAIT " + std::to_string(duration_ms);
+    } else {
+        has_input = true;
+        commands += combo + " " + std::to_string(duration_ms);
+    }
+}
+
+void Recorder::sample(const ns::HIDReport& report, std::uint64_t now_us, bool macro_playback_running) {
+    if (!recording || macro_playback_running) return;
+    RecordFrame frame = record_frame_from_report(report);
+    if (!have_frame) {
+        last_frame = frame;
+        have_frame = true;
+        last_change_us = now_us;
+        return;
+    }
+    if (frame != last_frame) {
+        append(last_frame, (now_us - last_change_us) / 1000ULL);
+        last_frame = frame;
+        last_change_us = now_us;
+    }
+}
+
+std::string Recorder::stop(std::uint64_t now_us) {
+    if (recording && have_frame) append(last_frame, (now_us - last_change_us) / 1000ULL);
+    recording = false;
+    have_frame = false;
+    if (!has_input) {
+        commands.clear();
+        return "";
+    }
+    return pretty_json(commands, "Recorded Macro");
 }
 
 } // namespace macro

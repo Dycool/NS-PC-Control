@@ -1,0 +1,241 @@
+#include "bluetooth_input.hpp"
+#include "app_state.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+#ifdef NS_ENABLE_SDL_BT
+#include "shared/sdl_input.hpp"
+
+#include <algorithm>
+#include <array>
+#endif
+
+using namespace ns;
+
+#ifdef NS_ENABLE_SDL_BT
+bool bluetooth_input_available() {
+    return true;
+}
+
+static void clear_bluetooth_slot_rumble_state(ClientSession& c) {
+    for (int s = 0; s < 4; ++s) {
+        c.rumble[s] = RumblePacket{};
+        c.precision_rumble[s] = PrecisionRumblePacket{};
+        c.rumble_active[s] = false;
+        c.rumble_seq[s]++;
+        c.udp_last_rumble_seq[s] = c.rumble_seq[s];
+    }
+}
+
+static void reset_bluetooth_client_slot(int client_idx) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return;
+    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+    g_clients[client_idx].active = false;
+    g_clients[client_idx].first_pkt = true;
+    g_clients[client_idx].expected_seq = 0;
+    g_clients[client_idx].last_rx_us = 0;
+    g_clients[client_idx].report.reset();
+    clear_all_motion(g_clients[client_idx]);
+    g_clients[client_idx].uses_pad_presence = false;
+    g_clients[client_idx].udp_rumble_enabled = false;
+    clear_bluetooth_slot_rumble_state(g_clients[client_idx]);
+    for (int s = 0; s < 4; ++s) {
+        g_clients[client_idx].pad_present[s] = false;
+        g_clients[client_idx].pad_last_present_us[s] = 0;
+    }
+    server_macro_stop_all_for_client(client_idx);
+}
+
+static int find_free_bluetooth_client_slot(uint64_t now) {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_mtx[i]);
+        repair_future_client_timestamp(g_clients[i], now);
+        if (!g_clients[i].active || elapsed_us_over(now, g_clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
+            g_clients[i].active = true;
+            g_clients[i].first_pkt = true;
+            g_clients[i].expected_seq = 0;
+            g_clients[i].last_rx_us = now;
+            g_clients[i].addr = sockaddr_in{};
+            g_clients[i].report.reset();
+            clear_all_motion(g_clients[i]);
+            g_clients[i].uses_pad_presence = true;
+            g_clients[i].udp_rumble_enabled = false;
+            clear_bluetooth_slot_rumble_state(g_clients[i]);
+            for (int s = 0; s < 4; ++s) {
+                g_clients[i].pad_present[s] = false;
+                g_clients[i].pad_last_present_us[s] = 0;
+            }
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
+    std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+    if (!g_clients[client_idx].active)
+        return;
+
+    g_clients[client_idx].uses_pad_presence = true;
+    g_clients[client_idx].udp_rumble_enabled = false;
+    g_clients[client_idx].last_rx_us = now;
+
+    g_clients[client_idx].report.reset();
+    g_clients[client_idx].report.p1.input = pad.input;
+    g_clients[client_idx].report.p1.has_motion = pad.has_motion ? 1 : 0;
+    g_clients[client_idx].report.p1.motion = pad.has_motion ? pad.motion : ns::MotionReport{};
+    g_clients[client_idx].pad_present[0] = true;
+    g_clients[client_idx].pad_last_present_us[0] = now;
+
+    if (pad.has_motion) {
+        set_motion_samples(g_clients[client_idx], 0, pad.motion_samples);
+    } else {
+        clear_motion(g_clients[client_idx], 0);
+    }
+
+    for (int s = 1; s < 4; ++s) {
+        g_clients[client_idx].pad_present[s] = false;
+        g_clients[client_idx].pad_last_present_us[s] = 0;
+        clear_motion(g_clients[client_idx], s);
+    }
+}
+
+static void apply_bluetooth_rumble(SDLInputManager& input,
+                                   int sdl_slot,
+                                   int client_idx,
+                                   uint32_t& last_seq,
+                                   uint64_t& rumble_until_us) {
+    if (sdl_slot < 0 || sdl_slot >= 4 || client_idx < 0 || client_idx >= MAX_CLIENTS)
+        return;
+
+    RumblePacket ev{};
+    uint32_t seq = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx[client_idx]);
+        if (!g_clients[client_idx].active) return;
+        seq = g_clients[client_idx].rumble_seq[0];
+        if (seq == last_seq) {
+            if (rumble_until_us != 0 && now_us() > rumble_until_us) {
+                rumble_until_us = 0;
+                input.set_rumble(sdl_slot, 0, 0, 0);
+            }
+            return;
+        }
+        ev = g_clients[client_idx].rumble[0];
+    }
+
+    last_seq = seq;
+    const bool neutral = (ev.low_freq == 0 && ev.high_freq == 0) || ev.duration_10ms == 0;
+    const uint32_t duration_ms = neutral ? 0 : std::max<uint32_t>(250, (uint32_t)ev.duration_10ms * 10U);
+    rumble_until_us = neutral ? 0 : now_us() + (uint64_t)duration_ms * 1000ULL;
+    input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
+}
+
+void bluetooth_input_thread() {
+    SDLInputManager input;
+    input.set_motion_enabled(true);
+    input.set_home_shortcut_enabled(true);
+    input.set_capture_shortcut_enabled(true);
+
+    if (!input.start()) {
+        std::fprintf(stderr, "[bt] SDL3 input failed: %s\n", input.error().c_str());
+        return;
+    }
+
+    std::array<int, 4> client_for_sdl{};
+    client_for_sdl.fill(-1);
+    std::array<uint32_t, 4> last_rumble_seq{};
+    std::array<uint64_t, 4> rumble_until_us{};
+    bool waiting_logged = false;
+
+    std::puts("[bt] Bluetooth/local SDL controller input enabled. Pair controllers outside ns-backend; paired controllers are auto-picked.");
+
+    while (g_running.load(std::memory_order_relaxed)) {
+        input.poll();
+        auto pads = input.snapshot();
+        const uint64_t now = now_us();
+        bool any_waiting = false;
+
+        for (int i = 0; i < 4; ++i) {
+            if (!pads[i].connected) {
+                if (client_for_sdl[i] >= 0) {
+                    input.set_rumble(i, 0, 0, 0);
+                    reset_bluetooth_client_slot(client_for_sdl[i]);
+                    if (g_verbose)
+                        std::printf("[bt] controller %d disconnected from server slot %d\n", i + 1, client_for_sdl[i] + 1);
+                    client_for_sdl[i] = -1;
+                    last_rumble_seq[i] = 0;
+                    rumble_until_us[i] = 0;
+                }
+                continue;
+            }
+
+            if (client_for_sdl[i] >= 0) {
+                bool still_active = false;
+                {
+                    std::lock_guard<std::mutex> lk(g_mtx[client_for_sdl[i]]);
+                    still_active = g_clients[client_for_sdl[i]].active;
+                }
+                if (!still_active) {
+                    client_for_sdl[i] = -1;
+                    last_rumble_seq[i] = 0;
+                    rumble_until_us[i] = 0;
+                }
+            }
+
+            if (client_for_sdl[i] < 0) {
+                client_for_sdl[i] = find_free_bluetooth_client_slot(now);
+                if (client_for_sdl[i] >= 0) {
+                    waiting_logged = false;
+                    input.set_rumble(i, 0, 0, 0);
+                    rumble_until_us[i] = 0;
+                    {
+                        std::lock_guard<std::mutex> lk(g_mtx[client_for_sdl[i]]);
+                        last_rumble_seq[i] = g_clients[client_for_sdl[i]].rumble_seq[0];
+                    }
+                    if (g_verbose)
+                        std::printf("[bt] controller %d (%s) assigned to server slot %d\n",
+                                    i + 1,
+                                    pads[i].name.empty() ? "SDL3 Gamepad" : pads[i].name.c_str(),
+                                    client_for_sdl[i] + 1);
+                }
+            }
+
+            if (client_for_sdl[i] < 0) {
+                any_waiting = true;
+                continue;
+            }
+
+            publish_bluetooth_state_to_client(client_for_sdl[i], pads[i], now);
+            apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
+        }
+
+        if (any_waiting && !waiting_logged) {
+            std::puts("[bt] controller connected, but all server slots are in use; waiting for UDP/WebSocket/BT slot to free");
+            waiting_logged = true;
+        } else if (!any_waiting) {
+            waiting_logged = false;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(PRO_UDP_INTERVAL_MS));
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        input.set_rumble(i, 0, 0, 0);
+        if (client_for_sdl[i] >= 0)
+            reset_bluetooth_client_slot(client_for_sdl[i]);
+    }
+    input.stop();
+    std::puts("[bt] Bluetooth/local SDL controller input stopped");
+}
+#else
+bool bluetooth_input_available() {
+    return false;
+}
+
+void bluetooth_input_thread() {
+    std::fprintf(stderr, "[bt] ns-backend was built without SDL3 Bluetooth/local controller support\n");
+}
+#endif

@@ -7,9 +7,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_options(-O3 -Wall -Wextra)
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
-
 option(USE_UPNP "Enable UPnP port forwarding via miniupnpc" ON)
+option(USE_SDL_BT "Enable local Bluetooth/controller input via SDL3" ON)
+option(REQUIRE_SDL_BT "Fail configure if SDL3 Bluetooth/controller support is unavailable" OFF)
 
 # Allow passing paths directly (e.g. from cross-compiled miniupnpc)
 set(MINIUPNPC_INCLUDE_DIRS "" CACHE STRING "miniupnpc include path")
@@ -37,6 +37,20 @@ else()
     message(STATUS "UPnP support disabled by user")
 endif()
 
+if(USE_SDL_BT)
+    find_package(SDL3 QUIET CONFIG)
+    if(SDL3_FOUND)
+        add_definitions(-DNS_ENABLE_SDL_BT)
+        message(STATUS "Bluetooth/local controller support enabled (SDL3 found)")
+    elseif(REQUIRE_SDL_BT)
+        message(FATAL_ERROR "Bluetooth/local controller support requires SDL3, but SDL3 was not found")
+    else()
+        message(STATUS "Bluetooth/local controller support disabled (SDL3 not found)")
+    endif()
+else()
+    message(STATUS "Bluetooth/local controller support disabled by user")
+endif()
+
 # Embed webapp HTML files into the binary via xxd
 find_program(XXD_EXECUTABLE xxd)
 if(NOT XXD_EXECUTABLE)
@@ -59,9 +73,31 @@ add_custom_command(
     VERBATIM
 )
 
-add_executable(ns-backend main.cpp ${WEBAPP_EMBED})
-target_include_directories(ns-backend PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_executable(ns-backend
+    src/main.cpp
+    src/app_state.cpp
+    src/web_server.cpp
+    src/gadget_wakeup.cpp
+    src/virtual_controller.cpp
+    src/writers.cpp
+    src/bluetooth_input.cpp
+    src/upnp.cpp
+    src/shared/macros.cpp
+    ${WEBAPP_EMBED}
+)
+
+if(SDL3_FOUND)
+    target_sources(ns-backend PRIVATE src/shared/sdl_input.cpp)
+endif()
+target_include_directories(ns-backend PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
 target_link_libraries(ns-backend PRIVATE pthread)
+
+if(SDL3_FOUND)
+    target_link_libraries(ns-backend PRIVATE SDL3::SDL3)
+endif()
 
 if(MINIUPNPC_FOUND)
     target_include_directories(ns-backend PRIVATE ${MINIUPNPC_INCLUDE_DIRS})
