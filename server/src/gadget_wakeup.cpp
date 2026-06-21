@@ -906,12 +906,14 @@ bool capture_switch2_wake_advert(int seconds,
     std::ostringstream cmd;
     const std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
 
+    // Keep the setup scanner identical to the known-good wake capture path.
+    // In particular, do not background lescan here: on some Pi/BlueZ stacks the
+    // background scan can fail before active scanning is really enabled, leaving
+    // btmon alive but seeing no Joy-Con advertisements.
     cmd << "sh -c 'rm -f " << log_path << "; "
         << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
         << "sleep 1; "
-        << "hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 & scan=$!; "
-        << "sleep " << std::max(1, seconds - 1) << "; "
-        << "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true; "
+        << "timeout " << std::max(1, seconds - 2) << " hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 || true; "
         << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
 
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
@@ -970,6 +972,9 @@ int run_switch2_wakeup_setup() {
     }
 
     g_switch2_wake_hci_dev = detect_wake_hci_for_setup();
+
+    // -wake is setup-only. Do not try to manage paired SDL/BlueZ controllers
+    // here; the capture path below owns the adapter directly with btmgmt/hcitool.
 
     std::puts("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::puts("------------------------------------------------");
