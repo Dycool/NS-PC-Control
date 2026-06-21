@@ -970,6 +970,17 @@ int run_switch2_wakeup_setup() {
 
     g_switch2_wake_hci_dev = detect_wake_hci_for_setup();
 
+    // Paired/trusted Bluetooth controllers can leave hci0 in a reconnecting or
+    // controller-owned state where `hcitool lescan` exits immediately with
+    // "Set scan parameters failed: Input/output error". Keep the actual capture
+    // loop identical to the known-good v5.3.1 flow, but reset hciuart once before
+    // setup starts so -wake owns a clean adapter.
+    {
+        std::string setup_hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+        reset_wake_bt_stack(setup_hci, false);
+        g_switch2_wake_hci_dev = setup_hci;
+    }
+
     // -wake is setup-only. Do not try to manage paired SDL/BlueZ controllers
     // here; the capture path below owns the adapter directly with btmgmt/hcitool.
 
