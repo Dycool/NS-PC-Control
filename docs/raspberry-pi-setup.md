@@ -74,18 +74,24 @@ sudo nano /etc/systemd/system/ns-control.service
 ```ini
 [Unit]
 Description=NS PC Control Backend
-After=network.target bluetooth.service
-Wants=bluetooth.service
+After=network-online.target dbus.service
+Wants=network-online.target
 
 [Service]
+Type=simple
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/chrt -f 99 /home/YOUR_USER/NS-PC-Control/server/ns-backend
 Restart=always
 RestartSec=5
 User=root
+KillSignal=SIGINT
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+If you want the service to force local Bluetooth controller mode even when a Switch 2 wake config exists, add `-bt` to `ExecStart`.
 
 3. Enable and start the service:
 

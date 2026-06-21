@@ -481,6 +481,12 @@ bool wake_cmd_ok(const std::vector<std::string>& args, bool verbose_output) {
     return r.exit_code == 0;
 }
 
+bool running_under_systemd_service() {
+    const char* invocation = std::getenv("INVOCATION_ID");
+    const char* journal = std::getenv("JOURNAL_STREAM");
+    return (invocation && *invocation) || (journal && *journal);
+}
+
 void enter_switch2_wake_runtime_mode() {
     if (!g_switch2_wake_adv_enabled || !g_switch2_wake_config_loaded)
         return;
@@ -566,12 +572,29 @@ void restore_bluetooth_controller_state(const std::string& hci, bool restart_blu
     }
 }
 
+void wait_for_bluetooth_runtime_ready(bool verbose_output) {
+    for (int i = 0; i < 20 && g_running.load(std::memory_order_relaxed); ++i) {
+        WakeCmdResult show = run_wake_command({"bluetoothctl", "show"}, false, true, 2000);
+        if (show.exit_code == 0 && show.output.find("Powered: yes") != std::string::npos) {
+            if (verbose_output)
+                std::puts("[bt] BlueZ adapter is powered and ready");
+            return;
+        }
+        run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 2000);
+        run_wake_command({"bluetoothctl", "power", "on"}, false, false, 2000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    if (verbose_output)
+        std::fprintf(stderr, "[bt] BlueZ adapter did not report Powered: yes before SDL startup; continuing anyway\n");
+}
+
 void enter_bluetooth_runtime_mode() {
     if (!g_switch2_wake_config_loaded)
         load_switch2_wakeup_config(true);
 
     const std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
     restore_bluetooth_controller_state(hci, true);
+    wait_for_bluetooth_runtime_ready(g_verbose);
 }
 
 void wait_for_wake_advert_idle() {
@@ -868,12 +891,23 @@ bool send_switch2_wake_advert_once(const std::string& mac,
         std::printf("[wake] Wake MAC: %s\n", mac_lc.c_str());
         std::printf("[wake] ADV bytes: %zu\n", adv_uc.size() / 2);
         std::printf("[wake] Duration: %ds\n", seconds);
-        std::printf("[wake] Preparing %s with wake identity before advertising\n", hci_dev.c_str());
     }
 
     bool ok = false;
+    const bool service_runtime = running_under_systemd_service();
 
-    if (prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+    if (service_runtime) {
+        if (verbose_output)
+            std::printf("[wake] Service runtime path: sending ADV directly on %s before Bluetooth prep\n", hci_dev.c_str());
+        ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
+        if (!ok && verbose_output)
+            std::fprintf(stderr, "[wake] Service fast ADV failed; falling back to Bluetooth prep once.\n");
+    }
+
+    if (!ok && verbose_output)
+        std::printf("[wake] Preparing %s with wake identity before advertising\n", hci_dev.c_str());
+
+    if (!ok && prepare_wake_controller(hci_dev, mac_lc, verbose_output))
         ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
 
     if (!ok) {
