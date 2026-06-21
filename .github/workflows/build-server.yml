@@ -51,7 +51,8 @@ jobs:
             -DSDL_STATIC=ON \
             -DSDL_TEST_LIBRARY=OFF \
             -DSDL_TESTS=OFF \
-            -DSDL_EXAMPLES=OFF
+            -DSDL_EXAMPLES=OFF \
+            -DSDL_VIDEO=OFF
           cmake --build /tmp/SDL3-build --parallel
           cmake --install /tmp/SDL3-build
 
