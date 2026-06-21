@@ -1,18 +1,46 @@
 #include "shared/sdl_input.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 namespace {
 constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 85;
 constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 100;
-constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 35;
+constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 20;
 
 uint8_t scale_sdl_rumble_motor(uint8_t v, int gain_percent) {
     int scaled = ((int)v * gain_percent) / 100;
     if (scaled == 0 && v != 0) scaled = 1;
     return (uint8_t)std::clamp(scaled, 0, 255);
+}
+
+bool contains_case_insensitive(const std::string& haystack, const char* needle) {
+    if (!needle || !*needle) return false;
+    std::string h;
+    std::string n;
+    h.reserve(haystack.size());
+    for (unsigned char c : haystack) h.push_back((char)std::tolower(c));
+    for (const unsigned char* p = (const unsigned char*)needle; *p; ++p) n.push_back((char)std::tolower(*p));
+    return h.find(n) != std::string::npos;
+}
+
+bool is_playstation_controller(const std::string& name, uint16_t vid) {
+    return vid == 0x054c ||
+           contains_case_insensitive(name, "playstation") ||
+           contains_case_insensitive(name, "dualsense") ||
+           contains_case_insensitive(name, "dualshock") ||
+           contains_case_insensitive(name, "wireless controller") ||
+           contains_case_insensitive(name, "wirless controller");
+}
+
+bool is_xbox_controller(const std::string& name, uint16_t vid) {
+    return vid == 0x045e ||
+           contains_case_insensitive(name, "xbox") ||
+           contains_case_insensitive(name, "microsoft") ||
+           contains_case_insensitive(name, "elite");
 }
 }
 
@@ -187,9 +215,9 @@ void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32
         Device* d = device_for_slot_locked(sdl_slot);
         if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
         int gain_percent = SDL_RUMBLE_DEFAULT_GAIN_PERCENT;
-        if (d->vid == 0x054c) {
+        if (is_playstation_controller(d->name, d->vid)) {
             gain_percent = SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT;
-        } else if (d->vid == 0x045e) {
+        } else if (is_xbox_controller(d->name, d->vid)) {
             gain_percent = SDL_RUMBLE_XBOX_GAIN_PERCENT;
             allow_trigger_rumble = false;
         }
@@ -202,7 +230,7 @@ void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32
         bool ok_trigger = true;
         SDL_PropertiesID props = SDL_GetGamepadProperties(d->pad);
         bool trigger_capable = props && SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
-        if ((allow_trigger_rumble && trigger_capable) || !ok_main || stop) {
+        if (stop || (allow_trigger_rumble && (trigger_capable || !ok_main))) {
             ok_trigger = SDL_RumbleGamepadTriggers(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
         }
         if (!stop && !ok_main && !ok_trigger) {
@@ -421,6 +449,12 @@ void SDLInputManager::scan_locked(bool initial) {
                 d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
+            std::printf("[sdl] controller slot=%d name=\"%s\" vid=%04x pid=%04x rumble=%s trigger_rumble=%s profile=%s\n",
+                        d.slot + 1, d.name.c_str(), d.vid, d.pid,
+                        d.rumble_capable ? "yes" : "no",
+                        d.trigger_rumble_capable ? "yes" : "no",
+                        is_xbox_controller(d.name, d.vid) ? "xbox" :
+                        (is_playstation_controller(d.name, d.vid) ? "playstation" : "default"));
             const bool enable_motion = motion_enabled.load(std::memory_order_relaxed);
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) d.accel_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, enable_motion);
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) d.gyro_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, enable_motion);

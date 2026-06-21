@@ -30,7 +30,7 @@ constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
 constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 2'000'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
-constexpr int SWITCH2_WAKE_ADV_BURST_MS = 3000;
+constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;
 
 extern std::string g_usb_serial;
 extern bool g_legacy_mode;
