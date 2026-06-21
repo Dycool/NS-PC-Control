@@ -193,7 +193,11 @@ void legacy_writer_thread(int hz) {
                 } else if (w == (ssize_t)sizeof(HIDReport)) {
                     prev[h] = out_reports[h];
                     ++g_hid_writes;
-                    mark_switch2_usb_activity(now_stamp);
+                    // Only count writes for an active client as USB host
+                    // activity.  Idle neutral writes succeed even when the
+                    // Switch is asleep and would poison the wake detector.
+                    if (hw_slots[h].client_idx != -1)
+                        mark_switch2_usb_activity(now_stamp);
                 } else if (w > 0) {
                     ok = false;
                 }
@@ -524,7 +528,12 @@ void writer_thread(int hz) {
                 } else if (w == (ssize_t)PRO_REPORT_SIZE) {
                     if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                     writes_this_second++;
-                    mark_switch2_usb_activity(now_stamp);
+                    // Only count writes that serve an active client or a
+                    // subcmd reply as USB host activity.  Idle neutral
+                    // heartbeats succeed even when the Switch is asleep
+                    // and would poison the wake detector.
+                    if (port_needed || wrote_subcmd_reply)
+                        mark_switch2_usb_activity(now_stamp);
                 } else if (w > 0) {
                     // Partial HID report writes should not happen.  Treat as an error so
                     // we reconnect cleanly rather than sending malformed controller data.
