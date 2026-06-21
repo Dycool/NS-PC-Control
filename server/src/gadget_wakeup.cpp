@@ -826,9 +826,13 @@ void maybe_send_switch2_wake_advert(const char* reason) {
 
     const uint64_t now = now_us();
 
-    if (switch2_usb_host_recently_active(now)) {
+    // Only skip wake when the USB host is currently connected. Do not use
+    // "recent USB activity" here: after the user suspends the Switch, the last
+    // HID traffic may still be fresh for a short while, but that is exactly when
+    // a new client connection should be allowed to send the wake advert.
+    if (g_switch2_usb_host_connected.load(std::memory_order_relaxed)) {
         if (g_verbose) {
-            std::printf("[wake] %s; recent Switch USB activity seen, skipping wake advert\n",
+            std::printf("[wake] %s; Switch USB host is connected, skipping wake advert\n",
                         reason ? reason : "client connected");
         }
         return;
