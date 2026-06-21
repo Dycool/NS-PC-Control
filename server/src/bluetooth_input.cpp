@@ -36,11 +36,12 @@ static void start_bluetooth_pairing_window() {
             "bluetoothctl pairable on >/dev/null 2>&1 || true; "
             "bluetoothctl discoverable on >/dev/null 2>&1 || true; "
             "(printf \"agent NoInputNoOutput\\ndefault-agent\\n\"; sleep 125) | bluetoothctl >/dev/null 2>&1 & agent=$!; "
-            "sleep 1; "
-            "bluetoothctl scan on >/dev/null 2>&1 || true; "
+            "(printf \"scan on\\n\"; sleep 120; printf \"scan off\\n\") | bluetoothctl >/dev/null 2>&1 & scan=$!; "
+            "sleep 3; "
             "end=$(( $(date +%s) + 120 )); "
             "while [ $(date +%s) -lt $end ]; do "
-                "bluetoothctl devices | while read -r _ mac name_rest; do "
+                "bluetoothctl devices | while read -r kind mac name_rest; do "
+                    "[ \"$kind\" = \"Device\" ] || continue; "
                     "name=\"$name_rest\"; "
                     "case \"$name\" in "
                         "*Wireless\\ Controller*|*Xbox\\ Wireless\\ Controller*|*Xbox\\ One\\ Wireless\\ Controller*|*Pro\\ Controller*|*Nintendo\\ Switch\\ Pro\\ Controller*|*Joy-Con*|*8BitDo*) "
@@ -53,6 +54,7 @@ static void start_bluetooth_pairing_window() {
                 "sleep 5; "
             "done; "
             "bluetoothctl scan off >/dev/null 2>&1 || true; "
+            "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true; "
             "kill $agent >/dev/null 2>&1 || true; wait $agent >/dev/null 2>&1 || true; "
             "'";
 

@@ -74,10 +74,10 @@ sudo nano /etc/systemd/system/ns-control.service
 ```ini
 [Unit]
 Description=NS PC Control Backend
-After=network.target
+After=network.target bluetooth.service
+Wants=bluetooth.service
 
 [Service]
-# The server handles USB gadget setup automatically.
 ExecStart=/usr/bin/chrt -f 99 /home/YOUR_USER/NS-PC-Control/server/ns-backend
 Restart=always
 RestartSec=5
