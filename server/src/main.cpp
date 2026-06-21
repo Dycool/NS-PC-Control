@@ -2,6 +2,8 @@
 #include "shared/macros.hpp"
 #include "shared/sha256.h"
 
+#include <print>
+#include <bit>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -120,12 +122,12 @@ int main(int argc, char** argv) {
     }
 
     if (legacy_p) {
-        std::fprintf(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead\n");
+        std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead");
         return 1;
     }
 
     if (!bind_arg.empty() && !parse_bind_arg(bind_arg, bind_addr, port)) {
-        std::fprintf(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT\n");
+        std::println(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT");
         return 1;
     }
     
@@ -141,7 +143,7 @@ int main(int argc, char** argv) {
     if (bt_explicit) {
         g_switch2_wake_adv_enabled = false;
         if (!bluetooth_input_available()) {
-            std::fprintf(stderr, "error: -bt requested, but ns-backend was built without SDL3 support\n");
+            std::println(stderr, "error: -bt requested, but ns-backend was built without SDL3 support");
             return 1;
         }
         enter_bluetooth_runtime_mode();
@@ -151,11 +153,11 @@ int main(int argc, char** argv) {
             bluetooth_enabled = false;
             enter_switch2_wake_runtime_mode();
             if (g_verbose)
-                std::printf("[wake] Switch 2 wake config loaded; wake mode active, Bluetooth disabled\n");
+                std::println("[wake] Switch 2 wake config loaded; wake mode active, Bluetooth disabled");
         } else {
             bluetooth_enabled = bluetooth_input_available();
             if (g_verbose && bluetooth_enabled)
-                std::printf("[bt] No Switch 2 wake config found; Bluetooth controller mode active\n");
+                std::println("[bt] No Switch 2 wake config found; Bluetooth controller mode active");
         }
     }
 
@@ -164,10 +166,10 @@ int main(int argc, char** argv) {
         int rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
         bool blocked = (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
         if (blocked) {
-            std::fprintf(stderr,
+            std::println(stderr,
                 "[bt] WARNING: Bluetooth controllers connected directly to the Raspberry Pi\n"
                 "[bt]          will NOT work — the adapter is blocked by rfkill.\n"
-                "[bt]          Unblock it with: sudo rfkill unblock bluetooth\n");
+                "[bt]          Unblock it with: sudo rfkill unblock bluetooth");
         }
     }
 
@@ -193,9 +195,9 @@ int main(int argc, char** argv) {
     int rbuf = 2 * 1024 * 1024;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf));
 
-    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(port);
+    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = std::byteswap((uint16_t)port);
     if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
-        std::fprintf(stderr, "error: invalid IPv4 bind address: %s\n", bind_addr.c_str());
+        std::println(stderr, "error: invalid IPv4 bind address: {}", bind_addr);
         close(sock);
         return 1;
     }
@@ -208,8 +210,8 @@ int main(int argc, char** argv) {
     if (bluetooth_enabled)
         bluetooth_thread = std::jthread(bluetooth_input_thread);
     
-    std::printf("UDP %s:%u writer=%d Hz mode=%s\n",
-                bind_addr.c_str(), port, PRO_WRITER_HZ,
+    std::println("UDP {}:{} writer={} Hz mode={}",
+                bind_addr, port, PRO_WRITER_HZ,
                 g_legacy_mode ? "hori" : "modern");
     std::jthread wt(writer_thread, PRO_WRITER_HZ);
     std::jthread st(stats_thread);
@@ -283,8 +285,8 @@ int main(int argc, char** argv) {
                                 std::string text(reinterpret_cast<char*>(udp_rx.data() + ns::macro::UDP_HEADER_SIZE), text_len);
                                 server_macro_start(client_idx, mh.subpad < 4 ? mh.subpad : 0, text);
                             }
-                        } else if (g_verbose) puts("bad macro HMAC, dropped");
-                    } else if (g_verbose) puts("bad macro packet size, dropped");
+                        } else if (g_verbose) std::println("bad macro HMAC, dropped");
+                    } else if (g_verbose) std::println("bad macro packet size, dropped");
                     continue;
                 }
             }
@@ -303,31 +305,32 @@ int main(int argc, char** argv) {
             } else if (bytes == (ssize_t)EXT3_UDP_PACKET_SIZE) {
                 memcpy(&ext3_pkt, udp_rx.data(), sizeof(ext3_pkt));
                 is_extended_udp3 = true;
-            } else {
-                if (g_verbose) std::printf("[udp] unexpected packet size=%zd, dropped\n", bytes);
+            }
+            if (bytes < (ssize_t)sizeof(ns::Packet)) {
+                if (g_verbose) std::println("[udp] unexpected packet size={}, dropped", bytes);
                 continue;
             }
 
             // ── 1. Per-IP rate limiter ────────────────────────────────────────────
             uint32_t src_ip = sender.sin_addr.s_addr;
             if (!rate_allow(src_ip)) {
-                if (g_verbose) puts("rate limit exceeded, dropped");
+                if (g_verbose) std::println("rate limit exceeded, dropped");
                 continue;
             }
 
             // ── 2. Magic + version check ──────────────────────────────────────────
             if (is_extended_udp) {
                 if (!extended_udp_packet_ok(ext_pkt)) {
-                    if (g_verbose) puts("bad extended UDP magic/version, dropped");
+                    if (g_verbose) std::println("bad extended UDP magic/version, dropped");
                     continue;
                 }
             } else if (is_extended_udp3) {
                 if (!extended_udp3_packet_ok(ext3_pkt)) {
-                    if (g_verbose) puts("bad extended UDP v3 magic/version, dropped");
+                    if (g_verbose) std::println("bad extended UDP v3 magic/version, dropped");
                     continue;
                 }
             } else if (!packet_ok(pkt)) {
-                if (g_verbose) puts("bad magic/version, dropped");
+                if (g_verbose) std::println("bad magic/version, dropped");
                 continue;
             }
 
@@ -366,7 +369,7 @@ int main(int argc, char** argv) {
                         }
                         g_clients[i].last_rx_us = now;
                         wake_on_new_client = true;
-                        if (g_verbose) std::printf("New UDP client accepted into Server Slot %d/4\n", i+1);
+                        if (g_verbose) std::println("New UDP client accepted into Server Slot {}/4", i+1);
                         break;
                     }
                 }
@@ -379,7 +382,7 @@ int main(int argc, char** argv) {
 
             // If all 4 slots are taken by active PCs, drop the packet.
             if (client_idx == -1) {
-                if (g_verbose) puts("server is full (4 PCs already active), dropped");
+                if (g_verbose) std::println("server is full (4 PCs already active), dropped");
                 continue;
             }
 
@@ -399,7 +402,7 @@ int main(int argc, char** argv) {
                                       std::span<const uint8_t>(pkt.hmac, HMAC_TAG_SIZE));
             }
             if (hmac_ok != 0) {
-                if (g_verbose) puts("bad HMAC, dropped");
+                if (g_verbose) std::println("bad HMAC, dropped");
                 continue;
             }
 
@@ -411,7 +414,7 @@ int main(int argc, char** argv) {
                     reset_udp_client_session_locked(g_clients[client_idx]);
                 }
                 rearm_switch2_wake_after_client_disconnect();
-                if (g_verbose) std::printf("UDP client %d sent disconnect and was released.\n", client_idx + 1);
+                if (g_verbose) std::println("UDP client {} sent disconnect and was released.", client_idx + 1);
                 ++g_pkts_rx;
                 continue;
             }
@@ -435,7 +438,7 @@ int main(int argc, char** argv) {
 
                 if (!g_clients[client_idx].first_pkt && seq < g_clients[client_idx].expected_seq && !is_reset && !sequence_jump) {
                     if (g_verbose)
-                        std::printf("UDP client %d out-of-order seq=%u, dropped\n", client_idx+1, seq);
+                        std::println("UDP client {} out-of-order seq={}, dropped", client_idx+1, seq);
                     continue;
                 }
                 g_clients[client_idx].first_pkt = false;
@@ -527,7 +530,7 @@ int main(int argc, char** argv) {
         } // drain loop
     } // epoll loop
 
-    puts("[backend] shutting down");
+    std::println("[backend] shutting down");
     upnp_remove_mapping(port);
     close(ep); close(sock);
     // std::jthread auto-joins and requests stop on destruction.

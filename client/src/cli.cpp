@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <print>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -36,7 +37,7 @@ void cli_signal_handler(int) {
 int cli_main(const std::vector<std::string>& original_args) {
     NetworkRuntime net;
     if (!net.good()) {
-        std::cerr << "ERROR: network startup failed\n";
+        std::println(stderr, "ERROR: network startup failed");
         return 1;
     }
     raise_process_priority();
@@ -86,12 +87,12 @@ int cli_main(const std::vector<std::string>& original_args) {
     }
 
     if (host_arg.empty()) {
-        std::cerr << app.help();
+        std::print(stderr, "{}", app.help());
         return 1;
     }
     
     if (!parse_host_port(host_arg, host, port)) {
-        std::cerr << "Invalid host: " << host_arg << "\n";
+        std::println(stderr, "Invalid host: {}", host_arg);
         return 1;
     }
     
@@ -103,7 +104,7 @@ int cli_main(const std::vector<std::string>& original_args) {
         if (k_val == "single") cli_keyboard_mode = KB_SINGLE;
         else if (k_val == "override") cli_keyboard_mode = KB_OVERRIDE;
         else {
-            std::cerr << "Unknown keyboard mode: " << k_val << "\n";
+            std::println(stderr, "Unknown keyboard mode: {}", k_val);
             return 1;
         }
     }
@@ -112,11 +113,12 @@ int cli_main(const std::vector<std::string>& original_args) {
     load_saved_feature_toggles();
     g_keyboardMode.store(cli_keyboard_mode);
     if (cli_keyboard_mode != KB_OFF) {
-        std::cout << "Keyboard mode enabled (" << (cli_keyboard_mode == KB_SINGLE ? "single" : "override") << ") - ";
-        std::cout << (cli_keyboard_mode == KB_SINGLE ? "replaces" : "augments") << " Player 1\n";
+        std::println("Keyboard mode enabled ({}) - {} Player 1",
+            cli_keyboard_mode == KB_SINGLE ? "single" : "override",
+            cli_keyboard_mode == KB_SINGLE ? "replaces" : "augments");
     }
-    std::cout << (legacy_udp ? "Hori UDP mode: input only. UDP rumble and gyro are disabled.\n"
-                             : "Extended UDP mode: SDL3 rumble replies + gyro/motion enabled where supported.\n");
+    std::print("{}", legacy_udp ? "Hori UDP mode: input only. UDP rumble and gyro are disabled.\n"
+                                 : "Extended UDP mode: SDL3 rumble replies + gyro/motion enabled where supported.\n");
 
     uint8_t hmac_key[32];
     derive_key(ns::DEFAULT_SECRET, hmac_key);
@@ -124,14 +126,14 @@ int cli_main(const std::vector<std::string>& original_args) {
     if (macro_mode) {
         SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock == INVALID_SOCKET) {
-            std::cerr << "ERROR: socket() failed\n";
+            std::println(stderr, "ERROR: socket() failed");
             return 1;
         }
         set_socket_nonblocking(sock);
 
         sockaddr_in dest{};
         if (!resolve_udp_destination(host, port, dest)) {
-            std::cerr << "ERROR: Unable to resolve IP/host: " << host << "\n";
+            std::println(stderr, "ERROR: Unable to resolve IP/host: {}", host);
             closesocket(sock);
             return 1;
         }
@@ -139,18 +141,18 @@ int cli_main(const std::vector<std::string>& original_args) {
         std::string err;
         std::string macro_raw = ns::macro::read_text_file_limited(macro_path, &err);
         if (macro_raw.empty()) {
-            std::cerr << "Macro file is empty or cannot be read: " << macro_path << "\n";
+            std::println(stderr, "Macro file is empty or cannot be read: {}", macro_path);
             closesocket(sock);
             return 1;
         }
         auto steps = ns::macro::parse_text(macro_raw);
         if (steps.empty()) {
-            std::cerr << "Macro file has no usable commands: " << macro_path << "\n";
+            std::println(stderr, "Macro file has no usable commands: {}", macro_path);
             closesocket(sock);
             return 1;
         }
         bool sent = send_macro_udp_packet(sock, dest, hmac_key, macro_raw, 0);
-        std::cout << (sent ? "Uploaded server-side macro to P1.\n" : "Failed to upload server-side macro.\n");
+        std::println("{}", sent ? "Uploaded server-side macro to P1." : "Failed to upload server-side macro.");
         uint64_t wait_ms = std::min<uint64_t>(ns::macro::total_ms(steps), 600000ULL);
         std::this_thread::sleep_for(std::chrono::milliseconds((int)wait_ms + 180));
         closesocket(sock);
@@ -166,10 +168,10 @@ int cli_main(const std::vector<std::string>& original_args) {
     cfg.idle_sleep_ms = 500;
     cfg.hmac_key = hmac_key;
 
-    std::cout << "Started unified CLI client. Press Ctrl+C to stop.\n";
+    std::println("Started unified CLI client. Press Ctrl+C to stop.");
     std::string err;
     int rc = run_client_stream(cfg, g_cliRunning, &err);
-    if (rc != 0 && !err.empty()) std::cerr << "ERROR: " << err << "\n";
-    std::cout << "\nShutting down...\n";
+    if (rc != 0 && !err.empty()) std::println(stderr, "ERROR: {}", err);
+    std::println("\nShutting down...");
     return rc;
 }

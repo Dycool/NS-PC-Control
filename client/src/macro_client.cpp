@@ -148,30 +148,27 @@ bool save_macro_entries_to_disk() {
     return (bool)f;
 }
 
-bool start_macro_text(const std::string& txt, std::string* err_out) {
+std::expected<void, std::string> start_macro_text(const std::string& txt) {
     std::vector<ns::macro::Step> parsed;
     if (!ns::macro::validate_text(txt, parsed, nullptr)) {
-        if (err_out) *err_out = ns::macro::last_error();
-        return false;
+        return std::unexpected(ns::macro::last_error());
     }
     std::string pretty, err;
     if (!ns::macro::validate_to_pretty_json(txt, pretty, err, "Macro")) {
-        if (err_out) *err_out = err;
-        return false;
+        return std::unexpected(err);
     }
     std::lock_guard<std::mutex> lk(g_macro_mtx);
     g_macro_upload_pending = pretty;
     g_macro_steps = std::move(parsed);
     g_macro_running = false;
     g_macro_start_us = ns::now_us();
-    return true;
+    return {};
 }
 
-bool upsert_macro_entry(ns::macro::Entry e, bool force_unique_name, std::string* err_out) {
+std::expected<void, std::string> upsert_macro_entry(ns::macro::Entry e, bool force_unique_name) {
     std::string pretty, err;
     if (!ns::macro::validate_to_pretty_json(e.json, pretty, err, e.name.empty() ? "Macro" : e.name)) {
-        if (err_out) *err_out = err;
-        return false;
+        return std::unexpected(err);
     }
     std::lock_guard<std::mutex> lk(g_macro_mtx);
     e.name = ns::macro::trim(e.name);
@@ -186,8 +183,9 @@ bool upsert_macro_entry(ns::macro::Entry e, bool force_unique_name, std::string*
     }
     if (existing >= 0) g_macro_entries[existing] = std::move(e);
     else g_macro_entries.push_back(std::move(e));
+    save_macro_entries_to_disk();
     rebuild_macro_hotkey_state();
-    return true;
+    return {};
 }
 
 void poll_macro_entry_hotkeys() {
@@ -204,7 +202,7 @@ void poll_macro_entry_hotkeys() {
             if (down && !was_down) to_run.push_back(e.json);
         }
     }
-    for (const auto& json : to_run) start_macro_text(json, nullptr);
+    for (const auto& json : to_run) start_macro_text(json);
 }
 
 ns::macro::Recorder g_macro_recorder;

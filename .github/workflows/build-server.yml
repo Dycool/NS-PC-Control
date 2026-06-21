@@ -25,7 +25,7 @@ jobs:
       - name: Install ARM Cross-Compiler and deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-aarch64-linux-gnu cmake ninja-build git wget xxd
+          sudo apt-get install -y gcc-14-aarch64-linux-gnu g++-14-aarch64-linux-gnu cmake ninja-build git wget xxd
 
       - name: Cache SDL3 aarch64 static
         id: cache-sdl3-aarch64
@@ -46,8 +46,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc-14 \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14 \
             -DCMAKE_INSTALL_PREFIX="$HOME/.local/sdl3-aarch64-static" \
             -DSDL_INSTALL=ON \
             -DSDL_SHARED=OFF \
@@ -82,20 +82,54 @@ jobs:
           cd build
 
           cmake .. \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc-14 \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14 \
             -DCMAKE_INSTALL_PREFIX=/tmp/miniupnpc \
             -DBUILD_SHARED_LIBS=OFF
 
           make -j"$(nproc)"
           make install
 
+      - name: Cache OpenSSL aarch64
+        id: cache-openssl-aarch64
+        uses: actions/cache@v4
+        with:
+          path: /tmp/openssl
+          key: openssl-aarch64-3.0.13-v1
+
       - name: Cross-compile OpenSSL for aarch64
+        if: steps.cache-openssl-aarch64.outputs.cache-hit != 'true'
         run: |
           wget -q https://github.com/openssl/openssl/releases/download/openssl-3.0.13/openssl-3.0.13.tar.gz
           tar xzf openssl-3.0.13.tar.gz
           cd openssl-3.0.13
-          ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
+          CC=aarch64-linux-gnu-gcc-14 CXX=aarch64-linux-gnu-g++-14 ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
+          make -j"$(nproc)"
+          make install
+
+      - name: Cache libwebsockets aarch64
+        id: cache-lws-aarch64
+        uses: actions/cache@v4
+        with:
+          path: /tmp/libwebsockets
+          key: lws-aarch64-4.3.3-v1
+
+      - name: Cross-compile libwebsockets for aarch64
+        if: steps.cache-lws-aarch64.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/warmcat/libwebsockets/archive/refs/tags/v4.3.3.tar.gz
+          tar xzf v4.3.3.tar.gz
+          cd libwebsockets-4.3.3
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc-14 \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14 \
+            -DCMAKE_INSTALL_PREFIX=/tmp/libwebsockets \
+            -DLWS_WITH_SSL=ON \
+            -DOPENSSL_ROOT_DIR=/tmp/openssl \
+            -DLWS_WITHOUT_TESTAPPS=ON
           make -j"$(nproc)"
           make install
 
@@ -106,13 +140,14 @@ jobs:
           cd build
 
           cmake .. \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14 \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
             -DUSE_SDL_BT=ON \
             -DREQUIRE_SDL_BT=ON \
             -DMINIUPNPC_INCLUDE_DIRS=/tmp/miniupnpc/include \
             -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a \
-            -DOPENSSL_ROOT_DIR=/tmp/openssl
+            -DOPENSSL_ROOT_DIR=/tmp/openssl \
+            -Dlibwebsockets_DIR=/tmp/libwebsockets/lib/cmake/libwebsockets
 
           make -j"$(nproc)"
 

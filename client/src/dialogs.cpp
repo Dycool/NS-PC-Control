@@ -369,8 +369,8 @@ void MacroDialog::rebuild() {
                     std::lock_guard<std::mutex> lk(g_macro_mtx);
                     if (i >= 0 && i < (int)g_macro_entries.size()) json = g_macro_entries[i].json;
                 }
-                std::string err;
-                if (!start_macro_text(json, &err)) QMessageBox::warning(this, "Macro validation", std_to_q("Invalid macro: " + err));
+                auto res = start_macro_text(json);
+                if (!res) QMessageBox::warning(this, "Macro validation", std_to_q("Invalid macro: " + res.error()));
             });
             connect(key, &QPushButton::clicked, this, [this, i] {
                 listeningMacro = i;
@@ -472,9 +472,9 @@ void MacroDialog::importMacros() {
                 std::lock_guard<std::mutex> lk(g_macro_mtx);
                 e.name = unique_name(e.name, g_macro_entries);
             }
-            std::string upsert_err;
-            if (!upsert_macro_entry(e, false, &upsert_err)) {
-                QMessageBox::warning(this, "Macro validation", std_to_q("Invalid macro: " + upsert_err));
+            auto upsert_res = upsert_macro_entry(e, false);
+            if (!upsert_res) {
+                QMessageBox::warning(this, "Macro validation", std_to_q("Invalid macro: " + upsert_res.error()));
                 return;
             }
         }
@@ -531,8 +531,7 @@ void MacroDialog::toggleRecord() {
                 e.name = "Recorded Macro";
                 e.hotkey = "";
                 e.json = recorded;
-                std::string err;
-                upsert_macro_entry(e, true, &err);
+                upsert_macro_entry(e, true);
                 save_macro_entries_to_disk();
             }
             rebuild();

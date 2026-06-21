@@ -9,7 +9,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
+#include <chrono>
+#include <print>
 #include <iostream>
 #include <utility>
 
@@ -264,7 +265,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
             std::this_thread::sleep_for(std::chrono::milliseconds(active_send_interval_ms));
         } else {
             if (cfg.print_cli_waiting_messages && !no_controllers_printed) {
-                std::cout << "No controllers detected - waiting for connections...\n";
+                std::println("No controllers detected - waiting for connections...");
                 no_controllers_printed = true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(cfg.idle_sleep_ms));
@@ -299,21 +300,18 @@ void sender_thread_main(std::stop_token stoken, std::string host, uint16_t port,
     g_connected.store(false);
 }
 
-bool start_connection(const std::string& target, std::string* err_out) {
-    if (g_connected.load()) return true;
+std::expected<void, std::string> start_connection(const std::string& target) {
+    if (g_connected.load()) return {};
     std::string host;
     int port = ns::DEFAULT_PORT;
     if (!parse_host_port(target, host, port)) {
-        if (err_out) *err_out = "Please enter a Raspberry Pi IP address.";
-        return false;
+        return std::unexpected("Please enter a Raspberry Pi IP address.");
     }
     if (!probe_server_sync(host, port)) {
-        if (err_out) *err_out = "Server not reachable. Check the IP address.";
-        return false;
+        return std::unexpected("Server not reachable. Check the IP address.");
     }
     if (!g_sdlInput.start()) {
-        if (err_out) *err_out = "SDL3 input failed: " + g_sdlInput.error();
-        return false;
+        return std::unexpected("SDL3 input failed: " + g_sdlInput.error());
     }
     derive_key(ns::DEFAULT_SECRET, g_hmacKey);
     save_last_ip(target);

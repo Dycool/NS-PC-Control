@@ -159,9 +159,9 @@ void MainWindow::toggleConnection() {
             updateUi();
             return;
         }
-        std::string err;
-        if (!start_connection(q_to_std(ipEdit->text()), &err)) {
-            QMessageBox::critical(this, "Error", std_to_q(err));
+        auto res = start_connection(q_to_std(ipEdit->text()));
+        if (!res) {
+            QMessageBox::critical(this, "Error", std_to_q(res.error()));
             return;
         }
         connectBtn->setText("Disconnect");

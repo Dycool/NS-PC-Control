@@ -10,6 +10,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <expected>
 
 extern std::atomic<bool> g_connected;
 extern std::jthread g_senderThread;
@@ -60,7 +61,7 @@ int run_client_stream(const ClientStreamConfig& cfg,
                       std::stop_token stoken,
                       std::string* err_out = nullptr);
 void sender_thread_main(std::stop_token stoken, std::string host, uint16_t port, bool legacy_udp);
-bool start_connection(const std::string& target, std::string* err_out = nullptr);
+std::expected<void, std::string> start_connection(const std::string& target);
 void stop_connection();
 
 class NetworkRuntime {

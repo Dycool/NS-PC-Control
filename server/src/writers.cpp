@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <poll.h>
+#include <print>
 
 #include <algorithm>
 #include <cerrno>
@@ -45,7 +46,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
         }
 
         if (g_verbose || !was_connected)
-            std::printf("%dx legacy /dev/hidg* opened\n", HID_PORT_COUNT);
+            std::println("{}x legacy /dev/hidg* opened", HID_PORT_COUNT);
         // Opening /dev/hidg* only proves the gadget exists, not that the Switch is awake.
         // Mark the host connected only after real USB writes succeed.
         was_connected = true;
@@ -85,7 +86,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
                         g_clients[c].pad_last_present_us[s] = 0;
                     }
                     if (g_verbose && !timeout_printed[c]) {
-                        std::printf("PC %d timed out after %.1fs without UDP input and was disconnected.\n",
+                        std::println("PC {} timed out after {:.1f}s without UDP input and was disconnected.",
                                     c + 1, (double)client_idle_us / 1000000.0);
                         timeout_printed[c] = true;
                     }
@@ -166,7 +167,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
                         hw_slots[chosen].client_idx = c;
                         hw_slots[chosen].sub_idx = s;
                         if (g_verbose)
-                            std::printf("Map -> PC %d (Pad %d) took console legacy Port %d\n", c + 1, s + 1, chosen + 1);
+                            std::println("Map -> PC {} (Pad {}) took console legacy Port {}", c + 1, s + 1, chosen + 1);
                     }
                 }
             }
@@ -204,7 +205,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
             }
 
             if (!ok) {
-                if (!error_shown) { std::puts("Host disconnected - waiting for reconnect..."); error_shown = true; }
+                if (!error_shown) { std::println("Host disconnected - waiting for reconnect..."); error_shown = true; }
                 mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; }
                 for (int wait_i = 0; wait_i < 100 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
@@ -279,7 +280,7 @@ void writer_thread(std::stop_token stoken, int hz) {
         }
 
         if (g_verbose || !was_connected)
-            std::printf("%dx USB gamepad /dev/hidg* opened\n", HID_PORT_COUNT);
+            std::println("{}x USB gamepad /dev/hidg* opened", HID_PORT_COUNT);
         // Opening /dev/hidg* only proves the gadget exists, not that the Switch is awake.
         // Mark the host connected only after real USB output/handshake activity succeeds.
         was_connected = true;
@@ -324,7 +325,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         g_clients[c].pad_last_present_us[s] = 0;
                     }
                     if (g_verbose && !timeout_printed[c]) {
-                        std::printf("PC %d timed out after %.1fs without UDP input and was disconnected.\n",
+                        std::println("PC {} timed out after {:.1f}s without UDP input and was disconnected.",
                                     c + 1, (double)elapsed_us_saturated(now_stamp, g_clients[c].last_rx_us) / 1000000.0);
                         timeout_printed[c] = true;
                     }
@@ -433,7 +434,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         hw_slots[chosen].client_idx = c;
                         hw_slots[chosen].sub_idx = s;
                         if (g_verbose)
-                            std::printf("Map -> PC %d (Pad %d) took console Pro Port %d\n", c + 1, s + 1, chosen + 1);
+                            std::println("Map -> PC {} (Pad {}) took console Pro Port {}", c + 1, s + 1, chosen + 1);
                     }
                 }
             }
@@ -581,16 +582,16 @@ void writer_thread(std::stop_token stoken, int hz) {
                         );
                         rt[h].pending_subcmd_reply = (reply_len >= 0);
                         if (g_verbose) {
-                            std::printf("[pro%d] subcmd 0x%02X reply=0x%02X 0x%02X",
+                            std::print("[pro{}] subcmd 0x{:02X} reply=0x{:02X} 0x{:02X}",
                                         h + 1, subcmd_id, rt[h].pending_reply.ack, rt[h].pending_reply.subcmd_id);
                             if ((subcmd_id == CMD_SET_DATA_FORMAT || subcmd_id == CMD_ENABLE_IMU ||
                                  subcmd_id == CMD_ENABLE_VIBRATION) &&
                                 subcmd_data_len > 0) {
-                                std::printf(" data=");
+                                std::print(" data=");
                                 for (size_t bi = 0; bi < subcmd_data_len && bi < 8; ++bi)
-                                    std::printf("%s%02X", bi ? " " : "", read_buf[11 + bi]);
+                                    std::print("{}{:02X}", bi ? " " : "", read_buf[11 + bi]);
                             }
-                            std::printf("\n");
+                            std::println("");
                         }
                     } else if (id == RID_OUTPUT_RUMBLE) {
                         if (hw_slots[h].client_idx != -1)
@@ -613,7 +614,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                         else if (w == (ssize_t)PRO_REPORT_SIZE) mark_switch2_usb_activity(now_stamp);
                         if (g_verbose) {
-                            std::printf("[pro%d] usb 0x80 cmd=0x%02X -> 0x81 subtype=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X timeout=%s\n",
+                            std::println("[pro{}] usb 0x80 cmd=0x{:02X} -> 0x81 subtype=0x{:02X} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} timeout={}",
                                         h + 1, usb_cmd, resp_81[1],
                                         CTRL_MAC_BE[h][0], CTRL_MAC_BE[h][1], CTRL_MAC_BE[h][2],
                                         CTRL_MAC_BE[h][3], CTRL_MAC_BE[h][4], CTRL_MAC_BE[h][5],
@@ -621,13 +622,13 @@ void writer_thread(std::stop_token stoken, int hz) {
                         }
                     } else {
                         if (g_verbose && id != 0x00)
-                            std::printf("[pro%d] unknown output report id=0x%02X len=%zd\n", h + 1, id, r);
+                            std::println("[pro{}] unknown output report id=0x{:02X} len={}", h + 1, id, r);
                     }
                 }
             }
 
             if (!ok) {
-                if (!error_shown) { std::puts("Host disconnected — waiting for reconnect..."); error_shown = true; }
+                if (!error_shown) { std::println("Host disconnected — waiting for reconnect..."); error_shown = true; }
                 mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < 4; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
                 for (int wait_i = 0; wait_i < 100 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
@@ -636,7 +637,7 @@ void writer_thread(std::stop_token stoken, int hz) {
 
             auto now_log = Clock::now();
             if (g_verbose && now_log - last_rate_log >= ms(1000)) {
-                std::printf("pro_hid_writes/sec=%llu\n", (unsigned long long)writes_this_second);
+                std::println("pro_hid_writes/sec={}", (unsigned long long)writes_this_second);
                 writes_this_second = 0;
                 last_rate_log = now_log;
             }
@@ -673,7 +674,7 @@ void stats_thread(std::stop_token stoken) {
         }
 
         if (!g_verbose) continue;
-        std::printf("pkts_rx=%-8llu  hid_writes=%-8llu\n",
+        std::println("pkts_rx={:<8}  hid_writes={:<8}",
             (unsigned long long)g_pkts_rx.load(),
             (unsigned long long)g_hid_writes.load());
     }

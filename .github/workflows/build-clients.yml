@@ -81,6 +81,7 @@ jobs:
           .\_deps\vcpkg\vcpkg.exe install `
             "qtbase[core,widgets,png]:x64-windows-static-release" `
             "sdl3:x64-windows-static-release" `
+            "openssl:x64-windows-static-release" `
             --overlay-triplets="$PWD/triplets" `
             --host-triplet=x64-windows-release `
             --clean-after-build
@@ -120,7 +121,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y gcc-14 g++-14 \
             build-essential cmake ninja-build pkg-config git file wget desktop-file-utils patchelf libssl-dev \
             qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins \
             libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev libglu1-mesa-dev \
@@ -143,6 +144,8 @@ jobs:
           git clone --depth 1 --branch "$SDL_REF" https://github.com/libsdl-org/SDL.git /tmp/SDL3
           cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_INSTALL_PREFIX="$HOME/.local/sdl3-static" \
             -DSDL_SHARED=OFF \
             -DSDL_STATIC=ON \
@@ -155,6 +158,8 @@ jobs:
       - name: Build client
         run: |
           cmake -S client -B client/build -G Ninja \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static"
           cmake --build client/build --parallel

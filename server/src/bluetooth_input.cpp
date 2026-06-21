@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <print>
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
@@ -68,7 +69,7 @@ static void start_bluetooth_pairing_window() {
         return;
 
     g_bt_pair_window_thread = std::thread([] {
-        std::puts("[bt] pairing window open for 2 minutes");
+        std::std::println("[bt] pairing window open for 2 minutes");
 
         // Service-mode friendly: use bluetoothctl non-interactively, avoid TTY
         // assumptions, and keep the pairing/scanning helper separate from SDL's
@@ -118,7 +119,7 @@ static void start_bluetooth_pairing_window() {
 
         run_pairing_window_script(script);
         std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
-        std::puts("[bt] pairing/reconnect helper stopped");
+        std::std::println("[bt] pairing/reconnect helper stopped");
     });
 }
 
@@ -273,7 +274,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     input.set_capture_shortcut_enabled(true);
 
     if (!input.start()) {
-        std::fprintf(stderr, "[bt] SDL3 input failed: %s\n", input.error().c_str());
+        std::println(stderr, "[bt] SDL3 input failed: {}", input.error());
         return;
     }
 
@@ -288,7 +289,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     bool switch_suspend_disconnect_active = false;
     uint64_t last_bt_disconnect_us = 0;
 
-    std::puts("[bt] Bluetooth/local controller input enabled");
+    std::std::println("[bt] Bluetooth/local controller input enabled");
 
     while (!stoken.stop_requested()) {
         input.poll();
@@ -301,12 +302,12 @@ void bluetooth_input_thread(std::stop_token stoken) {
             seen_suspend_disconnect_seq = suspend_seq;
             switch_suspend_disconnect_active = true;
             last_bt_disconnect_us = 0;
-            std::puts("[bt] Switch USB host suspended/disconnected; disconnecting local Bluetooth controllers");
+            std::println("[bt] Switch USB host suspended/disconnected; disconnecting local Bluetooth controllers");
         }
         if (switch_suspend_disconnect_active && g_switch2_usb_host_connected.load(std::memory_order_relaxed)) {
             switch_suspend_disconnect_active = false;
             if (g_verbose)
-                std::puts("[bt] Switch USB host activity returned; local Bluetooth controllers may reconnect");
+                std::println("[bt] Switch USB host activity returned; local Bluetooth controllers may reconnect");
         }
 
         for (int i = 0; i < 4; ++i) {
@@ -316,7 +317,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     if (client_for_sdl[i] >= 0) {
                         reset_bluetooth_client_slot(client_for_sdl[i]);
                         if (g_verbose)
-                            std::printf("[bt] controller %d removed from server slot %d due to Switch suspend\n",
+                            std::println("[bt] controller {} removed from server slot {} due to Switch suspend",
                                         i + 1, client_for_sdl[i] + 1);
                     }
                     client_for_sdl[i] = -1;
@@ -331,7 +332,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     input.set_rumble(i, 0, 0, 0);
                     reset_bluetooth_client_slot(client_for_sdl[i]);
                     if (g_verbose)
-                        std::printf("[bt] controller %d disconnected from server slot %d\n", i + 1, client_for_sdl[i] + 1);
+                        std::println("[bt] controller {} disconnected from server slot {}", i + 1, client_for_sdl[i] + 1);
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
                     rumble_until_us[i] = 0;
@@ -363,9 +364,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                         last_rumble_seq[i] = g_clients[client_for_sdl[i]].rumble_seq[0];
                     }
                     if (g_verbose)
-                        std::printf("[bt] controller %d (%s) assigned to server slot %d\n",
+                        std::println("[bt] controller {} ({}) assigned to server slot {}",
                                     i + 1,
-                                    pads[i].name.empty() ? "SDL3 Gamepad" : pads[i].name.c_str(),
+                                    pads[i].name.empty() ? "SDL3 Gamepad" : pads[i].name,
                                     client_for_sdl[i] + 1);
                 }
             }
@@ -386,7 +387,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
         }
 
         if (any_waiting && !waiting_logged) {
-            std::puts("[bt] controller connected, but all server slots are in use; waiting for UDP/WebSocket/BT slot to free");
+            std::println("[bt] controller connected, but all server slots are in use; waiting for UDP/WebSocket/BT slot to free");
             waiting_logged = true;
         } else if (!any_waiting) {
             waiting_logged = false;
@@ -403,7 +404,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     if (g_bt_pair_window_thread.joinable())
         g_bt_pair_window_thread.join();
     input.stop();
-    std::puts("[bt] Bluetooth/local SDL controller input stopped");
+    std::println("[bt] Bluetooth/local SDL controller input stopped");
 }
 #else
 bool bluetooth_input_available() {
@@ -411,6 +412,6 @@ bool bluetooth_input_available() {
 }
 
 void bluetooth_input_thread(std::stop_token) {
-    std::fprintf(stderr, "[bt] ns-backend was built without SDL3 Bluetooth/local controller support\n");
+    std::println(stderr, "[bt] ns-backend was built without SDL3 Bluetooth/local controller support");
 }
 #endif

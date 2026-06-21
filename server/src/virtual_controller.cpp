@@ -6,8 +6,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
+#include <print>
+#include <format>
 
 using namespace ns;
 
@@ -96,16 +97,12 @@ void randomize_controller_identity() {
         CTRL_MAC_BE[i][4] = rnd[(i * 3 + 1) % sizeof(rnd)];
         CTRL_MAC_BE[i][5] = (uint8_t)(rnd[(i * 3 + 2) % sizeof(rnd)] + i);
         CTRL_SERIAL[i] = "NSGP";
-        char suffix[16];
-        std::snprintf(suffix, sizeof(suffix), "%02X%02X%02X%02X",
+        CTRL_SERIAL[i] += std::format("{:02X}{:02X}{:02X}{:02X}",
                       CTRL_MAC_BE[i][2], CTRL_MAC_BE[i][3], CTRL_MAC_BE[i][4], CTRL_MAC_BE[i][5]);
-        CTRL_SERIAL[i] += suffix;
     }
 
-    char usb_ser[32];
-    std::snprintf(usb_ser, sizeof(usb_ser), "%02X%02X%02X%02X%02X%02X",
+    g_usb_serial = std::format("{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
                   rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5]);
-    g_usb_serial = usb_ser;
 }
 
 constexpr size_t SPI_FLASH_SIZE = 0x10000;
@@ -467,7 +464,7 @@ void build_standard_report(const ExtendedHIDReport& src,
         uint64_t t = now_us();
         if (t - last_log_us > 250000) {
             last_log_us = t;
-            std::printf("[input] lx=%3u ly=%3u rx=%3u ry=%3u | L=%02X %02X %02X R=%02X %02X %02X | motion=%s samples=%u ax=%6d ay=%6d az=%6d gx=%6d gy=%6d gz=%6d\n",
+            std::println("[input] lx={:3} ly={:3} rx={:3} ry={:3} | L={:02X} {:02X} {:02X} R={:02X} {:02X} {:02X} | motion={} samples={} ax={:6} ay={:6} az={:6} gx={:6} gy={:6} gz={:6}",
                         in.lx, in.ly, in.rx, in.ry,
                         out.left_stick[0], out.left_stick[1], out.left_stick[2],
                         out.right_stick[0], out.right_stick[1], out.right_stick[2],
@@ -592,13 +589,13 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, const uint8_t* cmd_
             memset(reply->reply_data + 5, 0xFF, size);
         }
         if (g_verbose) {
-            std::printf("[pro%d] SPI read addr=0x%04X size=%u", rt.ctrl + 1, addr, size);
+            std::print("[pro{}] SPI read addr=0x{:04X} size={}", rt.ctrl + 1, addr, size);
             if (addr == 0x6020 || addr == 0x8026 || addr == 0x8028 || addr == 0x6080 || addr == 0x6086 || addr == 0x6098) {
-                std::printf(" data=");
+                std::print(" data=");
                 for (uint8_t i = 0; i < size && i < 32 && addr + i < SPI_FLASH_SIZE; ++i)
-                    std::printf("%02X%s", flash[addr + i], (i + 1 < size && i + 1 < 32 && addr + i + 1 < SPI_FLASH_SIZE) ? " " : "");
+                    std::print("{:02X}{}", flash[addr + i], (i + 1 < size && i + 1 < 32 && addr + i + 1 < SPI_FLASH_SIZE) ? " " : "");
             }
-            std::printf("\n");
+            std::println("");
         }
         return 5 + size;
     }
@@ -756,7 +753,7 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
     g_clients[client_idx].rumble_seq[sub_idx]++;
 
     if (g_verbose) {
-        std::printf("[rumble] client=%d pad=%d low=%u high=%u duration=%u neutral=%s raw=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+        std::println("[rumble] client={} pad={} low={} high={} duration={} neutral={} raw={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
                     client_idx + 1, sub_idx + 1, ev.low_freq, ev.high_freq,
                     ev.duration_10ms, neutral ? "yes" : "no",
                     rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);

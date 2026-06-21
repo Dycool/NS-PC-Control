@@ -6,8 +6,9 @@
 #include <miniupnpc/upnperrors.h>
 #endif
 
-#include <cstdio>
+#include <print>
 #include <cstring>
+#include <string>
 #include <limits>
 #include <stdexcept>
 
@@ -30,28 +31,27 @@ bool upnp_add_mapping(uint16_t port) {
     
     if (igd != 1 && igd != 2) { FreeUPNPUrls(&g_upnp_urls); return false; }
     
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", port);
+    std::string port_str = std::to_string(port);
     
     int r = UPNP_AddPortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype,
-                                port_str, port_str, g_upnp_lan_addr, "ns-backend", "UDP", nullptr, "0");
+                                port_str.c_str(), port_str.c_str(), g_upnp_lan_addr, "ns-backend", "UDP", nullptr, "0");
     if (r != 0) { FreeUPNPUrls(&g_upnp_urls); return false; }
     
     g_upnp_active = true;
     g_upnp_port = port;
     char external_ip[40];
     if (UPNP_GetExternalIPAddress(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, external_ip) == 0) {
-        std::printf("UPnP: UDP port %u successfully forwarded!\n", port);
-        std::printf("UPnP: Tell your clients to connect to -> %s:%u\n", external_ip, port);
+        std::println("UPnP: UDP port {} successfully forwarded!", port);
+        std::println("UPnP: Tell your clients to connect to -> {}:{}", external_ip, port);
     }
     return true;
 }
 
 void upnp_remove_mapping(uint16_t) {
     if (!g_upnp_active) return;
-    char port_str[8]; snprintf(port_str, sizeof(port_str), "%u", g_upnp_port);
-    UPNP_DeletePortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, port_str, "UDP", nullptr);
-    std::puts("UPnP: port mapping removed cleanly");
+    std::string port_str = std::to_string(g_upnp_port);
+    UPNP_DeletePortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, port_str.c_str(), "UDP", nullptr);
+    std::println("UPnP: port mapping removed cleanly");
     FreeUPNPUrls(&g_upnp_urls); g_upnp_active = false; g_upnp_port = 0;
 }
 #else

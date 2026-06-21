@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <expected>
 
 extern uint32_t g_macro_udp_seq;
 extern std::mutex g_macro_mtx;
@@ -29,8 +30,8 @@ bool macro_entry_hotkey_conflicts(const std::string& hotkey, int skip_index, std
 void rebuild_macro_hotkey_state();
 void load_macro_entries();
 bool save_macro_entries_to_disk();
-bool start_macro_text(const std::string& txt, std::string* err_out = nullptr);
-bool upsert_macro_entry(ns::macro::Entry e, bool force_unique_name, std::string* err_out = nullptr);
+std::expected<void, std::string> start_macro_text(const std::string& txt);
+std::expected<void, std::string> upsert_macro_entry(ns::macro::Entry e, bool force_unique_name);
 void poll_macro_entry_hotkeys();
 void macro_record_start();
 std::string macro_record_stop();

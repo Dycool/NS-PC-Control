@@ -4,6 +4,8 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <print>
+#include <format>
 #include <cstdlib>
 
 namespace {
@@ -448,7 +450,7 @@ void SDLInputManager::scan_locked(bool initial) {
                 d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
-            std::printf("[sdl] controller slot=%d name=\"%s\" vid=%04x pid=%04x rumble=%s trigger_rumble=%s profile=%s\n",
+            std::print("[sdl] controller slot={} name=\"%s\" vid=%04x pid=%04x rumble=%s trigger_rumble=%s profile=%s\n",
                         d.slot + 1, d.name.c_str(), d.vid, d.pid,
                         d.rumble_capable ? "yes" : "no",
                         d.trigger_rumble_capable ? "yes" : "no",

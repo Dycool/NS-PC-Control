@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 
 void set_pad_present_flag(ns::ExtendedHIDReport3& r, bool present) {
@@ -47,9 +48,8 @@ bool resolve_udp_destination(const std::string& host, int port, sockaddr_in& des
     addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
-    char port_buf[8];
-    std::snprintf(port_buf, sizeof(port_buf), "%d", port);
-    if (getaddrinfo(host.c_str(), port_buf, &hints, &res) != 0 || !res) return false;
+    std::string port_str = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) return false;
     std::memcpy(&dest, res->ai_addr, sizeof(dest));
     freeaddrinfo(res);
     return true;

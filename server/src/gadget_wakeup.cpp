@@ -14,6 +14,8 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
+#include <print>
+#include <format>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -117,7 +119,7 @@ bool create_hid_function(int id) {
     std::snprintf(link_path, sizeof(link_path), "%s/hid.usb%d", CONFIG_DIR, id);
     unlink(link_path);
     if (symlink(func, link_path) != 0) {
-        std::fprintf(stderr, "[gadget] symlink %s -> %s failed: %s\n",
+        std::println(stderr, "[gadget] symlink {} -> {} failed: {}",
                      link_path, func, std::strerror(errno));
         return false;
     }
@@ -231,7 +233,7 @@ bool load_switch2_wakeup_config(bool quiet_if_missing) {
     if (!read_switch2_wakeup_config_file(g_switch2_wakeup_config_path, mac, adv, hci, &original_bt_mac)) {
         g_switch2_wake_config_loaded = false;
         if (!quiet_if_missing && g_verbose)
-            std::printf("[wake] No valid Switch 2 wake config at %s; wake disabled\n", g_switch2_wakeup_config_path.c_str());
+            std::println("[wake] No valid Switch 2 wake config at {}; wake disabled", g_switch2_wakeup_config_path);
         return false;
     }
 
@@ -241,7 +243,7 @@ bool load_switch2_wakeup_config(bool quiet_if_missing) {
     g_switch2_wake_original_bt_mac = original_bt_mac;
     g_switch2_wake_config_loaded = true;
     if (g_verbose) {
-        std::printf("[wake] Loaded Switch 2 wake config from %s (mac=%s adv_bytes=%zu hci=%s)\n",
+        std::println("[wake] Loaded Switch 2 wake config from {} (mac={} adv_bytes={} hci={})",
                     g_switch2_wakeup_config_path.c_str(), g_switch2_wake_mac.c_str(), g_switch2_wake_adv_hex.size() / 2,
                     g_switch2_wake_hci_dev.c_str());
     }
@@ -253,13 +255,13 @@ bool save_switch2_wakeup_config(const std::string& mac,
                                 const std::string& hci_dev = "hci0",
                                 const std::string& original_bt_mac = "") {
     if (!ensure_parent_dir_for_file(g_switch2_wakeup_config_path)) {
-        std::fprintf(stderr, "[wake] Failed to create config directory for %s\n", g_switch2_wakeup_config_path.c_str());
+        std::println(stderr, "[wake] Failed to create config directory for {}", g_switch2_wakeup_config_path);
         return false;
     }
 
     std::ofstream f(g_switch2_wakeup_config_path, std::ios::trunc);
     if (!f) {
-        std::fprintf(stderr, "[wake] Failed to open %s for writing\n", g_switch2_wakeup_config_path.c_str());
+        std::println(stderr, "[wake] Failed to open {} for writing", g_switch2_wakeup_config_path);
         return false;
     }
 
@@ -461,9 +463,9 @@ void enter_switch2_wake_runtime_mode() {
         std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
         const std::string mac = lowercase_copy(g_switch2_wake_mac);
         if (g_verbose)
-            std::printf("[wake] Preparing Bluetooth wake identity in background on %s\n", hci.c_str());
+            std::println("[wake] Preparing Bluetooth wake identity in background on {}", hci);
         if (!prepare_wake_controller(hci, mac, g_verbose) && g_verbose)
-            std::fprintf(stderr, "[wake] Background wake identity preparation failed; runtime wake will still use raw ADV\n");
+            std::println(stderr, "[wake] Background wake identity preparation failed; runtime wake will still use raw ADV");
     }).detach();
 }
 
@@ -544,7 +546,7 @@ void wait_for_bluetooth_runtime_ready(bool verbose_output) {
         WakeCmdResult show = run_wake_command({"bluetoothctl", "show"}, false, true, 2000);
         if (show.exit_code == 0 && show.output.find("Powered: yes") != std::string::npos) {
             if (verbose_output)
-                std::puts("[bt] BlueZ adapter is powered and ready");
+                std::println("[bt] BlueZ adapter is powered and ready");
             return;
         }
         run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 2000);
@@ -552,7 +554,7 @@ void wait_for_bluetooth_runtime_ready(bool verbose_output) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     if (verbose_output)
-        std::fprintf(stderr, "[bt] BlueZ adapter did not report Powered: yes before SDL startup; continuing anyway\n");
+        std::println(stderr, "[bt] BlueZ adapter did not report Powered: yes before SDL startup; continuing anyway");
 }
 
 void enter_bluetooth_runtime_mode() {
@@ -599,7 +601,7 @@ void teardown_gadget() {
     clear_switch2_usb_activity();
     if (!path_exists(GADGET_DIR)) return;
 
-    std::puts("[gadget] Closing USB gadget...");
+    std::println("[gadget] Closing USB gadget...");
 
     std::string udc_path = join_path(GADGET_DIR, "UDC");
     write_text_file(udc_path.c_str(), "");
@@ -622,7 +624,7 @@ void teardown_gadget() {
     rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409");
     rmdir_if_exists(GADGET_DIR);
 
-    std::puts("[gadget] USB gadget closed");
+    std::println("[gadget] USB gadget closed");
 }
 
 std::string parse_first_hci_device(const std::string& info) {
@@ -692,7 +694,7 @@ bool wait_for_wake_hci(std::string& hci_dev, bool verbose_output) {
     if (hci_dev.empty())
         hci_dev = "hci0";
     if (verbose_output)
-        std::printf("[wake] Using Bluetooth controller %s\n", hci_dev.c_str());
+        std::println("[wake] Using Bluetooth controller {}", hci_dev);
     return true;
 }
 
@@ -704,7 +706,7 @@ bool reset_wake_bt_stack(std::string& hci_dev, bool verbose_output) {
     if (hci_dev.empty())
         hci_dev = "hci0";
     if (verbose_output)
-        std::fprintf(stderr, "[wake] Resetting Bluetooth stack / hciuart\n");
+        std::println(stderr, "[wake] Resetting Bluetooth stack / hciuart");
 
     run_wake_command({"systemctl", "stop", "bluetooth"}, verbose_output, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, verbose_output, false, 3000);
@@ -738,12 +740,12 @@ bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bo
         g_saved_bt_hci = hci_dev;
         g_bt_modified_for_wake = true;
         if (verbose_output && !g_saved_bt_mac.empty())
-            std::printf("[wake] Saved original Bluetooth MAC: %s\n", g_saved_bt_mac.c_str());
+            std::println("[wake] Saved original Bluetooth MAC: {}", g_saved_bt_mac);
     }
 
     for (int attempt = 1; attempt <= 3; ++attempt) {
         if (verbose_output)
-            std::printf("[wake] Preparing Bluetooth controller, attempt %d, device %s\n", attempt, hci_dev.c_str());
+            std::println("[wake] Preparing Bluetooth controller, attempt {}, device {}", attempt, hci_dev);
 
         wake_cmd_ok({"btmgmt", "-i", hci_dev, "power", "off"}, verbose_output);
 
@@ -779,13 +781,13 @@ bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bo
         const std::string current = read_hci_address(hci_dev);
         if (!current.empty() && current != mac_lc) {
             if (verbose_output)
-                std::fprintf(stderr, "[wake] Controller address is still %s, wanted %s\n",
+                std::println(stderr, "[wake] Controller address is still {}, wanted {}",
                              current.c_str(), mac_lc.c_str());
             reset_wake_bt_stack(hci_dev, verbose_output);
             continue;
         }
         if (verbose_output)
-            std::printf("[wake] Bluetooth controller prepared as %s\n", mac_lc.c_str());
+            std::println("[wake] Bluetooth controller prepared as {}", mac_lc);
         return true;
     }
 
@@ -809,25 +811,25 @@ bool start_wake_raw_advertising(const std::string& hci_dev,
         adv_args.push_back("00");
 
     if (verbose_output)
-        std::printf("[wake] Disable advertising first\n");
+        std::println("[wake] Disable advertising first");
     wake_disable_advertising_quiet(hci_dev);
 
     if (verbose_output)
-        std::printf("[wake] Set advertising parameters\n");
+        std::println("[wake] Set advertising parameters");
     if (!wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0006",
                       "20", "00", "40", "00", "03", "00", "00",
                       "00", "00", "00", "00", "00", "00", "07", "00"}, verbose_output))
         return false;
 
     if (verbose_output)
-        std::printf("[wake] Set advertising data (%zu bytes)\n", adv_bytes);
+        std::println("[wake] Set advertising data ({} bytes)", adv_bytes);
     std::vector<std::string> set_adv = {"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0008"};
     set_adv.insert(set_adv.end(), adv_args.begin(), adv_args.end());
     if (!wake_cmd_ok(set_adv, verbose_output))
         return false;
 
     if (verbose_output)
-        std::printf("[wake] Clear scan response data\n");
+        std::println("[wake] Clear scan response data");
     std::vector<std::string> clear_scan = {"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0009", "00"};
     for (int i = 0; i < 31; ++i)
         clear_scan.push_back("00");
@@ -835,14 +837,14 @@ bool start_wake_raw_advertising(const std::string& hci_dev,
         return false;
 
     if (verbose_output)
-        std::printf("[wake] Enable advertising as %s for %ds\n", mac_lc.c_str(), seconds);
+        std::println("[wake] Enable advertising as {} for {}s", mac_lc, seconds);
     if (!wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "01"}, verbose_output))
         return false;
 
     std::this_thread::sleep_for(std::chrono::seconds(seconds));
 
     if (verbose_output)
-        std::printf("[wake] Disable advertising\n");
+        std::println("[wake] Disable advertising");
     wake_disable_advertising_quiet(hci_dev);
     return true;
 }
@@ -852,7 +854,7 @@ bool send_switch2_wake_advert_once(const std::string& mac,
                                            int seconds,
                                            bool verbose_output = false) {
     if (!valid_mac_string(mac) || !valid_adv_hex(adv_hex)) {
-        std::fprintf(stderr, "[wake] Invalid wake MAC/ADV; not sending\n");
+        std::println(stderr, "[wake] Invalid wake MAC/ADV; not sending");
         return false;
     }
     if (seconds <= 0) seconds = 1;
@@ -863,18 +865,18 @@ bool send_switch2_wake_advert_once(const std::string& mac,
     std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
 
     if (verbose_output) {
-        std::printf("[wake] Wake MAC: %s\n", mac_lc.c_str());
-        std::printf("[wake] ADV bytes: %zu\n", adv_uc.size() / 2);
-        std::printf("[wake] Duration: %ds\n", seconds);
+        std::println("[wake] Wake MAC: {}", mac_lc);
+        std::println("[wake] ADV bytes: {}", adv_uc.size() / 2);
+        std::println("[wake] Duration: {}s", seconds);
     }
 
     const std::string current_mac = read_hci_address(hci_dev);
     if (verbose_output) {
         if (!current_mac.empty() && current_mac != mac_lc) {
-            std::printf("[wake] Adapter currently reports %s; sending raw ADV without btmgmt on wake path\n",
+            std::println("[wake] Adapter currently reports {}; sending raw ADV without btmgmt on wake path",
                         current_mac.c_str());
         } else {
-            std::printf("[wake] Runtime path: sending ADV directly on %s without btmgmt\n", hci_dev.c_str());
+            std::println("[wake] Runtime path: sending ADV directly on {} without btmgmt", hci_dev);
         }
     }
 
@@ -882,7 +884,7 @@ bool send_switch2_wake_advert_once(const std::string& mac,
 
     if (!ok) {
         if (verbose_output)
-            std::fprintf(stderr, "[wake] Raw advertising failed. Resetting HCI stack and retrying raw ADV once.\n");
+            std::println(stderr, "[wake] Raw advertising failed. Resetting HCI stack and retrying raw ADV once.");
         if (reset_wake_bt_stack(hci_dev, verbose_output))
             ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
     }
@@ -890,11 +892,11 @@ bool send_switch2_wake_advert_once(const std::string& mac,
     wake_disable_advertising_quiet(hci_dev);
 
     if (!ok) {
-        std::fprintf(stderr, "[wake] Raw HCI wake advert failed\n");
+        std::println(stderr, "[wake] Raw HCI wake advert failed");
         return false;
     }
     if (verbose_output)
-        std::printf("[wake] Done\n");
+        std::println("[wake] Done");
     return true;
 }
 
@@ -927,11 +929,11 @@ void switch2_delayed_wake_check_worker(const char* reason) {
             g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
 
             if (g_verbose) {
-                std::printf("[wake] %s; USB activity went idle after connect, sending Joy-Con 2 BLE wake advert for %dms as %s\n",
+                std::println("[wake] {}; USB activity went idle after connect, sending Joy-Con 2 BLE wake advert for {}ms as {}",
                             wake_reason.c_str(), SWITCH2_WAKE_ADV_BURST_MS,
                             g_switch2_wake_mac.c_str());
             } else {
-                std::printf("[wake] waking up Switch 2\n");
+                std::println("[wake] waking up Switch 2");
             }
 
             std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
@@ -940,7 +942,7 @@ void switch2_delayed_wake_check_worker(const char* reason) {
     }
 
     if (g_verbose)
-        std::printf("[wake] %s; USB activity stayed active, treating Switch as awake\n", wake_reason.c_str());
+        std::println("[wake] {}; USB activity stayed active, treating Switch as awake", wake_reason);
     g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
 }
 
@@ -971,7 +973,7 @@ void maybe_send_switch2_wake_advert(const char* reason) {
 
     if (!force_after_disconnect && switch2_usb_host_recently_active(now)) {
         if (g_verbose) {
-            std::printf("[wake] %s; recent Switch USB activity seen, delaying wake evaluation\n",
+            std::println("[wake] {}; recent Switch USB activity seen, delaying wake evaluation",
                         reason ? reason : "client connected");
         }
         schedule_switch2_delayed_wake_check(reason);
@@ -993,11 +995,11 @@ void maybe_send_switch2_wake_advert(const char* reason) {
     g_switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
 
     if (g_verbose) {
-        std::printf("[wake] %s; sending Joy-Con 2 BLE wake advert for %dms as %s\n",
+        std::println("[wake] {}; sending Joy-Con 2 BLE wake advert for {}ms as {}",
                     reason ? reason : "client connected", SWITCH2_WAKE_ADV_BURST_MS,
                     g_switch2_wake_mac.c_str());
     } else {
-        std::printf("[wake] waking up Switch 2\n");
+        std::println("[wake] waking up Switch 2");
     }
 
     std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
@@ -1082,40 +1084,40 @@ bool capture_switch2_wake_advert(int seconds,
 }
 
 void wait_for_enter(const char* prompt) {
-    if (prompt && *prompt) std::printf("%s", prompt);
+    if (prompt && *prompt) std::print("{}", prompt);
     std::fflush(stdout);
     std::string dummy;
     std::getline(std::cin, dummy);
 }
 
 bool auto_find_joycon_for_setup(std::string& joycon_mac) {
-    std::puts("\n[wake] Step 1/4: Finding your Joy-Con 2 automatically.");
-    std::puts("[wake] Put the Joy-Con 2 very close to the Pi and hold the small SYNC button.");
+    std::println("\n[wake] Step 1/4: Finding your Joy-Con 2 automatically.");
+    std::println("[wake] Put the Joy-Con 2 very close to the Pi and hold the small SYNC button.");
 
     std::string adv;
     for (int attempt = 1; attempt <= 12; ++attempt) {
-        std::printf("[wake] Scanning for Nintendo/Joy-Con 2 advert... attempt %d/12\n", attempt);
+        std::println("[wake] Scanning for Nintendo/Joy-Con 2 advert... attempt {}/12", attempt);
         if (capture_switch2_wake_advert(10, "", joycon_mac, adv)) {
-            std::printf("[wake] Found Nintendo controller: %s\n", joycon_mac.c_str());
+            std::println("[wake] Found Nintendo controller: {}", joycon_mac);
             return true;
         }
-        std::puts("[wake] No Nintendo advert yet. Keep holding SYNC or press it again; retrying...");
+        std::println("[wake] No Nintendo advert yet. Keep holding SYNC or press it again; retrying...");
     }
 
-    std::fprintf(stderr, "[wake] Could not find a Nintendo/Joy-Con 2 advertisement. Keep it very close to the Pi and try again.\n");
+    std::println(stderr, "[wake] Could not find a Nintendo/Joy-Con 2 advertisement. Keep it very close to the Pi and try again.");
     return false;
 }
 
 int run_switch2_wakeup_setup() {
     if (geteuid() != 0) {
-        std::fprintf(stderr, "[wake] -wake needs root because it controls Bluetooth. Run with sudo.\n");
+        std::println(stderr, "[wake] -wake needs root because it controls Bluetooth. Run with sudo.");
         return 2;
     }
 
     const char* required[] = {"btmon", "btmgmt", "hcitool", "hciconfig", "rfkill", "systemctl"};
     for (const char* cmd : required) {
         if (!command_exists(cmd)) {
-            std::fprintf(stderr, "[wake] Missing command: %s. Install BlueZ tools with: sudo apt install bluez\n", cmd);
+            std::println(stderr, "[wake] Missing command: {}. Install BlueZ tools with: sudo apt install bluez", cmd);
             return 2;
         }
     }
@@ -1144,12 +1146,12 @@ int run_switch2_wakeup_setup() {
     // -wake is setup-only. Do not try to manage paired SDL/BlueZ controllers
     // here; the capture path below owns the adapter directly with btmgmt/hcitool.
 
-    std::puts("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
-    std::puts("------------------------------------------------");
-    std::printf("[wake] Config will be saved to: %s\n", g_switch2_wakeup_config_path.c_str());
-    std::printf("[wake] Bluetooth adapter registered for runtime wake: %s\n", g_switch2_wake_hci_dev.c_str());
-    std::puts("[wake] This setup scans your Joy-Con 2 on the Pi, captures its HOME advert, then asks you to attach it back to the Switch 2.");
-    std::puts("[wake] Use your own Joy-Con 2 right joycon that is paired to this Switch 2.\n");
+    std::println("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
+    std::println("------------------------------------------------");
+    std::println("[wake] Config will be saved to: {}", g_switch2_wakeup_config_path);
+    std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_switch2_wake_hci_dev);
+    std::println("[wake] This setup scans your Joy-Con 2 on the Pi, captures its HOME advert, then asks you to attach it back to the Switch 2.");
+    std::println("[wake] Use your own Joy-Con 2 right joycon that is paired to this Switch 2.\n");
 
     std::string mac;
     if (!auto_find_joycon_for_setup(mac)) {
@@ -1157,36 +1159,36 @@ int run_switch2_wakeup_setup() {
         return 1;
     }
 
-    std::puts("\n[wake] Step 2/4: Capture the Joy-Con 2 HOME wake advertisement.");
-    std::puts("[wake] Keep the Joy-Con 2 very close to the Pi.");
-    std::puts("[wake] If pressing HOME wakes the Switch 2, put it back to sleep and retry.");
-    std::puts("[wake] It should take about 3-5 tries, this is normal.");
+    std::println("\n[wake] Step 2/4: Capture the Joy-Con 2 HOME wake advertisement.");
+    std::println("[wake] Keep the Joy-Con 2 very close to the Pi.");
+    std::println("[wake] If pressing HOME wakes the Switch 2, put it back to sleep and retry.");
+    std::println("[wake] It should take about 3-5 tries, this is normal.");
 
     std::string cap_mac, cap_adv;
     bool captured_home = false;
     for (int attempt = 1; attempt <= 5; ++attempt) {
-        std::printf("[wake] HOME capture attempt %d/5.\n", attempt);
+        std::println("[wake] HOME capture attempt {}/5.", attempt);
         wait_for_enter("[wake] Press Enter, then press HOME on the Joy-Con 2 immediately... ");
         if (capture_switch2_wake_advert(20, mac, cap_mac, cap_adv)) {
             captured_home = true;
             break;
         }
-        std::fprintf(stderr, "[wake] Did not catch the HOME advert from %s.\n", mac.c_str());
-        std::fprintf(stderr, "[wake] Put the Switch 2 back to sleep if it woke, keep the Joy-Con close to the Pi, and retry.\n");
+        std::println(stderr, "[wake] Did not catch the HOME advert from {}.", mac);
+        std::println(stderr, "[wake] Put the Switch 2 back to sleep if it woke, keep the Joy-Con close to the Pi, and retry.");
     }
     if (!captured_home) {
-        std::fprintf(stderr, "[wake] Could not capture the HOME advertisement from %s.\n", mac.c_str());
+        std::println(stderr, "[wake] Could not capture the HOME advertisement from {}.", mac);
         restore_setup_bt_state();
         return 1;
     }
 
     mac = cap_mac;
-    std::printf("[wake] Captured wake MAC: %s\n", mac.c_str());
-    std::printf("[wake] Captured wake ADV: %s\n", cap_adv.c_str());
+    std::println("[wake] Captured wake MAC: {}", mac);
+    std::println("[wake] Captured wake ADV: {}", cap_adv);
 
-    std::puts("\n[wake] Step 3/4: Attach the Joy-Con 2 to the Switch 2, then suspend the Switch 2.");
-    std::puts("[wake] Attach the Joy-Con 2 to the Switch 2 and wait until the console accepts/pairs it again.");
-    std::puts("[wake] Then put the Switch 2 to sleep before continuing.");
+    std::println("\n[wake] Step 3/4: Attach the Joy-Con 2 to the Switch 2, then suspend the Switch 2.");
+    std::println("[wake] Attach the Joy-Con 2 to the Switch 2 and wait until the console accepts/pairs it again.");
+    std::println("[wake] Then put the Switch 2 to sleep before continuing.");
     wait_for_enter("[wake] Press Enter when the Joy-Con 2 is paired back AND the Switch 2 is asleep; setup will test wake... ");
 
     if (!save_switch2_wakeup_config(mac, cap_adv, g_switch2_wake_hci_dev, setup_original_bt_mac)) {
@@ -1199,17 +1201,17 @@ int run_switch2_wakeup_setup() {
     g_switch2_wake_hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
     g_switch2_wake_original_bt_mac = valid_mac_string(setup_original_bt_mac) ? setup_original_bt_mac : "";
     g_switch2_wake_config_loaded = true;
-    std::printf("[wake] Saved wake config to %s\n", g_switch2_wakeup_config_path.c_str());
+    std::println("[wake] Saved wake config to {}", g_switch2_wakeup_config_path);
 
-    std::puts("[wake] Step 4/4: Sending test wake advert with MAC spoofing...");
+    std::println("[wake] Step 4/4: Sending test wake advert with MAC spoofing...");
     if (!send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, 1, false)) {
-        std::fprintf(stderr, "[wake] Test wake send failed. Config was saved, but Bluetooth raw HCI send did not complete.\n");
+        std::println(stderr, "[wake] Test wake send failed. Config was saved, but Bluetooth raw HCI send did not complete.");
         restore_setup_bt_state();
         return 1;
     }
 
     restore_setup_bt_state();
-    std::puts("[wake] Test wake advert sent. If the Switch 2 woke up, setup is complete.");
+    std::println("[wake] Test wake advert sent. If the Switch 2 woke up, setup is complete.");
     return 0;
 }
 
@@ -1227,14 +1229,14 @@ bool setup_gadget_builtin(bool force, const char* reason) {
         g_gadget_setup_attempted.store(true);
 
     if (geteuid() != 0) {
-        std::fprintf(stderr,
+        std::println(stderr,
             "[gadget] requested /dev/hidg* nodes are not ready and built-in setup needs root.\n"
-            "[gadget] Run: sudo ./ns-backend ...\n");
+            "[gadget] Run: sudo ./ns-backend ...");
         return false;
     }
 
     if (g_verbose)
-        std::printf("[gadget] %s; creating built-in %d-interface %s gadget\n",
+        std::println("[gadget] {}; creating built-in {}-interface {} gadget",
                     reason ? reason : "HID gadget not ready",
                     HID_PORT_COUNT,
                     g_legacy_mode ? "legacy 8-byte" : "64-byte motion");
@@ -1245,9 +1247,9 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     (void)run_shell_best_effort("mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true");
 
     if (!dir_exists("/sys/kernel/config/usb_gadget")) {
-        std::fprintf(stderr,
+        std::println(stderr,
             "[gadget] /sys/kernel/config/usb_gadget is unavailable.\n"
-            "[gadget] Check libcomposite/configfs and dtoverlay=dwc2.\n");
+            "[gadget] Check libcomposite/configfs and dtoverlay=dwc2.");
         return false;
     }
 
@@ -1305,14 +1307,14 @@ bool setup_gadget_builtin(bool force, const char* reason) {
 
     std::string udc = first_udc_name();
     if (udc.empty()) {
-        std::fprintf(stderr,
-            "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt.\n");
+        std::println(stderr,
+            "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt.");
         return false;
     }
 
     if (!write_text_file(join_path(GADGET_DIR, "UDC").c_str(), udc.c_str())) return false;
     if (g_verbose)
-        std::printf("[gadget] Bound to UDC: %s\n", udc.c_str());
+        std::println("[gadget] Bound to UDC: {}", udc);
 
     // /dev/hidg* can appear shortly after binding.
     for (int tries = 0; tries < 20; ++tries) {
@@ -1324,13 +1326,13 @@ bool setup_gadget_builtin(bool force, const char* reason) {
             chmod(path, 0666);
         }
         if (all_seen && hidg_nodes_ready()) {
-            std::printf("[gadget] Done. Exposed %d USB gamepad HID interface(s) (/dev/hidg0..%d)\n", HID_PORT_COUNT, HID_PORT_COUNT - 1);
+            std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})", HID_PORT_COUNT, HID_PORT_COUNT - 1);
             return true;
         }
         std::this_thread::sleep_for(ms(100));
     }
 
-    std::fprintf(stderr, "[gadget] setup finished, but requested /dev/hidg* nodes are still not ready.\n");
+    std::println(stderr, "[gadget] setup finished, but requested /dev/hidg* nodes are still not ready.");
     return false;
 }
 

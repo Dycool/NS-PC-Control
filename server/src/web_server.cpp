@@ -426,14 +426,14 @@ void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, 
 
     g_lws_context = lws_create_context(&info);
     if (!g_lws_context) {
-        std::printf("libwebsockets init failed\n");
+        std::println("libwebsockets init failed");
         return;
     }
 
     if (serve_http_webapp)
-        std::printf("[web] HTTP webapp + WebSocket proxy listening on port %d\n", web_port);
+        std::println("[web] HTTP webapp + WebSocket proxy listening on port {}", web_port);
     else
-        std::printf("[ws] WebSocket proxy listening on port %d; HTTP webapp disabled (use -w to enable)\n", web_port);
+        std::println("[ws] WebSocket proxy listening on port {}; HTTP webapp disabled (use -w to enable)", web_port);
 
     while (!stoken.stop_requested()) {
         lws_service(g_lws_context, 50); // wait up to 50ms

@@ -2,8 +2,10 @@
 #include "gadget_wakeup.hpp"
 #include "shared/sha256.h"
 
-#include <cstdio>
+#include <print>
+#include <string>
 #include <cstring>
+#include <stdexcept>
 #include <utility>
 
 using namespace ns;
@@ -208,13 +210,13 @@ bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, const s
     ns::macro::MacroUdpChunkHeaderWire h{};
     memcpy(&h, data, sizeof(h));
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
-    if (h.version != PROTO_VERSION) { if (g_verbose) puts("bad macro chunk version, dropped"); return true; }
-    if (h.total_len > ns::macro::UDP_TEXT_MAX) { if (g_verbose) puts("macro chunk total over 50MB, dropped"); return true; }
-    if (h.chunk_len > ns::macro::UDP_CHUNK_MAX) { if (g_verbose) puts("macro chunk too large, dropped"); return true; }
-    if (h.chunk_count == 0 || h.chunk_index >= h.chunk_count) { if (g_verbose) puts("bad macro chunk index/count, dropped"); return true; }
-    if (bytes != ns::macro::CHUNK_HEADER_SIZE + (size_t)h.chunk_len + HMAC_TAG_SIZE) { if (g_verbose) puts("bad macro chunk packet size, dropped"); return true; }
+    if (h.version != PROTO_VERSION) { if (g_verbose) std::println("bad macro chunk version, dropped"); return true; }
+    if (h.total_len > ns::macro::UDP_TEXT_MAX) { if (g_verbose) std::println("macro chunk total over 50MB, dropped"); return true; }
+    if (h.chunk_len > ns::macro::UDP_CHUNK_MAX) { if (g_verbose) std::println("macro chunk too large, dropped"); return true; }
+    if (h.chunk_count == 0 || h.chunk_index >= h.chunk_count) { if (g_verbose) std::println("bad macro chunk index/count, dropped"); return true; }
+    if (bytes != ns::macro::CHUNK_HEADER_SIZE + (size_t)h.chunk_len + HMAC_TAG_SIZE) { if (g_verbose) std::println("bad macro chunk packet size, dropped"); return true; }
     const uint8_t* recv_hmac = data + ns::macro::CHUNK_HEADER_SIZE + h.chunk_len;
-    if (hmac_verify(std::span<const uint8_t>(g_hmac_key, 32), std::span<const uint8_t>(data, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len), std::span<const uint8_t>(recv_hmac, HMAC_TAG_SIZE)) != 0) { if (g_verbose) puts("bad macro chunk HMAC, dropped"); return true; }
+    if (hmac_verify(std::span<const uint8_t>(g_hmac_key, 32), std::span<const uint8_t>(data, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len), std::span<const uint8_t>(recv_hmac, HMAC_TAG_SIZE)) != 0) { if (g_verbose) std::println("bad macro chunk HMAC, dropped"); return true; }
     if (!rate_allow(sender.sin_addr.s_addr)) return true;
 
     uint64_t now = now_us();
@@ -242,11 +244,11 @@ bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, const s
                 up.got.assign(h.chunk_count, 0);
             } catch (...) {
                 up = ServerMacroUploadRuntime{};
-                if (g_verbose) puts("macro chunk allocation failed");
+                if (g_verbose) std::println("macro chunk allocation failed");
                 return true;
             }
         }
-        if (up.total_len != h.total_len || up.chunk_count != h.chunk_count) { if (g_verbose) puts("macro chunk metadata mismatch, dropped"); return true; }
+        if (up.total_len != h.total_len || up.chunk_count != h.chunk_count) { if (g_verbose) std::println("macro chunk metadata mismatch, dropped"); return true; }
         up.last_rx_us = now;
         if (!up.got[h.chunk_index]) {
             up.chunks[h.chunk_index].assign(reinterpret_cast<const char*>(data + ns::macro::CHUNK_HEADER_SIZE), h.chunk_len);
@@ -256,7 +258,7 @@ bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, const s
         if (up.received_count == up.chunk_count) {
             size_t total = 0;
             for (const auto& c : up.chunks) total += c.size();
-            if (total != up.total_len) { if (g_verbose) puts("macro chunk final size mismatch"); up = ServerMacroUploadRuntime{}; return true; }
+            if (total != up.total_len) { if (g_verbose) std::println("macro chunk final size mismatch"); up = ServerMacroUploadRuntime{}; return true; }
             completed.reserve(total);
             for (const auto& c : up.chunks) completed += c;
             completed_subpad = up.subpad;
@@ -264,7 +266,7 @@ bool server_macro_handle_chunk_packet(const uint8_t* data, size_t bytes, const s
         }
     }
     if (!completed.empty()) {
-        if (g_verbose) std::printf("[macro] received chunked macro %zu bytes\n", completed.size());
+        if (g_verbose) std::println("[macro] received chunked macro {} bytes", completed.size());
         server_macro_start(client_idx, completed_subpad, completed);
     }
     return true;
@@ -348,7 +350,7 @@ bool server_macro_start(int client_idx, int subpad, const std::string& json_or_c
     if (subpad < 0 || subpad >= 4) subpad = 0;
     std::vector<ns::macro::Step> steps;
     if (!ns::macro::validate_text(json_or_commands, steps, nullptr)) {
-        if (g_verbose) std::printf("[macro] rejected: %s\n", ns::macro::last_error().c_str());
+        if (g_verbose) std::println("[macro] rejected: {}", ns::macro::last_error());
         return false;
     }
     std::lock_guard<std::mutex> lk(g_server_macro_mtx);
@@ -356,7 +358,7 @@ bool server_macro_start(int client_idx, int subpad, const std::string& json_or_c
     rt.steps = std::move(steps);
     rt.running = true;
     rt.start_us = now_us();
-    if (g_verbose) std::printf("[macro] started server macro slot=%d pad=%d\n", client_idx + 1, subpad + 1);
+    if (g_verbose) std::println("[macro] started server macro slot={} pad={}", client_idx + 1, subpad + 1);
     return true;
 }
 
