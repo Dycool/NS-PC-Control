@@ -122,6 +122,29 @@ static void start_bluetooth_pairing_window() {
     });
 }
 
+static void disconnect_connected_bluetooth_gamepads() {
+    const char* script =
+        "command -v bluetoothctl >/dev/null 2>&1 || exit 0; "
+        "disconnect_gamepad() { "
+            "mac=\"$1\"; shift; name=\"$*\"; "
+            "case \"$name\" in "
+                "*Wireless\\ Controller*|*Xbox\\ Wireless\\ Controller*|*Xbox\\ One\\ Wireless\\ Controller*|*Pro\\ Controller*|*Nintendo\\ Switch\\ Pro\\ Controller*|*Joy-Con*|*8BitDo*) "
+                    "bluetoothctl disconnect \"$mac\" >/dev/null 2>&1 || true; "
+                    ";; "
+            "esac; "
+        "}; "
+        "bluetoothctl devices Connected 2>/dev/null | while read -r kind mac name_rest; do "
+            "[ \"$kind\" = \"Device\" ] || continue; "
+            "disconnect_gamepad \"$mac\" \"$name_rest\"; "
+        "done; "
+        "bluetoothctl paired-devices 2>/dev/null | while read -r kind mac name_rest; do "
+            "[ \"$kind\" = \"Device\" ] || continue; "
+            "bluetoothctl info \"$mac\" 2>/dev/null | grep -q 'Connected: yes' || continue; "
+            "disconnect_gamepad \"$mac\" \"$name_rest\"; "
+        "done";
+    std::system(script);
+}
+
 using namespace ns;
 
 #ifdef NS_ENABLE_SDL_BT
@@ -261,6 +284,9 @@ void bluetooth_input_thread() {
     std::array<uint32_t, 4> last_rumble_seq{};
     std::array<uint64_t, 4> rumble_until_us{};
     bool waiting_logged = false;
+    uint64_t seen_suspend_disconnect_seq = g_switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
+    bool switch_suspend_disconnect_active = false;
+    uint64_t last_bt_disconnect_us = 0;
 
     std::puts("[bt] Bluetooth/local controller input enabled");
 
@@ -270,7 +296,36 @@ void bluetooth_input_thread() {
         const uint64_t now = now_us();
         bool any_waiting = false;
 
+        const uint64_t suspend_seq = g_switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
+        if (suspend_seq != seen_suspend_disconnect_seq) {
+            seen_suspend_disconnect_seq = suspend_seq;
+            switch_suspend_disconnect_active = true;
+            last_bt_disconnect_us = 0;
+            std::puts("[bt] Switch USB host suspended/disconnected; disconnecting local Bluetooth controllers");
+        }
+        if (switch_suspend_disconnect_active && g_switch2_usb_host_connected.load(std::memory_order_relaxed)) {
+            switch_suspend_disconnect_active = false;
+            if (g_verbose)
+                std::puts("[bt] Switch USB host activity returned; local Bluetooth controllers may reconnect");
+        }
+
         for (int i = 0; i < 4; ++i) {
+            if (switch_suspend_disconnect_active) {
+                if (pads[i].connected || client_for_sdl[i] >= 0) {
+                    input.set_rumble(i, 0, 0, 0);
+                    if (client_for_sdl[i] >= 0) {
+                        reset_bluetooth_client_slot(client_for_sdl[i]);
+                        if (g_verbose)
+                            std::printf("[bt] controller %d removed from server slot %d due to Switch suspend\n",
+                                        i + 1, client_for_sdl[i] + 1);
+                    }
+                    client_for_sdl[i] = -1;
+                    last_rumble_seq[i] = 0;
+                    rumble_until_us[i] = 0;
+                }
+                continue;
+            }
+
             if (!pads[i].connected) {
                 if (client_for_sdl[i] >= 0) {
                     input.set_rumble(i, 0, 0, 0);
@@ -322,6 +377,12 @@ void bluetooth_input_thread() {
 
             publish_bluetooth_state_to_client(client_for_sdl[i], pads[i], now);
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
+        }
+
+        if (switch_suspend_disconnect_active &&
+            (last_bt_disconnect_us == 0 || elapsed_us_saturated(now, last_bt_disconnect_us) > 1'000'000ULL)) {
+            disconnect_connected_bluetooth_gamepads();
+            last_bt_disconnect_us = now;
         }
 
         if (any_waiting && !waiting_logged) {

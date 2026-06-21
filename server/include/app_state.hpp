@@ -48,6 +48,7 @@ extern std::atomic<bool> g_switch2_usb_host_connected;
 extern std::atomic<uint64_t> g_switch2_last_usb_activity_us;
 extern std::atomic<bool> g_switch2_force_next_wake;
 extern std::atomic<bool> g_switch2_delayed_wake_check_running;
+extern std::atomic<uint64_t> g_switch2_suspend_disconnect_seq;
 extern uint8_t g_hmac_key[32];
 
 struct RateSlot {

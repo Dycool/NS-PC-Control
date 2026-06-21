@@ -39,6 +39,7 @@ std::atomic<bool> g_switch2_usb_host_connected{false};
 std::atomic<uint64_t> g_switch2_last_usb_activity_us{0};
 std::atomic<bool> g_switch2_force_next_wake{false};
 std::atomic<bool> g_switch2_delayed_wake_check_running{false};
+std::atomic<uint64_t> g_switch2_suspend_disconnect_seq{0};
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 uint8_t  g_hmac_key[32];
@@ -75,6 +76,7 @@ void clear_switch2_usb_activity() {
 void mark_switch2_usb_host_disconnected() {
     clear_switch2_usb_activity();
     g_switch2_force_next_wake.store(true, std::memory_order_relaxed);
+    g_switch2_suspend_disconnect_seq.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool switch2_usb_host_recently_active(uint64_t now) {
