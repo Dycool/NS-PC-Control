@@ -92,7 +92,7 @@ jobs:
 
       - name: Cache OpenSSL aarch64
         id: cache-openssl-aarch64
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/openssl
           key: openssl-aarch64-3.0.13-v1
@@ -103,13 +103,13 @@ jobs:
           wget -q https://github.com/openssl/openssl/releases/download/openssl-3.0.13/openssl-3.0.13.tar.gz
           tar xzf openssl-3.0.13.tar.gz
           cd openssl-3.0.13
-          CC=aarch64-linux-gnu-gcc-14 CXX=aarch64-linux-gnu-g++-14 ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
+          CC=gcc-14 CXX=g++-14 ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- --prefix=/tmp/openssl
           make -j"$(nproc)"
           make install
 
       - name: Cache libwebsockets aarch64
         id: cache-lws-aarch64
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/libwebsockets
           key: lws-aarch64-4.3.3-v1
