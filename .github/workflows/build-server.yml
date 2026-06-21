@@ -18,6 +18,7 @@ env:
 jobs:
   build-pi-server:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v6
 
@@ -31,15 +32,16 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.local/sdl3-aarch64-static
-          key: sdl3-aarch64-static-${{ env.SDL_REF }}-v1
+          key: sdl3-aarch64-static-${{ env.SDL_REF }}-console-v2
           restore-keys: |
+            sdl3-aarch64-static-${{ env.SDL_REF }}-console-
             sdl3-aarch64-static-${{ env.SDL_REF }}-
-            sdl3-aarch64-static-
 
       - name: Build SDL3 aarch64 static
         if: steps.cache-sdl3-aarch64.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "$SDL_REF" https://github.com/libsdl-org/SDL.git /tmp/SDL3
+
           cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_SYSTEM_NAME=Linux \
@@ -47,12 +49,26 @@ jobs:
             -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
             -DCMAKE_INSTALL_PREFIX="$HOME/.local/sdl3-aarch64-static" \
+            -DSDL_INSTALL=ON \
             -DSDL_SHARED=OFF \
             -DSDL_STATIC=ON \
             -DSDL_TEST_LIBRARY=OFF \
             -DSDL_TESTS=OFF \
             -DSDL_EXAMPLES=OFF \
-            -DSDL_VIDEO=OFF
+            -DSDL_UNIX_CONSOLE_BUILD=ON \
+            -DSDL_AUDIO=OFF \
+            -DSDL_VIDEO=OFF \
+            -DSDL_RENDER=OFF \
+            -DSDL_GPU=OFF \
+            -DSDL_CAMERA=OFF \
+            -DSDL_DIALOG=OFF \
+            -DSDL_TRAY=OFF \
+            -DSDL_JOYSTICK=ON \
+            -DSDL_HAPTIC=ON \
+            -DSDL_HIDAPI=ON \
+            -DSDL_SENSOR=ON \
+            -DSDL_POWER=ON
+
           cmake --build /tmp/SDL3-build --parallel
           cmake --install /tmp/SDL3-build
 
@@ -60,20 +76,26 @@ jobs:
         run: |
           wget -q https://github.com/miniupnp/miniupnp/archive/refs/tags/miniupnpc_2_2_8.tar.gz
           tar xzf miniupnpc_2_2_8.tar.gz
+
           cd miniupnp-miniupnpc_2_2_8/miniupnpc
-          mkdir build && cd build
+          mkdir build
+          cd build
+
           cmake .. \
             -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
             -DCMAKE_INSTALL_PREFIX=/tmp/miniupnpc \
             -DBUILD_SHARED_LIBS=OFF
-          make -j$(nproc)
+
+          make -j"$(nproc)"
           make install
 
       - name: Build Unified Pi Server
         run: |
           cd server
-          mkdir -p build && cd build
+          mkdir -p build
+          cd build
+
           cmake .. \
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
@@ -81,7 +103,8 @@ jobs:
             -DREQUIRE_SDL_BT=ON \
             -DMINIUPNPC_INCLUDE_DIRS=/tmp/miniupnpc/include \
             -DMINIUPNPC_LIBRARIES=/tmp/miniupnpc/lib/libminiupnpc.a
-          make -j$(nproc)
+
+          make -j"$(nproc)"
 
           mkdir -p artifact/pi-server
           cp ns-backend artifact/pi-server/ns-backend
