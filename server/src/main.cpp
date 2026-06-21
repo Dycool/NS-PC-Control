@@ -163,6 +163,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: -bt requested, but ns-backend was built without SDL3 support\n");
             return 1;
         }
+        enter_bluetooth_runtime_mode();
     } else {
         g_switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
         if (g_switch2_wake_adv_enabled) {

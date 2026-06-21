@@ -2,10 +2,14 @@
 #include "app_state.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <csignal>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 #ifdef NS_ENABLE_SDL_BT
 #include "shared/sdl_input.hpp"
@@ -15,13 +19,55 @@
 #endif
 
 static std::atomic<bool> g_bt_pair_window_started{false};
+static std::thread g_bt_pair_window_thread;
+
+static void run_pairing_window_script(const char* script) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::perror("[bt] fork pairing helper");
+        return;
+    }
+
+    if (pid == 0) {
+        setpgid(0, 0);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        execl("/bin/sh", "sh", "-c", script, (char*)nullptr);
+        _exit(127);
+    }
+
+    setpgid(pid, pid);
+    int status = 0;
+    while (g_running.load(std::memory_order_relaxed)) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid)
+            return;
+        if (r < 0)
+            return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    kill(-pid, SIGTERM);
+    for (int i = 0; i < 20; ++i) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid)
+            break;
+        if (r < 0)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        kill(-pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+}
 
 static void start_bluetooth_pairing_window() {
     bool expected = false;
     if (!g_bt_pair_window_started.compare_exchange_strong(expected, true))
         return;
 
-    std::thread([] {
+    g_bt_pair_window_thread = std::thread([] {
         std::puts("[bt] pairing window open for 2 minutes");
 
         // Service-mode friendly: use bluetoothctl non-interactively, avoid TTY
@@ -30,7 +76,6 @@ static void start_bluetooth_pairing_window() {
         // does not scan forever during gameplay. Trusted controllers can still
         // reconnect later through normal BlueZ auto-connect behavior.
         const char* script =
-            "sh -c '"
             "command -v bluetoothctl >/dev/null 2>&1 || exit 0; "
             "bluetoothctl power on >/dev/null 2>&1 || true; "
             "bluetoothctl pairable on >/dev/null 2>&1 || true; "
@@ -56,12 +101,12 @@ static void start_bluetooth_pairing_window() {
             "bluetoothctl scan off >/dev/null 2>&1 || true; "
             "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true; "
             "kill $agent >/dev/null 2>&1 || true; wait $agent >/dev/null 2>&1 || true; "
-            "'";
+            "bluetoothctl discoverable off >/dev/null 2>&1 || true; ";
 
-        int rc = std::system(script);
-        (void)rc;
+        run_pairing_window_script(script);
+        std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
         std::puts("[bt] pairing window closed");
-    }).detach();
+    });
 }
 
 using namespace ns;
@@ -281,6 +326,8 @@ void bluetooth_input_thread() {
         if (client_for_sdl[i] >= 0)
             reset_bluetooth_client_slot(client_for_sdl[i]);
     }
+    if (g_bt_pair_window_thread.joinable())
+        g_bt_pair_window_thread.join();
     input.stop();
     std::puts("[bt] Bluetooth/local SDL controller input stopped");
 }
