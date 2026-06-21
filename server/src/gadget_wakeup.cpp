@@ -904,56 +904,27 @@ bool capture_switch2_wake_advert(int seconds,
     char log_path[128];
     std::snprintf(log_path, sizeof(log_path), "/tmp/ns_switch2_wake_%ld.log", (long)getpid());
 
-    const std::string hci_dev_const = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+    std::ostringstream cmd;
+    const std::string hci_dev = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
 
-    auto run_capture_once = [&](bool reset_first) -> bool {
-        std::string hci_dev = hci_dev_const;
-        if (reset_first) {
-            // If BlueZ/SDL/controller support recently used the adapter, hcitool
-            // can fail instantly with "Set scan parameters failed: Input/output error".
-            // Reset hciuart only as setup-capture recovery, not during normal runtime startup.
-            reset_wake_bt_stack(hci_dev, false);
-        }
+    cmd << "sh -c 'rm -f " << log_path << "; "
+        << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
+        << "sleep 1; "
+        << "timeout " << std::max(1, seconds - 2) << " hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 || true; "
+        << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
 
-        std::ostringstream cmd;
+    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "power", "off"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "privacy", "off"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "bredr", "off"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "le", "on"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", hci_dev, "power", "on"}, false, false, 5000);
 
-        // Keep the setup scanner based on the v5.3.1 known-good capture path, but
-        // do not let a fast-failing `hcitool lescan` collapse a 10-20s capture
-        // attempt into an instant retry. Some BlueZ states return from lescan
-        // immediately; btmon still needs to stay alive for the whole capture window.
-        const int scan_seconds = std::max(1, seconds - 2);
-        cmd << "sh -c 'rm -f " << log_path << "; "
-            << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
-            << "sleep 1; "
-            << "(hcitool -i " << hci_dev << " lescan --duplicates >/tmp/ns_switch2_wake_lescan_" << (long)getpid() << ".log 2>&1 & scan=$!; "
-            << "sleep " << scan_seconds << "; "
-            << "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true); "
-            << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true; "
-            << "cat /tmp/ns_switch2_wake_lescan_" << (long)getpid() << ".log >> " << log_path << " 2>/dev/null || true; "
-            << "rm -f /tmp/ns_switch2_wake_lescan_" << (long)getpid() << ".log'";
+    int rc = std::system(cmd.str().c_str());
+    (void)rc;
 
-        run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
-        run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
-        run_wake_command({"btmgmt", "-i", hci_dev, "power", "off"}, false, false, 5000);
-        run_wake_command({"btmgmt", "-i", hci_dev, "privacy", "off"}, false, false, 5000);
-        run_wake_command({"btmgmt", "-i", hci_dev, "bredr", "off"}, false, false, 5000);
-        run_wake_command({"btmgmt", "-i", hci_dev, "le", "on"}, false, false, 5000);
-        run_wake_command({"btmgmt", "-i", hci_dev, "power", "on"}, false, false, 5000);
-
-        int rc = std::system(cmd.str().c_str());
-        (void)rc;
-
-        return parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv);
-    };
-
-    bool ok = run_capture_once(false);
-    if (!ok) {
-        // Retry once after a full hciuart reset. This specifically handles the
-        // post-BT-controller state where `hcitool lescan` fails immediately with
-        // "Set scan parameters failed: Input/output error".
-        ok = run_capture_once(true);
-    }
-
+    bool ok = parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv);
     unlink(log_path);
     return ok;
 }
@@ -989,7 +960,7 @@ int run_switch2_wakeup_setup() {
         return 2;
     }
 
-    const char* required[] = {"btmon", "btmgmt", "hcitool", "rfkill", "systemctl", "timeout"};
+    const char* required[] = {"btmon", "btmgmt", "hcitool", "rfkill", "systemctl"};
     for (const char* cmd : required) {
         if (!command_exists(cmd)) {
             std::fprintf(stderr, "[wake] Missing command: %s. Install BlueZ tools with: sudo apt install bluez\n", cmd);
