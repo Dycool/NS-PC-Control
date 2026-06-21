@@ -4,6 +4,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <poll.h>
@@ -810,11 +811,9 @@ bool send_switch2_wake_advert_once(const std::string& mac,
 
 void switch2_wake_adv_worker(int burst_ms) {
     int seconds = std::max(1, (burst_ms + 999) / 1000);
-    std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
-    send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose, false);
-    // Power off the Bluetooth adapter after the burst so no controllers
-    // can connect while the server is idle in wake mode.
-    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false, false, 3000);
+    const bool ok = send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose, false);
+    if (!ok)
+        g_switch2_last_wake_adv_us.store(0, std::memory_order_relaxed);
     g_switch2_wake_adv_running.store(false, std::memory_order_relaxed);
 }
 
@@ -826,13 +825,9 @@ void maybe_send_switch2_wake_advert(const char* reason) {
 
     const uint64_t now = now_us();
 
-    // Only skip wake when the USB host is currently connected. Do not use
-    // "recent USB activity" here: after the user suspends the Switch, the last
-    // HID traffic may still be fresh for a short while, but that is exactly when
-    // a new client connection should be allowed to send the wake advert.
-    if (g_switch2_usb_host_connected.load(std::memory_order_relaxed)) {
+    if (switch2_usb_host_recently_active(now)) {
         if (g_verbose) {
-            std::printf("[wake] %s; Switch USB host is connected, skipping wake advert\n",
+            std::printf("[wake] %s; recent Switch USB activity seen, skipping wake advert\n",
                         reason ? reason : "client connected");
         }
         return;
