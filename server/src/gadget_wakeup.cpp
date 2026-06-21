@@ -475,16 +475,27 @@ static std::string read_hci_address(const std::string& hci_dev) {
     return lowercase_copy(mac);
 }
 
+void wait_for_wake_advert_idle() {
+    // The wake advert worker is detached, so shutdown must not restore BREDR/MAC
+    // while the worker is still advertising or about to power the adapter off.
+    for (int i = 0; i < 50 && g_switch2_wake_adv_running.load(std::memory_order_relaxed); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
 void restore_wake_bt_state() {
-    if (!g_bt_modified_for_wake.load())
-        return;
+    wait_for_wake_advert_idle();
 
-    std::string hci = g_saved_bt_hci.empty() ? "hci0" : g_saved_bt_hci;
+    std::string hci = !g_saved_bt_hci.empty() ? g_saved_bt_hci :
+                      (valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0");
 
+    // Always put the adapter back into a normal controller-friendly state when
+    // leaving wake mode. If we changed the public address, restore it too.
+    run_wake_command({"hcitool", "-i", hci, "cmd", "0x08", "0x000A", "00"}, false, false, 3000);
     run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false, false, 3000);
     run_wake_command({"btmgmt", "-i", hci, "bredr", "on"}, false, false, 3000);
+    run_wake_command({"btmgmt", "-i", hci, "le", "on"}, false, false, 3000);
 
-    if (!g_saved_bt_mac.empty())
+    if (g_bt_modified_for_wake.load() && !g_saved_bt_mac.empty())
         run_wake_command({"btmgmt", "-i", hci, "public-addr", g_saved_bt_mac}, false, false, 3000);
 
     run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false, false, 3000);
@@ -756,15 +767,12 @@ bool send_switch2_wake_advert_once(const std::string& mac,
     bool ok = false;
 
     if (!force_prepare) {
-        // Runtime/service wake path: the -wake setup already registered the HCI
-        // adapter and prepared/spoofed the controller identity. Do not spend
-        // several seconds on btmgmt cleanup every time a client connects; just
-        // emit the saved Joy-Con 2 advertising payload immediately.
+        // Runtime/service wake path: match the v5.3.1 fix. Do not do full
+        // Bluetooth prepare/spoof at backend startup; under systemd that made
+        // wake unreliable. First try the direct raw ADV path on the configured
+        // HCI device, then fall back to full prepare only if raw ADV fails.
         ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
 
-        // If raw HCI itself fails, fall back to the full prepare path once. This
-        // preserves recovery from cold/odd Bluetooth states without slowing down
-        // the normal good path.
         if (!ok && verbose_output)
             std::fprintf(stderr, "[wake] Fast ADV failed; falling back to full Bluetooth prepare once.\n");
     }
@@ -901,7 +909,9 @@ bool capture_switch2_wake_advert(int seconds,
     cmd << "sh -c 'rm -f " << log_path << "; "
         << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
         << "sleep 1; "
-        << "timeout " << std::max(1, seconds - 2) << " hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 || true; "
+        << "hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 & scan=$!; "
+        << "sleep " << std::max(1, seconds - 1) << "; "
+        << "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true; "
         << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
 
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
@@ -960,18 +970,6 @@ int run_switch2_wakeup_setup() {
     }
 
     g_switch2_wake_hci_dev = detect_wake_hci_for_setup();
-
-    // Disconnect any existing Bluetooth connections (e.g. SDL3 gamepads)
-    // so they don't interfere with Joy-Con 2 pairing during setup.
-    std::puts("[wake] Disconnecting any active Bluetooth connections...");
-    run_shell_best_effort(
-        "bluetoothctl devices Connected 2>/dev/null | "
-        "awk '{print $2}' | "
-        "while read mac; do "
-        "  [ -n \"$mac\" ] && bluetoothctl disconnect \"$mac\" >/dev/null 2>&1 || true; "
-        "done"
-    );
-    std::this_thread::sleep_for(ms(500));
 
     std::puts("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::puts("------------------------------------------------");
