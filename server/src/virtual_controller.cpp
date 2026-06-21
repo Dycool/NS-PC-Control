@@ -742,7 +742,7 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
     ev.high_freq = neutral ? 0 : high;
     // The compatibility testing sends rumble at report cadence.  Keep pulses short so
     // small precision packets do not smear into a long full-power buzz on classic clients.
-    ev.duration_10ms = neutral ? 0 : 3;
+    ev.duration_10ms = neutral ? 0 : 2;
 
     PrecisionRumblePacket& precision_ev = g_clients[client_idx].precision_rumble[sub_idx];
     precision_ev.magic = PRECISION_RUMBLE_MAGIC;

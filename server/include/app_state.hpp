@@ -20,8 +20,8 @@ extern bool g_verbose;
 
 constexpr uint64_t CLIENT_TIMEOUT_US = 30'000'000ULL;
 constexpr uint64_t CLIENT_STALE_NEUTRAL_US = 350'000ULL;
-constexpr uint8_t RUMBLE_MIN_NONZERO = 4;
-constexpr int RUMBLE_GAIN_PERCENT = 100;
+constexpr uint8_t RUMBLE_MIN_NONZERO = 2;
+constexpr int RUMBLE_GAIN_PERCENT = 60;
 constexpr int HID_PORT_COUNT = 4;
 constexpr int MAX_CLIENTS = 4;
 constexpr uint64_t RATE_WINDOW_US = 1'000'000;
@@ -46,6 +46,7 @@ extern std::atomic<uint64_t> g_switch2_last_wake_adv_us;
 extern std::atomic<bool> g_switch2_usb_host_connected;
 extern std::atomic<uint64_t> g_switch2_last_usb_activity_us;
 extern std::atomic<bool> g_switch2_force_next_wake;
+extern std::atomic<bool> g_switch2_delayed_wake_check_running;
 extern uint8_t g_hmac_key[32];
 
 struct RateSlot {

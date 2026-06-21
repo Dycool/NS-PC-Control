@@ -38,6 +38,7 @@ std::atomic<uint64_t> g_switch2_last_wake_adv_us{0};
 std::atomic<bool> g_switch2_usb_host_connected{false};
 std::atomic<uint64_t> g_switch2_last_usb_activity_us{0};
 std::atomic<bool> g_switch2_force_next_wake{false};
+std::atomic<bool> g_switch2_delayed_wake_check_running{false};
 
 // HMAC authentication (key derived from DEFAULT_SECRET at startup)
 uint8_t  g_hmac_key[32];

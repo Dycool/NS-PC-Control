@@ -72,9 +72,9 @@ static void start_bluetooth_pairing_window() {
 
         // Service-mode friendly: use bluetoothctl non-interactively, avoid TTY
         // assumptions, and keep the pairing/scanning helper separate from SDL's
-        // polling loop. The discovery window is intentionally finite so BT mode
-        // does not scan forever during gameplay. Trusted controllers can still
-        // reconnect later through normal BlueZ auto-connect behavior.
+        // polling loop. Discovery is intentionally finite so BT mode does not
+        // scan forever during gameplay. After that, keep nudging already paired
+        // controllers so trusted pads can reconnect at any time.
         const char* script =
             "command -v bluetoothctl >/dev/null 2>&1 || exit 0; "
             "bluetoothctl power on >/dev/null 2>&1 || true; "
@@ -101,11 +101,24 @@ static void start_bluetooth_pairing_window() {
             "bluetoothctl scan off >/dev/null 2>&1 || true; "
             "kill $scan >/dev/null 2>&1 || true; wait $scan >/dev/null 2>&1 || true; "
             "kill $agent >/dev/null 2>&1 || true; wait $agent >/dev/null 2>&1 || true; "
-            "bluetoothctl discoverable off >/dev/null 2>&1 || true; ";
+            "bluetoothctl discoverable off >/dev/null 2>&1 || true; "
+            "while true; do "
+                "bluetoothctl paired-devices | while read -r kind mac name_rest; do "
+                    "[ \"$kind\" = \"Device\" ] || continue; "
+                    "name=\"$name_rest\"; "
+                    "case \"$name\" in "
+                        "*Wireless\\ Controller*|*Xbox\\ Wireless\\ Controller*|*Xbox\\ One\\ Wireless\\ Controller*|*Pro\\ Controller*|*Nintendo\\ Switch\\ Pro\\ Controller*|*Joy-Con*|*8BitDo*) "
+                            "bluetoothctl trust \"$mac\" >/dev/null 2>&1 || true; "
+                            "bluetoothctl connect \"$mac\" >/dev/null 2>&1 || true; "
+                            ";; "
+                    "esac; "
+                "done; "
+                "sleep 10; "
+            "done; ";
 
         run_pairing_window_script(script);
         std::system("bluetoothctl scan off >/dev/null 2>&1 || true; bluetoothctl discoverable off >/dev/null 2>&1 || true");
-        std::puts("[bt] pairing window closed");
+        std::puts("[bt] pairing/reconnect helper stopped");
     });
 }
 
@@ -225,7 +238,7 @@ static void apply_bluetooth_rumble(SDLInputManager& input,
 
     last_seq = seq;
     const bool neutral = (ev.low_freq == 0 && ev.high_freq == 0) || ev.duration_10ms == 0;
-    const uint32_t duration_ms = neutral ? 0 : std::max<uint32_t>(250, (uint32_t)ev.duration_10ms * 10U);
+    const uint32_t duration_ms = neutral ? 0 : std::max<uint32_t>(120, (uint32_t)ev.duration_10ms * 10U);
     rumble_until_us = neutral ? 0 : now_us() + (uint64_t)duration_ms * 1000ULL;
     input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
 }

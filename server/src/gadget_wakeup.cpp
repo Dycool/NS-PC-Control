@@ -490,6 +490,8 @@ void enter_switch2_wake_runtime_mode() {
     // heavier power/MAC preparation that made service-start wake unreliable.
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
+    run_wake_command({"hciconfig", g_switch2_wake_hci_dev, "up"}, false, false, 5000);
+    run_wake_command({"btmgmt", "-i", g_switch2_wake_hci_dev, "power", "on"}, false, false, 3000);
 }
 
 static std::string read_hci_address(const std::string& hci_dev) {
@@ -775,11 +777,15 @@ bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bo
             reset_wake_bt_stack(hci_dev, verbose_output);
             continue;
         }
+        if (!wake_cmd_ok({"hciconfig", hci_dev, "up"}, verbose_output)) {
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
 
         // Do not verify with `btmgmt info` here. Verification is nice in an
         // interactive shell, but on the systemd service path it can hang before the
         // advert is sent. The wake packet itself is the important operation.
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
         if (verbose_output)
             std::printf("[wake] Bluetooth controller prepared as %s\n", mac_lc.c_str());
         return true;
@@ -874,7 +880,12 @@ bool send_switch2_wake_advert_once(const std::string& mac,
         // Bluetooth prepare/spoof at backend startup; under systemd that made
         // wake unreliable. First try the direct raw ADV path on the configured
         // HCI device, then fall back to full prepare only if raw ADV fails.
-        ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
+        const std::string current_mac = read_hci_address(hci_dev);
+        const bool adapter_already_spoofed = current_mac.empty() || current_mac == mac_lc;
+        if (adapter_already_spoofed)
+            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
+        else if (verbose_output)
+            std::printf("[wake] Adapter is %s; preparing wake MAC before advertising\n", current_mac.c_str());
 
         if (!ok && verbose_output)
             std::fprintf(stderr, "[wake] Fast ADV failed; falling back to full Bluetooth prepare once.\n");
@@ -885,7 +896,7 @@ bool send_switch2_wake_advert_once(const std::string& mac,
             ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
     }
 
-    if (!ok && force_prepare) {
+    if (!ok) {
         if (verbose_output)
             std::fprintf(stderr, "[wake] Raw advertising failed. Trying one Bluetooth stack reset, then retrying once.\n");
         if (reset_wake_bt_stack(hci_dev, verbose_output) && prepare_wake_controller(hci_dev, mac_lc, verbose_output))
@@ -901,6 +912,59 @@ bool send_switch2_wake_advert_once(const std::string& mac,
     if (verbose_output)
         std::printf("[wake] Done\n");
     return true;
+}
+
+void switch2_wake_adv_worker(int burst_ms);
+
+void switch2_delayed_wake_check_worker(const char* reason) {
+    const std::string wake_reason = reason ? reason : "client connected";
+
+    // Switch 2 suspend can leave the USB gadget accepting writes for several
+    // seconds before the host finally goes idle/disconnects. Treat that as a
+    // transitional state: if USB goes quiet while the client is still alive,
+    // send wake; if USB stays active, the console is awake and wake is skipped.
+    for (int i = 0; i < 32 && g_running.load(std::memory_order_relaxed); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+        const uint64_t now = now_us();
+        if (!any_recent_client_active(now)) {
+            g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+            return;
+        }
+
+        if (!switch2_usb_host_recently_active(now)) {
+            bool expected = false;
+            if (!g_switch2_wake_adv_running.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+                return;
+            }
+
+            g_switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
+            g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+
+            if (g_verbose) {
+                std::printf("[wake] %s; USB activity went idle after connect, sending Joy-Con 2 BLE wake advert for %dms as %s\n",
+                            wake_reason.c_str(), SWITCH2_WAKE_ADV_BURST_MS,
+                            g_switch2_wake_mac.c_str());
+            } else {
+                std::printf("[wake] waking up Switch 2\n");
+            }
+
+            std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
+            return;
+        }
+    }
+
+    if (g_verbose)
+        std::printf("[wake] %s; USB activity stayed active, treating Switch as awake\n", wake_reason.c_str());
+    g_switch2_delayed_wake_check_running.store(false, std::memory_order_relaxed);
+}
+
+void schedule_switch2_delayed_wake_check(const char* reason) {
+    bool expected = false;
+    if (!g_switch2_delayed_wake_check_running.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+        return;
+    std::thread(switch2_delayed_wake_check_worker, reason ? reason : "client connected").detach();
 }
 
 void switch2_wake_adv_worker(int burst_ms) {
@@ -923,9 +987,10 @@ void maybe_send_switch2_wake_advert(const char* reason) {
 
     if (!force_after_disconnect && switch2_usb_host_recently_active(now)) {
         if (g_verbose) {
-            std::printf("[wake] %s; recent Switch USB activity seen, skipping wake advert\n",
+            std::printf("[wake] %s; recent Switch USB activity seen, delaying wake evaluation\n",
                         reason ? reason : "client connected");
         }
+        schedule_switch2_delayed_wake_check(reason);
         return;
     }
 

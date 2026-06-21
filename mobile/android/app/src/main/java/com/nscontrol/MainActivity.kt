@@ -985,7 +985,7 @@ class MainActivity : AppCompatActivity() {
 
         val now = SystemClock.uptimeMillis()
         val neutral = (low == 0 && high == 0) || duration10Ms == 0
-        val durationMs = if (neutral) 0L else maxOf(250L, duration10Ms.coerceIn(1, 255) * 10L)
+        val durationMs = if (neutral) 0L else maxOf(120L, duration10Ms.coerceIn(1, 255) * 10L)
         val strength = maxOf(low, high).coerceIn(1, 255)
 
         val deviceId = synchronized(physicalLock) {
@@ -1028,7 +1028,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (vib != null && vib.hasVibrator()) {
                 if (Build.VERSION.SDK_INT >= 26) {
-                    val amp = if (vib.hasAmplitudeControl()) strength.coerceAtLeast(64) else VibrationEffect.DEFAULT_AMPLITUDE
+                    val amp = if (vib.hasAmplitudeControl()) strength.coerceAtLeast(32) else VibrationEffect.DEFAULT_AMPLITUDE
                     vib.vibrate(VibrationEffect.createOneShot(durationMs, amp))
                 } else {
                     @Suppress("DEPRECATION")

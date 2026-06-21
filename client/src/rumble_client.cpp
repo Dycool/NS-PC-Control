@@ -28,7 +28,7 @@ void RumbleManager::apply_packet(const ns::RumblePacket& rp, const int controlle
         const uint8_t high = rp.high_freq;
         const bool neutral = (low == 0 && high == 0) || rp.duration_10ms == 0;
         const uint64_t now = ns::now_us();
-        const uint64_t dur_us = neutral ? 0ULL : std::max<uint64_t>(250000ULL, (uint64_t)rp.duration_10ms * 10000ULL);
+        const uint64_t dur_us = neutral ? 0ULL : std::max<uint64_t>(120000ULL, (uint64_t)rp.duration_10ms * 10000ULL);
         if (!neutral && states[slot].low == low && states[slot].high == high &&
             now - states[slot].last_set_us < 100000ULL) {
             states[slot].until_us = now + dur_us;
@@ -62,7 +62,7 @@ void RumbleManager::set_output(int slot, uint8_t low, uint8_t high, int pad_idx)
         if (states[slot].last_controller != -1 && states[slot].last_controller != pad_idx)
             g_sdlInput.set_rumble(states[slot].last_controller, 0, 0, 0);
         if (pad_idx >= 0)
-            g_sdlInput.set_rumble(pad_idx, low, high, (low || high) ? 250 : 0);
+            g_sdlInput.set_rumble(pad_idx, low, high, (low || high) ? 120 : 0);
         states[slot].last_controller = pad_idx;
     }
 

@@ -1286,7 +1286,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pads[subpad].stopRumble()
                 return
             }
-            let duration = UInt64(max(250, min(max(duration10Ms, 1), 255) * 10))
+            let duration = UInt64(max(120, min(max(duration10Ms, 1), 255) * 10))
             if pads[subpad].rumbleLow == low && pads[subpad].rumbleHigh == high && now - pads[subpad].rumbleLastSetMs < 100 {
                 pads[subpad].rumbleUntilMs = now + duration
                 return
@@ -1321,8 +1321,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             pad.hapticPlayer = nil
 
             let strength = Float(max(low, high)) / 255.0
-            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: max(0.08, strength))
-            let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: min(1.0, max(0.2, Float(high) / 255.0)))
+            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: max(0.04, strength))
+            let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: min(1.0, max(0.12, Float(high) / 255.0)))
             let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: Double(durationMs) / 1000.0)
             let pattern = try CHHapticPattern(events: [event], parameters: [])
             let player = try engine.makePlayer(with: pattern)
