@@ -487,6 +487,8 @@ bool running_under_systemd_service() {
     return (invocation && *invocation) || (journal && *journal);
 }
 
+bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bool verbose_output);
+
 void enter_switch2_wake_runtime_mode() {
     if (!g_switch2_wake_adv_enabled || !g_switch2_wake_config_loaded)
         return;
@@ -497,7 +499,15 @@ void enter_switch2_wake_runtime_mode() {
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
     run_wake_command({"hciconfig", g_switch2_wake_hci_dev, "up"}, false, false, 5000);
-    run_wake_command({"btmgmt", "-i", g_switch2_wake_hci_dev, "power", "on"}, false, false, 3000);
+
+    std::thread([] {
+        std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
+        const std::string mac = lowercase_copy(g_switch2_wake_mac);
+        if (g_verbose)
+            std::printf("[wake] Preparing Bluetooth wake identity in background on %s\n", hci.c_str());
+        if (!prepare_wake_controller(hci, mac, g_verbose) && g_verbose)
+            std::fprintf(stderr, "[wake] Background wake identity preparation failed; runtime wake will still use raw ADV\n");
+    }).detach();
 }
 
 static std::string read_hci_address(const std::string& hci_dev) {
@@ -809,6 +819,14 @@ bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bo
         // interactive shell, but on the systemd service path it can hang before the
         // advert is sent. The wake packet itself is the important operation.
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        const std::string current = read_hci_address(hci_dev);
+        if (!current.empty() && current != mac_lc) {
+            if (verbose_output)
+                std::fprintf(stderr, "[wake] Controller address is still %s, wanted %s\n",
+                             current.c_str(), mac_lc.c_str());
+            reset_wake_bt_stack(hci_dev, verbose_output);
+            continue;
+        }
         if (verbose_output)
             std::printf("[wake] Bluetooth controller prepared as %s\n", mac_lc.c_str());
         return true;
@@ -893,27 +911,22 @@ bool send_switch2_wake_advert_once(const std::string& mac,
         std::printf("[wake] Duration: %ds\n", seconds);
     }
 
-    bool ok = false;
-    const bool service_runtime = running_under_systemd_service();
-
-    if (service_runtime) {
-        if (verbose_output)
-            std::printf("[wake] Service runtime path: sending ADV directly on %s before Bluetooth prep\n", hci_dev.c_str());
-        ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
-        if (!ok && verbose_output)
-            std::fprintf(stderr, "[wake] Service fast ADV failed; falling back to Bluetooth prep once.\n");
+    const std::string current_mac = read_hci_address(hci_dev);
+    if (verbose_output) {
+        if (!current_mac.empty() && current_mac != mac_lc) {
+            std::printf("[wake] Adapter currently reports %s; sending raw ADV without btmgmt on wake path\n",
+                        current_mac.c_str());
+        } else {
+            std::printf("[wake] Runtime path: sending ADV directly on %s without btmgmt\n", hci_dev.c_str());
+        }
     }
 
-    if (!ok && verbose_output)
-        std::printf("[wake] Preparing %s with wake identity before advertising\n", hci_dev.c_str());
-
-    if (!ok && prepare_wake_controller(hci_dev, mac_lc, verbose_output))
-        ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
+    bool ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
 
     if (!ok) {
         if (verbose_output)
-            std::fprintf(stderr, "[wake] Raw advertising failed. Trying one Bluetooth stack reset, then retrying once.\n");
-        if (reset_wake_bt_stack(hci_dev, verbose_output) && prepare_wake_controller(hci_dev, mac_lc, verbose_output))
+            std::fprintf(stderr, "[wake] Raw advertising failed. Resetting HCI stack and retrying raw ADV once.\n");
+        if (reset_wake_bt_stack(hci_dev, verbose_output))
             ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose_output);
     }
 
