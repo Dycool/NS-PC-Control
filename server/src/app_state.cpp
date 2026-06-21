@@ -26,7 +26,7 @@ std::atomic<bool> g_gadget_setup_attempted{false};
 // Nintendo manufacturer payload observed from a Joy-Con 2 HOME wake attempt.
 // This is only the BLE advertisement layer; if the console requires a full
 // bonded Joy-Con 2 GATT session, the advert alone may not be enough.
-bool g_switch2_wake_adv_enabled = true;
+bool g_switch2_wake_adv_enabled = false;
 bool g_switch2_wakeup_setup_requested = false;
 std::string g_switch2_wakeup_config_path = "/etc/ns-pc-control/switch2_wakeup.conf";
 std::string g_switch2_wake_mac;

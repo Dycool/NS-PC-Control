@@ -26,6 +26,11 @@ using namespace ns;
 constexpr const char* GADGET_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl";
 constexpr const char* CONFIG_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1";
 
+// Saved original Bluetooth adapter state so it can be restored on shutdown.
+static std::string g_saved_bt_mac;
+static std::string g_saved_bt_hci;
+static std::atomic<bool> g_bt_modified_for_wake{false};
+
 bool hidg_nodes_ready() {
     for (int i = 0; i < HID_PORT_COUNT; ++i) {
         char path[32];
@@ -156,7 +161,51 @@ bool create_hid_function(int id) {
     return true;
 }
 
+// Read the current MAC address of a Bluetooth adapter from sysfs.
+static std::string read_hci_address(const std::string& hci_dev) {
+    std::string path = "/sys/class/bluetooth/" + hci_dev + "/address";
+    std::ifstream f(path);
+    if (!f) return {};
+    std::string mac;
+    std::getline(f, mac);
+    if (!valid_mac_string(mac)) return {};
+    return lowercase_copy(mac);
+}
+
+// Restore the Bluetooth adapter to its original state after wake mode.
+// This must be called on shutdown so paired controllers can connect again.
+void restore_wake_bt_state() {
+    if (!g_bt_modified_for_wake.load())
+        return;
+
+    std::string hci = g_saved_bt_hci.empty() ? "hci0" : g_saved_bt_hci;
+    std::printf("[wake] Restoring original Bluetooth state on %s...\n", hci.c_str());
+
+    // Power off first.
+    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false, false, 3000);
+
+    // Re-enable BR/EDR so classic BT gamepads can connect.
+    run_wake_command({"btmgmt", "-i", hci, "bredr", "on"}, false, false, 3000);
+
+    // Restore the adapter's original MAC address.
+    if (!g_saved_bt_mac.empty()) {
+        run_wake_command({"btmgmt", "-i", hci, "public-addr", g_saved_bt_mac}, false, false, 3000);
+        std::printf("[wake] Restored Bluetooth MAC address to %s\n", g_saved_bt_mac.c_str());
+    }
+
+    // Power back on and restart the bluetooth service so SDL3 etc. can use it.
+    run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false, false, 3000);
+    run_wake_command({"systemctl", "restart", "bluetooth"}, false, false, 5000);
+
+    std::printf("[wake] Bluetooth state restored; controllers can connect again\n");
+
+    g_saved_bt_mac.clear();
+    g_saved_bt_hci.clear();
+    g_bt_modified_for_wake = false;
+}
+
 void teardown_gadget() {
+    restore_wake_bt_state();
     g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
             g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
     if (!path_exists(GADGET_DIR)) return;
@@ -592,6 +641,16 @@ bool prepare_wake_controller(std::string& hci_dev, const std::string& mac_lc, bo
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
 
+    // Save the adapter's original MAC before we spoof it, so it can be
+    // restored on shutdown and paired controllers can connect again.
+    if (!g_bt_modified_for_wake.load()) {
+        g_saved_bt_mac = read_hci_address(hci_dev);
+        g_saved_bt_hci = hci_dev;
+        g_bt_modified_for_wake = true;
+        if (verbose_output && !g_saved_bt_mac.empty())
+            std::printf("[wake] Saved original Bluetooth MAC: %s\n", g_saved_bt_mac.c_str());
+    }
+
     for (int attempt = 1; attempt <= 3; ++attempt) {
         if (verbose_output)
             std::printf("[wake] Preparing Bluetooth controller, attempt %d, device %s\n", attempt, hci_dev.c_str());
@@ -751,7 +810,11 @@ bool send_switch2_wake_advert_once(const std::string& mac,
 
 void switch2_wake_adv_worker(int burst_ms) {
     int seconds = std::max(1, (burst_ms + 999) / 1000);
+    std::string hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
     send_switch2_wake_advert_once(g_switch2_wake_mac, g_switch2_wake_adv_hex, seconds, g_verbose, false);
+    // Power off the Bluetooth adapter after the burst so no controllers
+    // can connect while the server is idle in wake mode.
+    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false, false, 3000);
     g_switch2_wake_adv_running.store(false, std::memory_order_relaxed);
 }
 
@@ -913,6 +976,18 @@ int run_switch2_wakeup_setup() {
     }
 
     g_switch2_wake_hci_dev = detect_wake_hci_for_setup();
+
+    // Disconnect any existing Bluetooth connections (e.g. SDL3 gamepads)
+    // so they don't interfere with Joy-Con 2 pairing during setup.
+    std::puts("[wake] Disconnecting any active Bluetooth connections...");
+    run_shell_best_effort(
+        "bluetoothctl devices Connected 2>/dev/null | "
+        "awk '{print $2}' | "
+        "while read mac; do "
+        "  [ -n \"$mac\" ] && bluetoothctl disconnect \"$mac\" >/dev/null 2>&1 || true; "
+        "done"
+    );
+    std::this_thread::sleep_for(ms(500));
 
     std::puts("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::puts("------------------------------------------------");

@@ -94,6 +94,7 @@ int main(int argc, char** argv) {
     int         web_port  = 8080; // WebSocket server is enabled by default
     bool        serve_http_webapp = false;
     bool        bluetooth_enabled = false;
+    bool        bt_explicit       = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -114,7 +115,7 @@ int main(int argc, char** argv) {
         else if (a == "-v")               g_verbose  = true;
         else if (a == "-wake")          g_switch2_wakeup_setup_requested = true;
         else if (a == "-hori")          g_legacy_mode = true;
-        else if (a == "-bt")            bluetooth_enabled = true;
+        else if (a == "-bt")            { bluetooth_enabled = true; bt_explicit = true; }
         else if (a == "--upnp")           do_upnp    = true;
         else if (a == "-w") {
             serve_http_webapp = true;
@@ -135,8 +136,9 @@ int main(int argc, char** argv) {
             puts("  --upnp          Forward the UDP port via UPnP for PC clients only.");
             puts("                  Mobile/web clients connect via WebSocket and don't need this.");
             puts("  -wake           Run interactive Joy-Con 2 wake setup, save switch2_wakeup.conf, test wake, then exit.");
-            puts("  -bt             Enable local SDL3 Bluetooth/controller input. Controllers must already be paired.");
-            puts("                  Switch 2 wake advertising/setup is disabled while -bt is active.");
+            puts("  -bt             Explicitly enable local SDL3 Bluetooth/controller input and disable Switch 2 wake.");
+            puts("                  By default, the backend auto-detects: Bluetooth is used unless a valid");
+            puts("                  Switch 2 wake config is present at /etc/ns-pc-control/switch2_wakeup.conf.");
             puts("  -hori           Expose the legacy 8-byte HORI controller gadget.");
             puts("                  Default mode exposes the 64-byte motion/rumble gadget.");
             puts("");
@@ -148,23 +150,43 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (bluetooth_enabled) {
+    // -wake setup mode: run interactive config and exit (takes priority)
+    if (g_switch2_wakeup_setup_requested)
+        return run_switch2_wakeup_setup();
+
+    // Determine operating mode:
+    //   * -bt  →  Bluetooth mode, wake disabled (explicit user choice)
+    //   * else →  auto-detect: wake mode if config exists, Bluetooth mode otherwise
+    if (bt_explicit) {
         g_switch2_wake_adv_enabled = false;
-        if (g_switch2_wakeup_setup_requested) {
-            std::fprintf(stderr, "[bt] -wake ignored because Switch 2 wake functionality is disabled with -bt\n");
-            g_switch2_wakeup_setup_requested = false;
-        }
         if (!bluetooth_input_available()) {
             std::fprintf(stderr, "error: -bt requested, but ns-backend was built without SDL3 support\n");
             return 1;
         }
+    } else {
+        g_switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
+        if (g_switch2_wake_adv_enabled) {
+            bluetooth_enabled = false;
+            if (g_verbose)
+                std::printf("[wake] Switch 2 wake config loaded; wake mode active, Bluetooth disabled\n");
+        } else {
+            bluetooth_enabled = bluetooth_input_available();
+            if (g_verbose && bluetooth_enabled)
+                std::printf("[bt] No Switch 2 wake config found; Bluetooth controller mode active\n");
+        }
     }
 
-    if (g_switch2_wakeup_setup_requested)
-        return run_switch2_wakeup_setup();
-
-    if (g_switch2_wake_adv_enabled)
-        load_switch2_wakeup_config(true);
+    // If Bluetooth mode is active, warn if rfkill blocks the adapter.
+    if (bluetooth_enabled) {
+        int rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
+        bool blocked = (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+        if (blocked) {
+            std::fprintf(stderr,
+                "[bt] WARNING: Bluetooth controllers connected directly to the Raspberry Pi\n"
+                "[bt]          will NOT work — the adapter is blocked by rfkill.\n"
+                "[bt]          Unblock it with: sudo rfkill unblock bluetooth\n");
+        }
+    }
 
     randomize_controller_identity();
 
