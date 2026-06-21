@@ -449,7 +449,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
 
         let config = WKWebViewConfiguration()
         config.userContentController = content
-        config.preferences.javaScriptEnabled = true
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
         webView = WKWebView(frame: view.bounds, configuration: config)
         webView.navigationDelegate = self
         webView.backgroundColor = .black
@@ -1108,7 +1108,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pad.present = true
                 if let motion = controller.motion {
                     if motion.sensorsRequireManualActivation { motion.sensorsActive = true }
-                    pad.hasGyro = (motion.hasRotationRate || motion.hasAttitudeAndRotationRate)
+                    pad.hasGyro = (motion.hasRotationRate || motion.hasAttitude)
                 } else {
                     pad.hasGyro = false
                 }
@@ -1191,7 +1191,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 if motion.sensorsRequireManualActivation && !motion.sensorsActive {
                     motion.sensorsActive = true
                 }
-                guard motion.hasRotationRate || motion.hasAttitudeAndRotationRate else { continue }
+                guard motion.hasRotationRate || motion.hasAttitude else { continue }
 
                 let accel: GCAcceleration
                 if motion.hasGravityAndUserAcceleration {
