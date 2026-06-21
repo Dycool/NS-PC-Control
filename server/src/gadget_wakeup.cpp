@@ -619,13 +619,21 @@ bool reset_wake_bt_stack(std::string& hci_dev, bool verbose_output) {
     if (verbose_output)
         std::fprintf(stderr, "[wake] Resetting Bluetooth stack / hciuart\n");
 
-    // Keep this close to the working standalone wake script, but do not ask btmgmt
-    // for adapter discovery here; service mode has been observed hanging there.
-    run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
-    run_wake_command({"rfkill", "unblock", "bluetooth"}, false, false, 3000);
+    run_wake_command({"systemctl", "stop", "bluetooth"}, verbose_output, false, 5000);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, verbose_output, false, 3000);
     wake_disable_advertising_quiet(hci_dev);
-    run_wake_command({"systemctl", "restart", "hciuart"}, false, false, 15000);
+
+    // Restarting hciuart alone is not always enough after BlueZ has paired and
+    // trusted controllers. Force the HCI device through a kernel down/up cycle
+    // as well; this is the bit that usually clears the state where `hcitool
+    // lescan` fails instantly with "Set scan parameters failed: Input/output error".
+    run_wake_command({"hciconfig", hci_dev, "down"}, verbose_output, false, 5000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    run_wake_command({"systemctl", "restart", "hciuart"}, verbose_output, false, 15000);
     std::this_thread::sleep_for(std::chrono::seconds(3));
+    run_wake_command({"hciconfig", hci_dev, "up"}, verbose_output, false, 5000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    wake_disable_advertising_quiet(hci_dev);
     return true;
 }
 
@@ -910,7 +918,7 @@ bool capture_switch2_wake_advert(int seconds,
     cmd << "sh -c 'rm -f " << log_path << "; "
         << "timeout " << seconds << " btmon -T > " << log_path << " 2>&1 & mon=$!; "
         << "sleep 1; "
-        << "timeout " << std::max(1, seconds - 2) << " hcitool -i " << hci_dev << " lescan --duplicates >/dev/null 2>&1 || true; "
+        << "timeout " << std::max(1, seconds - 2) << " btmgmt -i " << hci_dev << " find -l >/dev/null 2>&1 || true; "
         << "kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
 
     run_wake_command({"systemctl", "stop", "bluetooth"}, false, false, 5000);
@@ -960,7 +968,7 @@ int run_switch2_wakeup_setup() {
         return 2;
     }
 
-    const char* required[] = {"btmon", "btmgmt", "hcitool", "rfkill", "systemctl"};
+    const char* required[] = {"btmon", "btmgmt", "hcitool", "hciconfig", "rfkill", "systemctl"};
     for (const char* cmd : required) {
         if (!command_exists(cmd)) {
             std::fprintf(stderr, "[wake] Missing command: %s. Install BlueZ tools with: sudo apt install bluez\n", cmd);
@@ -977,7 +985,7 @@ int run_switch2_wakeup_setup() {
     // setup starts so -wake owns a clean adapter.
     {
         std::string setup_hci = valid_hci_dev_string(g_switch2_wake_hci_dev) ? g_switch2_wake_hci_dev : "hci0";
-        reset_wake_bt_stack(setup_hci, false);
+        reset_wake_bt_stack(setup_hci, g_verbose);
         g_switch2_wake_hci_dev = setup_hci;
     }
 
