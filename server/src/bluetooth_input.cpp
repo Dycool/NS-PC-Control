@@ -1,8 +1,10 @@
 #include "bluetooth_input.hpp"
 #include "app_state.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 #ifdef NS_ENABLE_SDL_BT
@@ -11,6 +13,54 @@
 #include <algorithm>
 #include <array>
 #endif
+
+static std::atomic<bool> g_bt_pair_window_started{false};
+
+static void start_bluetooth_pairing_window() {
+    bool expected = false;
+    if (!g_bt_pair_window_started.compare_exchange_strong(expected, true))
+        return;
+
+    std::thread([] {
+        std::puts("[bt] pairing window open for 2 minutes");
+
+        // Service-mode friendly: use bluetoothctl non-interactively, avoid TTY
+        // assumptions, and keep the pairing/scanning helper separate from SDL's
+        // polling loop. The discovery window is intentionally finite so BT mode
+        // does not scan forever during gameplay. Trusted controllers can still
+        // reconnect later through normal BlueZ auto-connect behavior.
+        const char* script =
+            "sh -c '"
+            "command -v bluetoothctl >/dev/null 2>&1 || exit 0; "
+            "bluetoothctl power on >/dev/null 2>&1 || true; "
+            "bluetoothctl pairable on >/dev/null 2>&1 || true; "
+            "bluetoothctl discoverable on >/dev/null 2>&1 || true; "
+            "(printf \"agent NoInputNoOutput\\ndefault-agent\\n\"; sleep 125) | bluetoothctl >/dev/null 2>&1 & agent=$!; "
+            "sleep 1; "
+            "bluetoothctl scan on >/dev/null 2>&1 || true; "
+            "end=$(( $(date +%s) + 120 )); "
+            "while [ $(date +%s) -lt $end ]; do "
+                "bluetoothctl devices | while read -r _ mac name_rest; do "
+                    "name=\"$name_rest\"; "
+                    "case \"$name\" in "
+                        "*Wireless\\ Controller*|*Xbox\\ Wireless\\ Controller*|*Xbox\\ One\\ Wireless\\ Controller*|*Pro\\ Controller*|*Nintendo\\ Switch\\ Pro\\ Controller*|*Joy-Con*|*8BitDo*) "
+                            "bluetoothctl pair \"$mac\" >/dev/null 2>&1 || true; "
+                            "bluetoothctl trust \"$mac\" >/dev/null 2>&1 || true; "
+                            "bluetoothctl connect \"$mac\" >/dev/null 2>&1 || true; "
+                            ";; "
+                    "esac; "
+                "done; "
+                "sleep 5; "
+            "done; "
+            "bluetoothctl scan off >/dev/null 2>&1 || true; "
+            "kill $agent >/dev/null 2>&1 || true; wait $agent >/dev/null 2>&1 || true; "
+            "'";
+
+        int rc = std::system(script);
+        (void)rc;
+        std::puts("[bt] pairing window closed");
+    }).detach();
+}
 
 using namespace ns;
 
@@ -144,13 +194,15 @@ void bluetooth_input_thread() {
         return;
     }
 
+    start_bluetooth_pairing_window();
+
     std::array<int, 4> client_for_sdl{};
     client_for_sdl.fill(-1);
     std::array<uint32_t, 4> last_rumble_seq{};
     std::array<uint64_t, 4> rumble_until_us{};
     bool waiting_logged = false;
 
-    std::puts("[bt] Bluetooth/local SDL controller input enabled. Pair controllers outside ns-backend; paired controllers are auto-picked.");
+    std::puts("[bt] Bluetooth/local controller input enabled");
 
     while (g_running.load(std::memory_order_relaxed)) {
         input.poll();
