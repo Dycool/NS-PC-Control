@@ -170,7 +170,20 @@ int cli_main(const std::vector<std::string>& original_args) {
 
     std::println("Started unified CLI client. Press Ctrl+C to stop.");
     std::string err;
-    int rc = run_client_stream(cfg, g_cliRunning, &err);
+    
+    std::stop_source ss;
+    std::thread monitor([&ss]() {
+        while (g_cliRunning.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ss.request_stop();
+    });
+
+    int rc = run_client_stream(cfg, ss.get_token(), &err);
+    
+    g_cliRunning.store(false, std::memory_order_relaxed);
+    monitor.join();
+
     if (rc != 0 && !err.empty()) std::println(stderr, "ERROR: {}", err);
     std::println("\nShutting down...");
     return rc;
