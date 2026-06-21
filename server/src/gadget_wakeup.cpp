@@ -162,84 +162,6 @@ bool create_hid_function(int id) {
 }
 
 // Read the current MAC address of a Bluetooth adapter from sysfs.
-static std::string read_hci_address(const std::string& hci_dev) {
-    std::string path = "/sys/class/bluetooth/" + hci_dev + "/address";
-    std::ifstream f(path);
-    if (!f) return {};
-    std::string mac;
-    std::getline(f, mac);
-    if (!valid_mac_string(mac)) return {};
-    return lowercase_copy(mac);
-}
-
-// Restore the Bluetooth adapter to its original state after wake mode.
-// This must be called on shutdown so paired controllers can connect again.
-void restore_wake_bt_state() {
-    if (!g_bt_modified_for_wake.load())
-        return;
-
-    std::string hci = g_saved_bt_hci.empty() ? "hci0" : g_saved_bt_hci;
-    std::printf("[wake] Restoring original Bluetooth state on %s...\n", hci.c_str());
-
-    // Power off first.
-    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false, false, 3000);
-
-    // Re-enable BR/EDR so classic BT gamepads can connect.
-    run_wake_command({"btmgmt", "-i", hci, "bredr", "on"}, false, false, 3000);
-
-    // Restore the adapter's original MAC address.
-    if (!g_saved_bt_mac.empty()) {
-        run_wake_command({"btmgmt", "-i", hci, "public-addr", g_saved_bt_mac}, false, false, 3000);
-        std::printf("[wake] Restored Bluetooth MAC address to %s\n", g_saved_bt_mac.c_str());
-    }
-
-    // Power back on and restart the bluetooth service so SDL3 etc. can use it.
-    run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false, false, 3000);
-    run_wake_command({"systemctl", "restart", "bluetooth"}, false, false, 5000);
-
-    std::printf("[wake] Bluetooth state restored; controllers can connect again\n");
-
-    g_saved_bt_mac.clear();
-    g_saved_bt_hci.clear();
-    g_bt_modified_for_wake = false;
-}
-
-void teardown_gadget() {
-    restore_wake_bt_state();
-    g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
-    if (!path_exists(GADGET_DIR)) return;
-
-    std::puts("[gadget] Closing USB gadget...");
-
-    // Unbind first.  This disconnects the virtual controllers from the console.
-    std::string udc_path = join_path(GADGET_DIR, "UDC");
-    write_text_file(udc_path.c_str(), "");
-
-    // Remove config links before removing functions, mirroring setup_gadget.sh.
-    for (int i = 0; i < 4; ++i) {
-        char link_path[320];
-        std::snprintf(link_path, sizeof(link_path), "%s/hid.usb%d", CONFIG_DIR, i);
-        remove_link_if_exists(link_path);
-    }
-
-    // Configfs object directories are removed with rmdir; their pseudo-attribute
-    // files must not be unlinked manually.
-    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409");
-    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1");
-
-    for (int i = 0; i < 4; ++i) {
-        char func[256];
-        std::snprintf(func, sizeof(func), "%s/functions/hid.usb%d", GADGET_DIR, i);
-        rmdir_if_exists(func);
-    }
-
-    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409");
-    rmdir_if_exists(GADGET_DIR);
-
-    std::puts("[gadget] USB gadget closed");
-}
-
 int run_shell_best_effort(const char* cmd) {
     int rc = std::system(cmd);
     return rc;
@@ -541,6 +463,68 @@ WakeCmdResult run_wake_command(const std::vector<std::string>& args,
 bool wake_cmd_ok(const std::vector<std::string>& args, bool verbose_output) {
     WakeCmdResult r = run_wake_command(args, verbose_output, false);
     return r.exit_code == 0;
+}
+
+static std::string read_hci_address(const std::string& hci_dev) {
+    std::string path = "/sys/class/bluetooth/" + hci_dev + "/address";
+    std::ifstream f(path);
+    if (!f) return {};
+    std::string mac;
+    std::getline(f, mac);
+    if (!valid_mac_string(mac)) return {};
+    return lowercase_copy(mac);
+}
+
+void restore_wake_bt_state() {
+    if (!g_bt_modified_for_wake.load())
+        return;
+
+    std::string hci = g_saved_bt_hci.empty() ? "hci0" : g_saved_bt_hci;
+
+    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false, false, 3000);
+    run_wake_command({"btmgmt", "-i", hci, "bredr", "on"}, false, false, 3000);
+
+    if (!g_saved_bt_mac.empty())
+        run_wake_command({"btmgmt", "-i", hci, "public-addr", g_saved_bt_mac}, false, false, 3000);
+
+    run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false, false, 3000);
+    run_wake_command({"systemctl", "restart", "bluetooth"}, false, false, 5000);
+
+    g_saved_bt_mac.clear();
+    g_saved_bt_hci.clear();
+    g_bt_modified_for_wake = false;
+}
+
+void teardown_gadget() {
+    restore_wake_bt_state();
+    g_switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+            g_switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+    if (!path_exists(GADGET_DIR)) return;
+
+    std::puts("[gadget] Closing USB gadget...");
+
+    std::string udc_path = join_path(GADGET_DIR, "UDC");
+    write_text_file(udc_path.c_str(), "");
+
+    for (int i = 0; i < 4; ++i) {
+        char link_path[320];
+        std::snprintf(link_path, sizeof(link_path), "%s/hid.usb%d", CONFIG_DIR, i);
+        remove_link_if_exists(link_path);
+    }
+
+    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409");
+    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1");
+
+    for (int i = 0; i < 4; ++i) {
+        char func[256];
+        std::snprintf(func, sizeof(func), "%s/functions/hid.usb%d", GADGET_DIR, i);
+        rmdir_if_exists(func);
+    }
+
+    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409");
+    rmdir_if_exists(GADGET_DIR);
+
+    std::puts("[gadget] USB gadget closed");
 }
 
 std::string parse_first_hci_device(const std::string& info) {
