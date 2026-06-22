@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: |
@@ -31,7 +31,7 @@ jobs:
 
       - name: Cache SDL3 aarch64 static
         id: cache-sdl3-aarch64
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/sdl3-aarch64-static
           key: sdl3-aarch64-static-${{ env.SDL_REF }}-console-v3
@@ -89,7 +89,7 @@ jobs:
           mkdir -p artifact/pi-server
           cp ns-backend artifact/pi-server/ns-backend
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: pi-server
           path: server/build/artifact/pi-server/
