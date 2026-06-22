@@ -113,7 +113,12 @@ static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpa
         std::lock_guard<std::mutex> lk(g_ctx.server_macro_upload_mtx);
         ServerMacroUploadRuntime& up = g_ctx.server_macro_uploads[client_idx];
         if (!up.active || up.upload_id != upload_id) {
-            up = ServerMacroUploadRuntime{.active = true, .sender = {}, .upload_id = upload_id, .subpad = (uint8_t)(subpad < 4 ? subpad : 0), .total_len = total_len, .chunk_count = chunk_count};
+            up = ServerMacroUploadRuntime{};
+            up.active = true;
+            up.upload_id = upload_id;
+            up.subpad = (uint8_t)(subpad < 4 ? subpad : 0);
+            up.total_len = total_len;
+            up.chunk_count = chunk_count;
             up.chunks.assign(chunk_count, {}); up.got.assign(chunk_count, 0);
         }
         if (up.total_len != total_len || up.chunk_count != chunk_count) return true;

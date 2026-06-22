@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
         int rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
         if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
             std::println(stderr, "[bt] Bluetooth adapter is blocked. Attempting to unblock...");
-            (void)std::system("sudo rfkill unblock bluetooth");
+            int dummy = std::system("sudo rfkill unblock bluetooth"); (void)dummy;
             rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
             if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
                 std::println(stderr, "[bt] WARNING: Bluetooth adapter is still blocked. Unblock manually with: sudo rfkill unblock bluetooth");
@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
     std::jthread wt(writer_thread, PRO_WRITER_HZ), st(stats_thread);
 
     std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
-    pollfd udp_poll{.fd = sock, .events = POLLIN};
+    pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
     while (g_ctx.running.load(std::memory_order_relaxed)) {
         udp_poll.revents = 0;
@@ -288,12 +288,14 @@ int main(int argc, char** argv) {
             if (!rate_allow(src_ip)) continue;
 
             if (bytes < (ssize_t)(20 + HMAC_TAG_SIZE)) {
-                if (g_ctx.verbose) std::println("[udp] short packet, dropped"); continue;
+                if (g_ctx.verbose) { std::println("[udp] short packet, dropped"); }
+                continue;
             }
 
             size_t auth_len = bytes - HMAC_TAG_SIZE;
             if (hmac_verify({g_ctx.hmac_key, 32}, {udp_rx.data(), auth_len}, {udp_rx.data() + auth_len, HMAC_TAG_SIZE}) != 0) {
-                if (g_ctx.verbose) std::println("bad HMAC, dropped"); continue;
+                if (g_ctx.verbose) { std::println("bad HMAC, dropped"); }
+                continue;
             }
 
             uint8_t flags = 0; uint32_t seq = 0;
@@ -335,7 +337,8 @@ int main(int argc, char** argv) {
             }
 
             if (cidx == -1) {
-                if (g_ctx.verbose) std::println("server is full, dropped"); continue;
+                if (g_ctx.verbose) { std::println("server is full, dropped"); }
+                continue;
             }
 
             bool accepted = false;

@@ -148,6 +148,7 @@ bool read_switch2_wakeup_config_file(const std::string& path, std::string& mac, 
 }
 
 bool load_switch2_wakeup_config(bool quiet_if_missing) {
+    (void)quiet_if_missing;
     std::string mac, adv, hci, orig;
     if (!read_switch2_wakeup_config_file(g_ctx.switch2_wakeup_config_path, mac, adv, hci, &orig)) {
         g_ctx.switch2_wake_config_loaded = false;
@@ -377,6 +378,7 @@ void switch2_delayed_wake_check_worker(const char* reason) {
 }
 
 void maybe_send_switch2_wake_advert(const char* reason) {
+    (void)reason;
     if (!g_ctx.switch2_wake_adv_enabled || !g_ctx.switch2_wake_config_loaded || g_ctx.switch2_wake_adv_running.exchange(true)) return;
     uint64_t now = now_us();
     if (g_ctx.switch2_usb_host_connected.load() && !g_ctx.switch2_force_next_wake.load()) {
@@ -438,7 +440,7 @@ bool capture_switch2_wake_advert(int seconds, const std::string& preferred_mac, 
     run_wake_command({"btmgmt", "-i", hci, "bredr", "off"}, false);
     run_wake_command({"btmgmt", "-i", hci, "le", "on"}, false);
     run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false);
-    (void)std::system(cmd.str().c_str());
+    int dummy = std::system(cmd.str().c_str()); (void)dummy;
     bool ok = parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv);
     unlink(log_path);
     return ok;
@@ -566,6 +568,7 @@ void enter_switch2_wake_runtime_mode() {
 }
 
 void wait_for_bluetooth_runtime_ready(bool verbose) {
+    (void)verbose;
     for (int i = 0; i < 20 && g_ctx.running.load(); ++i) {
         WakeCmdResult show = run_wake_command({"bluetoothctl", "show"}, false, true);
         if (show.exit_code == 0 && show.output.find("Powered: yes") != std::string::npos) return;
@@ -615,8 +618,8 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     if (g_ctx.verbose) {
         std::println("[gadget] {}; creating built-in {}-interface {} gadget", reason ? reason : "HID gadget not ready", HID_PORT_COUNT, g_ctx.legacy_mode ? "legacy 8-byte" : "64-byte motion");
     }
-    (void)std::system("modprobe libcomposite >/dev/null 2>&1 || true");
-    (void)std::system("mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true");
+    int dummy1 = std::system("modprobe libcomposite >/dev/null 2>&1 || true"); (void)dummy1;
+    int dummy2 = std::system("mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true"); (void)dummy2;
     if (!fs::is_directory("/sys/kernel/config/usb_gadget")) {
         std::println(stderr, "[gadget] /sys/kernel/config/usb_gadget is unavailable.");
         return false;
