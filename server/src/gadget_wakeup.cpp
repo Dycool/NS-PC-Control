@@ -770,3 +770,42 @@ void teardown_gadget() {
 }
 
 bool run_gadget_setup_if_needed(bool force, const char* reason) { return setup_gadget_builtin(force, reason); }
+
+bool run_revert_gadget_host() {
+    std::string config_path = "/boot/firmware/config.txt";
+    std::string cmdline_path = "/boot/firmware/cmdline.txt";
+    if (!fs::exists(config_path)) {
+        config_path = "/boot/config.txt";
+    }
+    if (!fs::exists(cmdline_path)) {
+        cmdline_path = "/boot/cmdline.txt";
+    }
+
+    if (!fs::exists(config_path) || !fs::exists(cmdline_path)) {
+        std::println(stderr, "[gadget] Boot configuration files not found. Revert skipped.");
+        return false;
+    }
+
+    std::println(stderr, "[gadget] Reverting USB gadget host configurations...");
+    int dummy;
+    // 1. Remove "dtoverlay=dwc2" from config.txt
+    std::string cmd1 = "sudo sed -i '/dtoverlay=dwc2/d' " + config_path;
+    dummy = std::system(cmd1.c_str());
+
+    // 2. Uncomment otg_mode=1 if it was commented out by the app
+    std::string cmd_otg = "sudo sed -i 's/#otg_mode=1/otg_mode=1/g' " + config_path;
+    dummy = std::system(cmd_otg.c_str());
+
+    // 3. Remove the loaded modules from cmdline.txt
+    std::string cmd2 = "sudo sed -i 's/modules-load=dwc2,libcomposite//g' " + cmdline_path;
+    dummy = std::system(cmd2.c_str());
+    std::string cmd3 = "sudo sed -i 's/  / /g' " + cmdline_path;
+    dummy = std::system(cmd3.c_str());
+    (void)dummy;
+
+    std::println(stderr, "[gadget] Rebooting system in 3 seconds to apply reverted boot configurations...");
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    int rb = std::system("sudo reboot"); (void)rb;
+    return true;
+}
+

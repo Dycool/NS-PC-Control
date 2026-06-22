@@ -119,12 +119,13 @@ int main(int argc, char** argv) {
         if (s == "-wake") s = "--wake";
         else if (s == "-hori") s = "--hori";
         else if (s == "-bt") s = "--bt";
+        else if (s == "-revert") s = "--revert";
         cli_args.push_back(s);
     }
 
     uint16_t port = DEFAULT_PORT;
     std::string bind_addr = "0.0.0.0";
-    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, bt_explicit = false, legacy_p = false;
+    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, bt_explicit = false, legacy_p = false, do_revert = false;
     int web_port = 8080;
 
     CLI::App app{"ns-backend - Switch Input Server\n\n  By default, UDP and WebSocket input are both enabled."};
@@ -134,6 +135,7 @@ int main(int argc, char** argv) {
     app.add_flag("--wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup and exit");
     app.add_flag("--hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget");
     app.add_flag("--bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth controller input");
+    app.add_flag("--revert", do_revert, "Revert host USB gadget boot configurations and reboot");
     app.add_flag("--upnp", do_upnp, "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", web_port, "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag("-p", legacy_p, "")->group("");
@@ -152,6 +154,7 @@ int main(int argc, char** argv) {
     }
     serve_http_webapp = opt_w->count() > 0;
 
+    if (do_revert) return run_revert_gadget_host() ? 0 : 1;
     if (g_ctx.switch2_wakeup_setup_requested) return run_switch2_wakeup_setup();
 
     if (bt_explicit) {
