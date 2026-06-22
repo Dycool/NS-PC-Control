@@ -27,7 +27,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup MSVC
         uses: TheMrMilchmann/setup-msvc-dev@v4
@@ -35,7 +35,7 @@ jobs:
           arch: x64
 
       - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
           key: vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-v2
@@ -108,7 +108,7 @@ jobs:
           New-Item -ItemType Directory -Force client/artifacts/windows | Out-Null
           Copy-Item client/build/ns-client.exe client/artifacts/windows/ns-client.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows-static-exe
           path: client/artifacts/windows/ns-client.exe
@@ -117,7 +117,7 @@ jobs:
     name: Linux single AppImage
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: |
@@ -135,7 +135,7 @@ jobs:
 
       - name: Cache SDL3 static
         id: cache-sdl3
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/sdl3-static
           key: sdl3-linux-static-${{ env.SDL_REF }}-v3
@@ -202,7 +202,7 @@ jobs:
           mkdir -p client/artifacts/linux
           mv ns-client-x86_64.AppImage client/artifacts/linux/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-appimage
           path: client/artifacts/linux/ns-client-x86_64.AppImage
@@ -211,7 +211,7 @@ jobs:
     name: macOS .app
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -226,7 +226,7 @@ jobs:
 
       - name: Cache SDL3 static
         id: cache-sdl3
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/sdl3-static
           key: sdl3-macos-static-${{ env.SDL_REF }}-v3
@@ -359,7 +359,7 @@ jobs:
           touch "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" client/artifacts/macos/ns-client-macos.app.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: macos-app
           path: client/artifacts/macos/ns-client-macos.app.zip

@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup MSVC
         uses: TheMrMilchmann/setup-msvc-dev@v4
@@ -37,7 +37,7 @@ jobs:
 
       - name: Cache SDL3 static
         id: cache-sdl3
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: _cache/sdl3-static
           key: sdl3-windows-static-msvc-${{ env.SDL_REF }}-v1
@@ -62,7 +62,7 @@ jobs:
 
       - name: Cache vcpkg OpenSSL
         id: cache-vcpkg-openssl
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~\AppData\Local\vcpkg\archives
           key: vcpkg-openssl-x64-windows-v1
@@ -108,7 +108,7 @@ jobs:
             -DestinationPath client/artifacts/ns-client-windows-dynamic.zip `
             -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows-dynamic-qt-zip
           path: client/artifacts/ns-client-windows-dynamic.zip
