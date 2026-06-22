@@ -589,6 +589,114 @@ void drain_hid_output_queue(int fd) {
     }
 }
 
+bool check_and_enable_gadget_host() {
+    std::string config_path = "/boot/firmware/config.txt";
+    std::string cmdline_path = "/boot/firmware/cmdline.txt";
+    if (!fs::exists(config_path)) {
+        config_path = "/boot/config.txt";
+    }
+    if (!fs::exists(cmdline_path)) {
+        cmdline_path = "/boot/cmdline.txt";
+    }
+
+    if (!fs::exists(config_path) || !fs::exists(cmdline_path)) {
+        return false;
+    }
+
+    bool has_dwc2 = false;
+    {
+        std::ifstream f(config_path);
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.find("dtoverlay=dwc2") != std::string::npos && line.find("#") == std::string::npos) {
+                has_dwc2 = true;
+                break;
+            }
+        }
+    }
+
+    bool has_modules = false;
+    {
+        std::ifstream f(cmdline_path);
+        std::string content;
+        if (std::getline(f, content)) {
+            if (content.find("modules-load=dwc2,libcomposite") != std::string::npos) {
+                has_modules = true;
+            }
+        }
+    }
+
+    if (has_dwc2 && has_modules) {
+        return false;
+    }
+
+    std::println(stderr, "[gadget] USB gadget host configurations are missing in boot settings.");
+    std::println(stderr, "[gadget] Required changes:");
+    if (!has_dwc2) {
+        std::println(stderr, "[gadget]   - Add 'dtoverlay=dwc2' to {}", config_path);
+    }
+    if (!has_modules) {
+        std::println(stderr, "[gadget]   - Add 'modules-load=dwc2,libcomposite' to {}", cmdline_path);
+    }
+
+    if (isatty(STDIN_FILENO)) {
+        std::print(stderr, "USB gadget mode not enabled. Enable and reboot? (y/N): ");
+        std::fflush(stderr);
+        std::string ans;
+        if (std::getline(std::cin, ans)) {
+            if (ans == "y" || ans == "Y") {
+                if (!has_dwc2) {
+                    std::ofstream f(config_path, std::ios::app);
+                    if (f) {
+                        f << "\n# Added by NS-PC-Control to enable USB OTG/Gadget\ndtoverlay=dwc2\n";
+                        std::println(stderr, "[gadget] Updated {}", config_path);
+                    } else {
+                        std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", config_path);
+                        return false;
+                    }
+                }
+                if (!has_modules) {
+                    std::ifstream f_in(cmdline_path);
+                    std::string line;
+                    if (std::getline(f_in, line)) {
+                        f_in.close();
+                        size_t pos = line.find("rootwait");
+                        if (pos != std::string::npos) {
+                            if (line.find("modules-load=dwc2,libcomposite") == std::string::npos) {
+                                line.replace(pos, 8, "rootwait modules-load=dwc2,libcomposite");
+                            }
+                        } else {
+                            if (!line.empty() && line.back() == '\n') line.pop_back();
+                            if (!line.empty() && line.back() == '\r') line.pop_back();
+                            if (line.find("modules-load=dwc2,libcomposite") == std::string::npos) {
+                                line += " modules-load=dwc2,libcomposite";
+                            }
+                        }
+                        std::ofstream f_out(cmdline_path);
+                        if (f_out) {
+                            f_out << line << "\n";
+                            std::println(stderr, "[gadget] Updated {}", cmdline_path);
+                        } else {
+                            std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", cmdline_path);
+                            return false;
+                        }
+                    } else {
+                        std::println(stderr, "[gadget] Error: Failed to read from {}.", cmdline_path);
+                        return false;
+                    }
+                }
+                std::println(stderr, "[gadget] Rebooting system in 3 seconds to apply boot configurations...");
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                int dummy = std::system("sudo reboot"); (void)dummy;
+                return true;
+            }
+        }
+    } else {
+        std::println(stderr, "[gadget] Run interactively or configure manually.");
+    }
+    return false;
+}
+
 bool setup_gadget_builtin(bool force, const char* reason) {
     if (!force && hidg_nodes_ready()) return true;
     if (!force && g_ctx.gadget_setup_attempted.exchange(true)) return hidg_nodes_ready();
@@ -631,7 +739,13 @@ bool setup_gadget_builtin(bool force, const char* reason) {
 
     for (int i = 0; i < HID_PORT_COUNT; ++i) { if (!create_hid_function(i)) return false; }
     std::string UDC = first_udc_name();
-    if (UDC.empty()) { std::println(stderr, "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt."); return false; }
+    if (UDC.empty()) {
+        if (check_and_enable_gadget_host()) {
+            return false;
+        }
+        std::println(stderr, "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt.");
+        return false;
+    }
     if (!write_file(gd / "UDC", UDC)) return false;
     if (g_ctx.verbose) std::println("[gadget] Bound to UDC: {}", UDC);
 

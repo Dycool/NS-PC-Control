@@ -186,7 +186,10 @@ int main(int argc, char** argv) {
     }
 
     randomize_controller_identity();
-    run_gadget_setup_if_needed(true, "startup gadget recreation requested");
+    if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
+        std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");
+        return 1;
+    }
     derive_key(DEFAULT_SECRET, g_ctx.hmac_key);
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
 
