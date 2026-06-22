@@ -131,7 +131,6 @@ add_executable(ns-backend
     src/virtual_controller.cpp
     src/writers.cpp
     src/bluetooth_input.cpp
-    src/upnp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
     ${WEBAPP_EMBED}
 )

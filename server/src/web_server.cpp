@@ -1,96 +1,28 @@
 #include "web_server.hpp"
 #include "app_state.hpp"
 #include "gadget_wakeup.hpp"
-#include "virtual_controller.hpp"
-#include "shared/sha256.h"
 #include "webapp_embed.h"
 
 #include <libwebsockets.h>
-
 #include <algorithm>
 #include <cerrno>
-#include <chrono>
-#include <cstdio>
 #include <cstring>
-#include <string>
-#include <thread>
 #include <mutex>
 #include <print>
+#include <string>
 #include <vector>
 
 using namespace ns;
 
-void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out) {
-    out.reset();
-    const ns::HIDReport* src[4] = {&in.p1, &in.p2, &in.p3, &in.p4};
-    ns::ExtendedHIDReport* dst[4] = {&out.p1, &out.p2, &out.p3, &out.p4};
-    for (int i = 0; i < 4; ++i) {
-        dst[i]->input = *src[i];
-        dst[i]->motion.reset();
-        dst[i]->has_motion = 0;
-    }
-}
-
-bool extended_udp_packet_ok(const ExtendedUdpPacket& p) {
-    return p.magic == ns::PROTO_MAGIC &&
-           (p.version == ns::WEB_PROTO_VERSION || p.version == ns::PROTO_VERSION);
-}
-
-bool extended_udp3_packet_ok(const ExtendedUdpPacketPc& p) {
-    return p.magic == ns::PROTO_MAGIC && p.version == ns::WEB_PROTO_VERSION_3;
-}
-
-bool extended_report_pad_present(const ns::ExtendedMultiReport& report, int subpad) {
-    const ns::ExtendedHIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
-    return subpad >= 0 && subpad < 4 && (pads[subpad]->input.vendor & ns::EXT_PAD_PRESENT) != 0;
-}
-
-bool extended3_report_pad_present(const ns::ExtendedMultiReport3& report, int subpad) {
-    const ns::ExtendedHIDReport3* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
-    return subpad >= 0 && subpad < 4 && (pads[subpad]->input.vendor & ns::EXT_PAD_PRESENT) != 0;
-}
-
-void extended3_to_extended_latest(const ns::ExtendedHIDReport3& in, ns::ExtendedHIDReport& out) {
-    out.reset();
-    out.input = in.input;
-    out.has_motion = in.has_motion;
-    if (in.has_motion) {
-        out.motion = in.motion[2];
-    }
-}
-
-void clear_udp_rumble_state(ClientSession& c) {
-    c.udp_rumble_enabled = false;
-    for (int i = 0; i < 4; i++)
-        c.udp_last_rumble_seq[i] = c.rumble_seq[i];
-}
-
-void enable_udp_rumble_state(ClientSession& c) {
+static void enable_udp_rumble_state(ClientSession& c) {
     if (!c.udp_rumble_enabled) {
         c.udp_rumble_enabled = true;
-        for (int i = 0; i < 4; i++)
-            c.udp_last_rumble_seq[i] = c.rumble_seq[i];
-    }
-}
-
-void reset_udp_client_session_locked(ClientSession& c) {
-    c.active = false;
-    c.first_pkt = true;
-    c.expected_seq = 0;
-    c.last_rx_us = 0;
-    c.report.reset();
-    clear_all_motion(c);
-    c.uses_pad_presence = false;
-    clear_udp_rumble_state(c);
-    for (int s = 0; s < 4; ++s) {
-        c.pad_present[s] = false;
-        c.pad_last_present_us[s] = 0;
+        for (int i = 0; i < 4; i++) c.udp_last_rumble_seq[i] = c.rumble_seq[i];
     }
 }
 
 void flush_rumble_to_udp(int sock, int client_idx) {
     if (sock < 0 || client_idx < 0 || client_idx >= MAX_CLIENTS) return;
-
     sockaddr_in dest{};
     ns::RumblePacket pending[4]{};
     bool has[4]{};
@@ -99,7 +31,6 @@ void flush_rumble_to_udp(int sock, int client_idx) {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
         ClientSession& c = g_ctx.clients[client_idx];
         if (!c.active || !c.udp_rumble_enabled) return;
-
         dest = c.addr;
         for (int s = 0; s < 4; ++s) {
             uint32_t seq = c.rumble_seq[s];
@@ -132,329 +63,142 @@ struct SessionData {
 
 static bool g_serve_http_webapp = false;
 
+struct StaticResource {
+    const char* url;
+    const unsigned char* content;
+    unsigned int len;
+    const char* mime;
+};
 
-static int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
-    (void)user;
-    (void)len;
-    switch (reason) {
-        case LWS_CALLBACK_HTTP: {
-            if (!g_serve_http_webapp) {
-                lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, "WebSocket only");
-                return -1;
-            }
-            const char* url = (const char*)in;
-            const unsigned char* content = nullptr;
-            size_t content_len = 0;
-            const char* mime = "text/html; charset=utf-8";
+static const StaticResource RESOURCES[] = {
+    {"/", index_html, index_html_len, "text/html; charset=utf-8"},
+    {"/index.html", index_html, index_html_len, "text/html; charset=utf-8"},
+    {"/mobile.html", mobile_html, mobile_html_len, "text/html; charset=utf-8"},
+    {"/editor.html", editor_html, editor_html_len, "text/html; charset=utf-8"},
+    {"/css/index.css", css_index_css, css_index_css_len, "text/css; charset=utf-8"},
+    {"/css/mobile.css", css_mobile_css, css_mobile_css_len, "text/css; charset=utf-8"},
+    {"/css/editor.css", css_editor_css, css_editor_css_len, "text/css; charset=utf-8"},
+    {"/js/bridge.js", js_bridge_js, js_bridge_js_len, "application/javascript; charset=utf-8"},
+    {"/js/index.js", js_index_js, js_index_js_len, "application/javascript; charset=utf-8"},
+    {"/js/mobile.js", js_mobile_js, js_mobile_js_len, "application/javascript; charset=utf-8"},
+    {"/js/editor.js", js_editor_js, js_editor_js_len, "application/javascript; charset=utf-8"}
+};
 
-            if (strcmp(url, "/") == 0 || strcmp(url, "/index.html") == 0) {
-                content = index_html;
-                content_len = index_html_len;
-            } else if (strcmp(url, "/mobile.html") == 0) {
-                content = mobile_html;
-                content_len = mobile_html_len;
-            } else if (strcmp(url, "/editor.html") == 0) {
-                content = editor_html;
-                content_len = editor_html_len;
-            } else if (strcmp(url, "/css/index.css") == 0) {
-                content = css_index_css;
-                content_len = css_index_css_len;
-                mime = "text/css; charset=utf-8";
-            } else if (strcmp(url, "/css/mobile.css") == 0) {
-                content = css_mobile_css;
-                content_len = css_mobile_css_len;
-                mime = "text/css; charset=utf-8";
-            } else if (strcmp(url, "/css/editor.css") == 0) {
-                content = css_editor_css;
-                content_len = css_editor_css_len;
-                mime = "text/css; charset=utf-8";
-            } else if (strcmp(url, "/js/bridge.js") == 0) {
-                content = js_bridge_js;
-                content_len = js_bridge_js_len;
-                mime = "application/javascript; charset=utf-8";
-            } else if (strcmp(url, "/js/index.js") == 0) {
-                content = js_index_js;
-                content_len = js_index_js_len;
-                mime = "application/javascript; charset=utf-8";
-            } else if (strcmp(url, "/js/mobile.js") == 0) {
-                content = js_mobile_js;
-                content_len = js_mobile_js_len;
-                mime = "application/javascript; charset=utf-8";
-            } else if (strcmp(url, "/js/editor.js") == 0) {
-                content = js_editor_js;
-                content_len = js_editor_js_len;
-                mime = "application/javascript; charset=utf-8";
-            }
-
-            if (content) {
-                uint8_t hdr_buf[2048 + LWS_PRE];
-                uint8_t *start = &hdr_buf[LWS_PRE];
-                uint8_t *p = start;
-                uint8_t *end = &hdr_buf[sizeof(hdr_buf) - 1];
-
-                if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK, mime, content_len, &p, end))
-                    return -1;
-                if (lws_finalize_write_http_header(wsi, start, &p, end))
-                    return -1;
-
-                // Allocate body buffer with leading LWS_PRE bytes.
-                unsigned char* body = (unsigned char*)malloc(LWS_PRE + content_len);
-                if (!body) return -1;
-                memcpy(body + LWS_PRE, content, content_len);
-                int w = lws_write(wsi, body + LWS_PRE, content_len, LWS_WRITE_HTTP_FINAL);
-                free(body);
-                // Log failed writes for diagnostic purposes.
-                if (w < 0 || (size_t)w < content_len) {
-                    if (g_serve_http_webapp)  // proxy for "verbose-ish"
-                        std::println(stderr, "[http] lws_write returned {} (expected {})", w, content_len);
-                }
-                return -1;
-            } else {
-                lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, "Not Found");
-                return -1;
-            }
-        }
-        default:
-            break;
+static int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void*, void *in, size_t) {
+    if (reason != LWS_CALLBACK_HTTP) return 0;
+    if (!g_serve_http_webapp) {
+        lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, "WebSocket only");
+        return -1;
     }
-    return 0;
+    const char* url = (const char*)in;
+    for (const auto& res : RESOURCES) {
+        if (strcmp(url, res.url) == 0) {
+            uint8_t hdr_buf[2048 + LWS_PRE];
+            uint8_t *start = &hdr_buf[LWS_PRE], *p = start, *end = &hdr_buf[sizeof(hdr_buf) - 1];
+            if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK, res.mime, res.len, &p, end) ||
+                lws_finalize_write_http_header(wsi, start, &p, end))
+                return -1;
+            std::vector<uint8_t> body(LWS_PRE + res.len);
+            std::memcpy(body.data() + LWS_PRE, res.content, res.len);
+            lws_write(wsi, body.data() + LWS_PRE, res.len, LWS_WRITE_HTTP_FINAL);
+            return -1;
+        }
+    }
+    lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, "Not Found");
+    return -1;
 }
 
 static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     SessionData* sd = (SessionData*)user;
     switch (reason) {
-        case LWS_CALLBACK_ESTABLISHED: {
-            sd->ws_slot = -1;
-            sd->ws_seq = 0;
-            sd->ws_first = true;
-            for (int i = 0; i < 4; ++i) {
-                sd->last_rumble_seq[i] = 0;
-                sd->pending_rumble_seq[i] = 0;
-                sd->has_pending_rumble[i] = false;
-            }
-            lws_set_timer_usecs(wsi, 10 * 1000); // Poll rumble every 10ms
+        case LWS_CALLBACK_ESTABLISHED:
+            sd->ws_slot = -1; sd->ws_seq = 0; sd->ws_first = true;
+            std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
+            std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
+            std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
+            lws_set_timer_usecs(wsi, 10 * 1000);
             break;
-        }
 
-        case LWS_CALLBACK_CLOSED: {
-            if (sd->ws_slot >= 0) {
-                std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
-                if (g_ctx.clients[sd->ws_slot].active) {
-                    reset_udp_client_session_locked(g_ctx.clients[sd->ws_slot]);
-                    g_ctx.clients[sd->ws_slot].active = false;
-                }
-            }
+        case LWS_CALLBACK_CLOSED:
+            if (sd->ws_slot >= 0) reset_client_session(sd->ws_slot);
             break;
-        }
 
         case LWS_CALLBACK_RECEIVE: {
-            bool is_binary = lws_frame_is_binary(wsi);
-            size_t flen = len;
             uint8_t* payload = (uint8_t*)in;
-
-            if (!is_binary) {
-                std::string text((char*)payload, flen);
-                const std::string prefix = "MACRO_RUN:";
-                if (text.starts_with(prefix)) {
+            if (!lws_frame_is_binary(wsi)) {
+                std::string text((char*)payload, len);
+                if (text.starts_with("MACRO_RUN:")) {
                     uint64_t now = now_us();
-                    if (sd->ws_slot < 0) {
-                        for (int i = 0; i < MAX_CLIENTS; ++i) {
-                            std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                            if (!g_ctx.clients[i].active) {
-                                sd->ws_slot = i;
-                                g_ctx.clients[i].active = true;
-                                g_ctx.clients[i].first_pkt = true;
-                                g_ctx.clients[i].report.reset();
-                                clear_all_motion(g_ctx.clients[i]);
-                                g_ctx.clients[i].uses_pad_presence = true;
-                                clear_udp_rumble_state(g_ctx.clients[i]);
-                                for (int s = 0; s < 4; ++s) { g_ctx.clients[i].pad_present[s] = false; g_ctx.clients[i].pad_last_present_us[s] = 0; }
-                                g_ctx.clients[i].last_rx_us = now;
-                                break;
-                            }
-                        }
-                    }
+                    if (sd->ws_slot < 0) sd->ws_slot = allocate_client_session(now, nullptr, true);
                     if (sd->ws_slot >= 0) {
                         {
                             std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
-                            g_ctx.clients[sd->ws_slot].active = true;
-                            g_ctx.clients[sd->ws_slot].uses_pad_presence = true;
                             g_ctx.clients[sd->ws_slot].pad_present[0] = true;
                             g_ctx.clients[sd->ws_slot].pad_last_present_us[0] = now;
-                            g_ctx.clients[sd->ws_slot].last_rx_us = now;
                         }
-                        server_macro_start(sd->ws_slot, 0, text.substr(prefix.size()));
+                        server_macro_start(sd->ws_slot, 0, text.substr(10));
                     }
                 }
                 break;
             }
 
-            // Binary processing
-            if (flen >= ns::macro::CHUNK_HEADER_SIZE) {
-                uint32_t maybe_macro_magic = 0;
-                memcpy(&maybe_macro_magic, payload, 4);
-                if (maybe_macro_magic == ns::macro::UDP_CHUNK_MAGIC) {
-                    uint64_t now = now_us();
-                    if (sd->ws_slot < 0) {
-                        for (int i = 0; i < MAX_CLIENTS; ++i) {
-                            std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                            if (!g_ctx.clients[i].active) {
-                                sd->ws_slot = i;
-                                g_ctx.clients[i].active = true;
-                                g_ctx.clients[i].first_pkt = true;
-                                g_ctx.clients[i].report.reset();
-                                clear_all_motion(g_ctx.clients[i]);
-                                g_ctx.clients[i].uses_pad_presence = true;
-                                g_ctx.clients[i].last_rx_us = now;
-                                break;
-                            }
-                        }
-                    }
-                    if (sd->ws_slot >= 0) {
-                        std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
-                        g_ctx.clients[sd->ws_slot].active = true;
-                        g_ctx.clients[sd->ws_slot].uses_pad_presence = true;
-                        g_ctx.clients[sd->ws_slot].pad_present[0] = true;
-                        g_ctx.clients[sd->ws_slot].pad_last_present_us[0] = now;
-                        g_ctx.clients[sd->ws_slot].last_rx_us = now;
-                    }
-                    if (sd->ws_slot >= 0) server_macro_handle_ws_chunk_packet(sd->ws_slot, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload), flen));
+            if (len >= ns::macro::CHUNK_HEADER_SIZE) {
+                uint32_t magic; memcpy(&magic, payload, 4);
+                if (magic == ns::macro::UDP_CHUNK_MAGIC) {
+                    if (sd->ws_slot < 0) sd->ws_slot = allocate_client_session(now_us(), nullptr, true);
+                    if (sd->ws_slot >= 0) server_macro_handle_ws_chunk_packet(sd->ws_slot, {payload, len});
                     break;
                 }
             }
 
-            if (flen != PACKET_SIZE && flen != WEB_PACKET_SIZE && flen != WEB_PACKET3_SIZE) break;
+            uint8_t flags = 0; uint32_t seq = 0;
+            ExtendedMultiReport report{}; ExtendedMultiReport3 report3{};
+            bool is_report3 = false, pad_present[4] = {};
+            if (!parse_client_packet(payload, len, flags, seq, report, pad_present, is_report3, report3)) break;
 
-            uint32_t magic; memcpy(&magic, payload, 4);
-            if (magic != PROTO_MAGIC) break;
-            uint8_t ver; memcpy(&ver, payload + 4, 1);
-            uint8_t flags; memcpy(&flags, payload + 5, 1);
-            bool is_reset = (flags & FLAG_RESET);
-            uint32_t seq; memcpy(&seq, payload + 8, 4);
-
-            ExtendedMultiReport report;
-            ExtendedMultiReport3 report3;
-            report.reset();
-            report3.reset();
-            bool is_report3 = false;
-            bool pad_present[4] = {};
-
-            if (ver == PROTO_VERSION && flen == PACKET_SIZE) {
-                MultiReport legacy;
-                memcpy(&legacy, payload + 20, sizeof(MultiReport));
-                legacy_multi_to_extended(legacy, report);
-                pad_present[0] = !extended_is_neutral(report.p1);
-                pad_present[1] = !extended_is_neutral(report.p2);
-                pad_present[2] = !extended_is_neutral(report.p3);
-                pad_present[3] = !extended_is_neutral(report.p4);
-            } else if ((ver == WEB_PROTO_VERSION || ver == PROTO_VERSION) && flen == WEB_PACKET_SIZE) {
-                memcpy(&report, payload + 20, sizeof(ExtendedMultiReport));
-                for (int s = 0; s < 4; ++s)
-                    pad_present[s] = (payload[20 + s * sizeof(ExtendedHIDReport) + 7] & 0x01) != 0;
-                if (flags & FLAG_SINGLE_PAD) {
-                    report.p2.reset(); report.p3.reset(); report.p4.reset();
-                    pad_present[0] = true;
-                    pad_present[1] = false; pad_present[2] = false; pad_present[3] = false;
-                }
-            } else if (ver == WEB_PROTO_VERSION_3 && flen == WEB_PACKET3_SIZE) {
-                is_report3 = true;
-                memcpy(&report3, payload + 20, sizeof(ExtendedMultiReport3));
-                const ExtendedHIDReport3* src3[4] = { &report3.p1, &report3.p2, &report3.p3, &report3.p4 };
-                ExtendedHIDReport* dst1[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
-                for (int s = 0; s < 4; ++s) {
-                    pad_present[s] = (payload[20 + s * sizeof(ExtendedHIDReport3) + 7] & 0x01) != 0;
-                    extended3_to_extended_latest(*src3[s], *dst1[s]);
-                }
-                if (flags & FLAG_SINGLE_PAD) {
-                    report.p2.reset(); report.p3.reset(); report.p4.reset();
-                    report3.p2.reset(); report3.p3.reset(); report3.p4.reset();
-                    pad_present[0] = true;
-                    pad_present[1] = false; pad_present[2] = false; pad_present[3] = false;
-                }
-            } else {
-                break;
-            }
-
-            if (!sd->ws_first && !is_reset && (int32_t)(seq - sd->ws_seq) < 0) break;
-            sd->ws_first = false;
-            sd->ws_seq = seq + 1;
+            if (!sd->ws_first && !(flags & FLAG_RESET) && (int32_t)(seq - sd->ws_seq) < 0) break;
+            sd->ws_first = false; sd->ws_seq = seq + 1;
 
             uint64_t now = now_us();
-            bool wake_on_new_client = false;
-
             if (sd->ws_slot >= 0) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
-                if (!g_ctx.clients[sd->ws_slot].active)
-                    sd->ws_slot = -1;
+                if (!g_ctx.clients[sd->ws_slot].active) sd->ws_slot = -1;
             }
             if (sd->ws_slot < 0) {
-                for (int i = 0; i < MAX_CLIENTS; ++i) {
-                    std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                    if (!g_ctx.clients[i].active) {
-                        sd->ws_slot = i;
-                        g_ctx.clients[i].active = true;
-                        g_ctx.clients[i].first_pkt = true;
-                        g_ctx.clients[i].report.reset();
-                        clear_all_motion(g_ctx.clients[i]);
-                        g_ctx.clients[i].uses_pad_presence = true;
-                        clear_udp_rumble_state(g_ctx.clients[i]);
-                        for (int s = 0; s < 4; ++s) {
-                            g_ctx.clients[i].pad_present[s] = false;
-                            g_ctx.clients[i].pad_last_present_us[s] = 0;
-                        }
-                        g_ctx.clients[i].last_rx_us = now;
-                        wake_on_new_client = true;
-                        for (int s = 0; s < 4; ++s)
-                            sd->last_rumble_seq[s] = g_ctx.clients[i].rumble_seq[s];
-                        break;
-                    }
+                sd->ws_slot = allocate_client_session(now, nullptr, true);
+                if (sd->ws_slot >= 0) {
+                    maybe_send_switch2_wake_advert("client connected via WebSocket input");
+                    for (int s = 0; s < 4; ++s) sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                 }
             }
 
-            if (wake_on_new_client)
-                maybe_send_switch2_wake_advert("client connected via WebSocket input");
-
             if (sd->ws_slot >= 0) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
-                g_ctx.clients[sd->ws_slot].active = true;
-                g_ctx.clients[sd->ws_slot].uses_pad_presence = true;
-                g_ctx.clients[sd->ws_slot].last_rx_us = now;
+                ClientSession& c = g_ctx.clients[sd->ws_slot];
+                c.active = true; c.uses_pad_presence = true; c.last_rx_us = now;
 
-                if (is_reset) {
-                    g_ctx.clients[sd->ws_slot].report.reset();
-                    g_ctx.clients[sd->ws_slot].first_pkt = true;
-                    clear_all_motion(g_ctx.clients[sd->ws_slot]);
-                    for (int s = 0; s < 4; ++s) {
-                        g_ctx.clients[sd->ws_slot].pad_present[s] = false;
-                        g_ctx.clients[sd->ws_slot].pad_last_present_us[s] = 0;
-                    }
+                if (flags & FLAG_RESET) {
+                    c.report.reset(); c.report3.reset(); c.first_pkt = true;
+                    clear_all_motion(c);
+                    for (int s = 0; s < 4; ++s) { c.pad_present[s] = false; c.pad_last_present_us[s] = 0; }
                 }
 
                 if (is_report3) {
-                    if (g_ctx.clients[sd->ws_slot].first_pkt ||
-                        memcmp(&g_ctx.clients[sd->ws_slot].report3, &report3, sizeof(ExtendedMultiReport3)) != 0) {
-                        g_ctx.clients[sd->ws_slot].report3 = report3;
-                        g_ctx.clients[sd->ws_slot].has_new_report3 = true;
-                        g_ctx.clients[sd->ws_slot].has_new_report = true;
-                        g_ctx.clients[sd->ws_slot].first_pkt = false;
-                        g_ctx.clients[sd->ws_slot].report = report;
-                        enable_udp_rumble_state(g_ctx.clients[sd->ws_slot]);
+                    if (c.first_pkt || memcmp(&c.report3, &report3, sizeof(ExtendedMultiReport3)) != 0) {
+                        c.report3 = report3; c.report = report;
+                        c.has_new_report3 = c.has_new_report = true; c.first_pkt = false;
+                        enable_udp_rumble_state(c);
                     }
                 } else {
-                    if (g_ctx.clients[sd->ws_slot].first_pkt ||
-                        memcmp(&g_ctx.clients[sd->ws_slot].report, &report, sizeof(ExtendedMultiReport)) != 0) {
-                        g_ctx.clients[sd->ws_slot].report = report;
-                        g_ctx.clients[sd->ws_slot].has_new_report = true;
-                        g_ctx.clients[sd->ws_slot].first_pkt = false;
-                        enable_udp_rumble_state(g_ctx.clients[sd->ws_slot]);
+                    if (c.first_pkt || memcmp(&c.report, &report, sizeof(ExtendedMultiReport)) != 0) {
+                        c.report = report;
+                        c.has_new_report = true; c.first_pkt = false;
+                        enable_udp_rumble_state(c);
                     }
                 }
 
                 for (int s = 0; s < 4; ++s) {
-                    if (pad_present[s]) {
-                        g_ctx.clients[sd->ws_slot].pad_present[s] = true;
-                        g_ctx.clients[sd->ws_slot].pad_last_present_us[s] = now;
-                    }
+                    if (pad_present[s]) { c.pad_present[s] = true; c.pad_last_present_us[s] = now; }
                 }
             }
             break;
@@ -462,25 +206,17 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
             if (sd->ws_slot < 0) break;
-            
             for (int s = 0; s < 4; ++s) {
                 if (sd->has_pending_rumble[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(RumblePacket)];
                     memcpy(buffer + LWS_PRE, sd->pending_rumble[s], sizeof(RumblePacket));
-                    int written = lws_write(wsi, buffer + LWS_PRE, sizeof(RumblePacket), LWS_WRITE_BINARY);
-                    if (written != static_cast<int>(sizeof(RumblePacket))) return -1;
+                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(RumblePacket), LWS_WRITE_BINARY) != sizeof(RumblePacket)) return -1;
                     sd->has_pending_rumble[s] = false;
                     sd->last_rumble_seq[s] = sd->pending_rumble_seq[s];
-                    break; 
+                    break;
                 }
             }
-
-            bool still_has = false;
-            for (int s = 0; s < 4; ++s) {
-                if (sd->has_pending_rumble[s]) still_has = true;
-            }
-            if (still_has) lws_callback_on_writable(wsi);
-
+            if (std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) lws_callback_on_writable(wsi);
             break;
         }
 
@@ -502,7 +238,6 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             lws_set_timer_usecs(wsi, 10 * 1000);
             break;
         }
-
         default:
             break;
     }
@@ -518,8 +253,6 @@ static struct lws_protocols protocols[] = {
 void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, bool serve_http_webapp) {
     (void)udp_port;
     g_serve_http_webapp = serve_http_webapp;
-
-    // Supress noisy libwebsockets logs
     lws_set_log_level(LLL_ERR | LLL_WARN, NULL);
 
     struct lws_context_creation_info info;
@@ -539,10 +272,8 @@ void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, 
     else
         std::println("[ws] WebSocket proxy listening on port {}; HTTP webapp disabled (use -w to enable)", web_port);
 
-    // WebSocket clients are trusted at the network level only.
     while (!stoken.stop_requested()) {
-        // Lower service timeout to 5 ms for improved rumble timer responsiveness.
-        lws_service(g_ctx.lws_context, 5); // wait up to 5ms
+        lws_service(g_ctx.lws_context, 5);
     }
 
     lws_context_destroy(g_ctx.lws_context);

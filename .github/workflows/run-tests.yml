@@ -1,0 +1,157 @@
+name: Run Tests
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  SDL_REF: release-3.4.10
+
+jobs:
+  test-suite:
+    name: Build & Run Tests (Ubuntu)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14 \
+            build-essential cmake ninja-build pkg-config git file wget xxd libssl-dev \
+            qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins libwebsockets-dev libminiupnpc-dev
+
+      - name: Cache SDL3 static
+        id: cache-sdl3
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/sdl3-static
+          key: sdl3-linux-static-${{ env.SDL_REF }}-v3
+
+      - name: Build SDL3 static
+        if: steps.cache-sdl3.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$SDL_REF" https://github.com/libsdl-org/SDL.git /tmp/SDL3
+          cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_INSTALL_PREFIX="$HOME/.local/sdl3-static" \
+            -DSDL_SHARED=OFF \
+            -DSDL_STATIC=ON \
+            -DSDL_TEST_LIBRARY=OFF \
+            -DSDL_TESTS=OFF \
+            -DSDL_EXAMPLES=OFF
+          cmake --build /tmp/SDL3-build --parallel
+          cmake --install /tmp/SDL3-build
+
+      - name: Build Backend (ns-backend)
+        run: |
+          cmake -S server -B server/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static"
+          cmake --build server/build --parallel
+
+      - name: Build Client (ns-client)
+        run: |
+          cmake -S client -B client/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static"
+          cmake --build client/build --parallel
+
+      - name: Build Tests (ns-unit-tests, ns-integration-tests)
+        run: |
+          cmake -S shared/tests -B shared/tests/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build shared/tests/build --parallel
+
+      - name: Run C++ Unit Tests
+        run: |
+          ./shared/tests/build/ns-unit-tests
+
+      - name: Run C++ Integration Tests
+        run: |
+          # Run with sudo so that the -wake flow's root validation passes
+          sudo ./shared/tests/build/ns-integration-tests
+
+  test-windows-client:
+    name: Build Client (Windows Dynamic)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      QT_VERSION: '6.8.3'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup MSVC
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Cache SDL3 static
+        id: cache-sdl3
+        uses: actions/cache@v5
+        with:
+          path: _cache/sdl3-static
+          key: sdl3-windows-static-msvc-${{ env.SDL_REF }}-v1
+
+      - name: Build SDL3 static
+        if: steps.cache-sdl3.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "$env:SDL_REF" https://github.com/libsdl-org/SDL.git _deps/SDL3
+          cmake -S _deps/SDL3 -B _deps/SDL3-build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$PWD/_cache/sdl3-static" `
+            -DSDL_SHARED=OFF `
+            -DSDL_STATIC=ON `
+            -DSDL_TEST_LIBRARY=OFF `
+            -DSDL_TESTS=OFF `
+            -DSDL_EXAMPLES=OFF
+          cmake --build _deps/SDL3-build --parallel
+          cmake --install _deps/SDL3-build
+
+      - name: Cache vcpkg OpenSSL
+        id: cache-vcpkg-openssl
+        uses: actions/cache@v5
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-openssl-x64-windows-v1
+
+      - name: Install OpenSSL
+        shell: pwsh
+        run: vcpkg install openssl:x64-windows
+
+      - name: Build client (Dynamic)
+        shell: pwsh
+        run: |
+          cmake -S client -B client/build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_PREFIX_PATH="$PWD/_cache/sdl3-static;$env:Qt6_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+          cmake --build client/build --target ns-client --parallel
+

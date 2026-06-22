@@ -92,21 +92,27 @@ bool parse_uint32_strict(const std::string& s, std::uint32_t& out) {
 
 
 std::uint16_t button_bit(const std::string& token) {
+    struct TokenMap { std::string_view key; std::uint16_t bit; };
+    static constexpr TokenMap BUTTONS[] = {
+        {"A", ns::BTN_A}, {"BTN_A", ns::BTN_A},
+        {"B", ns::BTN_B}, {"BTN_B", ns::BTN_B},
+        {"X", ns::BTN_X}, {"BTN_X", ns::BTN_X},
+        {"Y", ns::BTN_Y}, {"BTN_Y", ns::BTN_Y},
+        {"L", ns::BTN_L}, {"BTN_L", ns::BTN_L},
+        {"R", ns::BTN_R}, {"BTN_R", ns::BTN_R},
+        {"ZL", ns::BTN_ZL}, {"BTN_ZL", ns::BTN_ZL},
+        {"ZR", ns::BTN_ZR}, {"BTN_ZR", ns::BTN_ZR},
+        {"MINUS", ns::BTN_MINUS}, {"-", ns::BTN_MINUS}, {"BTN_MINUS", ns::BTN_MINUS},
+        {"PLUS", ns::BTN_PLUS}, {"+", ns::BTN_PLUS}, {"BTN_PLUS", ns::BTN_PLUS},
+        {"LSTICK", ns::BTN_LSTICK}, {"LS", ns::BTN_LSTICK}, {"BTN_LSTICK", ns::BTN_LSTICK},
+        {"RSTICK", ns::BTN_RSTICK}, {"RS", ns::BTN_RSTICK}, {"BTN_RSTICK", ns::BTN_RSTICK},
+        {"HOME", ns::BTN_HOME}, {"GUIDE", ns::BTN_HOME}, {"BTN_HOME", ns::BTN_HOME},
+        {"CAPTURE", ns::BTN_CAPTURE}, {"SHARE", ns::BTN_CAPTURE}, {"BTN_CAPTURE", ns::BTN_CAPTURE}
+    };
     std::string name = upper(trim(token));
-    if (name == "A" || name == "BTN_A") return ns::BTN_A;
-    if (name == "B" || name == "BTN_B") return ns::BTN_B;
-    if (name == "X" || name == "BTN_X") return ns::BTN_X;
-    if (name == "Y" || name == "BTN_Y") return ns::BTN_Y;
-    if (name == "L" || name == "BTN_L") return ns::BTN_L;
-    if (name == "R" || name == "BTN_R") return ns::BTN_R;
-    if (name == "ZL" || name == "BTN_ZL") return ns::BTN_ZL;
-    if (name == "ZR" || name == "BTN_ZR") return ns::BTN_ZR;
-    if (name == "MINUS" || name == "-" || name == "BTN_MINUS") return ns::BTN_MINUS;
-    if (name == "PLUS" || name == "+" || name == "BTN_PLUS") return ns::BTN_PLUS;
-    if (name == "LSTICK" || name == "LS" || name == "BTN_LSTICK") return ns::BTN_LSTICK;
-    if (name == "RSTICK" || name == "RS" || name == "BTN_RSTICK") return ns::BTN_RSTICK;
-    if (name == "HOME" || name == "GUIDE" || name == "BTN_HOME") return ns::BTN_HOME;
-    if (name == "CAPTURE" || name == "SHARE" || name == "BTN_CAPTURE") return ns::BTN_CAPTURE;
+    for (const auto& entry : BUTTONS) {
+        if (entry.key == name) return entry.bit;
+    }
     return 0;
 }
 
@@ -119,20 +125,33 @@ std::expected<void, std::string> apply_token(const std::string& raw_tok, Step& s
     std::uint16_t bit = button_bit(tok);
     if (bit) { st.buttons |= bit; return {}; }
 
-    if (tok == "DPAD_UP" || tok == "DUP" || tok == "UP") { du = true; return {}; }
-    if (tok == "DPAD_DOWN" || tok == "DDOWN" || tok == "DOWN") { dd = true; return {}; }
-    if (tok == "DPAD_LEFT" || tok == "DLEFT" || tok == "LEFT") { dl = true; return {}; }
-    if (tok == "DPAD_RIGHT" || tok == "DRIGHT" || tok == "RIGHT") { dr = true; return {}; }
+    struct ActionMap {
+        std::string_view key;
+        bool& target;
+        bool* has_stick = nullptr;
+    };
+    const ActionMap ACTIONS[] = {
+        {"DPAD_UP", du}, {"DUP", du}, {"UP", du},
+        {"DPAD_DOWN", dd}, {"DDOWN", dd}, {"DOWN", dd},
+        {"DPAD_LEFT", dl}, {"DLEFT", dl}, {"LEFT", dl},
+        {"DPAD_RIGHT", dr}, {"DRIGHT", dr}, {"RIGHT", dr},
+        {"LSTICK_UP", llu, &st.has_lstick}, {"LS_UP", llu, &st.has_lstick},
+        {"LSTICK_DOWN", lld, &st.has_lstick}, {"LS_DOWN", lld, &st.has_lstick},
+        {"LSTICK_LEFT", lll, &st.has_lstick}, {"LS_LEFT", lll, &st.has_lstick},
+        {"LSTICK_RIGHT", llr, &st.has_lstick}, {"LS_RIGHT", llr, &st.has_lstick},
+        {"RSTICK_UP", rru, &st.has_rstick}, {"RS_UP", rru, &st.has_rstick},
+        {"RSTICK_DOWN", rrd, &st.has_rstick}, {"RS_DOWN", rrd, &st.has_rstick},
+        {"RSTICK_LEFT", rrl, &st.has_rstick}, {"RS_LEFT", rrl, &st.has_rstick},
+        {"RSTICK_RIGHT", rrr, &st.has_rstick}, {"RS_RIGHT", rrr, &st.has_rstick}
+    };
 
-    if (tok == "LSTICK_UP" || tok == "LS_UP") { llu = true; st.has_lstick = true; return {}; }
-    if (tok == "LSTICK_DOWN" || tok == "LS_DOWN") { lld = true; st.has_lstick = true; return {}; }
-    if (tok == "LSTICK_LEFT" || tok == "LS_LEFT") { lll = true; st.has_lstick = true; return {}; }
-    if (tok == "LSTICK_RIGHT" || tok == "LS_RIGHT") { llr = true; st.has_lstick = true; return {}; }
-
-    if (tok == "RSTICK_UP" || tok == "RS_UP") { rru = true; st.has_rstick = true; return {}; }
-    if (tok == "RSTICK_DOWN" || tok == "RS_DOWN") { rrd = true; st.has_rstick = true; return {}; }
-    if (tok == "RSTICK_LEFT" || tok == "RS_LEFT") { rrl = true; st.has_rstick = true; return {}; }
-    if (tok == "RSTICK_RIGHT" || tok == "RS_RIGHT") { rrr = true; st.has_rstick = true; return {}; }
+    for (const auto& action : ACTIONS) {
+        if (action.key == tok) {
+            action.target = true;
+            if (action.has_stick) *action.has_stick = true;
+            return {};
+        }
+    }
 
     return std::unexpected("unknown macro input: " + raw_tok);
 }

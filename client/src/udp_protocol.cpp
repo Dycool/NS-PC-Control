@@ -1,6 +1,5 @@
 #include "udp_protocol.hpp"
 #include "shared/sha256.h"
-
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -63,35 +62,27 @@ int send_all_udp(SOCKET sock, const sockaddr_in& dest, std::span<const uint8_t> 
 void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
                                        const uint8_t hmac_key[32], uint32_t seq, bool legacy_udp) {
     if (sock == INVALID_SOCKET) return;
-    if (legacy_udp) {
-        ns::Packet pkt{};
-        pkt.magic = ns::PROTO_MAGIC;
-        pkt.version = ns::PROTO_VERSION;
-        pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT;
-        pkt.seq = seq;
-        pkt.ts_us = ns::now_us();
-        pkt.report.reset();
+    auto send_one = [&](void* pkt, size_t size, size_t auth_size) {
         uint8_t full_hmac[32];
-        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
-        std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+        hmac_sha256(std::span(hmac_key, 32), std::span(static_cast<const uint8_t*>(pkt), auth_size), std::span<uint8_t, 32>(full_hmac));
+        std::memcpy(static_cast<uint8_t*>(pkt) + auth_size, full_hmac, ns::HMAC_TAG_SIZE);
         for (int i = 0; i < 3; ++i) {
-            send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), ns::PACKET_SIZE));
+            send_all_udp(sock, dest, std::span(static_cast<const uint8_t*>(pkt), size));
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        return;
-    }
-    ExtendedUdpPacketPc pkt{};
-    pkt.magic = ns::PROTO_MAGIC;
-    pkt.version = ns::WEB_PROTO_VERSION_3;
-    pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT;
-    pkt.seq = seq;
-    pkt.timestamp_us = ns::now_us();
-    pkt.report.reset();
-    uint8_t full_hmac[32];
-    hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET3_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
-    std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
-    for (int i = 0; i < 3; ++i) {
-        send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    };
+    if (legacy_udp) {
+        ns::Packet pkt{};
+        pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::PROTO_VERSION;
+        pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT; pkt.seq = seq;
+        pkt.ts_us = ns::now_us(); pkt.report.reset();
+        send_one(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
+    } else {
+        ExtendedUdpPacketPc pkt{};
+        pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::WEB_PROTO_VERSION_3;
+        pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT; pkt.seq = seq;
+        pkt.timestamp_us = ns::now_us(); pkt.report.reset();
+        send_one(&pkt, sizeof(pkt), EXT_UDP_PACKET3_AUTH_SIZE);
     }
 }
+

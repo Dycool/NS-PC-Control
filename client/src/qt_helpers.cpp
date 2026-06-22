@@ -1,13 +1,10 @@
 #include "qt_helpers.hpp"
 #include "input_settings.hpp"
 #include "platform.hpp"
-
 #include <QIcon>
 #include <QKeyEvent>
 #include <QCoreApplication>
 #include <QDir>
-
-#include <string>
 #include <vector>
 
 std::string q_to_std(const QString& s) { return s.toUtf8().constData(); }
@@ -27,64 +24,36 @@ QString key_name_from_qkey(QKeyEvent* event) {
     if (key >= Qt::Key_A && key <= Qt::Key_Z) return QString(QChar('A' + key - Qt::Key_A));
     if (key >= Qt::Key_0 && key <= Qt::Key_9) return QString(QChar('0' + key - Qt::Key_0));
     if (key >= Qt::Key_F1 && key <= Qt::Key_F12) return QString("F%1").arg(key - Qt::Key_F1 + 1);
-    switch (key) {
-        case Qt::Key_Up: return "UP";
-        case Qt::Key_Down: return "DOWN";
-        case Qt::Key_Left: return "LEFT";
-        case Qt::Key_Right: return "RIGHT";
-        case Qt::Key_Shift: return "LSHIFT";
-        case Qt::Key_Control: return "LCTRL";
-        case Qt::Key_Alt: return "LALT";
-        case Qt::Key_Space: return "SPACE";
-        case Qt::Key_Return:
-        case Qt::Key_Enter: return "ENTER";
-        case Qt::Key_Tab: return "TAB";
-        case Qt::Key_Escape: return "ESC";
-        case Qt::Key_Backspace: return "BACKSPACE";
-        case Qt::Key_Home: return "HOME";
-        case Qt::Key_Print: return "SNAPSHOT";
-        default: break;
-    }
+    struct KeyMap { int qkey; const char* name; };
+    static const KeyMap map[] = {
+        {Qt::Key_Up, "UP"}, {Qt::Key_Down, "DOWN"}, {Qt::Key_Left, "LEFT"}, {Qt::Key_Right, "RIGHT"},
+        {Qt::Key_Shift, "LSHIFT"}, {Qt::Key_Control, "LCTRL"}, {Qt::Key_Alt, "LALT"}, {Qt::Key_Space, "SPACE"},
+        {Qt::Key_Return, "ENTER"}, {Qt::Key_Enter, "ENTER"}, {Qt::Key_Tab, "TAB"}, {Qt::Key_Escape, "ESC"},
+        {Qt::Key_Backspace, "BACKSPACE"}, {Qt::Key_Home, "HOME"}, {Qt::Key_Print, "SNAPSHOT"}
+    };
+    for (const auto& m : map) if (key == m.qkey) return m.name;
     return {};
 }
 
 QIcon app_icon() {
-    static QIcon cached;
-    static bool loaded = false;
-    if (loaded) return cached;
-    loaded = true;
-
-    QIcon embedded(":/icon.png");
-    if (!embedded.isNull()) {
-        cached = embedded;
-        return cached;
-    }
-
-    const QString exe_dir = QCoreApplication::applicationDirPath();
-    QDir d(exe_dir);
-
-    std::vector<QString> candidates = {
+    static QIcon cached = []() {
+        if (QIcon embedded(":/icon.png"); !embedded.isNull()) return embedded;
+        QDir d(QCoreApplication::applicationDirPath());
+        std::vector<QString> paths = {
 #ifdef __APPLE__
-        QDir(d.filePath("../Resources")).filePath("icon.icns"),
-        QDir(d.filePath("../Resources")).filePath("icon.png"),
+            d.filePath("../Resources/icon.icns"), d.filePath("../Resources/icon.png"),
 #endif
 #ifndef _WIN32
-        QDir(d.filePath("../share/icons/hicolor/256x256/apps")).filePath("ns-client.png"),
-        QDir(d.filePath("../share/pixmaps")).filePath("ns-client.png"),
+            d.filePath("../share/icons/hicolor/256x256/apps/ns-client.png"), d.filePath("../share/pixmaps/ns-client.png"),
 #endif
-        d.filePath("icon.ico"),
-        d.filePath("icon.png"),
-        QDir(NS_CLIENT_SOURCE_DIR).filePath("icon.ico"),
-        QDir(NS_CLIENT_SOURCE_DIR).filePath("icon.png")
-    };
-
-    for (const QString& p : candidates) {
-        QIcon icon(p);
-        if (!icon.isNull()) {
-            cached = icon;
-            return cached;
+            d.filePath("icon.ico"), d.filePath("icon.png"),
+            QDir(NS_CLIENT_SOURCE_DIR).filePath("icon.ico"), QDir(NS_CLIENT_SOURCE_DIR).filePath("icon.png")
+        };
+        for (const auto& p : paths) {
+            if (QIcon icon(p); !icon.isNull()) return icon;
         }
-    }
-
-    return {};
+        return QIcon();
+    }();
+    return cached;
 }
+

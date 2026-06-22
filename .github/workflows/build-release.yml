@@ -20,8 +20,11 @@ jobs:
   build-mobile:
     uses: ./.github/workflows/build-mobile.yml
 
+  run-tests:
+    uses: ./.github/workflows/run-tests.yml
+
   release:
-    needs: [build-clients, build-server, build-mobile]
+    needs: [build-clients, build-server, build-mobile, run-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts

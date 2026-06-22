@@ -48,14 +48,5 @@ constexpr size_t UDP_RX_MAX_PACKET_SIZE =
 static_assert(sizeof(ExtendedUdpPacket) == EXT_UDP_PACKET_SIZE, "ExtendedUdpPacket size must match its wire format");
 static_assert(sizeof(ExtendedUdpPacketPc) == EXT3_UDP_PACKET_SIZE, "ExtendedUdpPacketPc size must match its wire format");
 
-void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out);
-bool extended_udp_packet_ok(const ExtendedUdpPacket& p);
-bool extended_udp3_packet_ok(const ExtendedUdpPacketPc& p);
-bool extended_report_pad_present(const ns::ExtendedMultiReport& report, int subpad);
-bool extended3_report_pad_present(const ns::ExtendedMultiReport3& report, int subpad);
-void extended3_to_extended_latest(const ns::ExtendedHIDReport3& in, ns::ExtendedHIDReport& out);
-void clear_udp_rumble_state(ClientSession& c);
-void reset_udp_client_session_locked(ClientSession& c);
-void enable_udp_rumble_state(ClientSession& c);
 void flush_rumble_to_udp(int sock, int client_idx);
 void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, bool serve_http_webapp);

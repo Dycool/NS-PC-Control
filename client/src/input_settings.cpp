@@ -1,6 +1,5 @@
 #include "input_settings.hpp"
 #include "shared/macros.hpp"
-
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -29,7 +28,6 @@ void sync_sdl_input_options() {
     g_sdlInput.set_home_shortcut_enabled(g_homeShortcutEnabled.load());
     g_sdlInput.set_capture_shortcut_enabled(g_captureShortcutEnabled.load());
 }
-
 
 std::string macros_path() {
     QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
@@ -66,18 +64,20 @@ std::string normalize_key_name(std::string s) {
 bool is_valid_key_code(const std::string& s) {
     std::string c = normalize_key_name(s);
     if (c.empty()) return true;
-    static const char* named[] = {"ESC","ESCAPE","SPACE","ENTER","TAB","BACKSPACE","DELETE","INSERT","HOME","END","PAGEUP","PAGEDOWN","CAPSLOCK","NUMLOCK","SCROLLLOCK","PAUSE","SNAPSHOT","PRINTSCREEN","CONTEXTMENU","UP","DOWN","LEFT","RIGHT","LSHIFT","RSHIFT","LCTRL","RCTRL","LALT","RALT","LMETA","RMETA"};
+    static const char* named[] = {
+        "ESC","ESCAPE","SPACE","ENTER","TAB","BACKSPACE","DELETE","INSERT","HOME","END","PAGEUP","PAGEDOWN",
+        "CAPSLOCK","NUMLOCK","SCROLLLOCK","PAUSE","SNAPSHOT","PRINTSCREEN","CONTEXTMENU","UP","DOWN","LEFT","RIGHT",
+        "LSHIFT","RSHIFT","LCTRL","RCTRL","LALT","RALT","LMETA","RMETA", "SHIFTLEFT","SHIFTRIGHT","METALEFT","METARIGHT",
+        "CONTROLLEFT","CONTROLRIGHT","ALTLEFT","ALTRIGHT","ARROWUP","ARROWDOWN","ARROWLEFT","ARROWRIGHT"
+    };
     for (const char* n : named) if (c == n) return true;
-    if (c.size() == 1 && ((c[0] >= 'A' && c[0] <= 'Z') || (c[0] >= '0' && c[0] <= '9'))) return true;
-    if (c.size() == 2 && c[0] == 'F' && c[1] >= '1' && c[1] <= '9') return true;
-    if (c.size() == 3 && c[0] == 'F' && c[1] == '1' && c[2] >= '0' && c[2] <= '9') return true;
-    if (c.size() == 3 && c[0] == 'F' && c[1] == '2' && c[2] >= '0' && c[2] <= '4') return true;
-    if (c.size() > 3 && c.substr(0, 3) == "KEY" && c.size() == 4 && c[3] >= 'A' && c[3] <= 'Z') return true;
-    if (c.size() > 4 && c.substr(0, 5) == "DIGIT" && c.size() == 6 && c[5] >= '0' && c[5] <= '9') return true;
-    if (c.size() > 4 && c.substr(0, 5) == "ARROW" && (c == "ARROWUP" || c == "ARROWDOWN" || c == "ARROWLEFT" || c == "ARROWRIGHT")) return true;
-    if (c.size() > 4 && (c.substr(0, 5) == "SHIFT" || c.substr(0, 5) == "METAL") && (c == "SHIFTLEFT" || c == "SHIFTRIGHT" || c == "METALEFT" || c == "METARIGHT")) return true;
-    if (c.size() > 6 && c.substr(0, 7) == "CONTROL" && (c == "CONTROLLEFT" || c == "CONTROLRIGHT")) return true;
-    if (c.size() > 2 && c.substr(0, 3) == "ALT" && (c == "ALTLEFT" || c == "ALTRIGHT")) return true;
+    if (c.size() == 1 && std::isalnum((unsigned char)c[0])) return true;
+    if (c.size() >= 2 && c[0] == 'F' && std::all_of(c.begin() + 1, c.end(), ::isdigit)) {
+        int val = std::stoi(c.substr(1));
+        return val >= 1 && val <= 24;
+    }
+    if (c.substr(0, 3) == "KEY" && c.size() == 4 && std::isalpha((unsigned char)c[3])) return true;
+    if (c.substr(0, 5) == "DIGIT" && c.size() == 6 && std::isdigit((unsigned char)c[5])) return true;
     return false;
 }
 
@@ -110,24 +110,24 @@ void save_bindings() {
 }
 
 std::string load_saved_ip() {
-    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
-    return settings.value("LastIP", "192.168.1.100").toString().toStdString();
+    return QSettings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl")
+        .value("LastIP", "192.168.1.100").toString().toStdString();
 }
 
 void save_last_ip(const std::string& ip) {
-    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
-    settings.setValue("LastIP", QString::fromStdString(ip));
+    QSettings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl")
+        .setValue("LastIP", QString::fromStdString(ip));
 }
 
 int load_saved_keyboard_mode() {
-    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
-    int mode = settings.value("KeyboardMode", KB_OFF).toInt();
+    int mode = QSettings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl")
+        .value("KeyboardMode", KB_OFF).toInt();
     return (mode >= KB_OFF && mode <= KB_OVERRIDE) ? mode : KB_OFF;
 }
 
 void save_keyboard_mode(int mode) {
-    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
-    settings.setValue("KeyboardMode", mode);
+    QSettings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl")
+        .setValue("KeyboardMode", mode);
 }
 
 void load_saved_feature_toggles() {
@@ -164,15 +164,17 @@ bool pressed_key_cache_contains(const std::string& key) {
 int windows_vk_for_key(const std::string& name) {
     if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z') return name[0];
     if (name.size() == 1 && name[0] >= '0' && name[0] <= '9') return name[0];
+    if (name.size() >= 2 && name[0] == 'F') {
+        int num = std::stoi(name.substr(1));
+        if (num >= 1 && num <= 12) return VK_F1 + num - 1;
+    }
     struct Map { const char* n; int vk; };
     static const Map map[] = {
         {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
         {"LSHIFT", VK_LSHIFT}, {"RSHIFT", VK_RSHIFT}, {"LCTRL", VK_LCONTROL}, {"RCTRL", VK_RCONTROL},
         {"LALT", VK_LMENU}, {"RALT", VK_RMENU}, {"SPACE", VK_SPACE}, {"ENTER", VK_RETURN},
         {"TAB", VK_TAB}, {"ESC", VK_ESCAPE}, {"BACKSPACE", VK_BACK}, {"HOME", VK_HOME},
-        {"SNAPSHOT", VK_SNAPSHOT}, {"F1", VK_F1}, {"F2", VK_F2}, {"F3", VK_F3}, {"F4", VK_F4},
-        {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8}, {"F9", VK_F9},
-        {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12}
+        {"SNAPSHOT", VK_SNAPSHOT}
     };
     for (const auto& m : map) if (name == m.n) return m.vk;
     return 0;
@@ -181,7 +183,8 @@ int windows_vk_for_key(const std::string& name) {
 
 #ifdef __APPLE__
 int mac_keycode_for_key(const std::string& name) {
-    static const std::unordered_map<std::string, int> map = {
+    struct Map { const char* n; int kc; };
+    static const Map map[] = {
         {"A", 0}, {"S", 1}, {"D", 2}, {"F", 3}, {"H", 4}, {"G", 5}, {"Z", 6}, {"X", 7},
         {"C", 8}, {"V", 9}, {"B", 11}, {"Q", 12}, {"W", 13}, {"E", 14}, {"R", 15},
         {"Y", 16}, {"T", 17}, {"1", 18}, {"2", 19}, {"3", 20}, {"4", 21}, {"6", 22},
@@ -193,8 +196,8 @@ int mac_keycode_for_key(const std::string& name) {
         {"F1", 122}, {"F2", 120}, {"F3", 99}, {"F4", 118}, {"F5", 96}, {"F6", 97},
         {"F7", 98}, {"F8", 100}, {"F9", 101}, {"F10", 109}, {"F11", 103}, {"F12", 111}
     };
-    auto it = map.find(name);
-    return it == map.end() ? -1 : it->second;
+    for (const auto& m : map) if (name == m.n) return m.kc;
+    return -1;
 }
 #endif
 
@@ -243,21 +246,16 @@ void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
         auto it = g_keyBindings.find(btn);
         return it != g_keyBindings.end() ? it->second : "";
     };
-    std::string k;
-    k = get("Y"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_Y;
-    k = get("B"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_B;
-    k = get("A"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_A;
-    k = get("X"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_X;
-    k = get("L"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_L;
-    k = get("R"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_R;
-    k = get("ZL"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_ZL;
-    k = get("ZR"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_ZR;
-    k = get("MINUS"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_MINUS;
-    k = get("PLUS"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_PLUS;
-    k = get("LSTICK"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_LSTICK;
-    k = get("RSTICK"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_RSTICK;
-    k = get("HOME"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_HOME;
-    k = get("CAPTURE"); if (!k.empty() && key_is_down(k)) rep.buttons |= ns::BTN_CAPTURE;
+    struct BtnMap { const char* name; uint32_t flag; };
+    static const BtnMap btn_map[] = {
+        {"Y", ns::BTN_Y}, {"B", ns::BTN_B}, {"A", ns::BTN_A}, {"X", ns::BTN_X},
+        {"L", ns::BTN_L}, {"R", ns::BTN_R}, {"ZL", ns::BTN_ZL}, {"ZR", ns::BTN_ZR},
+        {"MINUS", ns::BTN_MINUS}, {"PLUS", ns::BTN_PLUS}, {"LSTICK", ns::BTN_LSTICK},
+        {"RSTICK", ns::BTN_RSTICK}, {"HOME", ns::BTN_HOME}, {"CAPTURE", ns::BTN_CAPTURE}
+    };
+    for (const auto& m : btn_map) {
+        if (auto k = get(m.name); !k.empty() && key_is_down(k)) rep.buttons |= m.flag;
+    }
 
     bool du = !get("DPAD_UP").empty() && key_is_down(get("DPAD_UP"));
     bool dd = !get("DPAD_DOWN").empty() && key_is_down(get("DPAD_DOWN"));
@@ -273,25 +271,16 @@ void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
     else if (dr) rep.hat = ns::HAT_E;
     else if (dl) rep.hat = ns::HAT_W;
 
-    bool lsu = !get("LSTICK_UP").empty() && key_is_down(get("LSTICK_UP"));
-    bool lsd = !get("LSTICK_DOWN").empty() && key_is_down(get("LSTICK_DOWN"));
-    bool lsl = !get("LSTICK_LEFT").empty() && key_is_down(get("LSTICK_LEFT"));
-    bool lsr = !get("LSTICK_RIGHT").empty() && key_is_down(get("LSTICK_RIGHT"));
-    if (lsl && !lsr) rep.lx = 0;
-    else if (lsr && !lsl) rep.lx = 255;
-    else if (!override_mode) rep.lx = 128;
-    if (lsu && !lsd) rep.ly = 0;
-    else if (lsd && !lsu) rep.ly = 255;
-    else if (!override_mode) rep.ly = 128;
-
-    bool rsu = !get("RSTICK_UP").empty() && key_is_down(get("RSTICK_UP"));
-    bool rsd = !get("RSTICK_DOWN").empty() && key_is_down(get("RSTICK_DOWN"));
-    bool rsl = !get("RSTICK_LEFT").empty() && key_is_down(get("RSTICK_LEFT"));
-    bool rsr = !get("RSTICK_RIGHT").empty() && key_is_down(get("RSTICK_RIGHT"));
-    if (rsl && !rsr) rep.rx = 0;
-    else if (rsr && !rsl) rep.rx = 255;
-    else if (!override_mode) rep.rx = 128;
-    if (rsu && !rsd) rep.ry = 0;
-    else if (rsd && !rsu) rep.ry = 255;
-    else if (!override_mode) rep.ry = 128;
+    auto apply_axis = [&](const char* min_key, const char* max_key, uint8_t& val) {
+        bool min_d = !get(min_key).empty() && key_is_down(get(min_key));
+        bool max_d = !get(max_key).empty() && key_is_down(get(max_key));
+        if (min_d && !max_d) val = 0;
+        else if (max_d && !min_d) val = 255;
+        else if (!override_mode) val = 128;
+    };
+    apply_axis("LSTICK_LEFT", "LSTICK_RIGHT", rep.lx);
+    apply_axis("LSTICK_UP", "LSTICK_DOWN", rep.ly);
+    apply_axis("RSTICK_LEFT", "RSTICK_RIGHT", rep.rx);
+    apply_axis("RSTICK_UP", "RSTICK_DOWN", rep.ry);
 }
+

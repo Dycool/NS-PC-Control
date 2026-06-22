@@ -130,6 +130,23 @@ void clear_motion(ClientSession& c, int subpad);
 void clear_all_motion(ClientSession& c);
 void set_motion(ClientSession& c, int subpad, const ns::MotionReport& motion);
 void set_motion_samples(ClientSession& c, int subpad, const ns::MotionReport samples[3]);
+void reset_client_session_locked(ClientSession& c);
+void reset_client_session(int client_idx);
+int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence);
+bool parse_client_packet(const uint8_t* data, size_t len,
+                         uint8_t& flags, uint32_t& seq,
+                         ns::ExtendedMultiReport& report,
+                         bool pad_present[4],
+                         bool& is_report3,
+                         ns::ExtendedMultiReport3& report3);
+void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out);
+void extended3_to_extended_latest(const ns::ExtendedHIDReport3& in, ns::ExtendedHIDReport& out);
+bool extended_is_neutral(const ns::ExtendedHIDReport& r);
+bool input_is_neutral(const ns::HIDReport& r);
+bool motion_is_neutral(const ns::MotionReport& m);
+
+
+
 
 bool rate_allow(uint32_t ip);
 int server_macro_client_for_sender(const sockaddr_in& sender);

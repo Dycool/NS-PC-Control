@@ -1,7 +1,6 @@
 #include "macro_client.hpp"
 #include "input_settings.hpp"
 #include "shared/sha256.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -19,22 +18,21 @@ uint32_t next_macro_upload_id() {
 bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
                                   const std::string& json_or_commands, uint8_t subpad) {
     if (json_or_commands.size() > ns::macro::UDP_TEXT_MAX) return false;
+    auto sign_and_send = [&](const void* hdr_ptr, size_t hdr_size, const char* data_ptr, size_t data_size) {
+        std::vector<uint8_t> buf(hdr_size + data_size + ns::HMAC_TAG_SIZE);
+        std::memcpy(buf.data(), hdr_ptr, hdr_size);
+        if (data_size) std::memcpy(buf.data() + hdr_size, data_ptr, data_size);
+        uint8_t hmac[32];
+        hmac_sha256(std::span(hmac_key, 32), std::span(buf.data(), hdr_size + data_size), std::span<uint8_t, 32>(hmac));
+        std::memcpy(buf.data() + hdr_size + data_size, hmac, ns::HMAC_TAG_SIZE);
+        return send_all_udp(sock, dest, buf) != SOCKET_ERROR;
+    };
+
     if (json_or_commands.size() + ns::macro::UDP_HEADER_SIZE + ns::HMAC_TAG_SIZE <= 1400) {
-        std::vector<uint8_t> buf(ns::macro::UDP_HEADER_SIZE + json_or_commands.size() + ns::HMAC_TAG_SIZE);
-        ns::macro::MacroUdpHeaderWire hdr{};
-        hdr.magic = ns::macro::UDP_MAGIC;
-        hdr.version = ns::PROTO_VERSION;
-        hdr.subpad = subpad;
-        hdr.text_len = (uint32_t)json_or_commands.size();
-        hdr.seq = next_macro_upload_id();
-        std::memcpy(buf.data(), &hdr, sizeof(hdr));
-        if (!json_or_commands.empty()) {
-            std::memcpy(buf.data() + sizeof(hdr), json_or_commands.data(), json_or_commands.size());
-        }
-        uint8_t full_hmac[32];
-        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(buf.data(), sizeof(hdr) + json_or_commands.size()), std::span<uint8_t, 32>(full_hmac));
-        std::memcpy(buf.data() + sizeof(hdr) + json_or_commands.size(), full_hmac, ns::HMAC_TAG_SIZE);
-        return send_all_udp(sock, dest, std::span<const uint8_t>(buf.data(), buf.size())) != SOCKET_ERROR;
+        ns::macro::MacroUdpHeaderWire hdr{.magic = ns::macro::UDP_MAGIC, .version = ns::PROTO_VERSION,
+                                          .subpad = subpad, .text_len = (uint32_t)json_or_commands.size(),
+                                          .seq = next_macro_upload_id()};
+        return sign_and_send(&hdr, sizeof(hdr), json_or_commands.data(), json_or_commands.size());
     }
 
     const uint32_t upload_id = next_macro_upload_id();
@@ -42,25 +40,14 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
     for (uint32_t i = 0; i < chunk_count; ++i) {
         size_t off = (size_t)i * ns::macro::UDP_CHUNK_MAX;
         size_t n = std::min(ns::macro::UDP_CHUNK_MAX, json_or_commands.size() - off);
-        std::vector<uint8_t> buf(ns::macro::CHUNK_HEADER_SIZE + n + ns::HMAC_TAG_SIZE);
-        ns::macro::MacroUdpChunkHeaderWire hdr{};
-        hdr.magic = ns::macro::UDP_CHUNK_MAGIC;
-        hdr.version = ns::PROTO_VERSION;
-        hdr.subpad = subpad;
-        hdr.flags = (i + 1 == chunk_count) ? 0x01 : 0x00;
-        hdr.reserved = 0;
-        hdr.upload_id = upload_id;
-        hdr.chunk_index = i;
-        hdr.chunk_count = chunk_count;
-        hdr.total_len = (uint32_t)json_or_commands.size();
-        hdr.chunk_len = (uint16_t)n;
-        hdr.seq = next_macro_upload_id();
-        std::memcpy(buf.data(), &hdr, sizeof(hdr));
-        if (n > 0) std::memcpy(buf.data() + sizeof(hdr), json_or_commands.data() + off, n);
-        uint8_t full_hmac[32];
-        hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(buf.data(), ns::macro::CHUNK_HEADER_SIZE + n), std::span<uint8_t, 32>(full_hmac));
-        std::memcpy(buf.data() + ns::macro::CHUNK_HEADER_SIZE + n, full_hmac, ns::HMAC_TAG_SIZE);
-        if (send_all_udp(sock, dest, std::span<const uint8_t>(buf.data(), buf.size())) == SOCKET_ERROR) return false;
+        ns::macro::MacroUdpChunkHeaderWire hdr{
+            .magic = ns::macro::UDP_CHUNK_MAGIC, .version = ns::PROTO_VERSION, .subpad = subpad,
+            .flags = (uint8_t)((i + 1 == chunk_count) ? 0x01 : 0x00), .reserved = 0,
+            .upload_id = upload_id, .chunk_index = i, .chunk_count = chunk_count,
+            .total_len = (uint32_t)json_or_commands.size(), .chunk_len = (uint16_t)n,
+            .seq = next_macro_upload_id()
+        };
+        if (!sign_and_send(&hdr, sizeof(hdr), json_or_commands.data() + off, n)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return true;
@@ -264,3 +251,4 @@ bool apply_macro_override(ns::HIDReport logical_reports[4], bool present[4], boo
     if (!active && elapsed_ms > ns::macro::total_ms(g_macro_steps) + 120) g_macro_running.store(false, std::memory_order_relaxed);
     return true;
 }
+
