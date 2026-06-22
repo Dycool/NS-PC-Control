@@ -19,6 +19,7 @@ env:
   QT_VERSION: '6.8.3'
   VCPKG_COMMIT: 8584f4d71b35d9c82a94bd39a0d558302b3604e4ee1ae46d8eb4c38519682bb9
   VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/_cache/vcpkg-bincache
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-windows:
