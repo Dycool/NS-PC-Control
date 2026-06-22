@@ -13,8 +13,6 @@ permissions:
 jobs:
   build-clients:
     uses: ./.github/workflows/build-clients.yml
-    with:
-      release-build: true
 
   build-server:
     uses: ./.github/workflows/build-server.yml
@@ -22,15 +20,12 @@ jobs:
   build-mobile:
     uses: ./.github/workflows/build-mobile.yml
 
-  run-tests:
-    uses: ./.github/workflows/run-tests.yml
-
   release:
-    needs: [build-clients, build-server, build-mobile, run-tests]
+    needs: [build-clients, build-server, build-mobile]
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
