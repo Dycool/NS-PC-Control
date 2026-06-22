@@ -644,7 +644,7 @@ bool check_and_enable_gadget_host() {
         std::println(stderr, "[gadget]   - Comment out 'otg_mode=1' in {} (conflicts with device/gadget mode)", config_path);
     }
     if (!has_dwc2) {
-        std::println(stderr, "[gadget]   - Add 'dtoverlay=dwc2,dr_mode=peripheral' to {}", config_path);
+        std::println(stderr, "[gadget]   - Add 'dtoverlay=dwc2' to {}", config_path);
     }
     if (!has_modules) {
         std::println(stderr, "[gadget]   - Add 'modules-load=dwc2,libcomposite' to {}", cmdline_path);
@@ -656,63 +656,24 @@ bool check_and_enable_gadget_host() {
         std::string ans;
         if (std::getline(std::cin, ans)) {
             if (ans == "y" || ans == "Y") {
-                bool config_modified = false;
+                int dummy;
                 if (has_otg_active) {
-                    for (auto& line : config_lines) {
-                        size_t hash_pos = line.find("#");
-                        size_t otg_pos = line.find("otg_mode=1");
-                        if (otg_pos != std::string::npos && (hash_pos == std::string::npos || hash_pos > otg_pos)) {
-                            line = "#" + line;
-                            config_modified = true;
-                        }
-                    }
+                    std::string cmd = "sudo sed -i 's/^otg_mode=1/#otg_mode=1/g' " + config_path;
+                    dummy = std::system(cmd.c_str());
                 }
                 if (!has_dwc2) {
-                    config_lines.push_back("");
-                    config_lines.push_back("# Added by NS-PC-Control to enable USB OTG/Gadget");
-                    config_lines.push_back("dtoverlay=dwc2,dr_mode=peripheral");
-                    config_modified = true;
+                    std::string cmd = "echo \"dtoverlay=dwc2\" | sudo tee -a " + config_path + " >/dev/null";
+                    dummy = std::system(cmd.c_str());
                 }
-
-                if (config_modified) {
-                    std::ofstream f(config_path);
-                    if (f) {
-                        for (const auto& line : config_lines) {
-                            f << line << "\n";
-                        }
-                        std::println(stderr, "[gadget] Updated {}", config_path);
-                    } else {
-                        std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", config_path);
-                        return false;
-                    }
-                }
-
                 if (!has_modules) {
-                    size_t pos = cmdline_content.find("rootwait");
-                    if (pos != std::string::npos) {
-                        if (cmdline_content.find("modules-load=dwc2,libcomposite") == std::string::npos) {
-                            cmdline_content.replace(pos, 8, "rootwait modules-load=dwc2,libcomposite");
-                        }
-                    } else {
-                        if (!cmdline_content.empty() && cmdline_content.back() == '\n') cmdline_content.pop_back();
-                        if (!cmdline_content.empty() && cmdline_content.back() == '\r') cmdline_content.pop_back();
-                        if (cmdline_content.find("modules-load=dwc2,libcomposite") == std::string::npos) {
-                            cmdline_content += " modules-load=dwc2,libcomposite";
-                        }
-                    }
-                    std::ofstream f_out(cmdline_path);
-                    if (f_out) {
-                        f_out << cmdline_content << "\n";
-                        std::println(stderr, "[gadget] Updated {}", cmdline_path);
-                    } else {
-                        std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", cmdline_path);
-                        return false;
-                    }
+                    std::string cmd = "sudo sed -i 's/rootwait/rootwait modules-load=dwc2,libcomposite/' " + cmdline_path;
+                    dummy = std::system(cmd.c_str());
                 }
+                (void)dummy;
 
                 std::println(stderr, "[gadget] Rebooting system in 3 seconds to apply boot configurations...");
                 std::this_thread::sleep_for(std::chrono::seconds(3));
-                int dummy = std::system("sudo reboot"); (void)dummy;
+                int rb = std::system("sudo reboot"); (void)rb;
                 return true;
             }
         }
@@ -766,7 +727,7 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     std::string UDC = first_udc_name();
     if (UDC.empty()) {
         if (check_and_enable_gadget_host()) {
-            return false;
+            std::exit(0);
         }
         std::println(stderr, "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt.");
         return false;
