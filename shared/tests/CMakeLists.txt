@@ -9,6 +9,9 @@ add_compile_options(-O3 -Wall -Wextra -Wpedantic)
 
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
+find_package(SDL3 REQUIRED CONFIG)
+
+add_definitions(-DNS_ENABLE_SDL_BT)
 
 include(FetchContent)
 
@@ -20,20 +23,25 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-# Unit Tests target
+# Unit Tests target — includes server app_state.cpp for deep logic testing
 add_executable(ns-unit-tests
     unit_tests.cpp
+    test_stubs.cpp
     ../src/macros.cpp
+    ../src/sdl_input.cpp
+    ../../server/src/app_state.cpp
+    ../../server/src/bluetooth_input.cpp
 )
 target_include_directories(ns-unit-tests PRIVATE
     ../include
-    ../../server/include # for gadget_wakeup.hpp or similar headers if needed
+    ../../server/include
 )
 target_link_libraries(ns-unit-tests PRIVATE
     nlohmann_json::nlohmann_json
     OpenSSL::SSL
     OpenSSL::Crypto
     Threads::Threads
+    SDL3::SDL3
 )
 
 # Integration Tests target
