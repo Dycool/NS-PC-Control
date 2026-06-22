@@ -13,6 +13,8 @@ permissions:
 jobs:
   build-clients:
     uses: ./.github/workflows/build-clients.yml
+    with:
+      release-build: true
 
   build-server:
     uses: ./.github/workflows/build-server.yml

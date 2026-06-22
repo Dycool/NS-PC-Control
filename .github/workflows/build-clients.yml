@@ -9,6 +9,10 @@ on:
       - '.github/workflows/build-clients.yml'
   workflow_dispatch:
   workflow_call:
+    inputs:
+      release-build:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,7 +26,7 @@ env:
 
 jobs:
   build-windows:
-    name: Windows static .exe
+    name: Windows Client (.exe)
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
@@ -33,7 +37,70 @@ jobs:
         with:
           arch: x64
 
-      - name: Restore vcpkg binary cache
+      # --- DYNAMIC BUILD PATH (Test runs/Pushes: fast) ---
+      - name: Install Qt (Dynamic)
+        if: ${{ !(inputs.release-build || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Cache SDL3 static (Dynamic)
+        if: ${{ !(inputs.release-build || startsWith(github.ref, 'refs/tags/v')) }}
+        id: cache-sdl3-dynamic
+        uses: actions/cache@v5
+        with:
+          path: _cache/sdl3-static
+          key: sdl3-windows-static-msvc-${{ env.SDL_REF }}-v1
+
+      - name: Build SDL3 static (Dynamic)
+        if: ${{ !(inputs.release-build || startsWith(github.ref, 'refs/tags/v')) && steps.cache-sdl3-dynamic.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "$env:SDL_REF" https://github.com/libsdl-org/SDL.git _deps/SDL3
+          cmake -S _deps/SDL3 -B _deps/SDL3-build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$PWD/_cache/sdl3-static" `
+            -DSDL_SHARED=OFF `
+            -DSDL_STATIC=ON `
+            -DSDL_TEST_LIBRARY=OFF `
+            -DSDL_TESTS=OFF `
+            -DSDL_EXAMPLES=OFF
+          cmake --build _deps/SDL3-build --parallel
+          cmake --install _deps/SDL3-build
+
+      - name: Cache vcpkg OpenSSL (Dynamic)
+        if: ${{ !(inputs.release-build || startsWith(github.ref, 'refs/tags/v')) }}
+        id: cache-vcpkg-openssl-dynamic
+        uses: actions/cache@v5
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-openssl-x64-windows-v1
+
+      - name: Install OpenSSL (Dynamic)
+        if: ${{ !(inputs.release-build || startsWith(github.ref, 'refs/tags/v')) }}
+        shell: pwsh
+        run: vcpkg install openssl:x64-windows
+
+      - name: Build client (Dynamic)
+        if: ${{ !(inputs.release-build || startsWith(github.ref, 'refs/tags/v')) }}
+        shell: pwsh
+        run: |
+          cmake -S client -B client/build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_PREFIX_PATH="$PWD/_cache/sdl3-static;$env:Qt6_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+          cmake --build client/build --target ns-client --parallel
+          New-Item -ItemType Directory -Force client/artifacts/windows | Out-Null
+          Copy-Item client/build/ns-client.exe client/artifacts/windows/ns-client.exe
+
+      # --- STATIC BUILD PATH (Releases/Tags: static standalone executable) ---
+      - name: Restore vcpkg binary cache (Static)
+        if: ${{ inputs.release-build || startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
@@ -44,7 +111,8 @@ jobs:
             vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-
             vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-
 
-      - name: Bootstrap pinned vcpkg
+      - name: Bootstrap pinned vcpkg (Static)
+        if: ${{ inputs.release-build || startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           git clone https://github.com/microsoft/vcpkg.git _deps/vcpkg
@@ -53,18 +121,17 @@ jobs:
           cd ../..
           .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
-      - name: Create release-only vcpkg triplets
+      - name: Create release-only vcpkg triplets (Static)
+        if: ${{ inputs.release-build || startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force triplets | Out-Null
-
           @'
           set(VCPKG_TARGET_ARCHITECTURE x64)
           set(VCPKG_CRT_LINKAGE static)
           set(VCPKG_LIBRARY_LINKAGE static)
           set(VCPKG_BUILD_TYPE release)
           '@ | Set-Content triplets/x64-windows-static-release.cmake
-
           @'
           set(VCPKG_TARGET_ARCHITECTURE x64)
           set(VCPKG_CRT_LINKAGE dynamic)
@@ -72,12 +139,12 @@ jobs:
           set(VCPKG_BUILD_TYPE release)
           '@ | Set-Content triplets/x64-windows-release.cmake
 
-      - name: Build static Qt + SDL3 with vcpkg
+      - name: Build static Qt + SDL3 with vcpkg (Static)
+        if: ${{ inputs.release-build || startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,$env:VCPKG_DEFAULT_BINARY_CACHE,readwrite"
-
           .\_deps\vcpkg\vcpkg.exe install `
             "qtbase[core,widgets,png]:x64-windows-static-release" `
             "sdl3:x64-windows-static-release" `
@@ -86,11 +153,11 @@ jobs:
             --host-triplet=x64-windows-release `
             --clean-after-build
 
-      - name: Build client
+      - name: Build client (Static)
+        if: ${{ inputs.release-build || startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           $env:VCPKG_BINARY_SOURCES = "clear;files,$env:VCPKG_DEFAULT_BINARY_CACHE,readwrite"
-
           cmake -S client -B client/build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake" `
@@ -98,10 +165,10 @@ jobs:
             -DVCPKG_HOST_TRIPLET=x64-windows-release `
             -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets" `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-
           cmake --build client/build --target ns-client --parallel
 
-      - name: Stage Windows artifact
+      - name: Stage Windows artifact (Static)
+        if: ${{ inputs.release-build || startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force client/artifacts/windows | Out-Null

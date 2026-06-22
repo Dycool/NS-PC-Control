@@ -29,7 +29,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14 \
             build-essential cmake ninja-build pkg-config git file wget xxd libssl-dev \
-            qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins libwebsockets-dev libminiupnpc-dev
+            qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins libwebsockets-dev libminiupnpc-dev \
+            libgl1-mesa-dev
 
       - name: Cache SDL3 static
         id: cache-sdl3
@@ -86,72 +87,4 @@ jobs:
         run: |
           # Run with sudo so that the -wake flow's root validation passes
           sudo ./shared/tests/build/ns-integration-tests
-
-  test-windows-client:
-    name: Build Client (Windows Dynamic)
-    runs-on: windows-latest
-    timeout-minutes: 60
-    env:
-      QT_VERSION: '6.8.3'
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup MSVC
-        uses: TheMrMilchmann/setup-msvc-dev@v4
-        with:
-          arch: x64
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          host: windows
-          target: desktop
-          arch: win64_msvc2022_64
-
-      - name: Cache SDL3 static
-        id: cache-sdl3
-        uses: actions/cache@v5
-        with:
-          path: _cache/sdl3-static
-          key: sdl3-windows-static-msvc-${{ env.SDL_REF }}-v1
-
-      - name: Build SDL3 static
-        if: steps.cache-sdl3.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          git clone --depth 1 --branch "$env:SDL_REF" https://github.com/libsdl-org/SDL.git _deps/SDL3
-          cmake -S _deps/SDL3 -B _deps/SDL3-build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_INSTALL_PREFIX="$PWD/_cache/sdl3-static" `
-            -DSDL_SHARED=OFF `
-            -DSDL_STATIC=ON `
-            -DSDL_TEST_LIBRARY=OFF `
-            -DSDL_TESTS=OFF `
-            -DSDL_EXAMPLES=OFF
-          cmake --build _deps/SDL3-build --parallel
-          cmake --install _deps/SDL3-build
-
-      - name: Cache vcpkg OpenSSL
-        id: cache-vcpkg-openssl
-        uses: actions/cache@v5
-        with:
-          path: ~\AppData\Local\vcpkg\archives
-          key: vcpkg-openssl-x64-windows-v1
-
-      - name: Install OpenSSL
-        shell: pwsh
-        run: vcpkg install openssl:x64-windows
-
-      - name: Build client (Dynamic)
-        shell: pwsh
-        run: |
-          cmake -S client -B client/build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DCMAKE_PREFIX_PATH="$PWD/_cache/sdl3-static;$env:Qt6_DIR" `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
-          cmake --build client/build --target ns-client --parallel
 
