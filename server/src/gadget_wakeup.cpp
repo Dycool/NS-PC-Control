@@ -786,6 +786,40 @@ bool run_revert_gadget_host() {
         return false;
     }
 
+    bool needs_revert = false;
+    {
+        std::ifstream f(config_path);
+        std::string line;
+        while (std::getline(f, line)) {
+            size_t hash_pos = line.find("#");
+            size_t dwc_pos = line.find("dtoverlay=dwc2");
+            if (dwc_pos != std::string::npos && (hash_pos == std::string::npos || hash_pos > dwc_pos)) {
+                needs_revert = true;
+                break;
+            }
+            size_t otg_pos = line.find("otg_mode=1");
+            if (otg_pos != std::string::npos && hash_pos != std::string::npos && hash_pos < otg_pos) {
+                needs_revert = true;
+                break;
+            }
+        }
+    }
+
+    if (!needs_revert) {
+        std::ifstream f(cmdline_path);
+        std::string content;
+        if (std::getline(f, content)) {
+            if (content.find("modules-load=dwc2,libcomposite") != std::string::npos) {
+                needs_revert = true;
+            }
+        }
+    }
+
+    if (!needs_revert) {
+        std::println(stderr, "[gadget] Boot configurations are already in their default/reverted state. No action taken.");
+        return true;
+    }
+
     std::println(stderr, "[gadget] Reverting USB gadget host configurations...");
     int dummy;
     // 1. Remove "dtoverlay=dwc2" from config.txt
