@@ -604,36 +604,47 @@ bool check_and_enable_gadget_host() {
     }
 
     bool has_dwc2 = false;
+    bool has_otg_active = false;
+    std::vector<std::string> config_lines;
     {
         std::ifstream f(config_path);
         std::string line;
         while (std::getline(f, line)) {
-            if (line.find("dtoverlay=dwc2") != std::string::npos && line.find("#") == std::string::npos) {
+            config_lines.push_back(line);
+            size_t hash_pos = line.find("#");
+            size_t dwc_pos = line.find("dtoverlay=dwc2");
+            if (dwc_pos != std::string::npos && (hash_pos == std::string::npos || hash_pos > dwc_pos)) {
                 has_dwc2 = true;
-                break;
+            }
+            size_t otg_pos = line.find("otg_mode=1");
+            if (otg_pos != std::string::npos && (hash_pos == std::string::npos || hash_pos > otg_pos)) {
+                has_otg_active = true;
             }
         }
     }
 
     bool has_modules = false;
+    std::string cmdline_content;
     {
         std::ifstream f(cmdline_path);
-        std::string content;
-        if (std::getline(f, content)) {
-            if (content.find("modules-load=dwc2,libcomposite") != std::string::npos) {
+        if (std::getline(f, cmdline_content)) {
+            if (cmdline_content.find("modules-load=dwc2,libcomposite") != std::string::npos) {
                 has_modules = true;
             }
         }
     }
 
-    if (has_dwc2 && has_modules) {
+    if (has_dwc2 && !has_otg_active && has_modules) {
         return false;
     }
 
-    std::println(stderr, "[gadget] USB gadget host configurations are missing in boot settings.");
+    std::println(stderr, "[gadget] USB gadget host configurations are missing or conflicting in boot settings.");
     std::println(stderr, "[gadget] Required changes:");
+    if (has_otg_active) {
+        std::println(stderr, "[gadget]   - Comment out 'otg_mode=1' in {} (conflicts with device/gadget mode)", config_path);
+    }
     if (!has_dwc2) {
-        std::println(stderr, "[gadget]   - Add 'dtoverlay=dwc2' to {}", config_path);
+        std::println(stderr, "[gadget]   - Add 'dtoverlay=dwc2,dr_mode=peripheral' to {}", config_path);
     }
     if (!has_modules) {
         std::println(stderr, "[gadget]   - Add 'modules-load=dwc2,libcomposite' to {}", cmdline_path);
@@ -645,46 +656,60 @@ bool check_and_enable_gadget_host() {
         std::string ans;
         if (std::getline(std::cin, ans)) {
             if (ans == "y" || ans == "Y") {
+                bool config_modified = false;
+                if (has_otg_active) {
+                    for (auto& line : config_lines) {
+                        size_t hash_pos = line.find("#");
+                        size_t otg_pos = line.find("otg_mode=1");
+                        if (otg_pos != std::string::npos && (hash_pos == std::string::npos || hash_pos > otg_pos)) {
+                            line = "#" + line;
+                            config_modified = true;
+                        }
+                    }
+                }
                 if (!has_dwc2) {
-                    std::ofstream f(config_path, std::ios::app);
+                    config_lines.push_back("");
+                    config_lines.push_back("# Added by NS-PC-Control to enable USB OTG/Gadget");
+                    config_lines.push_back("dtoverlay=dwc2,dr_mode=peripheral");
+                    config_modified = true;
+                }
+
+                if (config_modified) {
+                    std::ofstream f(config_path);
                     if (f) {
-                        f << "\n# Added by NS-PC-Control to enable USB OTG/Gadget\ndtoverlay=dwc2\n";
+                        for (const auto& line : config_lines) {
+                            f << line << "\n";
+                        }
                         std::println(stderr, "[gadget] Updated {}", config_path);
                     } else {
                         std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", config_path);
                         return false;
                     }
                 }
+
                 if (!has_modules) {
-                    std::ifstream f_in(cmdline_path);
-                    std::string line;
-                    if (std::getline(f_in, line)) {
-                        f_in.close();
-                        size_t pos = line.find("rootwait");
-                        if (pos != std::string::npos) {
-                            if (line.find("modules-load=dwc2,libcomposite") == std::string::npos) {
-                                line.replace(pos, 8, "rootwait modules-load=dwc2,libcomposite");
-                            }
-                        } else {
-                            if (!line.empty() && line.back() == '\n') line.pop_back();
-                            if (!line.empty() && line.back() == '\r') line.pop_back();
-                            if (line.find("modules-load=dwc2,libcomposite") == std::string::npos) {
-                                line += " modules-load=dwc2,libcomposite";
-                            }
-                        }
-                        std::ofstream f_out(cmdline_path);
-                        if (f_out) {
-                            f_out << line << "\n";
-                            std::println(stderr, "[gadget] Updated {}", cmdline_path);
-                        } else {
-                            std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", cmdline_path);
-                            return false;
+                    size_t pos = cmdline_content.find("rootwait");
+                    if (pos != std::string::npos) {
+                        if (cmdline_content.find("modules-load=dwc2,libcomposite") == std::string::npos) {
+                            cmdline_content.replace(pos, 8, "rootwait modules-load=dwc2,libcomposite");
                         }
                     } else {
-                        std::println(stderr, "[gadget] Error: Failed to read from {}.", cmdline_path);
+                        if (!cmdline_content.empty() && cmdline_content.back() == '\n') cmdline_content.pop_back();
+                        if (!cmdline_content.empty() && cmdline_content.back() == '\r') cmdline_content.pop_back();
+                        if (cmdline_content.find("modules-load=dwc2,libcomposite") == std::string::npos) {
+                            cmdline_content += " modules-load=dwc2,libcomposite";
+                        }
+                    }
+                    std::ofstream f_out(cmdline_path);
+                    if (f_out) {
+                        f_out << cmdline_content << "\n";
+                        std::println(stderr, "[gadget] Updated {}", cmdline_path);
+                    } else {
+                        std::println(stderr, "[gadget] Error: Failed to open {} for writing. Try running as sudo.", cmdline_path);
                         return false;
                     }
                 }
+
                 std::println(stderr, "[gadget] Rebooting system in 3 seconds to apply boot configurations...");
                 std::this_thread::sleep_for(std::chrono::seconds(3));
                 int dummy = std::system("sudo reboot"); (void)dummy;
