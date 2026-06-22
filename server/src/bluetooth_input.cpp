@@ -47,7 +47,7 @@ static void start_bluetooth_pairing_window() {
     g_bt_pair_window_thread = std::thread([] {
         std::println("[bt] pairing window open for 2 minutes");
         run_pairing_window_script(
-            "bluetoothctl power on; bluetoothctl pairable on; bluetoothctl discoverable on; "
+            "bluetoothctl power on >/dev/null 2>&1; bluetoothctl pairable on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
             "(printf \"agent NoInputNoOutput\\ndefault-agent\\n\"; sleep 125) | bluetoothctl >/dev/null 2>&1 & agent=$!; "
             "(printf \"scan on\\n\"; sleep 120) | bluetoothctl >/dev/null 2>&1 & scan=$!; "
             "for i in $(seq 1 24); do sleep 5; "
@@ -58,7 +58,7 @@ static void start_bluetooth_pairing_window() {
                         "bluetoothctl connect \"$mac\" >/dev/null 2>&1;; "
                     "esac; "
                 "done; "
-            "done; kill $scan $agent 2>/dev/null; bluetoothctl discoverable off"
+            "done; kill $scan $agent 2>/dev/null; bluetoothctl discoverable off >/dev/null 2>&1"
         );
         std::println("[bt] pairing/reconnect helper stopped");
     });
