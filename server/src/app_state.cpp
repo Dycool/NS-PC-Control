@@ -102,16 +102,16 @@ void clear_all_motion(ClientSession& c) {
 void set_motion(ClientSession& c, int subpad, const MotionReport& motion) {
     if (subpad < 0 || subpad >= 4) return;
 
-    uint64_t now = now_us();
+    // Always advance the ring-buffer to ensure all IMU samples are unique.
     if (!c.has_motion[subpad]) {
         for (int i = 0; i < 3; ++i) c.motion_samples[subpad][i] = motion;
-    } else if (elapsed_us_saturated(now, c.motion_last_collect_us[subpad]) > 5000ULL) {
+    } else {
         c.motion_samples[subpad][0] = c.motion_samples[subpad][1];
         c.motion_samples[subpad][1] = c.motion_samples[subpad][2];
+        c.motion_samples[subpad][2] = motion;
     }
-    c.motion_samples[subpad][2] = motion;
     c.has_motion[subpad] = true;
-    c.motion_last_collect_us[subpad] = now;
+    c.motion_last_collect_us[subpad] = now_us();
 }
 
 void set_motion_samples(ClientSession& c, int subpad, const MotionReport samples[3]) {
@@ -133,6 +133,9 @@ int run_switch2_wakeup_setup();
 bool load_switch2_wakeup_config(bool quiet_if_missing);
 
 int server_macro_client_for_sender(const sockaddr_in& sender) {
+    // Lock order: g_ctx.mtx[i] only.  Never hold g_ctx.server_macro_mtx while
+    // holding g_ctx.mtx[i] (server_macro_apply / server_macro_running already
+    // acquire server_macro_mtx while mtx[i] is held by the writer threads).
     uint32_t src_ip = sender.sin_addr.s_addr;
     uint64_t now = now_us();
     int client_idx = -1;
@@ -146,6 +149,7 @@ int server_macro_client_for_sender(const sockaddr_in& sender) {
             repair_future_client_timestamp(g_ctx.clients[i], now);
             if (!g_ctx.clients[i].active || elapsed_us_over(now, g_ctx.clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
                 client_idx = i;
+                // Initialize all fields under the lock.
                 g_ctx.clients[i].active = true;
                 g_ctx.clients[i].addr = sender;
                 g_ctx.clients[i].first_pkt = true;
@@ -156,8 +160,8 @@ int server_macro_client_for_sender(const sockaddr_in& sender) {
                 break;
             }
         }
-    }
-    if (client_idx >= 0) {
+    } else {
+        // Found existing session — refresh timestamp while holding the lock.
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
         g_ctx.clients[client_idx].active = true;
         g_ctx.clients[client_idx].addr = sender;
@@ -281,6 +285,9 @@ bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t
     return true;
 }
 
+// Lock order: callers may hold g_ctx.mtx[client_idx] before calling these.
+// These functions then acquire g_ctx.server_macro_mtx internally.
+// Never acquire g_ctx.server_macro_mtx first and then g_ctx.mtx[i].
 bool server_macro_running(int client_idx, int subpad) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
     std::lock_guard<std::mutex> lk(g_ctx.server_macro_mtx);

@@ -22,3 +22,8 @@ mobile/ios/build/
 
 # macOS
 .DS_Store
+
+# Local builds
+/build/
+/build-client/
+

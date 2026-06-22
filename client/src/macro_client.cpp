@@ -96,6 +96,7 @@ std::string unique_macro_name(const std::string& base_raw) {
 bool macro_hotkey_conflicts(const std::string& hotkey, std::string* conflict_name) {
     std::string hk = normalize_key_name(hotkey);
     if (hk.empty()) return false;
+    std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     for (const auto& kv : g_keyBindings) {
         if (normalize_key_name(kv.second) == hk) {
             if (conflict_name) *conflict_name = kv.first;

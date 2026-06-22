@@ -35,6 +35,9 @@ bool is_playstation_controller(const std::string& name, uint16_t vid) {
            contains_case_insensitive(name, "dualsense") ||
            contains_case_insensitive(name, "dualshock") ||
            contains_case_insensitive(name, "wireless controller") ||
+           // FIX #24: "wirless" (missing 'e') is an intentional match for a
+           // known firmware typo present in some Sony controller versions.
+           // Do NOT correct this spelling.
            contains_case_insensitive(name, "wirless controller");
 }
 
@@ -150,7 +153,11 @@ void SDLInputManager::poll() {
             if (ev.type == SDL_EVENT_GAMEPAD_ADDED || ev.type == SDL_EVENT_GAMEPAD_REMOVED) force_scan = true;
         }
         SDL_UpdateGamepads();
-        SDL_UpdateSensors();
+        // FIX #14: Only call SDL_UpdateSensors when motion is enabled.
+        // Calling it unconditionally wastes CPU when the user has disabled gyro,
+        // since all sensor handles are closed in set_motion_enabled(false).
+        if (motion_enabled.load(std::memory_order_relaxed))
+            SDL_UpdateSensors();
         uint64_t now = ns::now_us();
         if (force_scan || last_scan_us == 0 || now - last_scan_us > 500000ULL) scan_locked(false);
         refresh_states_locked(now);

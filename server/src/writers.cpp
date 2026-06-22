@@ -97,6 +97,7 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
 
                 active_snap[c] = g_ctx.clients[c].active;
                 uses_presence_snap[c] = g_ctx.clients[c].uses_pad_presence;
+                // input_stream_stale check is gated on active_snap being true.
                 const bool input_stream_stale =
                     g_ctx.clients[c].active &&
                     g_ctx.clients[c].last_rx_us != 0 &&
@@ -180,9 +181,9 @@ void legacy_writer_thread(std::stop_token stoken, int hz) {
                 int cidx = hw_slots[h].client_idx;
                 int sidx = hw_slots[h].sub_idx;
                 out_reports[h] = report_snap[cidx][sidx].input;
+                // Clear vendor byte before apply to strip EXT_PAD_PRESENT flags.
                 out_reports[h].vendor = 0;
                 server_macro_apply(cidx, sidx, out_reports[h]);
-                out_reports[h].vendor = 0;
             }
 
             bool ok = true;
@@ -681,17 +682,38 @@ void stats_thread(std::stop_token stoken) {
 }
 
 // ── Per-IP rate limiter ──────────────────────────────────────────────────────
+// Linear-probing hash table rate limiter.
 bool rate_allow(uint32_t ip) {
     std::lock_guard<std::mutex> lk(g_rate_mtx);
     uint64_t now = now_us();
-    uint32_t idx = ip % RATE_TABLE;
-    RateSlot &s = g_ctx.rate_table[idx];
-    if (s.ip != ip) {
-        s.ip = ip; s.count = 1; s.window_start = now; return true;
+    uint32_t base = ip % RATE_TABLE;
+
+    // 1. Probe for an existing entry or an empty slot.
+    int victim = -1;
+    uint64_t oldest_window = UINT64_MAX;
+    for (int p = 0; p < RATE_PROBE; ++p) {
+        uint32_t idx = (base + p) % RATE_TABLE;
+        RateSlot &s = g_ctx.rate_table[idx];
+
+        if (s.ip == ip) {
+            // Found our IP — update in place.
+            if (now - s.window_start > RATE_WINDOW_US) {
+                s.count = 1; s.window_start = now; return true;
+            }
+            if (s.count < UINT32_MAX) s.count++;
+            return s.count <= RATE_MAX_PKT;
+        }
+
+        // Track the oldest slot for LRU eviction.
+        if (s.window_start < oldest_window) {
+            oldest_window = s.window_start;
+            victim = (int)idx;
+        }
     }
-    if (now - s.window_start > RATE_WINDOW_US) {
-        s.count = 1; s.window_start = now; return true;
-    }
-    if (s.count < UINT32_MAX) s.count++;
-    return s.count <= RATE_MAX_PKT;
+
+    // 2. IP not found — evict the oldest-window slot (LRU).
+    if (victim < 0) victim = (int)base;  // fallback (should not happen)
+    RateSlot &v = g_ctx.rate_table[victim];
+    v.ip = ip; v.count = 1; v.window_start = now;
+    return true;
 }

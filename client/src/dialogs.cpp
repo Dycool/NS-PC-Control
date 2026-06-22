@@ -35,7 +35,11 @@ void KeyCaptureDialog::keyPressEvent(QKeyEvent* event) {
         if (!keyName.isEmpty()) accept();
     }
 
-BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent), editBindings(g_keyBindings) {
+BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
+        {
+            std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
+            editBindings = g_keyBindings;
+        }
         setWindowTitle("Keyboard Bindings");
         setModal(true);
         setMinimumWidth(620);
@@ -82,7 +86,10 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent), editBindings(
             refresh();
         });
         connect(save, &QPushButton::clicked, this, [this] {
-            g_keyBindings = editBindings;
+            {
+                std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
+                g_keyBindings = editBindings;
+            }
             save_bindings();
             accept();
         });
@@ -363,6 +370,7 @@ void MacroDialog::rebuild() {
             rows->addWidget(rename, i, 2);
             rows->addWidget(exp, i, 3);
             rows->addWidget(del, i, 4);
+            // Capture index `i` by value for click callback.
             connect(run, &QPushButton::clicked, this, [this, i] {
                 std::string json;
                 {
@@ -388,6 +396,7 @@ void MacroDialog::rebuild() {
                 save_macro_entries_to_disk();
                 rebuild();
             });
+
         }
         recordBtn->setText(recording ? "Stop" : "Record P1");
     }

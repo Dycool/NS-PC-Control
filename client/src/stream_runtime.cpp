@@ -152,7 +152,7 @@ void send_client_frame(SOCKET sock,
         return;
     }
 
-    ExtendedUdpPacket pkt{};
+    ExtendedUdpPacketPc pkt{};
     pkt.magic = ns::PROTO_MAGIC;
     pkt.version = ns::WEB_PROTO_VERSION_3;
     pkt.flags = ns::FLAG_NONE;
@@ -167,7 +167,7 @@ void send_client_frame(SOCKET sock,
     }
 
     uint8_t full_hmac[32];
-    hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
+    hmac_sha256(std::span<const uint8_t>(hmac_key, 32), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), EXT_UDP_PACKET3_AUTH_SIZE), std::span<uint8_t, 32>(full_hmac));
     std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
     send_all_udp(sock, dest, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
 }

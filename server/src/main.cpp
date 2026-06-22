@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
             bool is_extended_udp3 = false;
             Packet pkt{};
             ExtendedUdpPacket ext_pkt{};
-            ExtendedUdpPacket3 ext3_pkt{};
+            ExtendedUdpPacketPc ext3_pkt{};
 
             if (bytes == (ssize_t)PACKET_SIZE) {
                 memcpy(&pkt, udp_rx.data(), sizeof(pkt));

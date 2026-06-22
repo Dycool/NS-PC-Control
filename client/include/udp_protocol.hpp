@@ -13,7 +13,7 @@ constexpr uint8_t EXT_PAD_PRESENT = 0x01;
 #ifdef _MSC_VER
 #pragma pack(push, 1)
 #endif
-struct ExtendedUdpPacket {
+struct ExtendedUdpPacketPc {
     uint32_t magic = ns::PROTO_MAGIC;
     uint8_t version = ns::WEB_PROTO_VERSION_3;
     uint8_t flags = ns::FLAG_NONE;
@@ -27,9 +27,9 @@ struct ExtendedUdpPacket {
 #pragma pack(pop)
 #endif
 
-constexpr size_t EXT_UDP_PACKET_AUTH_SIZE = 20 + sizeof(ns::ExtendedMultiReport3);
-constexpr size_t EXT_UDP_PACKET_SIZE = EXT_UDP_PACKET_AUTH_SIZE + ns::HMAC_TAG_SIZE;
-static_assert(sizeof(ExtendedUdpPacket) == EXT_UDP_PACKET_SIZE, "ExtendedUdpPacket wire layout changed");
+constexpr size_t EXT_UDP_PACKET3_AUTH_SIZE = 20 + sizeof(ns::ExtendedMultiReport3);
+constexpr size_t EXT_UDP_PACKET3_SIZE = EXT_UDP_PACKET3_AUTH_SIZE + ns::HMAC_TAG_SIZE;
+static_assert(sizeof(ExtendedUdpPacketPc) == EXT_UDP_PACKET3_SIZE, "ExtendedUdpPacketPc wire layout changed");
 
 void set_pad_present_flag(ns::ExtendedHIDReport3& r, bool present);
 void fill_extended_pad(ns::ExtendedHIDReport3& dst, const ns::HIDReport& input,

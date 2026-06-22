@@ -319,6 +319,12 @@ WakeCmdResult run_wake_command(const std::vector<std::string>& args,
             fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
     }
 
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& a : args)
+        argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
     pid_t pid = fork();
     if (pid < 0) {
         if (pipefd[0] >= 0) close(pipefd[0]);
@@ -342,11 +348,6 @@ WakeCmdResult run_wake_command(const std::vector<std::string>& args,
             }
         }
 
-        std::vector<char*> argv;
-        argv.reserve(args.size() + 1);
-        for (const auto& a : args)
-            argv.push_back(const_cast<char*>(a.c_str()));
-        argv.push_back(nullptr);
         execvp(argv[0], argv.data());
         _exit(127);
     }

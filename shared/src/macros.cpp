@@ -85,10 +85,11 @@ bool parse_uint32_strict(const std::string& s, std::uint32_t& out) {
         v = v * 10 + static_cast<std::uint64_t>(c - '0');
         if (v > 0xFFFFFFFFULL) return false;
     }
-    if (v == 0) return false;
+    // Allow zero-duration steps (WAIT 0 / BTN 0) for parser consistency.
     out = static_cast<std::uint32_t>(v);
     return true;
 }
+
 
 std::uint16_t button_bit(const std::string& token) {
     std::string name = upper(trim(token));

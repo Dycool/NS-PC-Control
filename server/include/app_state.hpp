@@ -27,6 +27,8 @@ constexpr int MAX_CLIENTS = 4;
 constexpr uint64_t RATE_WINDOW_US = 1'000'000;
 constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
+// Number of slots to probe when the primary hash slot holds a different IP.
+constexpr int RATE_PROBE = 4;
 constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 2'000'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;

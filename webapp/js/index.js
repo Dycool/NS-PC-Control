@@ -1,7 +1,16 @@
+// FIX #20: 'use strict' enables stricter JS parsing and prevents accidental
+// global variable creation from typos, catching many issues at runtime.
+// A full IIFE/module wrapper is not applied here because index.js relies on
+// window.onload and deferred DOM queries that span the module boundary.
+'use strict';
+// FIX #9: Removed unused SECRET constant.
+// WebSocket traffic is trusted at the network level only (no HMAC); exposing
+// a shared-secret constant in JS source served over HTTP is misleading.
+// FIX #11 (security model): This webapp sends input over an unauthenticated
+// WebSocket. Ensure the server port is not reachable from untrusted networks.
 const PROTO_MAGIC = 0x4E535743;
 const PROTO_VERSION = 5;
 const PAD_PRESENT = 1;
-const SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY";
 const EXT_REPORT_SIZE = 24;
 const PACKET_SIZE = 116;
 const PACKET_AUTH_SIZE = 52;
@@ -176,8 +185,39 @@ function macroPrettyObject(objOrText) { const lines=validateMacro(objOrText); co
 function parseMacro(objOrText) {
     const text = macroCommandString(objOrText).replace(/[\r\n]+/g, ';');
     const steps = [];
-    let segmentStart = 0; const addStep = p => { const m = p.match(/^(.*?)\s+(\d+)$/); if (!m) return; const cmd = m[1].trim().toUpperCase(), ms = Math.max(1, parseInt(m[2], 10)); if (cmd === 'LOOP') { const block = steps.slice(segmentStart); for (let i=1; i<ms && steps.length<1000000; ++i) steps.push(...block.map(x=>({...x}))); segmentStart = steps.length; return; } const st = {...getNeutralState(), ms}; if (cmd !== 'WAIT') for (const t0 of cmd.split(/[+,|\s]+/).filter(Boolean)) { const t=t0.toUpperCase(); st.buttons |= macroBtnBit(t); if (t==='DPAD_UP'||t==='UP') st.hat=HAT_N; else if (t==='DPAD_DOWN'||t==='DOWN') st.hat=HAT_S; else if (t==='DPAD_LEFT'||t==='LEFT') st.hat=HAT_W; else if (t==='DPAD_RIGHT'||t==='RIGHT') st.hat=HAT_E; else if (t==='LSTICK_UP'||t==='LS_UP') st.ly=0; else if (t==='LSTICK_DOWN'||t==='LS_DOWN') st.ly=255; else if (t==='LSTICK_LEFT'||t==='LS_LEFT') st.lx=0; else if (t==='LSTICK_RIGHT'||t==='LS_RIGHT') st.lx=255; else if (t==='RSTICK_UP'||t==='RS_UP') st.ry=0; else if (t==='RSTICK_DOWN'||t==='RS_DOWN') st.ry=255; else if (t==='RSTICK_LEFT'||t==='RS_LEFT') st.rx=0; else if (t==='RSTICK_RIGHT'||t==='RS_RIGHT') st.rx=255; } steps.push(st); };
+    let segmentStart = 0;
+    // FIX #21: Track whether any LOOP was truncated so we can warn the user.
+    let loopTruncated = false;
+    const addStep = p => {
+        const m = p.match(/^(.*?)\s+(\d+)$/);
+        if (!m) return;
+        // FIX #7: Allow duration 0 (no longer clamping to Math.max(1,...)).
+        // The C++ server now accepts 0-duration steps; both parsers are consistent.
+        const cmd = m[1].trim().toUpperCase(), ms = parseInt(m[2], 10);
+        if (cmd === 'LOOP') {
+            const block = steps.slice(segmentStart);
+            let added = 0;
+            for (let i = 1; i < ms && steps.length < 1000000; ++i) {
+                steps.push(...block.map(x => ({...x})));
+                added++;
+            }
+            // FIX #21: Warn if LOOP was cut short.
+            // The server rejects macros that exceed MAX_EXPANDED_STEPS; a silent
+            // truncation here produces a macro that the server will reject.
+            if (added < ms - 1) loopTruncated = true;
+            segmentStart = steps.length;
+            return;
+        }
+        const st = {...getNeutralState(), ms};
+        if (cmd !== 'WAIT') for (const t0 of cmd.split(/[+,|\s]+/).filter(Boolean)) { const t=t0.toUpperCase(); st.buttons |= macroBtnBit(t); if (t==='DPAD_UP'||t==='UP') st.hat=HAT_N; else if (t==='DPAD_DOWN'||t==='DOWN') st.hat=HAT_S; else if (t==='DPAD_LEFT'||t==='LEFT') st.hat=HAT_W; else if (t==='DPAD_RIGHT'||t==='RIGHT') st.hat=HAT_E; else if (t==='LSTICK_UP'||t==='LS_UP') st.ly=0; else if (t==='LSTICK_DOWN'||t==='LS_DOWN') st.ly=255; else if (t==='LSTICK_LEFT'||t==='LS_LEFT') st.lx=0; else if (t==='LSTICK_RIGHT'||t==='LS_RIGHT') st.lx=255; else if (t==='RSTICK_UP'||t==='RS_UP') st.ry=0; else if (t==='RSTICK_DOWN'||t==='RS_DOWN') st.ry=255; else if (t==='RSTICK_LEFT'||t==='RS_LEFT') st.rx=0; else if (t==='RSTICK_RIGHT'||t==='RS_RIGHT') st.rx=255; }
+        steps.push(st);
+    };
     for (const raw of text.split(';')) { const p = raw.trim(); if (p) addStep(p); }
+    if (loopTruncated) {
+        console.warn('[ns-macro] LOOP was truncated at 1,000,000 expanded steps. ' +
+            'The server will reject macros that exceed its step limit. ' +
+            'Reduce the LOOP count or split the macro.');
+    }
     return steps;
 }
 function normalizeMacroKey(k) { return String(k || '').trim().toUpperCase(); }

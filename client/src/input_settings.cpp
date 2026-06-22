@@ -16,6 +16,7 @@ std::atomic<bool> g_rumbleEnabled{true};
 std::atomic<bool> g_homeShortcutEnabled{true};
 std::atomic<bool> g_captureShortcutEnabled{true};
 std::unordered_map<std::string, std::string> g_keyBindings;
+std::mutex g_keyBindingsMutex;
 std::mutex g_pressedKeysMutex;
 std::unordered_set<std::string> g_pressedKeys;
 SDLInputManager g_sdlInput;
@@ -85,6 +86,7 @@ std::string normalize_macro_hotkey_for_io(const std::string& s) {
 }
 
 void load_saved_bindings() {
+    std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     g_keyBindings = default_key_bindings();
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
     settings.beginGroup("Bindings");
@@ -98,6 +100,7 @@ void load_saved_bindings() {
 }
 
 void save_bindings() {
+    std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
     settings.beginGroup("Bindings");
     for (const auto& kv : g_keyBindings) {
@@ -196,7 +199,8 @@ int mac_keycode_for_key(const std::string& name) {
 #endif
 
 void update_keyboard_state_cache() {
-    std::lock_guard<std::mutex> lk(g_kbCacheMutex);
+    std::lock_guard<std::mutex> lk_bind(g_keyBindingsMutex);
+    std::lock_guard<std::mutex> lk_cache(g_kbCacheMutex);
     for (const auto& kv : g_keyBindings) {
         std::string key = normalize_key_name(kv.second);
         if (key.empty()) continue;
@@ -234,6 +238,7 @@ bool key_is_down(const std::string& name_raw) {
 }
 
 void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
+    std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     auto get = [](const std::string& btn) -> std::string {
         auto it = g_keyBindings.find(btn);
         return it != g_keyBindings.end() ? it->second : "";

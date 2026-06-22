@@ -10,7 +10,6 @@
 #include <print>
 #include <format>
 #include <span>
-#include <algorithm>
 #include <cstring>
 
 using namespace ns;
@@ -306,6 +305,8 @@ void fill_neutral_controls(ProInputReport30& r) {
     r.left_stick[0]  = 0x00; r.left_stick[1]  = 0x08; r.left_stick[2]  = 0x80;
     r.right_stick[0] = 0x00; r.right_stick[1] = 0x08; r.right_stick[2] = 0x80;
     r.vibrator = PRO_VIBRATOR_REPORT;
+    // Zero vendor_rest to prevent sending stale junk bytes to the console.
+    memset(r.vendor_rest, 0, sizeof(r.vendor_rest));
 }
 
 void fill_neutral_controls(ProInputReport21& r) {
@@ -702,9 +703,10 @@ uint8_t rumble_decode_half_to_u8(const uint8_t* f) {
 }
 
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral) {
-    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || len < 10)
-
+    // Validate indices and length.
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || len < 10) {
         return;
+    }
 
     const uint8_t* rb = packet + 2;
     DecodedPrecisionRumbleHalf left  = rumble_decode_half_precision_to_dual(rb);

@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <span>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -24,8 +26,14 @@ static inline int hmac_verify(std::span<const uint8_t> key, std::span<const uint
 static inline void derive_key(const char *secret, uint8_t key[32]) {
     unsigned int len = 32;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, secret, std::strlen(secret));
-    EVP_DigestFinal_ex(ctx, key, &len);
-    EVP_MD_CTX_free(ctx);
+    if (ctx) {
+        EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+        EVP_DigestUpdate(ctx, secret, std::strlen(secret));
+        EVP_DigestFinal_ex(ctx, key, &len);
+        EVP_MD_CTX_free(ctx);
+    } else {
+        // Abort on OpenSSL context initialization failure.
+        std::fprintf(stderr, "[sha256] FATAL: EVP_MD_CTX_new() failed (out of memory); cannot derive HMAC key\n");
+        std::abort();
+    }
 }

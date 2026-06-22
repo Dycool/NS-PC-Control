@@ -36,7 +36,7 @@ bool extended_udp_packet_ok(const ExtendedUdpPacket& p) {
            (p.version == ns::WEB_PROTO_VERSION || p.version == ns::PROTO_VERSION);
 }
 
-bool extended_udp3_packet_ok(const ExtendedUdpPacket3& p) {
+bool extended_udp3_packet_ok(const ExtendedUdpPacketPc& p) {
     return p.magic == ns::PROTO_MAGIC && p.version == ns::WEB_PROTO_VERSION_3;
 }
 
@@ -149,62 +149,65 @@ static int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void
 
             if (strcmp(url, "/") == 0 || strcmp(url, "/index.html") == 0) {
                 content = index_html;
-                content_len = index_html_len - 1;
+                content_len = index_html_len;
             } else if (strcmp(url, "/mobile.html") == 0) {
                 content = mobile_html;
-                content_len = mobile_html_len - 1;
+                content_len = mobile_html_len;
             } else if (strcmp(url, "/editor.html") == 0) {
                 content = editor_html;
-                content_len = editor_html_len - 1;
+                content_len = editor_html_len;
             } else if (strcmp(url, "/css/index.css") == 0) {
                 content = css_index_css;
-                content_len = css_index_css_len - 1;
+                content_len = css_index_css_len;
                 mime = "text/css; charset=utf-8";
             } else if (strcmp(url, "/css/mobile.css") == 0) {
                 content = css_mobile_css;
-                content_len = css_mobile_css_len - 1;
+                content_len = css_mobile_css_len;
                 mime = "text/css; charset=utf-8";
             } else if (strcmp(url, "/css/editor.css") == 0) {
                 content = css_editor_css;
-                content_len = css_editor_css_len - 1;
+                content_len = css_editor_css_len;
                 mime = "text/css; charset=utf-8";
             } else if (strcmp(url, "/js/bridge.js") == 0) {
                 content = js_bridge_js;
-                content_len = js_bridge_js_len - 1;
+                content_len = js_bridge_js_len;
                 mime = "application/javascript; charset=utf-8";
             } else if (strcmp(url, "/js/index.js") == 0) {
                 content = js_index_js;
-                content_len = js_index_js_len - 1;
+                content_len = js_index_js_len;
                 mime = "application/javascript; charset=utf-8";
             } else if (strcmp(url, "/js/mobile.js") == 0) {
                 content = js_mobile_js;
-                content_len = js_mobile_js_len - 1;
+                content_len = js_mobile_js_len;
                 mime = "application/javascript; charset=utf-8";
             } else if (strcmp(url, "/js/editor.js") == 0) {
                 content = js_editor_js;
-                content_len = js_editor_js_len - 1;
+                content_len = js_editor_js_len;
                 mime = "application/javascript; charset=utf-8";
             }
 
             if (content) {
-                uint8_t buffer[2048 + LWS_PRE];
-                uint8_t *start = &buffer[LWS_PRE];
+                uint8_t hdr_buf[2048 + LWS_PRE];
+                uint8_t *start = &hdr_buf[LWS_PRE];
                 uint8_t *p = start;
-                uint8_t *end = &buffer[sizeof(buffer) - 1];
+                uint8_t *end = &hdr_buf[sizeof(hdr_buf) - 1];
 
                 if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK, mime, content_len, &p, end))
                     return -1;
-                
                 if (lws_finalize_write_http_header(wsi, start, &p, end))
                     return -1;
 
+                // Allocate body buffer with leading LWS_PRE bytes.
                 unsigned char* body = (unsigned char*)malloc(LWS_PRE + content_len);
                 if (!body) return -1;
                 memcpy(body + LWS_PRE, content, content_len);
-                lws_write(wsi, body + LWS_PRE, content_len, LWS_WRITE_HTTP_FINAL);
+                int w = lws_write(wsi, body + LWS_PRE, content_len, LWS_WRITE_HTTP_FINAL);
                 free(body);
-                
-                // HTTP transaction finished, close connection
+                // Log failed writes for diagnostic purposes.
+                if (w < 0 || (size_t)w < content_len) {
+                    if (g_serve_http_webapp)  // proxy for "verbose-ish"
+                        std::println(stderr, "[http] lws_write returned {} (expected {})", w, content_len);
+                }
                 return -1;
             } else {
                 lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, "Not Found");
@@ -536,8 +539,10 @@ void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, 
     else
         std::println("[ws] WebSocket proxy listening on port {}; HTTP webapp disabled (use -w to enable)", web_port);
 
+    // WebSocket clients are trusted at the network level only.
     while (!stoken.stop_requested()) {
-        lws_service(g_ctx.lws_context, 50); // wait up to 50ms
+        // Lower service timeout to 5 ms for improved rumble timer responsiveness.
+        lws_service(g_ctx.lws_context, 5); // wait up to 5ms
     }
 
     lws_context_destroy(g_ctx.lws_context);
