@@ -174,7 +174,14 @@ int main(int argc, char** argv) {
     if (bluetooth_enabled) {
         int rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
         if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
-            std::println(stderr, "[bt] WARNING: Bluetooth adapter is blocked. Unblock with: sudo rfkill unblock bluetooth");
+            std::println(stderr, "[bt] Bluetooth adapter is blocked. Attempting to unblock...");
+            (void)std::system("sudo rfkill unblock bluetooth");
+            rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
+            if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
+                std::println(stderr, "[bt] WARNING: Bluetooth adapter is still blocked. Unblock manually with: sudo rfkill unblock bluetooth");
+            } else {
+                std::println("[bt] Bluetooth adapter unblocked successfully.");
+            }
         }
     }
 
