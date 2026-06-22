@@ -45,27 +45,8 @@ bool mkdirs(const fs::path& p) {
 }
 
 bool write_file(const fs::path& p, const void* data, size_t len) {
-    int fd = open(p.c_str(), O_WRONLY);
-    if (fd < 0) {
-        std::println(stderr, "[gadget] open {} failed: {}", p.string(), std::strerror(errno));
-        return false;
-    }
-    const uint8_t* ptr = static_cast<const uint8_t*>(data);
-    size_t left = len;
-    bool ok = true;
-    while (left > 0) {
-        ssize_t w = write(fd, ptr, left);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            std::println(stderr, "[gadget] write to {} failed: {}", p.string(), std::strerror(errno));
-            ok = false;
-            break;
-        }
-        ptr += w;
-        left -= w;
-    }
-    close(fd);
-    return ok;
+    std::ofstream f(p, std::ios::binary);
+    return f && f.write(static_cast<const char*>(data), len).good();
 }
 
 bool write_file(const fs::path& p, const std::string& text) {
@@ -91,7 +72,8 @@ bool create_hid_function(int id) {
         if (!write_file(desc_path, VIRTUAL_CONTROLLER_REPORT_DESC, sizeof(VIRTUAL_CONTROLLER_REPORT_DESC))) return false;
     }
     fs::path link_path = fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(id));
-    unlink(link_path.c_str());
+    std::error_code ec;
+    fs::remove(link_path, ec);
     return symlink(func.c_str(), link_path.c_str()) == 0;
 }
 
@@ -669,38 +651,21 @@ bool setup_gadget_builtin(bool force, const char* reason) {
     return false;
 }
 
-static void remove_link_if_exists(const char* path) {
-    if (unlink(path) != 0 && errno != ENOENT) {
-        if (g_ctx.verbose) std::println(stderr, "[gadget] unlink {} failed: {}", path, std::strerror(errno));
-    }
-}
-
-static void rmdir_if_exists(const char* path) {
-    if (rmdir(path) != 0 && errno != ENOENT) {
-        if (g_ctx.verbose) std::println(stderr, "[gadget] rmdir {} failed: {}", path, std::strerror(errno));
-    }
-}
-
 void teardown_gadget() {
     restore_wake_bt_state();
     clear_switch2_usb_activity();
-    if (access(GADGET_DIR, F_OK) != 0) return;
+    std::error_code ec;
+    if (!fs::exists(GADGET_DIR, ec)) return;
     std::println("[gadget] Closing USB gadget...");
     write_file(fs::path(GADGET_DIR) / "UDC", "");
     for (int i = 0; i < 4; ++i) {
-        char link_path[320];
-        std::snprintf(link_path, sizeof(link_path), "%s/hid.usb%d", CONFIG_DIR, i);
-        remove_link_if_exists(link_path);
+        fs::remove(fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(i)), ec);
+        fs::remove(fs::path(GADGET_DIR) / "functions" / ("hid.usb" + std::to_string(i)), ec);
     }
-    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409");
-    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1");
-    for (int i = 0; i < 4; ++i) {
-        char func[256];
-        std::snprintf(func, sizeof(func), "%s/functions/hid.usb%d", GADGET_DIR, i);
-        rmdir_if_exists(func);
-    }
-    rmdir_if_exists("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409");
-    rmdir_if_exists(GADGET_DIR);
+    fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409", ec);
+    fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1", ec);
+    fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409", ec);
+    fs::remove(GADGET_DIR, ec);
     std::println("[gadget] USB gadget closed");
 }
 
