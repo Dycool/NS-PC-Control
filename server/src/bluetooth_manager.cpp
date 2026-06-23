@@ -1040,26 +1040,13 @@ void BluezManager::tick() {
         if (dev.blocked || !dev.is_gamepad_like()) continue;
 
         if (dev.connected) {
-            if (dev.services_resolved) {
-                stale_since.erase(dev.path);
-                clear_connect_retry(dev);
-                if (dev.paired || dev.trusted) {
-                    if (initial_device_snapshot_done && !connected_paths.contains(dev.path)) {
-                        note_connected(dev, "connected", true);
-                    } else {
-                        connected_paths.insert(dev.path);
-                    }
-                }
-            } else {
-                auto [it, inserted] = stale_since.emplace(dev.path, now);
-                const auto stale_limit = dev.is_xbox_like() ? std::chrono::seconds(20) : std::chrono::seconds(8);
-                if (!inserted && now - it->second > stale_limit) {
-                    std::println("[bt] stale connected state for {} ({}), reconnecting", dev.display_name(), dev.address);
-                    disconnect_device(dev);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-                    if (connect_allowed(dev, now) && connect_device(dev)) clear_connect_retry(dev);
-                    else schedule_connect_retry(dev, now, true);
-                    it->second = now;
+            stale_since.erase(dev.path);
+            clear_connect_retry(dev);
+            if (dev.paired || dev.trusted) {
+                if (initial_device_snapshot_done && !connected_paths.contains(dev.path)) {
+                    note_connected(dev, "connected", true);
+                } else {
+                    connected_paths.insert(dev.path);
                 }
             }
             continue;
@@ -1158,14 +1145,26 @@ void BluezManager::run() {
     close_bus();
 }
 
+static bool safe_bt_addr(const std::string& addr) {
+    if (addr.size() != 17) return false;
+    for (size_t i = 0; i < addr.size(); ++i) {
+        if ((i + 1) % 3 == 0) {
+            if (addr[i] != ':') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(addr[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void BluezManager::disconnect_gamepads() {
     BluezManager mgr(false);
-    if (!mgr.connect_bus() || !mgr.ensure_adapter()) return;
+    if (!mgr.connect_bus()) return;
     for (const auto& d : mgr.list_devices()) {
-        if (d.is_gamepad_like() && d.connected) {
-            std::println("[bt] disconnecting {} ({}) because Switch suspended", d.display_name(), d.address);
-            mgr.disconnect_device(d);
-        }
+        if (!d.is_gamepad_like() || !d.connected || !safe_bt_addr(d.address)) continue;
+        std::println("[bt] disconnecting {} ({}) because Switch suspended", d.display_name(), d.address);
+        const std::string cmd = "sh -c 'timeout --kill-after=1s 1s bluetoothctl disconnect " + d.address + " >/dev/null 2>&1 &'";
+        (void)std::system(cmd.c_str());
     }
 }
 
