@@ -146,6 +146,76 @@ bool write_uhid_modules_load(bool verbose) {
     return true;
 }
 
+void ensure_bluez_fast_connect_config(bool verbose) {
+    // Make the adapter quick to accept incoming connections from already trusted controllers.
+    // This is the closest we can get to “press any controller button and reconnect immediately”
+    // without scanning forever. It affects bluetoothd, so restart bluetooth.service only when
+    // we actually change the file and before the D-Bus manager starts.
+    const char* script = R"SH(
+set -eu
+conf=/etc/bluetooth/main.conf
+mkdir -p /etc/bluetooth
+[ -f "$conf" ] || printf '[General]
+
+[Policy]
+' > "$conf"
+cp -n "$conf" "$conf.ns-pc-control.bak" 2>/dev/null || true
+changed=0
+ensure_section() {
+    section="$1"
+    grep -q "^\[$section\]" "$conf" || { printf '
+[%s]
+' "$section" >> "$conf"; changed=1; }
+}
+set_key() {
+    section="$1"; key="$2"; value="$3"
+    ensure_section "$section"
+    if awk -v sec="$section" -v key="$key" '
+        $0 ~ "^\[" { insec = ($0 == "[" sec "]") }
+        insec && $0 ~ "^[#[:space:]]*" key "[[:space:]]*=" { found=1 }
+        END { exit found ? 0 : 1 }
+    ' "$conf"; then
+        tmp="${conf}.tmp.$$"
+        awk -v sec="$section" -v key="$key" -v value="$value" '
+            $0 ~ "^\[" { insec = ($0 == "[" sec "]") }
+            insec && $0 ~ "^[#[:space:]]*" key "[[:space:]]*=" {
+                print key " = " value
+                done=1
+                next
+            }
+            { print }
+        ' "$conf" > "$tmp"
+        if ! cmp -s "$conf" "$tmp"; then mv "$tmp" "$conf"; changed=1; else rm -f "$tmp"; fi
+    else
+        tmp="${conf}.tmp.$$"
+        awk -v sec="$section" -v key="$key" -v value="$value" '
+            $0 == "[" sec "]" { print; print key " = " value; next }
+            { print }
+        ' "$conf" > "$tmp"
+        mv "$tmp" "$conf"
+        changed=1
+    fi
+}
+set_key General FastConnectable true
+set_key General ControllerMode dual
+set_key Policy AutoEnable true
+set_key Policy ReconnectAttempts 7
+set_key Policy ReconnectIntervals 1,2,4,8
+exit "$changed"
+)SH";
+    const int rc = run_cmd(std::string("/bin/sh -c ") + shell_quote(script), verbose);
+    if (rc == 1) {
+        if (verbose) std::println("[bt] setup: enabled BlueZ fast trusted-controller reconnect settings");
+        if (command_exists("systemctl")) {
+            (void)run_cmd("systemctl restart bluetooth.service >/dev/null 2>&1", verbose);
+        } else if (command_exists("service")) {
+            (void)run_cmd("service bluetooth restart >/dev/null 2>&1", verbose);
+        }
+    } else if (rc != 0 && verbose) {
+        std::println(stderr, "[bt] setup: could not tune /etc/bluetooth/main.conf for fast reconnect");
+    }
+}
+
 void runtime_setup_impl(bool verbose) {
     if (geteuid() != 0) {
         if (verbose) std::println(stderr, "[bt] setup: not root; cannot auto-install packages, unblock rfkill, or load uhid");
@@ -194,6 +264,7 @@ void runtime_setup_impl(bool verbose) {
         }
     }
     (void)write_uhid_modules_load(verbose);
+    ensure_bluez_fast_connect_config(verbose);
 
     if (command_exists("systemctl")) {
         (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
@@ -327,7 +398,7 @@ while :; do
         [ "$pair_open" = "1" ] && start_scan
     done < "$tmp"
     rm -f "$tmp"
-    sleep 4
+    if [ "$pair_open" = "1" ]; then sleep 1; else sleep 4; fi
 done
 )BT";
 
@@ -448,16 +519,19 @@ class BluezManager {
 public:
     explicit BluezManager(bool pair_window) : pair_window_requested(pair_window) {}
     void run();
+    void request_urgent_tick() { urgent_tick = true; }
     static void disconnect_gamepads();
 
 private:
     bool pair_window_requested = false;
     sd_bus* bus = nullptr;
     SdBusSlotGuard agent_slot;
+    SdBusSlotGuard properties_slot;
     std::string adapter_path;
     bool discovery_active = false;
     bool pair_window_open = false;
     bool initial_device_snapshot_done = false;
+    bool urgent_tick = false;
     Clock::time_point pair_window_end{};
     std::map<std::string, Clock::time_point> stale_since;
     std::set<std::string> connect_logged;
@@ -470,6 +544,7 @@ private:
     bool connect_bus();
     void close_bus();
     bool register_agent();
+    bool install_property_watch();
     bool ensure_adapter();
     bool adapter_set_bool(const char* property, bool value);
     bool start_discovery();
@@ -602,6 +677,24 @@ bool BluezManager::register_agent() {
                            "RequestDefaultAgent", &err.error, &reply.msg, "o", AGENT_PATH);
     if (r < 0) {
         std::println(stderr, "[bt] failed to make pairing agent default: {}", err.error.message ? err.error.message : std::strerror(-r));
+        return false;
+    }
+    return true;
+}
+
+static int bluez_device_properties_changed(sd_bus_message*, void* userdata, sd_bus_error*) {
+    auto* mgr = static_cast<BluezManager*>(userdata);
+    if (mgr) mgr->request_urgent_tick();
+    return 0;
+}
+
+bool BluezManager::install_property_watch() {
+    if (!bus) return false;
+    const char* match = "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
+                        "member='PropertiesChanged',arg0='org.bluez.Device1'";
+    int r = sd_bus_add_match(bus, &properties_slot.slot, match, bluez_device_properties_changed, this);
+    if (r < 0) {
+        if (g_ctx.verbose) std::println(stderr, "[bt] failed to watch BlueZ device events: {}", std::strerror(-r));
         return false;
     }
     return true;
@@ -868,7 +961,7 @@ void BluezManager::schedule_connect_retry(const DeviceInfo& dev, Clock::time_poi
     // Xbox Bluetooth controllers, especially Elite/Series pads, often leave BlueZ with
     // org.bluez.Error.InProgress while the BLE/HID path is still settling. Retrying
     // every tick just spams Connect() and can make the adapter/controller more stuck.
-    const auto delay = dev.is_xbox_like() ? std::chrono::seconds(15) : std::chrono::seconds(5);
+    const auto delay = dev.is_xbox_like() ? std::chrono::seconds(8) : std::chrono::seconds(2);
     next_connect_attempt[dev.path] = now + delay;
 }
 
@@ -1024,6 +1117,7 @@ void BluezManager::tick() {
 void BluezManager::run() {
     if (!connect_bus()) return;
     register_agent();
+    install_property_watch();
     if (!ensure_adapter()) { close_bus(); return; }
 
     adapter_set_bool("Pairable", false);
@@ -1036,9 +1130,16 @@ void BluezManager::run() {
     while (g_manager_running.load(std::memory_order_relaxed)) {
         (void)sd_bus_process(bus, nullptr);
         tick();
-        for (int i = 0; i < 20 && g_manager_running.load(std::memory_order_relaxed); ++i) {
-            (void)sd_bus_process(bus, nullptr);
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // Use D-Bus wakeups instead of a fixed 2 s sleep. Already-paired controllers
+        // usually initiate the reconnect themselves when the user presses any button;
+        // PropertiesChanged wakes this loop so SDL can see/map the controller quickly.
+        const int wait_ms = (pair_window_open || discovery_active) ? 100 : 250;
+        urgent_tick = false;
+        for (int waited = 0; waited < wait_ms && g_manager_running.load(std::memory_order_relaxed); waited += 50) {
+            (void)sd_bus_wait(bus, 50 * 1000); // microseconds
+            while (sd_bus_process(bus, nullptr) > 0) {}
+            if (urgent_tick) break;
         }
     }
 
