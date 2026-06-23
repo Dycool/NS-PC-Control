@@ -108,23 +108,13 @@ for i in $(seq 1 24); do
                 continue
             fi
 
-            fails=0
-            if [ -r "$fail_file" ]; then fails="$(cat "$fail_file" 2>/dev/null || echo 0)"; fi
-            case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
-            fails=$((fails + 1))
-            printf '%s\n' "$fails" > "$fail_file" 2>/dev/null || true
-
-            if [ "$fails" -ge 2 ]; then
-                echo "[bt] stale pairing suspected for $name ($mac); removing old BlueZ key and keeping pairing open"
-                bt_quiet 5s bluetoothctl remove "$mac"
-                rm -f "$fail_file" 2>/dev/null
-                sleep 1
-                if bt_quiet 10s bluetoothctl pair "$mac"; then
-                    bt_quiet 4s bluetoothctl trust "$mac"
-                    bt_quiet 8s bluetoothctl connect "$mac"
-                fi
-            else
-                echo "[bt] reconnect failed for $name ($mac); retrying before repairing stale pairing"
+            echo "[bt] reconnect failed for $name ($mac); stale pairing suspected, removing old BlueZ key"
+            bt_quiet 5s bluetoothctl remove "$mac"
+            rm -f "$fail_file" 2>/dev/null
+            sleep 1
+            if bt_quiet 12s bluetoothctl pair "$mac"; then
+                bt_quiet 4s bluetoothctl trust "$mac"
+                bt_quiet 8s bluetoothctl connect "$mac"
             fi
             continue
         fi

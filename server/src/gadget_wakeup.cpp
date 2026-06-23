@@ -93,6 +93,33 @@ std::string to_upper_no_space(std::string s) {
     return s;
 }
 
+std::string to_upper_hex_bytes(std::string payload) {
+    // btmon output varies a lot between BlueZ versions. Some lines contain raw
+    // hex with spaces, while others include labels/punctuation. Keep only clear
+    // byte tokens so words like "Data" do not accidentally become hex.
+    payload = trim(payload);
+    std::string compact;
+    compact.reserve(payload.size());
+    for (char c : payload) {
+        if (!std::isspace((unsigned char)c)) compact.push_back((char)std::toupper((unsigned char)c));
+    }
+    if (!compact.empty() && compact.size() % 2 == 0 &&
+        std::ranges::all_of(compact, [](char c) { return std::isxdigit((unsigned char)c); })) {
+        return compact;
+    }
+
+    std::ostringstream out;
+    std::istringstream iss(payload);
+    std::string tok;
+    while (iss >> tok) {
+        while (!tok.empty() && std::ispunct((unsigned char)tok.back()) && tok.back() != ':') tok.pop_back();
+        if (tok.size() == 2 && std::isxdigit((unsigned char)tok[0]) && std::isxdigit((unsigned char)tok[1])) {
+            out << (char)std::toupper((unsigned char)tok[0]) << (char)std::toupper((unsigned char)tok[1]);
+        }
+    }
+    return out.str();
+}
+
 bool valid_mac(const std::string& mac) {
     if (mac.size() != 17) return false;
     for (int i = 0; i < 17; ++i) if (i % 3 == 2 ? mac[i] != ':' : !std::isxdigit((unsigned char)mac[i])) return false;
@@ -557,10 +584,59 @@ void maybe_send_switch2_wake_advert(const char* reason) {
     std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
 }
 
+std::string normalize_nintendo_adv_payload(const std::string& data_hex) {
+    std::string data = to_upper_no_space(data_hex);
+    if (data.empty()) return "";
+
+    // Complete AD payload as bytes on-air.
+    if (data.starts_with("020106") && data.find("FF5305") != std::string::npos) return data;
+
+    // Manufacturer data including Nintendo company id, without the AD flags/header.
+    if (data.size() == 52 && data.starts_with("5305")) return "0201061BFF" + data;
+
+    // btmon often decodes the Company field separately and prints only the
+    // Nintendo manufacturer body as 24 bytes.
+    if (data.size() == 48) return "0201061BFF5305" + data;
+
+    return "";
+}
+
+bool prepare_wake_capture_adapter(std::string& hci, bool verbose) {
+    if (!valid_hci(hci)) hci = "hci0";
+    run_wake_command({"systemctl", "stop", "bluetooth"}, verbose);
+    run_wake_command({"rfkill", "unblock", "bluetooth"}, verbose);
+    if (!wait_for_hci_ready(hci, verbose, 12)) reset_wake_bt_stack(hci, verbose);
+    if (!wait_for_hci_ready(hci, verbose, 12)) return false;
+
+    // Setup/capture mode is allowed to own the adapter. Do this once, not once
+    // per scan attempt, otherwise the HCI device can get into a flaky state and
+    // normal controller pairing may stop working until Bluetooth is restarted.
+    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, verbose);
+    run_wake_command({"btmgmt", "-i", hci, "privacy", "off"}, verbose);
+    run_wake_command({"btmgmt", "-i", hci, "bredr", "off"}, verbose);
+    run_wake_command({"btmgmt", "-i", hci, "le", "on"}, verbose);
+    run_wake_command({"btmgmt", "-i", hci, "power", "on"}, verbose);
+    wait_for_hci_ready(hci, verbose, 12);
+    wake_disable_advertising_quiet(hci);
+    wake_disable_le_scan_quiet(hci);
+    return true;
+}
+
 bool parse_nintendo_adv_from_btmon_log(const std::string& path, const std::string& preferred_mac, std::string& out_mac, std::string& out_adv) {
     std::ifstream f(path);
     if (!f) return false;
     std::string line, cur_mac, preferred = to_lower(preferred_mac);
+    bool saw_nintendo_company = false;
+
+    auto accept_candidate = [&](const std::string& raw_hex) -> bool {
+        if (cur_mac.empty() || (!preferred.empty() && cur_mac != preferred)) return false;
+        std::string adv = normalize_nintendo_adv_payload(raw_hex);
+        if (!valid_adv_hex(adv)) return false;
+        out_mac = cur_mac;
+        out_adv = adv;
+        return true;
+    };
+
     while (std::getline(f, line)) {
         std::string lower = to_lower(line);
         size_t ap = lower.find("address:");
@@ -569,58 +645,60 @@ bool parse_nintendo_adv_from_btmon_log(const std::string& path, const std::strin
             while (p < line.size() && std::isspace((unsigned char)line[p])) ++p;
             if (p + 17 <= line.size()) {
                 std::string cand = to_lower(line.substr(p, 17));
-                if (valid_mac(cand)) cur_mac = cand;
+                if (valid_mac(cand)) {
+                    cur_mac = cand;
+                    saw_nintendo_company = false;
+                }
             }
         }
-        size_t dp = lower.find("data[");
-        if (dp == std::string::npos) continue;
-        size_t p = line.find(':', dp);
-        if (p == std::string::npos) continue;
-        if (cur_mac.empty() || (!preferred.empty() && cur_mac != preferred)) continue;
 
-        std::string data = to_upper_no_space(line.substr(p + 1));
-        std::string adv;
-        // Some btmon versions print the complete AD structure, others print only
-        // the 24-byte Nintendo manufacturer body. Accept both formats.
-        if (data.starts_with("020106") && data.find("FF5305") != std::string::npos) {
-            adv = data;
-        } else if (data.size() == 48) {
-            adv = "0201061BFF5305" + data;
-        } else {
+        if (lower.find("nintendo") != std::string::npos || lower.find("0x0553") != std::string::npos || lower.find("0x5305") != std::string::npos) {
+            saw_nintendo_company = true;
+        }
+
+        size_t dp = lower.find("data[");
+        if (dp != std::string::npos) {
+            size_t p = line.find(':', dp);
+            if (p != std::string::npos && accept_candidate(to_upper_hex_bytes(line.substr(p + 1)))) return true;
             continue;
         }
 
-        if (!valid_adv_hex(adv)) continue;
-        out_mac = cur_mac;
-        out_adv = adv;
-        return true;
+        // Newer btmon output often decodes manufacturer data as:
+        //   Company: Nintendo Co., Ltd. (0x0553)
+        //   Data: 01 00 03 7e ...
+        // The old parser only handled "Data[31]: ...", so Joy-Con detection
+        // could fail even though btmon saw the advertisement.
+        size_t plain_data = lower.find("data:");
+        if (plain_data != std::string::npos && lower.find("data length") == std::string::npos) {
+            size_t p = line.find(':', plain_data);
+            if (p != std::string::npos) {
+                std::string hex = to_upper_hex_bytes(line.substr(p + 1));
+                if (saw_nintendo_company && accept_candidate(hex)) return true;
+                if (accept_candidate(hex)) return true;
+            }
+        }
     }
     return false;
 }
 
 bool capture_switch2_wake_advert(int seconds, const std::string& preferred_mac, std::string& out_mac, std::string& out_adv) {
-    seconds = std::clamp(seconds, 5, 90);
+    seconds = std::clamp(seconds, 5, 120);
     char log_path[128];
     std::snprintf(log_path, sizeof(log_path), "/tmp/ns_switch2_wake_%ld.log", (long)getpid());
     std::string hci = valid_hci(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
 
-    run_wake_command({"systemctl", "stop", "bluetooth"}, false);
-    run_wake_command({"rfkill", "unblock", "bluetooth"}, false);
-    if (!wait_for_hci_ready(hci, false, 12)) reset_wake_bt_stack(hci, false);
-    run_wake_command({"btmgmt", "-i", hci, "power", "off"}, false);
-    run_wake_command({"btmgmt", "-i", hci, "privacy", "off"}, false);
-    run_wake_command({"btmgmt", "-i", hci, "bredr", "off"}, false);
-    run_wake_command({"btmgmt", "-i", hci, "le", "on"}, false);
-    run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false);
-    wait_for_hci_ready(hci, false, 12);
-    g_ctx.switch2_wake_hci_dev = hci;
+    // The setup code prepares the adapter once. Each attempt should only scan;
+    // repeatedly power-cycling hci0 makes detection faster to fail but much less
+    // reliable, and can leave controller pairing broken after an interrupted setup.
+    wake_disable_advertising_quiet(hci);
+    wake_disable_le_scan_quiet(hci);
 
     // Keep btmon recording while active LE scanning runs. hcitool active scan
     // mirrors the reference setup notes and avoids making the user perfectly time
     // a HOME press against short manual attempts.
     std::ostringstream cmd;
     cmd << "sh -c 'rm -f " << log_path
-        << "; timeout --kill-after=1s " << (seconds + 3) << "s btmon -T > " << log_path << " 2>&1 & mon=$!"
+        << "; timeout --kill-after=1s " << (seconds + 4) << "s btmon -T > " << log_path << " 2>&1 & mon=$!"
         << "; sleep 1"
         << "; hcitool -i " << hci << " cmd 0x08 0x000B 01 04 00 04 00 00 00 >/dev/null 2>&1 || true"
         << "; hcitool -i " << hci << " cmd 0x08 0x000C 01 00 >/dev/null 2>&1 || true"
@@ -628,6 +706,7 @@ bool capture_switch2_wake_advert(int seconds, const std::string& preferred_mac, 
         << "; hcitool -i " << hci << " cmd 0x08 0x000C 00 00 >/dev/null 2>&1 || true"
         << "; kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
     int dummy = std::system(cmd.str().c_str()); (void)dummy;
+    wake_disable_le_scan_quiet(hci);
     bool ok = parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv);
     unlink(log_path);
     return ok;
@@ -641,17 +720,18 @@ void wait_for_enter(const char* prompt) {
 }
 
 bool auto_find_joycon_for_setup(std::string& joycon_mac) {
-    std::println("\n[wake] Step 1/4: Finding your Joy-Con 2 automatically.");
-    std::println("[wake] Put the Joy-Con 2 very close to the Pi and hold the small SYNC button.");
+    std::println("\n[wake] Step 1/4: Optional Joy-Con 2 discovery.");
+    std::println("[wake] Put the Joy-Con 2 very close to the Pi and hold/press the small SYNC button.");
     std::string adv;
-    for (int attempt = 1; attempt <= 12; ++attempt) {
-        std::println("[wake] Scanning for Nintendo/Joy-Con 2 advert... attempt {}/12", attempt);
-        if (capture_switch2_wake_advert(10, joycon_mac, joycon_mac, adv)) {
+    for (int attempt = 1; attempt <= 4; ++attempt) {
+        std::println("[wake] Scanning for Nintendo/Joy-Con 2 advert... attempt {}/4, 30 seconds", attempt);
+        if (capture_switch2_wake_advert(30, joycon_mac, joycon_mac, adv)) {
             std::println("[wake] Found Nintendo controller: {}", joycon_mac);
             return true;
         }
         std::println("[wake] No Nintendo advert yet. Keep holding SYNC or press it again; retrying...");
     }
+    std::println("[wake] Joy-Con discovery did not lock onto a MAC; continuing to HOME capture anyway.");
     return false;
 }
 
@@ -698,6 +778,11 @@ int run_switch2_wakeup_setup() {
     {
         std::string setup_hci = g_ctx.switch2_wake_hci_dev;
         reset_wake_bt_stack(setup_hci, g_ctx.verbose);
+        if (!prepare_wake_capture_adapter(setup_hci, g_ctx.verbose)) {
+            std::println(stderr, "[wake] Could not prepare Bluetooth adapter for wake capture.");
+            restore_bluetooth_controller_state(setup_hci, true);
+            return 1;
+        }
         g_ctx.switch2_wake_hci_dev = setup_hci;
     }
     auto restore_setup_bt_state = [&] { restore_bluetooth_controller_state(g_ctx.switch2_wake_hci_dev, true); };
@@ -707,7 +792,7 @@ int run_switch2_wakeup_setup() {
     std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_ctx.switch2_wake_hci_dev);
 
     std::string mac;
-    if (!auto_find_joycon_for_setup(mac)) { restore_setup_bt_state(); return 1; }
+    auto_find_joycon_for_setup(mac);
 
     std::println("\n[wake] Step 2/4: Capture the Joy-Con 2 HOME wake advertisement.");
     std::println("[wake] Put the Switch 2 to sleep, keep the Joy-Con 2 close to the Pi, then press HOME.");
