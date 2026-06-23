@@ -52,7 +52,7 @@ To setup wake for the Switch 2, put the console to sleep and press HOME on the J
 ```bash
 sudo ./ns-backend -wake
 ```
-During wake setup, the HOME advert may only appear after several sleep/wake cycles. If capture does not happen immediately, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
+During wake setup, the joycon may only broadcast the HOME advert after several sleep/wake cycles. Suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
 
 If you want to debug a specific issue:
 ```bash

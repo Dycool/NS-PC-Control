@@ -191,7 +191,11 @@ void writer_thread(std::stop_token stoken, int hz) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                     } else if (w == (ssize_t)sizeof(HoriHIDReport)) {
                         prev[h] = r; ++g_ctx.hid_writes;
-                        if (hw_slots[h].client_idx != -1) mark_switch2_usb_activity(now_stamp);
+                        // A successful write to /dev/hidg* does not prove the Switch USB host is awake.
+                        // When the backend starts while the Switch is already suspended, writes can still
+                        // succeed briefly before the gadget reports a disconnect. Treat only host-originated
+                        // output/handshake reads as proof of an active host, otherwise we would disconnect
+                        // freshly connected BT/UDP/WebSocket clients before they can wake the console.
                     } else if (w > 0) ok = false;
                 }
             } else {
@@ -241,7 +245,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                         } else if (w == (ssize_t)PRO_REPORT_SIZE) {
                             if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                             ++g_ctx.hid_writes;
-                            if (port_needed || wrote_subcmd_reply) mark_switch2_usb_activity(now_stamp);
+                            // A report/subcommand-reply write alone is not reliable host-presence evidence.
+                            // Actual Switch activity is recorded when we read host output below.
                         } else if (w > 0) ok = false;
                     }
                 }

@@ -53,23 +53,7 @@ The wizard captures the Joy-Con 2 HOME wake advertisement and saves it. It does 
 3. Press HOME on the Joy-Con 2 until the setup captures the HOME advert.
 4. The setup saves the Joy-Con 2 MAC, ADV payload, and HCI device to the config file.
 
-> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working. During setup, the HOME advert may only appear after several sleep/wake cycles. If capture does not happen immediately, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
-
-### Runtime behavior
-
-After `sudo ./ns-backend -wake` saves a valid config, normal runtime automatically arms Switch 2 wake. You do not need a separate wake-only mode.
-
-```bash
-sudo ./ns-backend -w
-```
-
-Runtime inputs can coexist:
-
-- UDP client connects/sends input → wake is triggered if the USB host looks asleep.
-- WebSocket client connects/sends input → wake is triggered if the USB host looks asleep.
-- Previously paired Bluetooth controller connects → wake is triggered while preserving that controller connection when possible.
-
-Runtime wake uses a non-destructive raw HCI advertising path: it keeps the Pi public Bluetooth address unchanged, keeps BlueZ/controller links alive, loads the captured Joy-Con 2 MAC into the LE random address register, and sends the captured HOME ADV payload. It does not restart BlueZ, power-cycle `hci0`, disable BR/EDR, or change the adapter public address.
+> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working. During setup, the joycon may only broadcast the HOME advert after several sleep/wake cycles. If capture does not happen immediately, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
 
 Use `-no-bt` only if you want to disable local SDL Bluetooth controller input. Switch 2 wake can still run if configured.
 

@@ -773,8 +773,8 @@ int run_switch2_wakeup_setup() {
     std::println("[wake] Config will be saved to: {}", g_ctx.switch2_wakeup_config_path);
     std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_ctx.switch2_wake_hci_dev);
     std::println("[wake] Put the Switch 2 to sleep, keep the Joy-Con 2 close to the Pi, then press HOME.");
-    std::println("[wake] Setup captures the HOME advert MAC/payload and saves it. It does not send a test wake advert.");
-    std::println("[wake] The HOME advert may only appear after several sleep/wake cycles. If needed, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until captured.");
+    std::println("[wake] This is turn on the Switch 2. Suspend it and press HOME again.");
+    std::println("[wake] After repeating this for about 6-10 tries, the rpi will capture and save the advertised packet.");
 
     std::string cap_mac, cap_adv;
     bool captured = false;
