@@ -157,10 +157,10 @@ using namespace ns;
 #ifdef NS_ENABLE_SDL_BT
 bool bluetooth_input_available() { return true; }
 
-static void publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
+static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
-    if (!c.active) return;
+    if (!c.active || c.source != InputSource::Bluetooth) return false;
     c.uses_pad_presence = true;
     c.udp_rumble_enabled = false;
     c.last_rx_us = now;
@@ -181,6 +181,7 @@ static void publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
         c.pad_last_present_us[s] = 0;
         clear_motion(c, s);
     }
+    return true;
 }
 
 static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int client_idx, uint32_t& last_seq, uint64_t& rumble_until_us) {
@@ -188,7 +189,7 @@ static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int cli
     uint32_t seq = 0;
     {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
-        if (!g_ctx.clients[client_idx].active) return;
+        if (!g_ctx.clients[client_idx].active || g_ctx.clients[client_idx].source != InputSource::Bluetooth) return;
         seq = g_ctx.clients[client_idx].rumble_seq[0];
         if (seq == last_seq) {
             if (rumble_until_us && now_us() > rumble_until_us) {
@@ -211,6 +212,17 @@ void bluetooth_input_thread(std::stop_token stoken) {
     input.set_motion_enabled(true);
     input.set_home_shortcut_enabled(true);
     input.set_capture_shortcut_enabled(true);
+    input.set_connection_callback([](int slot, bool connected) {
+        if (slot < 0 || slot >= MAX_CLIENTS) return;
+        const uint8_t bit = static_cast<uint8_t>(1u << slot);
+        uint8_t old_mask = g_ctx.bluetooth_reserved_client_slots_mask.load(std::memory_order_relaxed);
+        uint8_t new_mask = 0;
+        do {
+            new_mask = connected ? static_cast<uint8_t>(old_mask | bit)
+                                 : static_cast<uint8_t>(old_mask & static_cast<uint8_t>(~bit));
+        } while (!g_ctx.bluetooth_reserved_client_slots_mask.compare_exchange_weak(
+            old_mask, new_mask, std::memory_order_relaxed, std::memory_order_relaxed));
+    });
     if (!input.start()) {
         std::println(stderr, "[bt] SDL3 input failed: {}", input.error());
         return;
@@ -247,11 +259,19 @@ void bluetooth_input_thread(std::stop_token stoken) {
             switch_suspend_disconnect_active = false;
         }
 
+        uint8_t bt_reserved_mask = 0;
+        if (!switch_suspend_disconnect_active) {
+            for (int i = 0; i < 4; ++i) {
+                if (pads[i].connected) bt_reserved_mask |= static_cast<uint8_t>(1u << i);
+            }
+        }
+        g_ctx.bluetooth_reserved_client_slots_mask.store(bt_reserved_mask, std::memory_order_relaxed);
+
         for (int i = 0; i < 4; ++i) {
             if (switch_suspend_disconnect_active) {
                 if (pads[i].connected || client_for_sdl[i] >= 0) {
                     input.set_rumble(i, 0, 0, 0);
-                    if (client_for_sdl[i] >= 0) reset_client_session(client_for_sdl[i]);
+                    if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
                     rumble_until_us[i] = 0;
@@ -262,7 +282,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
             if (!pads[i].connected) {
                 if (client_for_sdl[i] >= 0) {
                     input.set_rumble(i, 0, 0, 0);
-                    reset_client_session(client_for_sdl[i]);
+                    reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
                     rumble_until_us[i] = 0;
@@ -274,7 +294,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 bool still_active = false;
                 {
                     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
-                    still_active = g_ctx.clients[client_for_sdl[i]].active;
+                    still_active = g_ctx.clients[client_for_sdl[i]].active && g_ctx.clients[client_for_sdl[i]].source == InputSource::Bluetooth;
                 }
                 if (!still_active) {
                     client_for_sdl[i] = -1;
@@ -284,7 +304,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
             }
 
             if (client_for_sdl[i] < 0) {
-                client_for_sdl[i] = allocate_client_session(now, nullptr, true);
+                client_for_sdl[i] = allocate_client_session(now, nullptr, true, InputSource::Bluetooth, i);
                 if (client_for_sdl[i] >= 0) {
                     waiting_logged = false;
                     input.set_rumble(i, 0, 0, 0);
@@ -301,7 +321,12 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 continue;
             }
 
-            publish_bluetooth_state_to_client(client_for_sdl[i], pads[i], now);
+            if (!publish_bluetooth_state_to_client(client_for_sdl[i], pads[i], now)) {
+                client_for_sdl[i] = -1;
+                last_rumble_seq[i] = 0;
+                rumble_until_us[i] = 0;
+                continue;
+            }
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
         }
 
@@ -319,9 +344,10 @@ void bluetooth_input_thread(std::stop_token stoken) {
         std::this_thread::sleep_for(std::chrono::milliseconds(PRO_UDP_INTERVAL_MS));
     }
 
+    g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
     for (int i = 0; i < 4; ++i) {
         input.set_rumble(i, 0, 0, 0);
-        if (client_for_sdl[i] >= 0) reset_client_session(client_for_sdl[i]);
+        if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
     }
     g_bt_pair_window_stop.store(true, std::memory_order_relaxed);
     if (g_bt_pair_window_thread.joinable()) g_bt_pair_window_thread.join();

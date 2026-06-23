@@ -7,6 +7,7 @@
 #include <print>
 #include <format>
 #include <cstdlib>
+#include <utility>
 
 namespace {
 constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 85;
@@ -170,6 +171,11 @@ std::string SDLInputManager::error() const {
 void SDLInputManager::request_rescan() {
         std::lock_guard<std::mutex> lk(mtx);
         force_scan = true;
+    }
+
+void SDLInputManager::set_connection_callback(std::function<void(int slot, bool connected)> cb) {
+        std::lock_guard<std::mutex> lk(mtx);
+        connection_callback = std::move(cb);
     }
 
 void SDLInputManager::set_gyro_enabled(bool enabled) { set_motion_enabled(enabled); }
@@ -422,7 +428,10 @@ void SDLInputManager::scan_locked(bool initial) {
         last_scan_us = ns::now_us();
         std::erase_if(devices, [this](Device& d) {
             if (!d.pad || !SDL_GamepadConnected(d.pad)) {
-                if (d.slot >= 0 && d.slot < 4) states[d.slot] = SdlPadState{};
+                if (d.slot >= 0 && d.slot < 4) {
+                    states[d.slot] = SdlPadState{};
+                    if (connection_callback) connection_callback(d.slot, false);
+                }
                 close_device_locked(d);
                 return true;
             }
@@ -451,6 +460,7 @@ void SDLInputManager::scan_locked(bool initial) {
                 d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
+            if (connection_callback) connection_callback(d.slot, true);
             std::println("[sdl] controller slot={} name=\"{}\" vid={:04x} pid={:04x} rumble={} trigger_rumble={} profile={}",
                          d.slot + 1, d.name, d.vid, d.pid,
                          d.rumble_capable ? "yes" : "no",

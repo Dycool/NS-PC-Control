@@ -100,6 +100,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (g_ctx.clients[c].active && g_ctx.clients[c].last_rx_us != 0 && client_idle_us > CLIENT_TIMEOUT_US &&
                     !server_macro_running(c,0) && !server_macro_running(c,1) && !server_macro_running(c,2) && !server_macro_running(c,3)) {
                     g_ctx.clients[c].active = false;
+                    g_ctx.clients[c].source = InputSource::None;
                     g_ctx.clients[c].report.reset();
                     clear_all_motion(g_ctx.clients[c]);
                     g_ctx.clients[c].uses_pad_presence = false;

@@ -123,7 +123,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         case LWS_CALLBACK_CLOSED:
             if (sd->ws_slot >= 0) {
                 std::println("[ws] Connection closed, releasing Slot {}", sd->ws_slot + 1);
-                reset_client_session(sd->ws_slot);
+                reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
             } else {
                 std::println("[ws] Connection closed");
             }
@@ -136,7 +136,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (text.starts_with("MACRO_RUN:")) {
                     uint64_t now = now_us();
                     if (sd->ws_slot < 0) {
-                        sd->ws_slot = allocate_client_session(now, nullptr, true);
+                        sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                         if (sd->ws_slot >= 0) {
                             std::println("[ws] Allocated WebSocket client to Slot {} (triggered by macro)", sd->ws_slot + 1);
                         }
@@ -160,7 +160,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 uint32_t magic; memcpy(&magic, payload, 4);
                 if (magic == ns::macro::UDP_CHUNK_MAGIC) {
                     if (sd->ws_slot < 0) {
-                        sd->ws_slot = allocate_client_session(now_us(), nullptr, true);
+                        sd->ws_slot = allocate_client_session(now_us(), nullptr, true, InputSource::WebSocket);
                         if (sd->ws_slot >= 0) {
                             std::println("[ws] Allocated WebSocket client to Slot {} (triggered by macro chunk)", sd->ws_slot + 1);
                         }
@@ -181,10 +181,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             uint64_t now = now_us();
             if (sd->ws_slot >= 0) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
-                if (!g_ctx.clients[sd->ws_slot].active) sd->ws_slot = -1;
+                if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) sd->ws_slot = -1;
             }
             if (sd->ws_slot < 0) {
-                sd->ws_slot = allocate_client_session(now, nullptr, true);
+                sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                 if (sd->ws_slot >= 0) {
                     std::println("[ws] Allocated WebSocket client to Slot {}", sd->ws_slot + 1);
                     maybe_send_switch2_wake_advert("client connected via WebSocket input");
@@ -195,7 +195,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             if (sd->ws_slot >= 0) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 ClientSession& c = g_ctx.clients[sd->ws_slot];
-                c.active = true; c.uses_pad_presence = true; c.last_rx_us = now;
+                c.active = true; c.source = InputSource::WebSocket; c.uses_pad_presence = true; c.last_rx_us = now;
 
                 if (flags & FLAG_RESET) {
                     c.report.reset(); c.first_pkt = true;
@@ -236,6 +236,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
+                if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) {
+                    sd->ws_slot = -1;
+                    break;
+                }
                 for (int s = 0; s < 4; ++s) {
                     uint32_t seq = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                     if (seq != sd->last_rumble_seq[s]) {

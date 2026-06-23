@@ -25,6 +25,16 @@ ServerContext g_ctx{
 #pragma GCC diagnostic pop
 #endif
 
+
+const char* input_source_name(InputSource source) {
+    switch (source) {
+        case InputSource::Udp: return "UDP";
+        case InputSource::WebSocket: return "WebSocket";
+        case InputSource::Bluetooth: return "Bluetooth";
+        case InputSource::None: default: return "none";
+    }
+}
+
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
     return (then == 0 || then > now) ? 0 : now - then;
 }
@@ -156,11 +166,11 @@ int server_macro_client_for_sender(const sockaddr_in& sender) {
     uint64_t now = now_us();
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-        if (g_ctx.clients[i].active && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+        if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
             g_ctx.clients[i].last_rx_us = now; return i;
         }
     }
-    return allocate_client_session(now, &sender, false);
+    return allocate_client_session(now, &sender, false, InputSource::Udp);
 }
 
 bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const sockaddr_in& sender) {
@@ -229,7 +239,7 @@ void server_macro_stop_all_for_client(int client_idx) {
 }
 
 void reset_client_session_locked(ClientSession& c) {
-    c.active = false; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
+    c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
     c.report.reset(); c.has_new_report = false;
     clear_all_motion(c);
     c.uses_pad_presence = c.udp_rumble_enabled = false;
@@ -243,30 +253,79 @@ void reset_client_session_locked(ClientSession& c) {
 
 void reset_client_session(int client_idx) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS) return;
-    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
-    reset_client_session_locked(g_ctx.clients[client_idx]);
+    {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+        reset_client_session_locked(g_ctx.clients[client_idx]);
+    }
     server_macro_stop_all_for_client(client_idx);
 }
 
-int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence) {
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+bool reset_client_session_if_source(int client_idx, InputSource source) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
+    bool reset = false;
+    {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+        ClientSession& c = g_ctx.clients[client_idx];
+        if (c.source == source) {
+            reset_client_session_locked(c);
+            reset = true;
+        }
+    }
+    if (reset) server_macro_stop_all_for_client(client_idx);
+    return reset;
+}
+
+bool client_session_is_source(int client_idx, InputSource source) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    return g_ctx.clients[client_idx].active && g_ctx.clients[client_idx].source == source;
+}
+
+int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,
+                            InputSource source, int preferred_client_idx) {
+    const uint8_t bt_reserved = g_ctx.bluetooth_reserved_client_slots_mask.load(std::memory_order_relaxed);
+
+    auto try_slot = [&](int i) -> bool {
+        if (i < 0 || i >= MAX_CLIENTS) return false;
+        if (source != InputSource::Bluetooth && (bt_reserved & (1u << i))) {
+            return false;
+        }
+
         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
         repair_future_client_timestamp(g_ctx.clients[i], now);
-        if (!g_ctx.clients[i].active || elapsed_us_over(now, g_ctx.clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
-            g_ctx.clients[i].active = true; g_ctx.clients[i].first_pkt = true; g_ctx.clients[i].expected_seq = 0;
-            g_ctx.clients[i].last_rx_us = now; g_ctx.clients[i].addr = addr ? *addr : sockaddr_in{};
-            g_ctx.clients[i].report.reset();
-            clear_all_motion(g_ctx.clients[i]);
-            g_ctx.clients[i].uses_pad_presence = uses_pad_presence; g_ctx.clients[i].udp_rumble_enabled = false;
-            for (int s = 0; s < 4; ++s) {
-                g_ctx.clients[i].rumble[s] = RumblePacket{};
-                g_ctx.clients[i].precision_rumble[s] = PrecisionRumblePacket{};
-                g_ctx.clients[i].rumble_active[s] = false; g_ctx.clients[i].rumble_seq[s]++;
-                g_ctx.clients[i].udp_last_rumble_seq[s] = g_ctx.clients[i].rumble_seq[s];
-                g_ctx.clients[i].pad_present[s] = false; g_ctx.clients[i].pad_last_present_us[s] = 0;
-            }
-            return i;
+        if (g_ctx.clients[i].active && !elapsed_us_over(now, g_ctx.clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
+            return false;
         }
+
+        g_ctx.clients[i].active = true;
+        g_ctx.clients[i].source = source;
+        g_ctx.clients[i].first_pkt = true;
+        g_ctx.clients[i].expected_seq = 0;
+        g_ctx.clients[i].last_rx_us = now;
+        g_ctx.clients[i].addr = addr ? *addr : sockaddr_in{};
+        g_ctx.clients[i].report.reset();
+        clear_all_motion(g_ctx.clients[i]);
+        g_ctx.clients[i].uses_pad_presence = uses_pad_presence;
+        g_ctx.clients[i].udp_rumble_enabled = false;
+        for (int s = 0; s < 4; ++s) {
+            g_ctx.clients[i].rumble[s] = RumblePacket{};
+            g_ctx.clients[i].precision_rumble[s] = PrecisionRumblePacket{};
+            g_ctx.clients[i].rumble_active[s] = false;
+            g_ctx.clients[i].rumble_seq[s]++;
+            g_ctx.clients[i].udp_last_rumble_seq[s] = g_ctx.clients[i].rumble_seq[s];
+            g_ctx.clients[i].pad_present[s] = false;
+            g_ctx.clients[i].pad_last_present_us[s] = 0;
+        }
+        return true;
+    };
+
+    if (source == InputSource::Bluetooth && preferred_client_idx >= 0 && preferred_client_idx < MAX_CLIENTS) {
+        if (try_slot(preferred_client_idx)) return preferred_client_idx;
+    }
+
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        if (i == preferred_client_idx) continue;
+        if (try_slot(i)) return i;
     }
     return -1;
 }

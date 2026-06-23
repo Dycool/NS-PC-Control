@@ -378,7 +378,7 @@ int main(int argc, char** argv) {
                 int cidx = -1;
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                    if (g_ctx.clients[i].active && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                    if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
                         cidx = i; break;
                     }
                 }
@@ -394,13 +394,13 @@ int main(int argc, char** argv) {
             bool wake_on_new_client = false;
             for (int i = 0; i < MAX_CLIENTS; ++i) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                if (g_ctx.clients[i].active && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
                     cidx = i; break;
                 }
             }
 
             if (cidx == -1) {
-                cidx = allocate_client_session(now, &sender, true);
+                cidx = allocate_client_session(now, &sender, true, InputSource::Udp);
                 if (cidx >= 0) {
                     wake_on_new_client = true;
                     std::println("New UDP client accepted into Slot {}", cidx + 1);
@@ -424,7 +424,7 @@ int main(int argc, char** argv) {
                     c.first_pkt = false; c.expected_seq = seq + 1;
                     if (is_reset) {
                         reset_client_session_locked(c);
-                        c.active = true; c.addr = sender; c.last_rx_us = now;
+                        c.active = true; c.source = InputSource::Udp; c.addr = sender; c.last_rx_us = now;
                     } else {
                         c.last_rx_us = now;
                         c.uses_pad_presence = c.udp_rumble_enabled = true;

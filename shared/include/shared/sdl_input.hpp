@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -48,6 +49,7 @@ public:
     std::array<SdlPadState, 4> snapshot();
     std::string error() const;
     void request_rescan();
+    void set_connection_callback(std::function<void(int slot, bool connected)> cb);
     void set_gyro_enabled(bool enabled);
     void set_motion_enabled(bool enabled);
     void set_home_shortcut_enabled(bool enabled);
@@ -78,6 +80,7 @@ private:
     std::string last_error;
     std::array<SdlPadState, 4> states{};
     std::vector<Device> devices;
+    std::function<void(int slot, bool connected)> connection_callback;
     std::atomic<bool> motion_enabled{true};
     std::atomic<bool> home_shortcut_enabled{true};
     std::atomic<bool> capture_shortcut_enabled{true};

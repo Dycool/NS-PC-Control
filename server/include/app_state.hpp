@@ -40,8 +40,18 @@ struct RateSlot {
     uint64_t window_start;
 };
 
+enum class InputSource : uint8_t {
+    None = 0,
+    Udp,
+    WebSocket,
+    Bluetooth,
+};
+
+const char* input_source_name(InputSource source);
+
 struct ClientSession {
     bool active = false;
+    InputSource source = InputSource::None;
     sockaddr_in addr{};
     uint64_t last_rx_us = 0;
     uint32_t expected_seq = 0;
@@ -101,6 +111,7 @@ struct ServerContext {
     std::atomic<bool> switch2_force_next_wake{false};
     std::atomic<bool> switch2_delayed_wake_check_running{false};
     std::atomic<uint64_t> switch2_suspend_disconnect_seq{0};
+    std::atomic<uint8_t> bluetooth_reserved_client_slots_mask{0};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};
     std::mutex mtx[MAX_CLIENTS];
@@ -129,7 +140,10 @@ void set_motion(ClientSession& c, int subpad, const ns::MotionReport& motion);
 void set_motion_samples(ClientSession& c, int subpad, const ns::MotionReport samples[3]);
 void reset_client_session_locked(ClientSession& c);
 void reset_client_session(int client_idx);
-int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence);
+bool reset_client_session_if_source(int client_idx, InputSource source);
+bool client_session_is_source(int client_idx, InputSource source);
+int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,
+                            InputSource source, int preferred_client_idx = -1);
 bool parse_client_packet(const uint8_t* data, size_t len,
                          uint8_t& flags, uint32_t& seq,
                          ns::MultiReport& report,
