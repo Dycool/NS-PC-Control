@@ -61,7 +61,8 @@ static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
     return true;
 }
 
-static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int client_idx, uint32_t& last_seq, uint64_t& rumble_until_us) {
+static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int client_idx, uint32_t& last_seq,
+                                   uint64_t& rumble_until_us, uint8_t& last_low, uint8_t& last_high, uint64_t& last_set_us) {
     RumblePacket ev{};
     uint32_t seq = 0;
     {
@@ -71,6 +72,7 @@ static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int cli
         if (seq == last_seq) {
             if (rumble_until_us && now_us() > rumble_until_us) {
                 rumble_until_us = 0;
+                last_low = last_high = 0;
                 input.set_rumble(sdl_slot, 0, 0, 0);
             }
             return;
@@ -78,18 +80,23 @@ static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int cli
         ev = g_ctx.clients[client_idx].rumble[0];
     }
     last_seq = seq;
+
+    const uint64_t now = now_us();
     bool neutral = (ev.low_freq == 0 && ev.high_freq == 0) || ev.duration_10ms == 0;
-    uint32_t duration_ms = 0;
-    if (!neutral) {
-        duration_ms = std::max<uint32_t>(RUMBLE_BT_MIN_DURATION_MS, (uint32_t)ev.duration_10ms * 10U);
-        // Keep Bluetooth controller rumble as short pulses. The Switch sends fresh
-        // rumble packets while an effect is active, so continuous rumble still works,
-        // but a missing/late neutral packet cannot leave Mario Kart-style lingering
-        // vibration on the physical controller.
-        duration_ms = std::min<uint32_t>(duration_ms, BT_RUMBLE_MAX_PULSE_MS);
+    uint32_t dur_ms = neutral ? 0 : std::max(40u, (uint32_t)ev.duration_10ms * 10);
+    uint64_t dur_us = (uint64_t)dur_ms * 1000;
+
+    if (!neutral && last_low == ev.low_freq && last_high == ev.high_freq && now - last_set_us < 100000ULL) {
+        rumble_until_us = now + dur_us;
+        return;
     }
-    rumble_until_us = neutral ? 0 : now_us() + (uint64_t)duration_ms * 1000ULL;
-    input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
+
+    last_low = ev.low_freq;
+    last_high = ev.high_freq;
+    rumble_until_us = neutral ? 0 : now + dur_us;
+    last_set_us = now;
+
+    input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, dur_ms);
 }
 
 static void apply_bluetooth_controller_status(SDLInputManager& input, int sdl_slot, int client_idx,
@@ -124,6 +131,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
     std::array<uint32_t, 4> last_status_seq{};
     std::array<uint64_t, 4> last_status_apply_us{};
     std::array<uint64_t, 4> rumble_until_us{};
+    std::array<uint8_t, 4> last_rumble_low{};
+    std::array<uint8_t, 4> last_rumble_high{};
+    std::array<uint64_t, 4> last_rumble_set_us{};
     std::array<uint64_t, 4> last_live_input_or_motion_us{};
     std::array<bool, 4> motion_seen{};
     std::array<bool, 4> dormant_until_input{};
@@ -150,6 +160,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 last_status_seq[i] = 0;
                 last_status_apply_us[i] = 0;
                 rumble_until_us[i] = 0;
+                last_rumble_low[i] = 0;
+                last_rumble_high[i] = 0;
+                last_rumble_set_us[i] = 0;
                 last_live_input_or_motion_us[i] = 0;
                 motion_seen[i] = false;
                 input.clear_player_status(i);
@@ -184,6 +197,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     last_status_seq[i] = 0;
                     last_status_apply_us[i] = 0;
                     rumble_until_us[i] = 0;
+                    last_rumble_low[i] = 0;
+                    last_rumble_high[i] = 0;
+                    last_rumble_set_us[i] = 0;
                     last_live_input_or_motion_us[i] = 0;
                     motion_seen[i] = false;
                     input.clear_player_status(i);
@@ -206,6 +222,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     last_status_seq[i] = 0;
                     last_status_apply_us[i] = 0;
                     rumble_until_us[i] = 0;
+                    last_rumble_low[i] = 0;
+                    last_rumble_high[i] = 0;
+                    last_rumble_set_us[i] = 0;
                     last_live_input_or_motion_us[i] = 0;
                     motion_seen[i] = false;
                     input.clear_player_status(i);
@@ -239,6 +258,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                         last_rumble_seq[i] = g_ctx.clients[client_for_sdl[i]].rumble_seq[0];
                         last_status_seq[i] = g_ctx.clients[client_for_sdl[i]].controller_status_seq[0];
                         last_status_apply_us[i] = 0;
+                        last_rumble_low[i] = 0;
+                        last_rumble_high[i] = 0;
+                        last_rumble_set_us[i] = 0;
                     }
                     maybe_send_switch2_wake_advert("Bluetooth controller connected");
                 }
@@ -255,12 +277,16 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 last_status_seq[i] = 0;
                 last_status_apply_us[i] = 0;
                 rumble_until_us[i] = 0;
+                last_rumble_low[i] = 0;
+                last_rumble_high[i] = 0;
+                last_rumble_set_us[i] = 0;
                 last_live_input_or_motion_us[i] = 0;
                 motion_seen[i] = false;
                 input.clear_player_status(i);
                 continue;
             }
-            apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
+            apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i],
+                                   last_rumble_low[i], last_rumble_high[i], last_rumble_set_us[i]);
             apply_bluetooth_controller_status(input, i, client_for_sdl[i], last_status_seq[i], last_status_apply_us[i]);
         }
 

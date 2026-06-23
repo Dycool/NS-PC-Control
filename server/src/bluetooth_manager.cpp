@@ -657,10 +657,13 @@ void BluezManager::tick() {
             if (dev.connected) {
                 have_connected_controller = true;
                 note_connected(dev);
+                continue;
             } else {
                 logged_connected.erase(dev.path);
+                if (!pair_window_open) {
+                    continue;
+                }
             }
-            continue;
         }
 
         if (!pair_window_open) continue;
