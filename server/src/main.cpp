@@ -447,7 +447,11 @@ int main(int argc, char** argv) {
     wt.request_stop();
     st.request_stop();
     if (web_thread.joinable()) web_thread.request_stop();
-    if (bluetooth_thread.joinable()) bluetooth_thread.request_stop();
+    if (bluetooth_thread.joinable()) {
+        // Stop BlueZ first so Ctrl+C is not held up by an in-flight reconnect/pair tick.
+        bluetooth_manager_stop();
+        bluetooth_thread.request_stop();
+    }
 
     if (wt.joinable()) wt.join();
     if (st.joinable()) st.join();

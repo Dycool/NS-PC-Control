@@ -21,6 +21,16 @@ BOOL WINAPI cli_handler(DWORD t) { if (t == CTRL_C_EVENT || t == CTRL_CLOSE_EVEN
 void cli_handler(int) { g_cliRunning = false; }
 #endif
 
+static void cli_sleep_while_running(std::chrono::milliseconds duration) {
+    constexpr auto SLICE = std::chrono::milliseconds(20);
+    auto remaining = duration;
+    while (g_cliRunning.load(std::memory_order_relaxed) && remaining > std::chrono::milliseconds::zero()) {
+        const auto chunk = std::min(remaining, SLICE);
+        std::this_thread::sleep_for(chunk);
+        remaining -= chunk;
+    }
+}
+
 int cli_main(const std::vector<std::string>& original_args) {
     NetworkRuntime net;
     if (!net.good()) return std::println(stderr, "ERROR: network startup failed"), 1;
@@ -92,9 +102,9 @@ int cli_main(const std::vector<std::string>& original_args) {
         }
         bool sent = send_macro_udp_packet(sock, dest, hmac_key, raw, 0);
         std::println("{}", sent ? "Uploaded macro." : "Upload failed.");
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int>(ns::macro::total_ms(steps), 600000) + 180));
+        cli_sleep_while_running(std::chrono::milliseconds(std::min<int>(ns::macro::total_ms(steps), 600000) + 180));
         closesocket(sock);
-        return sent ? 0 : 1;
+        return sent && g_cliRunning.load(std::memory_order_relaxed) ? 0 : 1;
     }
 
     ClientStreamConfig cfg{.host = host, .port = port,

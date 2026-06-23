@@ -22,6 +22,16 @@ std::mutex g_statusMutex;
 std::string g_statusMessage = "Ready";
 std::string g_lastError;
 
+static void sleep_while_running(std::atomic<bool>& running, std::chrono::milliseconds duration) {
+    constexpr auto SLICE = std::chrono::milliseconds(20);
+    auto remaining = duration;
+    while (running.load(std::memory_order_relaxed) && remaining > std::chrono::milliseconds::zero()) {
+        const auto chunk = std::min(remaining, SLICE);
+        std::this_thread::sleep_for(chunk);
+        remaining -= chunk;
+    }
+}
+
 void set_status_message(const std::string& s) {
     std::lock_guard<std::mutex> lk(g_statusMutex);
     g_statusMessage = s;
@@ -214,13 +224,13 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
 
         if (frame.active_count > 0) {
             no_controllers_printed = false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(ns::LEGACY_UDP_INTERVAL_MS));
+            sleep_while_running(running, std::chrono::milliseconds(ns::LEGACY_UDP_INTERVAL_MS));
         } else {
             if (cfg.print_cli_waiting_messages && !no_controllers_printed) {
                 std::println("No controllers detected - waiting for connections...");
                 no_controllers_printed = true;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(cfg.idle_sleep_ms));
+            sleep_while_running(running, std::chrono::milliseconds(cfg.idle_sleep_ms));
         }
     }
 

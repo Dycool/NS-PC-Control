@@ -26,6 +26,7 @@ using Clock = std::chrono::steady_clock;
 
 std::atomic<bool> g_manager_running{false};
 std::atomic<bool> g_proactive_reconnect_enabled{true};
+std::atomic<bool> g_runtime_pair_window_requested{false};
 std::thread g_manager_thread;
 constexpr const char* BT_RECONNECT_PAUSE_FILE = "/tmp/ns-pc-control-bt-reconnect-paused";
 
@@ -54,7 +55,7 @@ constexpr const char* BT_RECONNECT_PAUSE_FILE = "/tmp/ns-pc-control-bt-reconnect
     return mac;
 }
 
-bool looks_like_mac(const std::string& s) {
+[[maybe_unused]] bool looks_like_mac(const std::string& s) {
     if (s.size() != 17) return false;
     for (size_t i = 0; i < s.size(); ++i) {
         if ((i + 1) % 3 == 0) {
@@ -273,161 +274,7 @@ void runtime_setup_impl(bool verbose) {
     }
 }
 
-#ifndef NS_ENABLE_BLUEZ_DBUS
-
-// Fallback for builds without libsystemd/sd-bus. This preserves old behavior,
-// but D-Bus builds are preferred because they avoid parsing bluetoothctl text.
-static std::atomic<bool> g_fallback_stop{false};
-
-static void run_shell_manager(bool pair_window) {
-    std::string script = std::string("initial_pair_window=") + (pair_window ? "1" : "0") + R"BT(
-set +e
-bt_timeout() { secs="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi; }
-bt_quiet() { secs="$1"; shift; bt_timeout "$secs" "$@" >/dev/null 2>&1; }
-is_gamepad_name() { case "$1" in *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*|*DualSense*|*DualShock*|*PLAYSTATION*|*Controller*|*Gamepad*) return 0 ;; *) return 1 ;; esac; }
-scan_pid=""
-pair_open=0
-pair_end=0
-seen_connected=" "
-pause_file="/tmp/ns-pc-control-bt-reconnect-paused"
-cleanup() {
-    [ -n "$scan_pid" ] && kill "$scan_pid" 2>/dev/null || true
-    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
-    bt_quiet 4s bluetoothctl scan off
-    bt_quiet 4s bluetoothctl discoverable off
-    bt_quiet 4s bluetoothctl pairable off
-}
-start_scan() {
-    [ -n "$scan_pid" ] && kill "$scan_pid" 2>/dev/null || true
-    (printf "scan on\n"; while :; do sleep 3600; done) | bluetoothctl >/dev/null 2>&1 & scan_pid=$!
-}
-stop_scan() {
-    [ -n "$scan_pid" ] && kill "$scan_pid" 2>/dev/null || true
-    scan_pid=""
-    bt_quiet 4s bluetoothctl scan off
-}
-open_pair_window() {
-    reason="$1"
-    pair_open=1
-    pair_end=$(( $(date +%s) + 120 ))
-    bt_quiet 4s bluetoothctl pairable on
-    bt_quiet 4s bluetoothctl discoverable on
-    start_scan
-    printf '[bt] pairing window open for 2 minutes (%s)\n' "$reason"
-}
-close_pair_window_now() {
-    [ "$pair_open" = "1" ] || return 0
-    pair_open=0
-    stop_scan
-    bt_quiet 4s bluetoothctl discoverable off
-    bt_quiet 4s bluetoothctl pairable off
-    printf '[bt] pairing window closed; trusted reconnect helper stays active\n'
-}
-close_pair_window_if_due() {
-    [ "$pair_open" = "1" ] || return 0
-    [ "$(date +%s)" -lt "$pair_end" ] && return 0
-    close_pair_window_now
-}
-mark_seen_connected() { seen_connected="$seen_connected$1 "; }
-was_seen_connected() { case "$seen_connected" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-mark_disconnected() { seen_connected="$(printf '%s' "$seen_connected" | sed "s/ $1 / /g")"; }
-
-trap cleanup INT TERM EXIT
-bt_quiet 4s bluetoothctl power on
-(printf "agent NoInputNoOutput\ndefault-agent\n"; while :; do sleep 3600; done) | bluetoothctl >/dev/null 2>&1 & agent_pid=$!
-printf '[bt] BlueZ fallback trusted-controller reconnect helper active (bluetoothctl); D-Bus manager not compiled in\n'
-if [ "$initial_pair_window" = "1" ]; then
-    open_pair_window "startup --pair"
-else
-    bt_quiet 4s bluetoothctl pairable off
-    bt_quiet 4s bluetoothctl discoverable off
-fi
-
-while :; do
-    close_pair_window_if_due
-    if [ -e "$pause_file" ]; then
-        close_pair_window_now
-        sleep 4
-        continue
-    fi
-    tmp="/tmp/ns-pc-control-bt-devices.$$"
-    bluetoothctl devices 2>/dev/null > "$tmp" || true
-    while read -r tag mac name_rest; do
-        [ "$tag" = "Device" ] || continue
-        name="$name_rest"
-        is_gamepad_name "$name" || continue
-        info="$(bt_timeout 3s bluetoothctl info "$mac" 2>/dev/null || true)"
-        if printf '%s\n' "$info" | grep -q 'Connected: yes'; then
-            if printf '%s\n' "$info" | grep -q 'ServicesResolved: no'; then
-                printf '[bt] stale connected state for %s (%s), reconnecting\n' "$name" "$mac"
-                bt_quiet 4s bluetoothctl disconnect "$mac"; sleep 1; bt_quiet 5s bluetoothctl connect "$mac"
-            elif printf '%s\n' "$info" | grep -q 'Paired: yes\|Trusted: yes'; then
-                if ! was_seen_connected "$mac"; then
-                    printf '[bt] connected %s (%s)\n' "$name" "$mac"
-                    open_pair_window "trusted controller connected"
-                fi
-                mark_seen_connected "$mac"
-            fi
-            continue
-        fi
-
-        mark_disconnected "$mac"
-        if printf '%s\n' "$info" | grep -q 'Paired: yes\|Trusted: yes'; then
-            bt_quiet 4s bluetoothctl trust "$mac"
-            stop_scan
-            if bt_quiet 5s bluetoothctl connect "$mac"; then
-                printf '[bt] reconnected %s (%s)\n' "$name" "$mac"
-                mark_seen_connected "$mac"
-                open_pair_window "trusted controller connected"
-            elif [ "$pair_open" = "1" ]; then
-                start_scan
-            fi
-            continue
-        fi
-
-        [ "$pair_open" = "1" ] || continue
-        printf '%s\n' "$info" | grep -q 'RSSI:' || continue
-        stop_scan
-        if bt_quiet 12s bluetoothctl pair "$mac"; then
-            bt_quiet 4s bluetoothctl trust "$mac"
-            if bt_quiet 8s bluetoothctl connect "$mac"; then
-                printf '[bt] paired %s (%s)\n' "$name" "$mac"
-                mark_seen_connected "$mac"
-            fi
-        fi
-        [ "$pair_open" = "1" ] && start_scan
-    done < "$tmp"
-    rm -f "$tmp"
-    if [ "$pair_open" = "1" ]; then sleep 1; else sleep 4; fi
-done
-)BT";
-
-    pid_t pid = fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        setpgid(0, 0);
-        execl("/bin/sh", "sh", "-c", script.c_str(), (char*)nullptr);
-        _exit(127);
-    }
-
-    int status = 0;
-    while (g_manager_running.load(std::memory_order_relaxed)) {
-        if (waitpid(pid, &status, WNOHANG) == pid) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    kill(-pid, SIGTERM);
-    for (int i = 0; i < 10 && waitpid(pid, &status, WNOHANG) != pid; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    kill(-pid, SIGKILL);
-    waitpid(pid, &status, 0);
-}
-
-#endif
-
 } // namespace
-
-#ifdef NS_ENABLE_BLUEZ_DBUS
 
 #include <systemd/sd-bus.h>
 
@@ -442,6 +289,11 @@ constexpr const char* AGENT_MANAGER_IFACE = "org.bluez.AgentManager1";
 constexpr const char* AGENT_IFACE = "org.bluez.Agent1";
 constexpr const char* AGENT_PATH = "/com/ns_pc_control/agent";
 constexpr const char* HID_UUID = "00001124-0000-1000-8000-00805f9b34fb";
+constexpr uint64_t BLUEZ_DBUS_CALL_TIMEOUT_US = 500'000ULL;
+constexpr uint64_t BLUEZ_DBUS_CONNECT_TIMEOUT_US = 3'000'000ULL;
+constexpr uint64_t BLUEZ_DBUS_PAIR_TIMEOUT_US = 12'000'000ULL;
+constexpr uint64_t BLUEZ_DBUS_DISCONNECT_TIMEOUT_US = 1'000'000ULL;
+constexpr uint64_t BLUEZ_DBUS_SHUTDOWN_TIMEOUT_US = 50'000ULL;
 
 struct SdBusErrorGuard {
     sd_bus_error error = SD_BUS_ERROR_NULL;
@@ -551,6 +403,7 @@ private:
     bool stop_discovery();
     std::vector<DeviceInfo> list_devices();
     bool set_trusted(const DeviceInfo& dev, bool trusted);
+    bool call_device_method(const DeviceInfo& dev, const char* method, uint64_t timeout_us, const char* log_action);
     bool pair_device(const DeviceInfo& dev);
     bool connect_device(const DeviceInfo& dev);
     bool disconnect_device(const DeviceInfo& dev);
@@ -560,7 +413,7 @@ private:
     void maybe_warn_xbox_driver_path(const DeviceInfo& dev);
     void tick();
     void open_pair_window(const char* reason);
-    void note_connected(const DeviceInfo& dev, const char* action, bool trigger_followup_pair_window = false);
+    void note_connected(const DeviceInfo& dev, const char* action);
 };
 
 static int agent_release(sd_bus_message* m, void*, sd_bus_error*) {
@@ -644,7 +497,7 @@ bool BluezManager::connect_bus() {
     // Never let BlueZ method calls make Ctrl+C/systemd shutdown feel stuck.
     // Controllers, especially Xbox BLE pads, can leave Connect() waiting for many seconds.
     // A short global D-Bus timeout keeps reconnects opportunistic and shutdown fast.
-    (void)sd_bus_set_method_call_timeout(bus, 2'000'000ULL);
+    (void)sd_bus_set_method_call_timeout(bus, BLUEZ_DBUS_CALL_TIMEOUT_US);
     return true;
 }
 
@@ -912,43 +765,40 @@ bool BluezManager::set_trusted(const DeviceInfo& dev, bool trusted) {
     return true;
 }
 
-bool BluezManager::pair_device(const DeviceInfo& dev) {
+bool BluezManager::call_device_method(const DeviceInfo& dev, const char* method, uint64_t timeout_us, const char* log_action) {
     if (!bus || dev.path.empty()) return false;
+
+    // The normal manager timeout is intentionally short so Ctrl+C/service stop is snappy.
+    // Pair/Connect need a little longer on Raspberry Pi Bluetooth, otherwise BlueZ often
+    // times out before HID/SDL has actually settled and the controller appears to take
+    // many repeated attempts to connect.
+    (void)sd_bus_set_method_call_timeout(bus, timeout_us);
     SdBusErrorGuard err;
     SdBusMessageGuard reply;
     int r = sd_bus_call_method(bus, BLUEZ_SERVICE, dev.path.c_str(), DEVICE_IFACE,
-                               "Pair", &err.error, &reply.msg, "");
+                               method, &err.error, &reply.msg, "");
+    (void)sd_bus_set_method_call_timeout(bus, BLUEZ_DBUS_CALL_TIMEOUT_US);
+
     if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] pair failed for {} ({}): {}", dev.display_name(), dev.address, err.error.message ? err.error.message : std::strerror(-r));
+        if (g_ctx.verbose) {
+            std::println(stderr, "[bt] {} failed for {} ({}): {}", log_action, dev.display_name(), dev.address,
+                         err.error.message ? err.error.message : std::strerror(-r));
+        }
         return false;
     }
     return true;
+}
+
+bool BluezManager::pair_device(const DeviceInfo& dev) {
+    return call_device_method(dev, "Pair", BLUEZ_DBUS_PAIR_TIMEOUT_US, "pair");
 }
 
 bool BluezManager::connect_device(const DeviceInfo& dev) {
-    if (!bus || dev.path.empty()) return false;
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, dev.path.c_str(), DEVICE_IFACE,
-                               "Connect", &err.error, &reply.msg, "");
-    if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] connect failed for {} ({}): {}", dev.display_name(), dev.address, err.error.message ? err.error.message : std::strerror(-r));
-        return false;
-    }
-    return true;
+    return call_device_method(dev, "Connect", BLUEZ_DBUS_CONNECT_TIMEOUT_US, "connect");
 }
 
 bool BluezManager::disconnect_device(const DeviceInfo& dev) {
-    if (!bus || dev.path.empty()) return false;
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, dev.path.c_str(), DEVICE_IFACE,
-                               "Disconnect", &err.error, &reply.msg, "");
-    if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] disconnect failed for {} ({}): {}", dev.display_name(), dev.address, err.error.message ? err.error.message : std::strerror(-r));
-        return false;
-    }
-    return true;
+    return call_device_method(dev, "Disconnect", BLUEZ_DBUS_DISCONNECT_TIMEOUT_US, "disconnect");
 }
 
 bool BluezManager::connect_allowed(const DeviceInfo& dev, Clock::time_point now) const {
@@ -962,11 +812,18 @@ void BluezManager::schedule_connect_retry(const DeviceInfo& dev, Clock::time_poi
         maybe_warn_xbox_driver_path(dev);
     }
 
-    // Xbox Bluetooth controllers, especially Elite/Series pads, often leave BlueZ with
-    // org.bluez.Error.InProgress while the BLE/HID path is still settling. Retrying
-    // every tick just spams Connect() and can make the adapter/controller more stuck.
-    const auto delay = dev.is_xbox_like() ? std::chrono::seconds(8) : std::chrono::seconds(2);
-    next_connect_attempt[dev.path] = now + delay;
+    // Retrying Connect() too aggressively keeps BlueZ busy and can make controller
+    // reconnects slower, not faster. Back off while the pad is asleep/offline; when a
+    // trusted controller actually reconnects by itself, the PropertiesChanged signal
+    // still wakes this loop immediately.
+    const int failures = std::max(1, connect_failures[dev.path]);
+    int delay_s = 0;
+    if (dev.is_xbox_like()) {
+        delay_s = std::min(45, 6 + failures * 6);
+    } else {
+        delay_s = std::min(30, 1 << std::min(failures, 5));
+    }
+    next_connect_attempt[dev.path] = now + std::chrono::seconds(delay_s);
 }
 
 void BluezManager::clear_connect_retry(const DeviceInfo& dev) {
@@ -996,13 +853,10 @@ void BluezManager::open_pair_window(const char* reason) {
     }
 }
 
-void BluezManager::note_connected(const DeviceInfo& dev, const char* action, bool trigger_followup_pair_window) {
+void BluezManager::note_connected(const DeviceInfo& dev, const char* action) {
     connected_paths.insert(dev.path);
     if (connect_logged.insert(dev.path + action).second) {
         std::println("[bt] {} {} ({})", action, dev.display_name(), dev.address);
-    }
-    if (trigger_followup_pair_window) {
-        open_pair_window("trusted controller connected");
     }
 }
 
@@ -1025,6 +879,10 @@ void BluezManager::tick() {
         return;
     }
 
+    if (g_runtime_pair_window_requested.exchange(false, std::memory_order_relaxed)) {
+        open_pair_window("Switch Change Grip/Order");
+    }
+
     if (pair_window_open && now >= pair_window_end) {
         pair_window_open = false;
         stop_discovery();
@@ -1044,7 +902,7 @@ void BluezManager::tick() {
             clear_connect_retry(dev);
             if (dev.paired || dev.trusted) {
                 if (initial_device_snapshot_done && !connected_paths.contains(dev.path)) {
-                    note_connected(dev, "connected", true);
+                    note_connected(dev, "connected");
                 } else {
                     connected_paths.insert(dev.path);
                 }
@@ -1057,22 +915,16 @@ void BluezManager::tick() {
 
         if (dev.paired || dev.trusted) {
             set_trusted(dev, true);
-            // Do not repeatedly Connect() cached/offline trusted devices.
-            // A controller that the user wakes by pressing any button normally initiates
-            // the reconnect itself; this branch is only a fallback for live devices seen
-            // during discovery/pair-window. This avoids misleading "reconnected" logs
-            // after SDL already has the pad and avoids useless reconnect attempts when
-            // the user intentionally turned controllers off.
-            if (!dev.has_rssi && !pair_window_open) {
-                continue;
-            }
+            // Attempt proactive reconnect for trusted devices even without RSSI.
+            // This reduces connection latency when controllers wake up. The retry
+            // backoff prevents spamming while the controller is offline.
             if (!connect_allowed(dev, now)) continue;
 
             const bool was_discovering = discovery_active;
             if (was_discovering) stop_discovery();
             if (connect_device(dev)) {
                 clear_connect_retry(dev);
-                note_connected(dev, "reconnected", true);
+                note_connected(dev, "reconnected");
             } else {
                 schedule_connect_retry(dev, now, true);
             }
@@ -1139,38 +991,27 @@ void BluezManager::run() {
         }
     }
 
+    (void)sd_bus_set_method_call_timeout(bus, BLUEZ_DBUS_SHUTDOWN_TIMEOUT_US);
     stop_discovery();
     adapter_set_bool("Discoverable", false);
     adapter_set_bool("Pairable", false);
     close_bus();
 }
 
-static bool safe_bt_addr(const std::string& addr) {
-    if (addr.size() != 17) return false;
-    for (size_t i = 0; i < addr.size(); ++i) {
-        if ((i + 1) % 3 == 0) {
-            if (addr[i] != ':') return false;
-        } else if (!std::isxdigit(static_cast<unsigned char>(addr[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void BluezManager::disconnect_gamepads() {
     BluezManager mgr(false);
     if (!mgr.connect_bus()) return;
+    if (!mgr.ensure_adapter()) { mgr.close_bus(); return; }
     for (const auto& d : mgr.list_devices()) {
-        if (!d.is_gamepad_like() || !d.connected || !safe_bt_addr(d.address)) continue;
+        if (!d.is_gamepad_like() || !d.connected) continue;
         std::println("[bt] disconnecting {} ({}) because Switch suspended", d.display_name(), d.address);
-        const std::string cmd = "sh -c 'timeout --kill-after=1s 1s bluetoothctl disconnect " + d.address + " >/dev/null 2>&1 &'";
-        (void)std::system(cmd.c_str());
+        (void)mgr.disconnect_device(d);
     }
+    mgr.close_bus();
 }
 
-} // namespace
 
-#endif // NS_ENABLE_BLUEZ_DBUS
+} // namespace
 
 void bluetooth_manager_runtime_setup(bool verbose) {
     static std::atomic<bool> already_done{false};
@@ -1181,26 +1022,24 @@ void bluetooth_manager_runtime_setup(bool verbose) {
 
 void bluetooth_manager_start(bool open_pair_window) {
     g_proactive_reconnect_enabled.store(true, std::memory_order_relaxed);
+    g_runtime_pair_window_requested.store(false, std::memory_order_relaxed);
     (void)unlink(BT_RECONNECT_PAUSE_FILE);
     bool expected = false;
     if (!g_manager_running.compare_exchange_strong(expected, true)) return;
     if (g_manager_thread.joinable()) g_manager_thread.join();
 
-#ifdef NS_ENABLE_BLUEZ_DBUS
     g_manager_thread = std::thread([open_pair_window] {
         BluezManager mgr(open_pair_window);
         mgr.run();
         g_manager_running.store(false, std::memory_order_relaxed);
         std::println("[bt] BlueZ manager stopped");
     });
-#else
-    g_fallback_stop.store(false, std::memory_order_relaxed);
-    g_manager_thread = std::thread([open_pair_window] {
-        run_shell_manager(open_pair_window);
-        g_manager_running.store(false, std::memory_order_relaxed);
-        std::println("[bt] fallback Bluetooth manager stopped");
-    });
-#endif
+}
+
+bool bluetooth_manager_request_pairing_window() {
+    if (!g_manager_running.load(std::memory_order_relaxed)) return false;
+    g_runtime_pair_window_requested.store(true, std::memory_order_relaxed);
+    return true;
 }
 
 void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {
@@ -1222,22 +1061,5 @@ void bluetooth_manager_stop() {
 }
 
 void bluetooth_manager_disconnect_connected_gamepads() {
-#ifdef NS_ENABLE_BLUEZ_DBUS
     BluezManager::disconnect_gamepads();
-#else
-    const char* script = R"BT(
-set +e
-bt_timeout() { secs="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi; }
-is_gamepad_name() { case "$1" in *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*|*DualSense*|*DualShock*|*PLAYSTATION*|*Controller*|*Gamepad*) return 0 ;; *) return 1 ;; esac; }
-bluetoothctl devices 2>/dev/null | while read -r tag mac name; do
-    [ "$tag" = "Device" ] || continue
-    is_gamepad_name "$name" || continue
-    info="$(bt_timeout 2s bluetoothctl info "$mac" 2>/dev/null || true)"
-    echo "$info" | grep -q 'Connected: yes' || continue
-    echo "[bt] disconnecting $name ($mac) because Switch suspended"
-    bt_timeout 3s bluetoothctl disconnect "$mac" >/dev/null 2>&1 || true
-done
-)BT";
-    (void)std::system(script);
-#endif
 }

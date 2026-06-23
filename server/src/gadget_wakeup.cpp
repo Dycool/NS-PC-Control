@@ -217,7 +217,7 @@ WakeCmdResult run_wake_command(const std::vector<std::string>& args, bool verbos
         for (const auto& a : args) {
             std::string al = a;
             std::transform(al.begin(), al.end(), al.begin(), [](unsigned char c){ return std::tolower(c); });
-            if (al == "rfkill" || al == "bluetoothctl" || al == "btmgmt" || al == "hcitool" || al == "hciconfig" || al.find("bluetooth") != std::string::npos) {
+            if (al == "rfkill" || al == "btmgmt" || al == "hcitool" || al == "hciconfig" || al.find("bluetooth") != std::string::npos) {
                 is_bt = true;
                 break;
             }
@@ -389,9 +389,7 @@ void restore_bluetooth_controller_state(const std::string& hci, bool restart_blu
     run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false);
     if (restart_bluez) {
         run_wake_command({"systemctl", "restart", "bluetooth"}, false);
-        run_wake_command({"bluetoothctl", "power", "on"}, false);
-        run_wake_command({"bluetoothctl", "agent", "NoInputNoOutput"}, false);
-        run_wake_command({"bluetoothctl", "default-agent"}, false);
+        run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false);
     }
 }
 
@@ -831,11 +829,21 @@ void enter_switch2_wake_runtime_mode() {
 void wait_for_bluetooth_runtime_ready(bool verbose) {
     if (g_ctx.bluetooth_disabled) return;
     (void)verbose;
+    std::string hci = valid_hci(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
     for (int i = 0; i < 20 && g_ctx.running.load(); ++i) {
-        WakeCmdResult show = run_wake_command({"bluetoothctl", "show"}, false, true);
-        if (show.exit_code == 0 && show.output.find("Powered: yes") != std::string::npos) return;
+        WakeCmdResult info = run_wake_command({"btmgmt", "-i", hci, "info"}, false, true);
+        if (info.exit_code == 0) {
+            const std::string marker = "current settings:";
+            size_t pos = info.output.find(marker);
+            if (pos != std::string::npos) {
+                size_t end = info.output.find('\n', pos);
+                std::string current = info.output.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+                if (current.find("powered") != std::string::npos) return;
+            }
+        }
         run_wake_command({"rfkill", "unblock", "bluetooth"}, false);
-        run_wake_command({"bluetoothctl", "power", "on"}, false);
+        run_wake_command({"systemctl", "start", "bluetooth"}, false);
+        run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 }
@@ -857,9 +865,8 @@ void enter_bluetooth_runtime_mode() {
         restore_bluetooth_controller_state(hci, true);
     } else {
         run_wake_command({"systemctl", "start", "bluetooth"}, false);
-        run_wake_command({"bluetoothctl", "power", "on"}, false);
+        run_wake_command({"btmgmt", "-i", hci, "power", "on"}, false);
         // Pairing/reconnect is owned by the BlueZ D-Bus manager in bluetooth_manager.cpp.
-        // Do not register a one-shot bluetoothctl agent here; it exits immediately.
     }
 
     wait_for_bluetooth_runtime_ready(g_ctx.verbose);

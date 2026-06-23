@@ -6,7 +6,6 @@
 
 #include <atomic>
 #include <cerrno>
-#include <cctype>
 #include <chrono>
 #include <print>
 #include <cstdlib>
@@ -24,35 +23,11 @@
 
 using namespace ns;
 
-// Kept here so older bluetooth_manager.hpp snapshots still compile when only the .cpp files are updated.
-void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled);
-
 #ifdef NS_ENABLE_SDL_BT
 bool bluetooth_input_available() { return true; }
 
 
 constexpr uint32_t BT_RUMBLE_MAX_PULSE_MS = 50;
-
-static bool bt_contains_case_insensitive(const std::string& haystack, const char* needle) {
-    if (!needle || !*needle) return false;
-    std::string h;
-    std::string n;
-    h.reserve(haystack.size());
-    for (unsigned char c : haystack) h.push_back(static_cast<char>(std::tolower(c)));
-    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(needle); *p; ++p) {
-        n.push_back(static_cast<char>(std::tolower(*p)));
-    }
-    return h.find(n) != std::string::npos;
-}
-
-static bool bt_is_playstation_controller(const SdlPadState& pad) {
-    return pad.vid == 0x054c ||
-           bt_contains_case_insensitive(pad.name, "playstation") ||
-           bt_contains_case_insensitive(pad.name, "dualsense") ||
-           bt_contains_case_insensitive(pad.name, "dualshock") ||
-           bt_contains_case_insensitive(pad.name, "wireless controller") ||
-           bt_contains_case_insensitive(pad.name, "wirless controller");
-}
 
 static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -257,31 +232,11 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 last_live_input_or_motion_us[i] = now;
             }
 
-            // RPi/BlueZ can leave a DualShock/DualSense in a zombie state: SDL still says
-            // connected, but motion/input stops and BlueZ also still says Connected. For PS pads
-            // that previously delivered motion, no motion for a few seconds is a good stale-link
-            // signal. Do not apply this to Xbox/default controllers, because idle pads can be
-            // completely silent there.
-            if (client_for_sdl[i] >= 0 && motion_seen[i] && bt_is_playstation_controller(pads[i]) &&
-                last_live_input_or_motion_us[i] != 0 && now - last_live_input_or_motion_us[i] > 5'000'000ULL) {
-                if (g_ctx.verbose) {
-                    std::println("[bt] {} appears connected but stopped sending input/motion; forcing reconnect", pads[i].name);
-                }
-                reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
-                client_for_sdl[i] = -1;
-                last_rumble_seq[i] = 0;
-                last_status_seq[i] = 0;
-                last_status_apply_us[i] = 0;
-                rumble_until_us[i] = 0;
-                last_live_input_or_motion_us[i] = 0;
-                motion_seen[i] = false;
-                input.clear_player_status(i);
-                g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
-                input.disconnect_all();
-                bluetooth_manager_disconnect_connected_gamepads();
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                continue;
-            }
+            // Do not force-disconnect an SDL/BlueZ controller just because it went quiet.
+            // Some controllers legitimately stop producing motion/input while idle, and forcibly
+            // disconnecting them here causes the “controller randomly shut off” behavior. If BlueZ
+            // truly loses the link, SDL will report disconnected and the normal cleanup path below
+            // will release the server slot.
 
             if (client_for_sdl[i] < 0) {
                 if (dormant_until_input[i] && switch_sleeping && !real_bt_input) {
@@ -332,18 +287,18 @@ void bluetooth_input_thread(std::stop_token stoken) {
         std::this_thread::sleep_for(std::chrono::milliseconds(PRO_UDP_INTERVAL_MS));
     }
 
+    const bool process_stopping = !g_ctx.running.load(std::memory_order_relaxed) || stoken.stop_requested();
     g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
     for (int i = 0; i < 4; ++i) {
         input.set_rumble(i, 0, 0, 0);
         if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
     }
     // Ctrl+C/service stop should be decisive: stop publishing, stop rumble,
-    // disconnect physical BT controllers once, and prevent the manager from
-    // racing shutdown by starting another proactive Connect().
+    // and prevent the manager from racing shutdown by starting another proactive Connect().
     input.stop_all_rumble();
     bluetooth_manager_set_proactive_reconnect_enabled(false);
     input.disconnect_all();
-    bluetooth_manager_disconnect_connected_gamepads();
+    if (!process_stopping) bluetooth_manager_disconnect_connected_gamepads();
     bluetooth_manager_stop();
     input.stop();
     std::println("[bt] Bluetooth/local SDL controller input stopped");
