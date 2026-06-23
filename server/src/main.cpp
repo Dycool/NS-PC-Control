@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
                         .udp_hz = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ)
                     };
                     const uint64_t reply_now = now_us();
-                    if (switch2_sleep_confirmed(reply_now) && !switch2_wake_recent(reply_now)) {
+                    if (switch2_sleep_confirmed(reply_now) && switch2_dormant_udp_endpoint_matches(sender)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     }
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen); continue;
@@ -381,7 +381,12 @@ int main(int argc, char** argv) {
 
             const bool dormant_endpoint = sleeping && switch2_dormant_udp_endpoint_matches(sender);
             if (cidx == -1) {
-                if (dormant_endpoint && !real_input) {
+                if (dormant_endpoint) {
+                    // This UDP endpoint belonged to a client that was connected
+                    // before the Switch suspended. Keep dropping it until the
+                    // desktop client observes the ServerInfo sleep flag, performs
+                    // its own disconnect, and then reconnects as a fresh wake
+                    // attempt.
                     ++g_ctx.pkts_rx;
                     continue;
                 }

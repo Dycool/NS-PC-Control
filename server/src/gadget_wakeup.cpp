@@ -564,17 +564,27 @@ void switch2_delayed_wake_check_worker(const char* reason) {
 }
 
 void maybe_send_switch2_wake_advert(const char* reason) {
-    (void)reason;
-    if (!g_ctx.switch2_wake_adv_enabled || !g_ctx.switch2_wake_config_loaded || g_ctx.switch2_wake_adv_running.exchange(true)) return;
+    if (!g_ctx.switch2_wake_adv_enabled || !g_ctx.switch2_wake_config_loaded) return;
+
     uint64_t now = now_us();
 
     // Clean adapter rule: the Switch is awake only when it recently sent HID OUT
     // traffic to us. Successful writes to /dev/hidg* or USB gadget state are not
     // trusted as wake/active evidence.
-    if (switch2_usb_host_recently_active(now)) {
-        g_ctx.switch2_wake_adv_running.store(false);
+    if (switch2_usb_host_recently_active(now)) return;
+
+    // Product rule: waking is a single-client intent. If multiple clients are
+    // connected while the Switch is asleep, do not spam wake adverts or guess
+    // which player is trying to wake the console.
+    const int clients = active_client_count(now);
+    if (clients != 1) {
+        if (g_ctx.verbose) {
+            std::println("[wake] skipped: Switch quiet but {} clients are connected", clients);
+        }
         return;
     }
+
+    if (g_ctx.switch2_wake_adv_running.exchange(true)) return;
 
     uint64_t last = g_ctx.switch2_last_wake_adv_us.load(std::memory_order_relaxed);
     if (last && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US) {
@@ -583,7 +593,11 @@ void maybe_send_switch2_wake_advert(const char* reason) {
     }
 
     g_ctx.switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
-    std::println("[wake] waking up Switch 2");
+    if (g_ctx.verbose && reason && *reason) {
+        std::println("[wake] waking up Switch 2 ({})", reason);
+    } else {
+        std::println("[wake] waking up Switch 2");
+    }
     std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
 }
 

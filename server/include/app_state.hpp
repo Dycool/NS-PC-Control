@@ -156,6 +156,7 @@ void poll_switch2_sleep_state(uint64_t now = 0);
 void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
+int active_client_count(uint64_t now = 0);
 bool any_client_source_active(InputSource source, uint64_t now = 0);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);
 void clear_motion(ClientSession& c, int subpad);

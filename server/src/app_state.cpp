@@ -207,6 +207,19 @@ bool any_recent_client_active(uint64_t now) {
     return false;
 }
 
+int active_client_count(uint64_t now) {
+    if (now == 0) now = now_us();
+    int count = 0;
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        const ClientSession& c = g_ctx.clients[i];
+        if (c.active && c.last_rx_us != 0 && elapsed_us_saturated(now, c.last_rx_us) <= CLIENT_TIMEOUT_US) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool any_client_source_active(InputSource source, uint64_t now) {
     if (now == 0) now = now_us();
     for (int i = 0; i < MAX_CLIENTS; ++i) {

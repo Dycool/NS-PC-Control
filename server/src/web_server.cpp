@@ -59,6 +59,8 @@ struct SessionData {
     uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
     bool has_pending_rumble[4] = {};
+    uint64_t assigned_sleep_seq = 0;
+    bool had_slot = false;
 };
 
 static bool g_serve_http_webapp = false;
@@ -113,6 +115,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
             sd->ws_slot = -1; sd->ws_seq = 0; sd->ws_first = true;
+            sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+            sd->had_slot = false;
             std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
             std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
@@ -138,6 +142,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     if (sd->ws_slot < 0) {
                         sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                         if (sd->ws_slot >= 0) {
+                            sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+                            sd->had_slot = true;
                             std::println("[ws] Allocated WebSocket client to Slot {} (triggered by macro)", sd->ws_slot + 1);
                         }
                     }
@@ -162,6 +168,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     if (sd->ws_slot < 0) {
                         sd->ws_slot = allocate_client_session(now_us(), nullptr, true, InputSource::WebSocket);
                         if (sd->ws_slot >= 0) {
+                            sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+                            sd->had_slot = true;
                             std::println("[ws] Allocated WebSocket client to Slot {} (triggered by macro chunk)", sd->ws_slot + 1);
                         }
                     }
@@ -187,6 +195,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             if (sd->ws_slot < 0) {
                 sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                 if (sd->ws_slot >= 0) {
+                    sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+                    sd->had_slot = true;
                     std::println("[ws] Allocated WebSocket client to Slot {}", sd->ws_slot + 1);
                     wake_on_new_client = true;
                     for (int s = 0; s < 4; ++s) sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
@@ -237,10 +247,16 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_TIMER: {
-            // Keep the WebSocket TCP connection alive while the Switch is asleep.
-            // The sleep state machine may release the server slot, but the client
-            // connection itself should survive so the next touch/web input can
-            // allocate a fresh slot and trigger wake without reconnect churn.
+            const uint64_t sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+            if (sd->had_slot && sleep_seq != sd->assigned_sleep_seq) {
+                if (sd->ws_slot >= 0) {
+                    reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
+                    sd->ws_slot = -1;
+                }
+                lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL, nullptr, 0);
+                return -1;
+            }
+
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
