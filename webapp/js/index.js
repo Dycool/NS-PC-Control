@@ -45,7 +45,6 @@ window.onload = () => {
         document.getElementById('btnMacros').style.display = 'none';
         document.getElementById('btnTouchControls').style.display = 'inline-block';
         document.getElementById('btnEditor').style.display = 'inline-block';
-        document.getElementById('btnConnect').style.display = 'none';
     }
     const savedMode = localStorage.getItem('nswc_mode');
     if (savedMode) document.getElementById('kbMode').value = savedMode;

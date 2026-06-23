@@ -859,7 +859,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func connectWs() -> Bool {
         do {
             let url = try normalizeWsUrl(host)
-            let task = session.webSocketTask(with: url)
+            let task = session.webSocketTask(with: url, protocols: ["nspc-protocol"])
             webSocket = task
             task.resume()
             receiveLoop(task)

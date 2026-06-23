@@ -130,6 +130,7 @@ bool read_switch2_wakeup_config_file(const std::string& path, std::string& mac, 
 }
 
 bool load_switch2_wakeup_config(bool quiet_if_missing) {
+    if (g_ctx.bluetooth_disabled) return false;
     (void)quiet_if_missing;
     std::string mac, adv, hci, orig;
     if (!read_switch2_wakeup_config_file(g_ctx.switch2_wakeup_config_path, mac, adv, hci, &orig)) {
@@ -170,6 +171,21 @@ struct WakeCmdResult { int exit_code = -1; std::string output; };
 WakeCmdResult run_wake_command(const std::vector<std::string>& args, bool verbose, bool capture = false) {
     WakeCmdResult res;
     if (args.empty()) return res;
+    if (g_ctx.bluetooth_disabled) {
+        bool is_bt = false;
+        for (const auto& a : args) {
+            std::string al = a;
+            std::transform(al.begin(), al.end(), al.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (al == "rfkill" || al == "bluetoothctl" || al == "btmgmt" || al == "hcitool" || al == "hciconfig" || al.find("bluetooth") != std::string::npos) {
+                is_bt = true;
+                break;
+            }
+        }
+        if (is_bt) {
+            if (verbose) std::println("[exec] (blocked by -disable-bt) {}", args[0]);
+            return res;
+        }
+    }
     std::string cmd;
     for (const auto& a : args) cmd += a + " ";
     cmd += "2>&1";
@@ -225,6 +241,7 @@ std::string original_bt_mac_for_runtime(const std::string& hci) {
 }
 
 void restore_bluetooth_controller_state(const std::string& hci, bool restart_bluez) {
+    if (g_ctx.bluetooth_disabled) return;
     std::string current = read_hci_address(hci), original = original_bt_mac_for_runtime(hci);
     wake_disable_advertising_quiet(hci);
     run_wake_command({"rfkill", "unblock", "bluetooth"}, false);
@@ -550,6 +567,7 @@ void enter_switch2_wake_runtime_mode() {
 }
 
 void wait_for_bluetooth_runtime_ready(bool verbose) {
+    if (g_ctx.bluetooth_disabled) return;
     (void)verbose;
     for (int i = 0; i < 20 && g_ctx.running.load(); ++i) {
         WakeCmdResult show = run_wake_command({"bluetoothctl", "show"}, false, true);
@@ -561,6 +579,7 @@ void wait_for_bluetooth_runtime_ready(bool verbose) {
 }
 
 void enter_bluetooth_runtime_mode() {
+    if (g_ctx.bluetooth_disabled) return;
     if (!g_ctx.switch2_wake_config_loaded) load_switch2_wakeup_config(true);
     restore_bluetooth_controller_state(g_ctx.switch2_wake_hci_dev, true);
     wait_for_bluetooth_runtime_ready(g_ctx.verbose);
@@ -569,6 +588,7 @@ void enter_bluetooth_runtime_mode() {
 bool wake_bt_state_was_modified() { return g_bt_modified_for_wake.load(); }
 
 void restore_wake_bt_state() {
+    if (g_ctx.bluetooth_disabled) return;
     for (int i = 0; i < 50 && g_ctx.switch2_wake_adv_running.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (!g_ctx.switch2_wake_adv_enabled && !wake_bt_state_was_modified()) return;
     std::string hci = !g_saved_bt_hci.empty() ? g_saved_bt_hci : g_ctx.switch2_wake_hci_dev;

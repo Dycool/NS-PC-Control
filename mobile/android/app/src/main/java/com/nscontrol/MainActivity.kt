@@ -287,7 +287,10 @@ class MainActivity : AppCompatActivity() {
     private fun connectWs(): Boolean {
         return try {
             val wsUrl = normalizeWsUrl(host)
-            val req = Request.Builder().url(wsUrl).build()
+            val req = Request.Builder()
+                .url(wsUrl)
+                .addHeader("Sec-WebSocket-Protocol", "nspc-protocol")
+                .build()
             ws = client.newWebSocket(req, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     runOnUiThread {

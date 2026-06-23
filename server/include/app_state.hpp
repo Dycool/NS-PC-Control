@@ -85,6 +85,7 @@ struct ServerContext {
     std::string usb_serial;
     bool legacy_mode = false;
     bool bluetooth_pairing_enabled = false;
+    bool bluetooth_disabled = false;
     std::atomic<bool> gadget_setup_attempted{false};
     bool switch2_wake_adv_enabled = false;
     bool switch2_wakeup_setup_requested = false;
