@@ -6,12 +6,12 @@
 #include <string>
 #include <thread>
 
-void set_pad_present_flag(ns::ExtendedHIDReport3& r, bool present) {
+void set_pad_present_flag(ns::HIDReport& r, bool present) {
     if (present) r.input.vendor |= EXT_PAD_PRESENT;
     else r.input.vendor &= (uint8_t)~EXT_PAD_PRESENT;
 }
 
-void fill_extended_pad(ns::ExtendedHIDReport3& dst, const ns::HIDReport& input,
+void fill_extended_pad(ns::HIDReport& dst, const ns::HoriHIDReport& input,
                               bool present, const ns::MotionReport motion[3]) {
     dst.reset();
     dst.input = input;
@@ -60,7 +60,7 @@ int send_all_udp(SOCKET sock, const sockaddr_in& dest, std::span<const uint8_t> 
 }
 
 void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
-                                       const uint8_t hmac_key[32], uint32_t seq, bool legacy_udp) {
+                                const uint8_t hmac_key[32], uint32_t seq) {
     if (sock == INVALID_SOCKET) return;
     auto send_one = [&](void* pkt, size_t size, size_t auth_size) {
         uint8_t full_hmac[32];
@@ -71,18 +71,10 @@ void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     };
-    if (legacy_udp) {
-        ns::Packet pkt{};
-        pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::PROTO_VERSION;
-        pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT; pkt.seq = seq;
-        pkt.ts_us = ns::now_us(); pkt.report.reset();
-        send_one(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
-    } else {
-        ExtendedUdpPacketPc pkt{};
-        pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::WEB_PROTO_VERSION_3;
-        pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT; pkt.seq = seq;
-        pkt.timestamp_us = ns::now_us(); pkt.report.reset();
-        send_one(&pkt, sizeof(pkt), EXT_UDP_PACKET3_AUTH_SIZE);
-    }
+    ns::Packet pkt{};
+    pkt.magic = ns::PROTO_MAGIC; pkt.version = ns::WEB_PROTO_VERSION;
+    pkt.flags = ns::FLAG_RESET | ns::FLAG_DISCONNECT; pkt.seq = seq;
+    pkt.ts_us = ns::now_us(); pkt.report.reset();
+    send_one(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
 

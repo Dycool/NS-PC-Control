@@ -48,4 +48,4 @@ void set_key_pressed(const std::string& key, bool down);
 bool pressed_key_cache_contains(const std::string& key);
 void update_keyboard_state_cache();
 bool key_is_down(const std::string& name_raw);
-void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode);
+void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode);

@@ -345,7 +345,7 @@ bool step_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, Step& out
     return false;
 }
 
-bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HIDReport& out) {
+bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HoriHIDReport& out) {
     out.reset();
     Step st{};
     if (!step_at(steps, elapsed_ms, st)) return false;
@@ -453,7 +453,7 @@ std::string buttons_to_text(std::uint16_t buttons) {
     return out;
 }
 
-RecordFrame record_frame_from_report(const ns::HIDReport& report) {
+RecordFrame record_frame_from_report(const ns::HoriHIDReport& report) {
     auto axis_dir = [](std::uint8_t v) -> std::int8_t {
         if (v < 80) return -1;
         if (v > 176) return 1;
@@ -527,7 +527,7 @@ bool runtime_step(Runtime& rt, std::uint64_t now_us, Step& out) {
     return true;
 }
 
-bool runtime_report(Runtime& rt, std::uint64_t now_us, ns::HIDReport& out) {
+bool runtime_report(Runtime& rt, std::uint64_t now_us, ns::HoriHIDReport& out) {
     if (!rt.running) return false;
     std::uint64_t elapsed_ms = (now_us - rt.start_us) / 1000ULL;
     bool active = report_at(rt.steps, elapsed_ms, out);
@@ -557,7 +557,7 @@ void Recorder::append(const RecordFrame& frame, std::uint64_t duration_ms) {
     }
 }
 
-void Recorder::sample(const ns::HIDReport& report, std::uint64_t now_us, bool macro_playback_running) {
+void Recorder::sample(const ns::HoriHIDReport& report, std::uint64_t now_us, bool macro_playback_running) {
     if (!recording || macro_playback_running) return;
     RecordFrame frame = record_frame_from_report(report);
     if (!have_frame) {

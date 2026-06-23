@@ -208,12 +208,12 @@ std::string macro_record_stop() {
     return g_macro_recorder.stop(ns::now_us());
 }
 
-void macro_record_sample(const ns::HIDReport& report) {
+void macro_record_sample(const ns::HoriHIDReport& report) {
     std::lock_guard<std::mutex> lk(g_macro_mtx);
     g_macro_recorder.sample(report, ns::now_us(), g_macro_running.load(std::memory_order_relaxed));
 }
 
-bool poll_macro_record_p1(ns::HIDReport& report) {
+bool poll_macro_record_p1(ns::HoriHIDReport& report) {
     report.reset();
     auto sdl = g_sdlInput.snapshot();
     if (sdl[0].connected) {
@@ -229,17 +229,17 @@ bool poll_macro_record_p1(ns::HIDReport& report) {
 }
 
 void macro_record_sample_p1() {
-    ns::HIDReport report;
+    ns::HoriHIDReport report;
     poll_macro_record_p1(report);
     macro_record_sample(report);
 }
 
-bool apply_macro_override(ns::HIDReport logical_reports[4], bool present[4], bool has_motion[4]) {
+bool apply_macro_override(ns::HoriHIDReport logical_reports[4], bool present[4], bool has_motion[4]) {
     (void)has_motion;
     std::lock_guard<std::mutex> lk(g_macro_mtx);
     if (!g_macro_running.load(std::memory_order_relaxed)) return false;
     uint64_t elapsed_ms = (ns::now_us() - g_macro_start_us) / 1000ULL;
-    ns::HIDReport mr;
+    ns::HoriHIDReport mr;
     bool active = ns::macro::report_at(g_macro_steps, elapsed_ms, mr);
     for (int i = 0; i < 4; ++i) {
         logical_reports[i].reset();

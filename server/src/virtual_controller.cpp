@@ -158,12 +158,12 @@ void map_buttons(uint16_t in_btns, uint8_t hat, uint8_t out_btns[3]) {
     hat_to_pro_buttons(hat, out_btns);
 }
 
-void apply_input_controls_to_pro21(const ExtendedHIDReport& src, ProInputReport21& out) {
+void apply_input_controls_to_pro21(const HIDReport& src, ProInputReport21& out) {
     out.vibrator = PRO_VIBRATOR_REPORT; map_buttons(src.input.buttons, src.input.hat, out.buttons);
     pack_stick_12(out.left_stick, src.input.lx, src.input.ly); pack_stick_12(out.right_stick, src.input.rx, src.input.ry);
 }
 
-void build_standard_report(const ExtendedHIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, ProInputReport30& out) {
+void build_standard_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, ProInputReport30& out) {
     memset(&out, 0, sizeof(out)); out.id = RID_INPUT_STANDARD; out.timer = timer; out.conn_info = PRO_BAT_CON; out.vibrator = PRO_VIBRATOR_REPORT;
     map_buttons(src.input.buttons, src.input.hat, out.buttons);
     pack_stick_12(out.left_stick, src.input.lx, src.input.ly); pack_stick_12(out.right_stick, src.input.rx, src.input.ry);

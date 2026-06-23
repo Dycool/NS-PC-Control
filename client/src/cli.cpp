@@ -41,10 +41,8 @@ int cli_main(const std::vector<std::string>& original_args) {
     }
 
     std::string host_arg, macro_path, k_val = "single";
-    bool legacy_udp = false;
     CLI::App app{"ns-client --cli"};
     app.add_option("host", host_arg, "Target IP[:PORT]")->required();
-    app.add_flag("--hori", legacy_udp, "Send HORI-compatible packets");
     auto* opt_m = app.add_option("-m,--macro", macro_path);
     auto* opt_k = app.add_option("-k,--keyboard", k_val)->expected(0, 1);
 
@@ -71,7 +69,7 @@ int cli_main(const std::vector<std::string>& original_args) {
         std::println("Keyboard mode enabled ({}) - {} Player 1",
             k_val, cli_kb == KB_SINGLE ? "replaces" : "augments");
     }
-    std::print("{}", legacy_udp ? "Hori UDP mode: input only.\n" : "Extended UDP mode: rumble + motion.\n");
+    std::println("Extended UDP mode: rumble + motion.");
 
     uint8_t hmac_key[32];
     derive_key(ns::DEFAULT_SECRET, hmac_key);
@@ -99,7 +97,7 @@ int cli_main(const std::vector<std::string>& original_args) {
         return sent ? 0 : 1;
     }
 
-    ClientStreamConfig cfg{.host = host, .port = port, .force_legacy_udp = legacy_udp,
+    ClientStreamConfig cfg{.host = host, .port = port,
                            .gui_features = false, .print_cli_waiting_messages = true,
                            .idle_sleep_ms = 500, .hmac_key = hmac_key};
 

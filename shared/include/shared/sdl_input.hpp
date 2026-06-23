@@ -20,12 +20,12 @@ struct DigitalReleaseFilter {
     uint64_t hat_until = 0;
 
     void reset();
-    void apply(ns::HIDReport& r, uint64_t now);
+    void apply(ns::HoriHIDReport& r, uint64_t now);
 };
 
 struct SdlPadState {
     bool connected = false;
-    ns::HIDReport input{};
+    ns::HoriHIDReport input{};
     ns::MotionReport motion{};
     ns::MotionReport motion_samples[3]{};
     bool has_motion = false;
@@ -84,10 +84,10 @@ private:
 
     static Uint16 motor_word(uint8_t v);
     static bool button(SDL_Gamepad* pad, SDL_GamepadButton b);
-    static bool report_non_neutral(const ns::HIDReport& r);
+    static bool report_non_neutral(const ns::HoriHIDReport& r);
     static void push_motion_sample(Device& d, const ns::MotionReport& sample);
 
-    ns::HIDReport map_gamepad(const Device& d) const;
+    ns::HoriHIDReport map_gamepad(const Device& d) const;
     void apply_motion(Device& d, ns::MotionReport out_samples[3], bool& has_motion);
     Device* device_for_slot_locked(int slot);
     int first_free_slot_locked() const;

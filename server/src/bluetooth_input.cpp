@@ -87,11 +87,15 @@ static void publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
     c.report.reset();
     c.report.p1.input = pad.input;
     c.report.p1.has_motion = pad.has_motion ? 1 : 0;
-    c.report.p1.motion = pad.has_motion ? pad.motion : ns::MotionReport{};
+    if (pad.has_motion) {
+        c.report.p1.motion[0] = pad.motion_samples[0];
+        c.report.p1.motion[1] = pad.motion_samples[1];
+        c.report.p1.motion[2] = pad.motion_samples[2];
+    } else {
+        for (int j = 0; j < 3; ++j) c.report.p1.motion[j].reset();
+    }
     c.pad_present[0] = true;
     c.pad_last_present_us[0] = now;
-    if (pad.has_motion) set_motion_samples(c, 0, pad.motion_samples);
-    else clear_motion(c, 0);
     for (int s = 1; s < 4; ++s) {
         c.pad_present[s] = false;
         c.pad_last_present_us[s] = 0;

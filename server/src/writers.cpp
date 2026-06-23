@@ -17,7 +17,7 @@
 
 using namespace ns;
 
-static const ExtendedHIDReport& get_hid_report(const ClientSession& c, int s) {
+static const HIDReport& get_hid_report(const ClientSession& c, int s) {
     if (s == 0) return c.report.p1;
     if (s == 1) return c.report.p2;
     if (s == 2) return c.report.p3;
@@ -81,7 +81,7 @@ void writer_thread(std::stop_token stoken, int hz) {
         auto next = Clock::now() + tick;
         bool error_shown = false;
         bool timeout_printed[MAX_CLIENTS] = {};
-        HIDReport prev[HID_PORT_COUNT];
+        HoriHIDReport prev[HID_PORT_COUNT];
         for (int i = 0; i < HID_PORT_COUNT; ++i) prev[i].buttons = 0xFFFF;
 
         while (!stoken.stop_requested()) {
@@ -118,7 +118,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                 stale[c] = snap[c].active && snap[c].last_rx_us != 0 && client_idle_us > CLIENT_STALE_NEUTRAL_US;
                 if (stale[c]) {
                     snap[c].report.reset();
-                    std::fill(snap[c].has_motion, snap[c].has_motion + 4, false);
                 }
             }
 
@@ -153,7 +152,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     } else if (g_ctx.legacy_mode) {
                         if (input_is_neutral(get_hid_report(snap[c], s).input) && !macro_active_for_pad) continue;
                     } else {
-                        if (extended_is_neutral(get_hid_report(snap[c], s)) && !macro_active_for_pad) continue;
+                        if (hid_is_neutral(get_hid_report(snap[c], s)) && !macro_active_for_pad) continue;
                     }
 
                     int chosen = -1;
@@ -172,7 +171,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
-            ExtendedHIDReport out_reports[HID_PORT_COUNT];
+            HIDReport out_reports[HID_PORT_COUNT];
             for (int h = 0; h < HID_PORT_COUNT; ++h) {
                 if (hw_slots[h].client_idx != -1) {
                     out_reports[h] = get_hid_report(snap[hw_slots[h].client_idx], hw_slots[h].sub_idx);
@@ -183,13 +182,13 @@ void writer_thread(std::stop_token stoken, int hz) {
             bool ok = true;
             if (g_ctx.legacy_mode) {
                 for (int h = 0; h < HID_PORT_COUNT; ++h) {
-                    HIDReport r = out_reports[h].input;
+                    HoriHIDReport r = out_reports[h].input;
                     r.vendor = 0;
                     if (r == prev[h]) continue;
-                    ssize_t w = write(fds[h], &r, sizeof(HIDReport));
+                    ssize_t w = write(fds[h], &r, sizeof(HoriHIDReport));
                     if (w < 0) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
-                    } else if (w == (ssize_t)sizeof(HIDReport)) {
+                    } else if (w == (ssize_t)sizeof(HoriHIDReport)) {
                         prev[h] = r; ++g_ctx.hid_writes;
                         if (hw_slots[h].client_idx != -1) mark_switch2_usb_activity(now_stamp);
                     } else if (w > 0) ok = false;
@@ -215,14 +214,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                         bool standard_due = (rt[h].last_standard_report_us == 0) || (elapsed_us_saturated(now_stamp, rt[h].last_standard_report_us) >= PRO_REPORT_INTERVAL_US);
 
                         if ((port_needed || release_burst) ? standard_due : idle_due) {
-                            ExtendedHIDReport report_for_port;
+                            HIDReport report_for_port;
                             if (port_needed) report_for_port = out_reports[h];
                             const MotionReport* motion_for_port = nullptr;
                             bool has_motion_for_port = false;
                             if (port_needed) {
                                 int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
-                                motion_for_port = snap[cidx].motion_samples[sidx];
-                                has_motion_for_port = snap[cidx].has_motion[sidx];
+                                motion_for_port = get_hid_report(snap[cidx], sidx).motion;
+                                has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
                             }
                             ProInputReport30 std_in{};
                             build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in);
@@ -291,10 +290,10 @@ void writer_thread(std::stop_token stoken, int hz) {
     }
 
     if (g_ctx.legacy_mode) {
-        HIDReport neutral{}; neutral.reset();
+        HoriHIDReport neutral{}; neutral.reset();
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
             if (fds[i] >= 0) {
-                ssize_t unused = write(fds[i], &neutral, sizeof(HIDReport)); (void)unused;
+                ssize_t unused = write(fds[i], &neutral, sizeof(HoriHIDReport)); (void)unused;
                 close(fds[i]);
             }
         }

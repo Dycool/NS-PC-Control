@@ -240,7 +240,7 @@ bool key_is_down(const std::string& name_raw) {
     return pressed_key_cache_contains(name);
 }
 
-void apply_keyboard_to_report(ns::HIDReport& rep, bool override_mode) {
+void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     auto get = [](const std::string& btn) -> std::string {
         auto it = g_keyBindings.find(btn);

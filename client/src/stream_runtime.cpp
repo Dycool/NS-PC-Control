@@ -117,7 +117,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     }
 }
 
-void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint32_t& seq, bool legacy_packet, const ClientFrame& frame) {
+void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint32_t& seq, const ClientFrame& frame) {
     auto sign_and_send = [&](void* pkt, size_t size, size_t auth_size) {
         uint8_t full_hmac[32];
         hmac_sha256(std::span(hmac_key, 32), std::span(static_cast<const uint8_t*>(pkt), auth_size), std::span<uint8_t, 32>(full_hmac));
@@ -125,21 +125,13 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
         send_all_udp(sock, dest, std::span(static_cast<const uint8_t*>(pkt), size));
     };
 
-    if (legacy_packet) {
-        ns::Packet pkt{.magic = ns::PROTO_MAGIC, .version = ns::PROTO_VERSION, .flags = ns::FLAG_NONE, .seq = seq++, .ts_us = ns::now_us()};
-        pkt.report.reset();
-        pkt.report.p1 = frame.reports[0]; pkt.report.p2 = frame.reports[1];
-        pkt.report.p3 = frame.reports[2]; pkt.report.p4 = frame.reports[3];
-        sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
-    } else {
-        ExtendedUdpPacketPc pkt{.magic = ns::PROTO_MAGIC, .version = ns::WEB_PROTO_VERSION_3, .flags = ns::FLAG_NONE, .seq = seq++, .timestamp_us = ns::now_us()};
-        pkt.report.reset();
-        for (int i = 0; i < 4; ++i) {
-            ns::ExtendedHIDReport3* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
-            fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr);
-        }
-        sign_and_send(&pkt, sizeof(pkt), EXT_UDP_PACKET3_AUTH_SIZE);
+    ns::Packet pkt{.magic = ns::PROTO_MAGIC, .version = ns::WEB_PROTO_VERSION, .flags = ns::FLAG_NONE, .reserved = 0, .seq = seq++, .ts_us = ns::now_us()};
+    pkt.report.reset();
+    for (int i = 0; i < 4; ++i) {
+        ns::HIDReport* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
+        fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr);
     }
+    sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
 
 int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running, std::string* err_out) {
@@ -156,9 +148,8 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     }
     set_socket_nonblocking(sock);
 
-    const bool server_is_legacy = detect_server_is_legacy(sock, dest);
+    detect_server_is_legacy(sock, dest);
     if (g_serverLastReplyUs.load() == 0) return (err_out ? *err_out = "Server not reachable." : ""), closesocket(sock), 1;
-    const bool legacy_packet = cfg.force_legacy_udp || server_is_legacy;
     uint32_t seq = 0;
     RumbleManager rumble;
     DigitalReleaseFilter sdl_filters[4];
@@ -181,7 +172,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
 
         g_sdlInput.poll();
         ClientFrame frame;
-        build_client_frame(frame, sdl_filters, !legacy_packet, g_keyboardMode.load());
+        build_client_frame(frame, sdl_filters, true, g_keyboardMode.load());
 
         if (cfg.gui_features) {
             if (g_macro_recording.load(std::memory_order_relaxed)) macro_record_sample(frame.reports[0]);
@@ -190,9 +181,9 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             }
         }
 
-        send_client_frame(sock, dest, cfg.hmac_key, seq, legacy_packet, frame);
+        send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
-        if (!legacy_packet) rumble.update_timeouts(frame.controller_for_slot);
+        rumble.update_timeouts(frame.controller_for_slot);
         ++g_packetCount;
 
         const uint64_t now = ns::now_us();
@@ -220,13 +211,13 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     }
 
     rumble.stop_all();
-    send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++, legacy_packet);
+    send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++);
     closesocket(sock);
     return 0;
 }
 
-void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port, bool legacy_udp) {
-    ClientStreamConfig cfg{.host = std::move(host), .port = port, .force_legacy_udp = legacy_udp,
+void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port) {
+    ClientStreamConfig cfg{.host = std::move(host), .port = port,
                            .gui_features = true, .print_cli_waiting_messages = false,
                            .idle_sleep_ms = 50, .hmac_key = g_hmacKey};
     set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
@@ -259,7 +250,7 @@ std::expected<void, std::string> start_connection(const std::string& target) {
         g_senderThread.join();
     }
     g_senderRunning = true;
-    g_senderThread = std::thread(sender_thread_main, std::ref(g_senderRunning), host, (uint16_t)port, false);
+    g_senderThread = std::thread(sender_thread_main, std::ref(g_senderRunning), host, (uint16_t)port);
     return {};
 }
 

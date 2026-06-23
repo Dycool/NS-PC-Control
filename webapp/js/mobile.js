@@ -28,7 +28,7 @@ applyLayout();
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 5;
 const PAD_PRESENT = 1;
 const FLAG_SINGLE_PAD = 0x04;
-const EXT_REPORT_SIZE = 24, PACKET_SIZE = 116;
+const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
 const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
@@ -205,6 +205,7 @@ function sendPacket() {
     const sendButtons = normalizeSystemShortcuts(state.buttons);
     view.setUint16(off, sendButtons, true); view.setUint8(off+2, state.hat);
     view.setUint8(off+3, state.lx); view.setUint8(off+4, state.ly); view.setUint8(off+5, state.rx); view.setUint8(off+6, state.ry); view.setUint8(off+7, PAD_PRESENT);
+    for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(off + k, 0);
     for(let p=1; p<4; p++) {
         off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);
         view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);

@@ -27,7 +27,7 @@ void raise_process_priority();
 void raise_sender_priority();
 
 struct ClientFrame {
-    ns::HIDReport reports[4];
+    ns::HoriHIDReport reports[4];
     ns::MotionReport motion[4][3];
     bool present[4] = {false, false, false, false};
     bool has_motion[4] = {false, false, false, false};
@@ -40,7 +40,6 @@ struct ClientFrame {
 struct ClientStreamConfig {
     std::string host;
     int port = ns::DEFAULT_PORT;
-    bool force_legacy_udp = false;
     bool gui_features = false;
     bool print_cli_waiting_messages = false;
     int idle_sleep_ms = 50;
@@ -55,12 +54,11 @@ void send_client_frame(SOCKET sock,
                        const sockaddr_in& dest,
                        const uint8_t hmac_key[32],
                        uint32_t& seq,
-                       bool legacy_packet,
                        const ClientFrame& frame);
 int run_client_stream(const ClientStreamConfig& cfg,
                       std::atomic<bool>& running,
                       std::string* err_out = nullptr);
-void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port, bool legacy_udp);
+void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port);
 std::expected<void, std::string> start_connection(const std::string& target);
 void stop_connection();
 

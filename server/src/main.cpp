@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
     app.add_flag("--bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth controller input");
     app.add_flag("--revert", do_revert, "Revert host USB gadget boot configurations and reboot");
     app.add_flag("--upnp", do_upnp, "Forward UDP port via UPnP");
-    auto opt_w = app.add_option("-w", web_port, "Serve browser webapp on this port")->expected(0, 1);
+    auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag("-p", legacy_p, "")->group("");
 
     try {
@@ -153,6 +153,18 @@ int main(int argc, char** argv) {
         std::println(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT"); return 1;
     }
     serve_http_webapp = opt_w->count() > 0;
+    if (serve_http_webapp) {
+        if (!opt_w->results().empty() && !opt_w->results()[0].empty()) {
+            try {
+                web_port = std::stoi(opt_w->results()[0]);
+            } catch (...) {
+                std::println(stderr, "error: invalid web port value: {}", opt_w->results()[0]);
+                return 1;
+            }
+        } else {
+            web_port = 8080;
+        }
+    }
 
     if (do_revert) return run_revert_gadget_host() ? 0 : 1;
     if (g_ctx.switch2_wakeup_setup_requested) return run_switch2_wakeup_setup();
@@ -304,10 +316,10 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            uint8_t flags = 0; uint32_t seq = 0;
-            ExtendedMultiReport report; ExtendedMultiReport3 report3;
-            bool pad_present[4] = {}; bool is_report3 = false;
-            if (!parse_client_packet(udp_rx.data(), bytes, flags, seq, report, pad_present, is_report3, report3)) continue;
+                    uint8_t flags = 0; uint32_t seq = 0;
+            MultiReport report;
+            bool pad_present[4] = {};
+            if (!parse_client_packet(udp_rx.data(), bytes, flags, seq, report, pad_present)) continue;
 
             if (flags & FLAG_DISCONNECT) {
                 int cidx = -1;
@@ -335,7 +347,7 @@ int main(int argc, char** argv) {
             }
 
             if (cidx == -1) {
-                cidx = allocate_client_session(now, &sender, bytes != (ssize_t)PACKET_SIZE);
+                cidx = allocate_client_session(now, &sender, true);
                 if (cidx >= 0) {
                     wake_on_new_client = true;
                     if (g_ctx.verbose) std::println("New UDP client accepted into Slot {}", cidx + 1);
@@ -362,42 +374,21 @@ int main(int argc, char** argv) {
                         c.active = true; c.addr = sender; c.last_rx_us = now;
                     } else {
                         c.last_rx_us = now;
-                        if (bytes == (ssize_t)PACKET_SIZE) {
-                            c.uses_pad_presence = c.udp_rumble_enabled = false;
-                            std::fill(c.pad_present, c.pad_present + 4, false);
-                            std::fill(c.pad_last_present_us, c.pad_last_present_us + 4, 0);
-                            clear_all_motion(c);
-                            c.report = report; c.has_new_report = true;
-                        } else {
-                            c.uses_pad_presence = c.udp_rumble_enabled = true;
-                            if (is_report3) { c.report3 = report3; c.has_new_report3 = true; }
-                            else { c.report = report; c.has_new_report = true; }
+                        c.uses_pad_presence = c.udp_rumble_enabled = true;
+                        c.report = report; c.has_new_report = true;
 
-                            ExtendedHIDReport* dst_pads[4] = { &c.report.p1, &c.report.p2, &c.report.p3, &c.report.p4 };
-                            ExtendedHIDReport3* dst_pads3[4] = { &c.report3.p1, &c.report3.p2, &c.report3.p3, &c.report3.p4 };
-                            const ExtendedHIDReport* src_pads[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
-                            const ExtendedHIDReport3* src_pads3[4] = { &report3.p1, &report3.p2, &report3.p3, &report3.p4 };
+                        HIDReport* dst_pads[4] = { &c.report.p1, &c.report.p2, &c.report.p3, &c.report.p4 };
+                        const HIDReport* src_pads[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
 
-                            for (int s = 0; s < 4; ++s) {
-                                if (pad_present[s]) {
-                                    c.pad_present[s] = true; c.pad_last_present_us[s] = now;
-                                    if (is_report3) {
-                                        *dst_pads3[s] = *src_pads3[s];
-                                        if (src_pads3[s]->has_motion) set_motion_samples(c, s, src_pads3[s]->motion);
-                                        else clear_motion(c, s);
-                                    } else {
-                                        *dst_pads[s] = *src_pads[s];
-                                        if (src_pads[s]->has_motion) set_motion(c, s, src_pads[s]->motion);
-                                        else clear_motion(c, s);
-                                    }
-                                } else {
-                                    c.pad_present[s] = false;
-                                    uint64_t last_seen = c.pad_last_present_us[s];
-                                    if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US) {
-                                        if (is_report3) dst_pads3[s]->reset();
-                                        else dst_pads[s]->reset();
-                                        clear_motion(c, s);
-                                    }
+                        for (int s = 0; s < 4; ++s) {
+                            if (pad_present[s]) {
+                                c.pad_present[s] = true; c.pad_last_present_us[s] = now;
+                                *dst_pads[s] = *src_pads[s];
+                            } else {
+                                c.pad_present[s] = false;
+                                uint64_t last_seen = c.pad_last_present_us[s];
+                                if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US) {
+                                    dst_pads[s]->reset();
                                 }
                             }
                         }
@@ -409,7 +400,7 @@ int main(int argc, char** argv) {
             if (!accepted) continue;
             ++g_ctx.pkts_rx;
             if (wake_on_new_client) maybe_send_switch2_wake_advert("client connected via UDP input");
-            if (bytes != (ssize_t)PACKET_SIZE) flush_rumble_to_udp(sock, cidx);
+            flush_rumble_to_udp(sock, cidx);
         }
     }
 

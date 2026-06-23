@@ -37,7 +37,7 @@ std::expected<void, std::string> upsert_macro_entry(ns::macro::Entry e, bool for
 void poll_macro_entry_hotkeys();
 void macro_record_start();
 std::string macro_record_stop();
-void macro_record_sample(const ns::HIDReport& report);
-bool poll_macro_record_p1(ns::HIDReport& report);
+void macro_record_sample(const ns::HoriHIDReport& report);
+bool poll_macro_record_p1(ns::HoriHIDReport& report);
 void macro_record_sample_p1();
-bool apply_macro_override(ns::HIDReport logical_reports[4], bool present[4], bool has_motion[4]);
+bool apply_macro_override(ns::HoriHIDReport logical_reports[4], bool present[4], bool has_motion[4]);

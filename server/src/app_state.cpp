@@ -75,32 +75,43 @@ void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
     if (c.active && (c.last_rx_us == 0 || c.last_rx_us > now)) c.last_rx_us = now;
 }
 
+static HIDReport* get_pad_report(ClientSession& c, int subpad) {
+    if (subpad == 0) return &c.report.p1;
+    if (subpad == 1) return &c.report.p2;
+    if (subpad == 2) return &c.report.p3;
+    if (subpad == 3) return &c.report.p4;
+    return nullptr;
+}
+
 void clear_motion(ClientSession& c, int subpad) {
-    if (subpad < 0 || subpad >= 4) return;
-    for (int i = 0; i < 3; ++i) c.motion_samples[subpad][i].reset();
-    c.has_motion[subpad] = false; c.motion_last_collect_us[subpad] = 0;
+    auto pad = get_pad_report(c, subpad);
+    if (!pad) return;
+    for (int i = 0; i < 3; ++i) pad->motion[i].reset();
+    pad->has_motion = 0;
 }
 
 void clear_all_motion(ClientSession& c) { for (int s = 0; s < 4; ++s) clear_motion(c, s); }
 
 void set_motion(ClientSession& c, int subpad, const MotionReport& motion) {
-    if (subpad < 0 || subpad >= 4) return;
-    if (!c.has_motion[subpad]) {
-        for (int i = 0; i < 3; ++i) c.motion_samples[subpad][i] = motion;
+    auto pad = get_pad_report(c, subpad);
+    if (!pad) return;
+    if (!pad->has_motion) {
+        for (int i = 0; i < 3; ++i) pad->motion[i] = motion;
     } else {
-        c.motion_samples[subpad][0] = c.motion_samples[subpad][1];
-        c.motion_samples[subpad][1] = c.motion_samples[subpad][2];
-        c.motion_samples[subpad][2] = motion;
+        pad->motion[0] = pad->motion[1];
+        pad->motion[1] = pad->motion[2];
+        pad->motion[2] = motion;
     }
-    c.has_motion[subpad] = true; c.motion_last_collect_us[subpad] = now_us();
+    pad->has_motion = 1;
 }
 
 void set_motion_samples(ClientSession& c, int subpad, const MotionReport samples[3]) {
-    if (subpad < 0 || subpad >= 4 || !samples) return;
-    c.motion_samples[subpad][0] = samples[0];
-    c.motion_samples[subpad][1] = samples[1];
-    c.motion_samples[subpad][2] = samples[2];
-    c.has_motion[subpad] = true; c.motion_last_collect_us[subpad] = now_us();
+    auto pad = get_pad_report(c, subpad);
+    if (!pad || !samples) return;
+    pad->motion[0] = samples[0];
+    pad->motion[1] = samples[1];
+    pad->motion[2] = samples[2];
+    pad->has_motion = 1;
 }
 
 bool rate_allow(uint32_t ip);
@@ -183,7 +194,7 @@ bool server_macro_running(int client_idx, int subpad) {
     return true;
 }
 
-void server_macro_apply(int client_idx, int subpad, HIDReport& live) {
+void server_macro_apply(int client_idx, int subpad, HoriHIDReport& live) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return;
     std::lock_guard<std::mutex> lk(g_ctx.server_macro_mtx);
     ServerMacroRuntime& rt = g_ctx.server_macros[client_idx][subpad];
@@ -219,7 +230,7 @@ void server_macro_stop_all_for_client(int client_idx) {
 
 void reset_client_session_locked(ClientSession& c) {
     c.active = false; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
-    c.report.reset(); c.report3.reset(); c.has_new_report = c.has_new_report3 = false;
+    c.report.reset(); c.has_new_report = false;
     clear_all_motion(c);
     c.uses_pad_presence = c.udp_rumble_enabled = false;
     for (int s = 0; s < 4; ++s) {
@@ -244,7 +255,7 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         if (!g_ctx.clients[i].active || elapsed_us_over(now, g_ctx.clients[i].last_rx_us, CLIENT_TIMEOUT_US)) {
             g_ctx.clients[i].active = true; g_ctx.clients[i].first_pkt = true; g_ctx.clients[i].expected_seq = 0;
             g_ctx.clients[i].last_rx_us = now; g_ctx.clients[i].addr = addr ? *addr : sockaddr_in{};
-            g_ctx.clients[i].report.reset(); g_ctx.clients[i].report3.reset();
+            g_ctx.clients[i].report.reset();
             clear_all_motion(g_ctx.clients[i]);
             g_ctx.clients[i].uses_pad_presence = uses_pad_presence; g_ctx.clients[i].udp_rumble_enabled = false;
             for (int s = 0; s < 4; ++s) {
@@ -260,7 +271,7 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
     return -1;
 }
 
-bool input_is_neutral(const HIDReport& r) {
+bool input_is_neutral(const HoriHIDReport& r) {
     return r.buttons == 0 && r.hat == HAT_NEUTRAL && r.lx == 128 && r.ly == 128 && r.rx == 128 && r.ry == 128;
 }
 
@@ -269,69 +280,30 @@ bool motion_is_neutral(const MotionReport& m) {
            std::abs((int)m.gx) < 64 && std::abs((int)m.gy) < 64 && std::abs((int)m.gz) < 64;
 }
 
-bool extended_is_neutral(const ExtendedHIDReport& r) {
-    return input_is_neutral(r.input) && (!r.has_motion || motion_is_neutral(r.motion));
-}
-
-void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out) {
-    out.reset();
-    const ns::HIDReport* src[4] = {&in.p1, &in.p2, &in.p3, &in.p4};
-    ns::ExtendedHIDReport* dst[4] = {&out.p1, &out.p2, &out.p3, &out.p4};
-    for (int i = 0; i < 4; ++i) {
-        dst[i]->input = *src[i]; dst[i]->motion.reset(); dst[i]->has_motion = 0;
-    }
-}
-
-void extended3_to_extended_latest(const ns::ExtendedHIDReport3& in, ns::ExtendedHIDReport& out) {
-    out.reset(); out.input = in.input; out.has_motion = in.has_motion;
-    if (in.has_motion) out.motion = in.motion[2];
+bool hid_is_neutral(const HIDReport& r) {
+    return input_is_neutral(r.input) && (!r.has_motion || (motion_is_neutral(r.motion[0]) && motion_is_neutral(r.motion[1]) && motion_is_neutral(r.motion[2])));
 }
 
 bool parse_client_packet(const uint8_t* data, size_t len,
                          uint8_t& flags, uint32_t& seq,
-                         ns::ExtendedMultiReport& report,
-                         bool pad_present[4],
-                         bool& is_report3,
-                         ns::ExtendedMultiReport3& report3) {
+                         ns::MultiReport& report,
+                         bool pad_present[4]) {
     if (len < 20) return false;
     uint32_t magic; std::memcpy(&magic, data, 4);
     if (magic != PROTO_MAGIC) return false;
 
     uint8_t ver = data[4]; flags = data[5];
     std::memcpy(&seq, data + 8, 4);
-    report.reset(); report3.reset(); is_report3 = false;
+    report.reset();
     std::fill(pad_present, pad_present + 4, false);
 
-    if (ver == PROTO_VERSION && len == PACKET_SIZE) {
-        ns::MultiReport legacy; std::memcpy(&legacy, data + 20, sizeof(ns::MultiReport));
-        legacy_multi_to_extended(legacy, report);
-        for (int s = 0; s < 4; ++s) pad_present[s] = !extended_is_neutral((&report.p1)[s]);
-        return true;
-    }
-
-    constexpr size_t EXT_UDP_PACKET_SIZE = 20 + sizeof(ns::ExtendedMultiReport) + HMAC_TAG_SIZE;
-    if ((ver == WEB_PROTO_VERSION || ver == PROTO_VERSION) && (len == WEB_PACKET_SIZE || len == EXT_UDP_PACKET_SIZE)) {
-        std::memcpy(&report, data + 20, sizeof(ns::ExtendedMultiReport));
-        for (int s = 0; s < 4; ++s) pad_present[s] = (data[20 + s * sizeof(ns::ExtendedHIDReport) + 7] & 0x01) != 0;
-        if (flags & FLAG_SINGLE_PAD) {
-            report.p2.reset(); report.p3.reset(); report.p4.reset();
-            pad_present[0] = true; pad_present[1] = pad_present[2] = pad_present[3] = false;
-        }
-        return true;
-    }
-
-    constexpr size_t EXT3_UDP_PACKET_SIZE = 20 + sizeof(ns::ExtendedMultiReport3) + HMAC_TAG_SIZE;
-    if (ver == WEB_PROTO_VERSION_3 && (len == WEB_PACKET3_SIZE || len == EXT3_UDP_PACKET_SIZE)) {
-        is_report3 = true; std::memcpy(&report3, data + 20, sizeof(ns::ExtendedMultiReport3));
-        const ns::ExtendedHIDReport3* src3[4] = { &report3.p1, &report3.p2, &report3.p3, &report3.p4 };
-        ns::ExtendedHIDReport* dst1[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
+    if ((ver == WEB_PROTO_VERSION || ver == WEB_PROTO_VERSION_3) && (len == WEB_PACKET_SIZE || len == PACKET_SIZE)) {
+        std::memcpy(&report, data + 20, sizeof(ns::MultiReport));
         for (int s = 0; s < 4; ++s) {
-            pad_present[s] = (data[20 + s * sizeof(ns::ExtendedHIDReport3) + 7] & 0x01) != 0;
-            extended3_to_extended_latest(*src3[s], *dst1[s]);
+            pad_present[s] = (data[20 + s * sizeof(ns::HIDReport) + 7] & 0x01) != 0;
         }
         if (flags & FLAG_SINGLE_PAD) {
             report.p2.reset(); report.p3.reset(); report.p4.reset();
-            report3.p2.reset(); report3.p3.reset(); report3.p4.reset();
             pad_present[0] = true; pad_present[1] = pad_present[2] = pad_present[3] = false;
         }
         return true;

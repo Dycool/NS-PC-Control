@@ -11,9 +11,9 @@
 const PROTO_MAGIC = 0x4E535743;
 const PROTO_VERSION = 5;
 const PAD_PRESENT = 1;
-const EXT_REPORT_SIZE = 24;
-const PACKET_SIZE = 116;
-const PACKET_AUTH_SIZE = 52;
+const EXT_REPORT_SIZE = 48;
+const PACKET_SIZE = 212;
+const PACKET_AUTH_SIZE = 196;
 const BTN_Y = 1<<0, BTN_B = 1<<1, BTN_A = 1<<2, BTN_X = 1<<3;
 const BTN_L = 1<<4, BTN_R = 1<<5, BTN_ZL = 1<<6, BTN_ZR = 1<<7;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;

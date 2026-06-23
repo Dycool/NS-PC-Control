@@ -53,7 +53,7 @@ void DigitalReleaseFilter::reset() {
     hat_until = 0;
 }
 
-void DigitalReleaseFilter::apply(ns::HIDReport& r, uint64_t now) {
+void DigitalReleaseFilter::apply(ns::HoriHIDReport& r, uint64_t now) {
     for (int i = 0; i < 16; ++i) {
         uint16_t bit = (uint16_t)(1u << i);
         if (r.buttons & bit) {
@@ -251,8 +251,8 @@ void SDLInputManager::stop_all_rumble() {
 Uint16 SDLInputManager::motor_word(uint8_t v) { return (Uint16)((uint32_t)v * 65535u / 255u); }
 bool SDLInputManager::button(SDL_Gamepad* pad, SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); }
 
-ns::HIDReport SDLInputManager::map_gamepad(const Device& d) const {
-        ns::HIDReport r;
+ns::HoriHIDReport SDLInputManager::map_gamepad(const Device& d) const {
+        ns::HoriHIDReport r;
         r.reset();
         SDL_Gamepad* pad = d.pad;
         if (!pad) return r;
@@ -299,7 +299,7 @@ ns::HIDReport SDLInputManager::map_gamepad(const Device& d) const {
         return r;
     }
 
-bool SDLInputManager::report_non_neutral(const ns::HIDReport& r) {
+bool SDLInputManager::report_non_neutral(const ns::HoriHIDReport& r) {
         return r.buttons != 0 || r.hat != ns::HAT_NEUTRAL ||
                r.lx != 128 || r.ly != 128 || r.rx != 128 || r.ry != 128;
     }

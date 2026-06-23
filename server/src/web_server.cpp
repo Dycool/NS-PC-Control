@@ -152,9 +152,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             }
 
             uint8_t flags = 0; uint32_t seq = 0;
-            ExtendedMultiReport report{}; ExtendedMultiReport3 report3{};
-            bool is_report3 = false, pad_present[4] = {};
-            if (!parse_client_packet(payload, len, flags, seq, report, pad_present, is_report3, report3)) break;
+            MultiReport report{};
+            bool pad_present[4] = {};
+            if (!parse_client_packet(payload, len, flags, seq, report, pad_present)) break;
 
             if (!sd->ws_first && !(flags & FLAG_RESET) && (int32_t)(seq - sd->ws_seq) < 0) break;
             sd->ws_first = false; sd->ws_seq = seq + 1;
@@ -178,23 +178,15 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 c.active = true; c.uses_pad_presence = true; c.last_rx_us = now;
 
                 if (flags & FLAG_RESET) {
-                    c.report.reset(); c.report3.reset(); c.first_pkt = true;
+                    c.report.reset(); c.first_pkt = true;
                     clear_all_motion(c);
                     for (int s = 0; s < 4; ++s) { c.pad_present[s] = false; c.pad_last_present_us[s] = 0; }
                 }
 
-                if (is_report3) {
-                    if (c.first_pkt || memcmp(&c.report3, &report3, sizeof(ExtendedMultiReport3)) != 0) {
-                        c.report3 = report3; c.report = report;
-                        c.has_new_report3 = c.has_new_report = true; c.first_pkt = false;
-                        enable_udp_rumble_state(c);
-                    }
-                } else {
-                    if (c.first_pkt || memcmp(&c.report, &report, sizeof(ExtendedMultiReport)) != 0) {
-                        c.report = report;
-                        c.has_new_report = true; c.first_pkt = false;
-                        enable_udp_rumble_state(c);
-                    }
+                if (c.first_pkt || memcmp(&c.report, &report, sizeof(MultiReport)) != 0) {
+                    c.report = report;
+                    c.has_new_report = true; c.first_pkt = false;
+                    enable_udp_rumble_state(c);
                 }
 
                 for (int s = 0; s < 4; ++s) {

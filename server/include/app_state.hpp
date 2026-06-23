@@ -46,13 +46,8 @@ struct ClientSession {
     uint64_t last_rx_us = 0;
     uint32_t expected_seq = 0;
     bool first_pkt = true;
-    ns::ExtendedMultiReport report{};
-    ns::ExtendedMultiReport3 report3{};
+    ns::MultiReport report{};
     bool has_new_report = false;
-    bool has_new_report3 = false;
-    ns::MotionReport motion_samples[4][3]{};
-    bool has_motion[4]{};
-    uint64_t motion_last_collect_us[4]{};
     ns::RumblePacket rumble[4]{};
     ns::PrecisionRumblePacket precision_rumble[4]{};
     uint32_t rumble_seq[4]{};
@@ -135,14 +130,10 @@ void reset_client_session(int client_idx);
 int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence);
 bool parse_client_packet(const uint8_t* data, size_t len,
                          uint8_t& flags, uint32_t& seq,
-                         ns::ExtendedMultiReport& report,
-                         bool pad_present[4],
-                         bool& is_report3,
-                         ns::ExtendedMultiReport3& report3);
-void legacy_multi_to_extended(const ns::MultiReport& in, ns::ExtendedMultiReport& out);
-void extended3_to_extended_latest(const ns::ExtendedHIDReport3& in, ns::ExtendedHIDReport& out);
-bool extended_is_neutral(const ns::ExtendedHIDReport& r);
-bool input_is_neutral(const ns::HIDReport& r);
+                         ns::MultiReport& report,
+                         bool pad_present[4]);
+bool hid_is_neutral(const ns::HIDReport& r);
+bool input_is_neutral(const ns::HoriHIDReport& r);
 bool motion_is_neutral(const ns::MotionReport& m);
 
 
@@ -153,6 +144,6 @@ int server_macro_client_for_sender(const sockaddr_in& sender);
 bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const sockaddr_in& sender);
 bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t> data);
 bool server_macro_running(int client_idx, int subpad);
-void server_macro_apply(int client_idx, int subpad, ns::HIDReport& live);
+void server_macro_apply(int client_idx, int subpad, ns::HoriHIDReport& live);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);
 void server_macro_stop_all_for_client(int client_idx);

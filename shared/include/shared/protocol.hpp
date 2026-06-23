@@ -90,14 +90,14 @@ enum Flags : uint8_t {
     FLAG_DISCONNECT = 0x08, // Authenticated UDP client is leaving; free its slot now.
 };
 
-// Extended clients set this in HIDReport::vendor inside ExtendedHIDReport.
+// Extended clients set this in HoriHIDReport::vendor inside HIDReport.
 // Server code should clear vendor before writing legacy 8-byte reports.
 static constexpr uint8_t EXT_PAD_PRESENT = 0x01;
 
 // ── Legacy input reports ─────────────────────────────────────────────────────
 // Exactly 8 bytes. This is the complete HID report written to the old
 // legacy 8-byte gadget endpoints.
-struct HIDReport {
+struct HoriHIDReport {
     uint16_t buttons = 0;
     uint8_t  hat = HAT_NEUTRAL;
     uint8_t  lx = 128;
@@ -113,13 +113,9 @@ struct HIDReport {
         vendor = 0;
     }
 
-    bool operator==(const HIDReport&) const = default;
+    bool operator==(const HoriHIDReport&) const = default;
 } NS_PACKED_ATTR;
 
-struct MultiReport {
-    HIDReport p1, p2, p3, p4;
-    void reset() noexcept { p1.reset(); p2.reset(); p3.reset(); p4.reset(); }
-} NS_PACKED_ATTR;
 
 // ── Optional motion / modern reports ─────────────────────────────────────────
 struct MotionReport {
@@ -132,30 +128,8 @@ struct MotionReport {
     }
 } NS_PACKED_ATTR;
 
-struct ExtendedHIDReport {
-    HIDReport input{};      // 8 bytes; input.vendor bit 0 = EXT_PAD_PRESENT.
-    MotionReport motion{};  // 12 bytes.
-    uint8_t has_motion = 0;
-    uint8_t reserved[3]{};
-
-    void reset() noexcept {
-        input.reset();
-        motion.reset();
-        has_motion = 0;
-        reserved[0] = reserved[1] = reserved[2] = 0;
-    }
-} NS_PACKED_ATTR;
-
-struct ExtendedMultiReport {
-    ExtendedHIDReport p1, p2, p3, p4;
-    void reset() noexcept { p1.reset(); p2.reset(); p3.reset(); p4.reset(); }
-} NS_PACKED_ATTR;
-
-// New extended report used by WEB_PROTO_VERSION_3.  It carries the three
-// Pro-controller IMU samples explicitly instead of making the backend synthesize
-// sample 0/1 from a single latest motion value.
-struct ExtendedHIDReport3 {
-    HIDReport input{};        // 8 bytes; input.vendor bit 0 = EXT_PAD_PRESENT.
+struct HIDReport {
+    HoriHIDReport input{};        // 8 bytes; input.vendor bit 0 = EXT_PAD_PRESENT.
     MotionReport motion[3]{}; // 3x 12 bytes, oldest -> newest.
     uint8_t has_motion = 0;
     uint8_t reserved[3]{};
@@ -168,8 +142,8 @@ struct ExtendedHIDReport3 {
     }
 } NS_PACKED_ATTR;
 
-struct ExtendedMultiReport3 {
-    ExtendedHIDReport3 p1, p2, p3, p4;
+struct MultiReport {
+    HIDReport p1, p2, p3, p4;
     void reset() noexcept { p1.reset(); p2.reset(); p3.reset(); p4.reset(); }
 } NS_PACKED_ATTR;
 
@@ -205,13 +179,12 @@ struct ServerInfoReply {
     uint16_t udp_hz = PRO_UDP_HZ;
     uint8_t  reserved[6]{};
 } NS_PACKED_ATTR;
-
-// ── Legacy UDP packet ────────────────────────────────────────────────────────
+// ── Unified UDP packet ───────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;
-    uint8_t     version = PROTO_VERSION;
+    uint8_t     version = WEB_PROTO_VERSION;
     uint8_t     flags = FLAG_NONE;
-    uint16_t    autofire_mask = 0;
+    uint16_t    reserved = 0;
     uint32_t    seq = 0;
     uint64_t    ts_us = 0;
     MultiReport report{};
@@ -221,30 +194,20 @@ struct Packet {
 static constexpr std::size_t PACKET_SIZE      = sizeof(Packet);
 static constexpr std::size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
 
-static constexpr std::size_t EXT_REPORT_SIZE   = sizeof(ExtendedHIDReport);
-static constexpr std::size_t EXT_MULTI_SIZE    = sizeof(ExtendedMultiReport);
-static constexpr std::size_t EXT3_REPORT_SIZE  = sizeof(ExtendedHIDReport3);
-static constexpr std::size_t EXT3_MULTI_SIZE   = sizeof(ExtendedMultiReport3);
-static constexpr std::size_t WEB_PACKET_SIZE   = 20 + sizeof(ExtendedMultiReport);
-static constexpr std::size_t WEB_PACKET3_SIZE  = 20 + sizeof(ExtendedMultiReport3);
+static constexpr std::size_t REPORT_SIZE   = sizeof(HIDReport);
+static constexpr std::size_t WEB_PACKET_SIZE   = PACKET_AUTH_SIZE;
 
 // ── Hard wire-layout checks ──────────────────────────────────────────────────
-static_assert(sizeof(HIDReport) == 8,
-              "HIDReport must stay 8 bytes for legacy gadget reports");
-static_assert(sizeof(MultiReport) == 32,
-              "MultiReport must be four 8-byte HID reports");
+static_assert(sizeof(HoriHIDReport) == 8,
+              "HoriHIDReport must stay 8 bytes for legacy gadget reports");
 static_assert(sizeof(MotionReport) == 12,
               "MotionReport wire layout changed");
-static_assert(sizeof(ExtendedHIDReport) == 24,
-              "ExtendedHIDReport wire layout changed");
-static_assert(sizeof(ExtendedMultiReport) == 96,
-              "ExtendedMultiReport wire layout changed");
-static_assert(sizeof(ExtendedHIDReport3) == 48,
-              "ExtendedHIDReport3 wire layout changed");
-static_assert(sizeof(ExtendedMultiReport3) == 192,
-              "ExtendedMultiReport3 wire layout changed");
-static_assert(sizeof(Packet) == 68,
-              "Legacy Packet wire layout changed");
+static_assert(sizeof(HIDReport) == 48,
+              "HIDReport wire layout changed");
+static_assert(sizeof(MultiReport) == 192,
+              "MultiReport wire layout changed");
+static_assert(sizeof(Packet) == 228,
+              "Packet wire layout changed");
 static_assert(sizeof(RumblePacket) == 8,
               "RumblePacket wire layout changed");
 static_assert(sizeof(PrecisionRumblePacket) == 20,

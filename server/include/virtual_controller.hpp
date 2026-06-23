@@ -104,12 +104,12 @@ void fill_neutral_controls(ProInputReport21& r);
 uint16_t axis8_to_12(uint8_t v);
 uint8_t invert_axis8_centered(uint8_t v);
 void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8);
-bool input_is_neutral(const ns::HIDReport& r);
+bool input_is_neutral(const ns::HoriHIDReport& r);
 bool motion_is_neutral(const ns::MotionReport& m);
-bool extended_is_neutral(const ns::ExtendedHIDReport& r);
+bool hid_is_neutral(const ns::HIDReport& r);
 void hat_to_pro_buttons(uint8_t hat, uint8_t buttons[3]);
-void apply_input_controls_to_pro21(const ns::ExtendedHIDReport& src, ProInputReport21& out);
-void build_standard_report(const ns::ExtendedHIDReport& src,
+void apply_input_controls_to_pro21(const ns::HIDReport& src, ProInputReport21& out);
+void build_standard_report(const ns::HIDReport& src,
                            const ns::MotionReport motion_samples[3],
                            bool has_motion,
                            bool imu_enabled,

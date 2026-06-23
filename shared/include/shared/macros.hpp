@@ -129,7 +129,7 @@ bool validate_to_pretty_json(const std::string& raw_text,
                              const std::string& fallback_name = "Macro");
 std::uint64_t total_ms(const std::vector<Step>& steps);
 bool step_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, Step& out);
-bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HIDReport& out);
+bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::HoriHIDReport& out);
 
 using NormalizeHotkeyFn = std::string (*)(const std::string&);
 
@@ -148,7 +148,7 @@ struct RecordFrame {
     bool operator==(const RecordFrame&) const = default;
 };
 std::string buttons_to_text(std::uint16_t buttons);
-RecordFrame record_frame_from_report(const ns::HIDReport& report);
+RecordFrame record_frame_from_report(const ns::HoriHIDReport& report);
 void append_token(std::string& out, const char* token);
 std::string record_frame_to_text(const RecordFrame& f);
 
@@ -162,7 +162,7 @@ struct Recorder {
 
     void start(std::uint64_t now_us);
     void append(const RecordFrame& frame, std::uint64_t duration_ms);
-    void sample(const ns::HIDReport& report, std::uint64_t now_us, bool macro_playback_running = false);
+    void sample(const ns::HoriHIDReport& report, std::uint64_t now_us, bool macro_playback_running = false);
     std::string stop(std::uint64_t now_us);
 };
 
@@ -176,7 +176,7 @@ void runtime_start(Runtime& rt, std::vector<Step> parsed_steps, std::uint64_t no
 bool runtime_start_text(Runtime& rt, const std::string& raw_text, std::uint64_t now_us);
 bool runtime_running(Runtime& rt, std::uint64_t now_us, std::uint64_t grace_ms = 120);
 bool runtime_step(Runtime& rt, std::uint64_t now_us, Step& out);
-bool runtime_report(Runtime& rt, std::uint64_t now_us, ns::HIDReport& out);
+bool runtime_report(Runtime& rt, std::uint64_t now_us, ns::HoriHIDReport& out);
 
 } // namespace macro
 } // namespace ns
