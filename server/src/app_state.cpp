@@ -81,6 +81,16 @@ bool any_recent_client_active(uint64_t now) {
     return false;
 }
 
+bool any_client_source_active(InputSource source, uint64_t now) {
+    if (now == 0) now = now_us();
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        const ClientSession& c = g_ctx.clients[i];
+        if (c.active && c.source == source && c.last_rx_us != 0 && elapsed_us_saturated(now, c.last_rx_us) <= CLIENT_TIMEOUT_US) return true;
+    }
+    return false;
+}
+
 void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
     if (c.active && (c.last_rx_us == 0 || c.last_rx_us > now)) c.last_rx_us = now;
 }

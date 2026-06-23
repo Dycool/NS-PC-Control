@@ -1,5 +1,6 @@
 #include "bluetooth_input.hpp"
 #include "app_state.hpp"
+#include "gadget_wakeup.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -144,14 +145,6 @@ bt_quiet 4s bluetoothctl discoverable off
     });
 }
 
-static void disconnect_connected_bluetooth_gamepads() {
-    int r = std::system("bluetoothctl devices 2>/dev/null | while read -r _ mac name; do "
-                        "case \"$name\" in *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*) "
-                        "bluetoothctl info \"$mac\" 2>/dev/null | grep -q 'Connected: yes' && "
-                        "bluetoothctl disconnect \"$mac\" >/dev/null 2>&1;; esac; done");
-    (void)r;
-}
-
 using namespace ns;
 
 #ifdef NS_ENABLE_SDL_BT
@@ -236,10 +229,6 @@ void bluetooth_input_thread(std::stop_token stoken) {
     std::array<uint32_t, 4> last_rumble_seq{};
     std::array<uint64_t, 4> rumble_until_us{};
     bool waiting_logged = false;
-    uint64_t seen_suspend_disconnect_seq = g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
-    bool switch_suspend_disconnect_active = false;
-    uint64_t last_bt_disconnect_us = 0;
-
     std::println("[bt] Bluetooth/local controller input enabled");
 
     while (!stoken.stop_requested()) {
@@ -248,37 +237,13 @@ void bluetooth_input_thread(std::stop_token stoken) {
         uint64_t now = now_us();
         bool any_waiting = false;
 
-        uint64_t suspend_seq = g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
-        if (suspend_seq != seen_suspend_disconnect_seq) {
-            seen_suspend_disconnect_seq = suspend_seq;
-            switch_suspend_disconnect_active = true;
-            last_bt_disconnect_us = 0;
-            std::println("[bt] Switch USB host suspended/disconnected; disconnecting local Bluetooth controllers");
-        }
-        if (switch_suspend_disconnect_active && g_ctx.switch2_usb_host_connected.load(std::memory_order_relaxed)) {
-            switch_suspend_disconnect_active = false;
-        }
-
         uint8_t bt_reserved_mask = 0;
-        if (!switch_suspend_disconnect_active) {
-            for (int i = 0; i < 4; ++i) {
-                if (pads[i].connected) bt_reserved_mask |= static_cast<uint8_t>(1u << i);
-            }
+        for (int i = 0; i < 4; ++i) {
+            if (pads[i].connected) bt_reserved_mask |= static_cast<uint8_t>(1u << i);
         }
         g_ctx.bluetooth_reserved_client_slots_mask.store(bt_reserved_mask, std::memory_order_relaxed);
 
         for (int i = 0; i < 4; ++i) {
-            if (switch_suspend_disconnect_active) {
-                if (pads[i].connected || client_for_sdl[i] >= 0) {
-                    input.set_rumble(i, 0, 0, 0);
-                    if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
-                    client_for_sdl[i] = -1;
-                    last_rumble_seq[i] = 0;
-                    rumble_until_us[i] = 0;
-                }
-                continue;
-            }
-
             if (!pads[i].connected) {
                 if (client_for_sdl[i] >= 0) {
                     input.set_rumble(i, 0, 0, 0);
@@ -313,6 +278,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
                         last_rumble_seq[i] = g_ctx.clients[client_for_sdl[i]].rumble_seq[0];
                     }
+                    maybe_send_switch2_wake_advert("Bluetooth controller connected");
                 }
             }
 
@@ -328,11 +294,6 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 continue;
             }
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
-        }
-
-        if (switch_suspend_disconnect_active && (last_bt_disconnect_us == 0 || now - last_bt_disconnect_us > 1'000'000ULL)) {
-            disconnect_connected_bluetooth_gamepads();
-            last_bt_disconnect_us = now;
         }
 
         if (any_waiting && !waiting_logged) {

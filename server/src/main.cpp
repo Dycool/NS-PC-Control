@@ -118,27 +118,29 @@ int main(int argc, char** argv) {
         std::string s = argv[i] ? argv[i] : "";
         if (s == "-wake") s = "--wake";
         else if (s == "-hori") s = "--hori";
-        else if (s == "-bt") s = "--bt";
+        else if (s == "-bt" || s == "--bt") {
+            std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled by default. Use -no-bt to disable it.");
+            return 1;
+        }
         else if (s == "-pair") s = "--pair";
-        else if (s == "-disable-bt") s = "--disable-bt";
+        else if (s == "-no-bt") s = "--no-bt";
         else if (s == "-revert") s = "--revert";
         cli_args.push_back(s);
     }
 
     uint16_t port = DEFAULT_PORT;
     std::string bind_addr = "0.0.0.0";
-    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, bt_explicit = false, pair_explicit = false, disable_bt = false, legacy_p = false, do_revert = false;
+    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, pair_explicit = false, no_bt = false, legacy_p = false, do_revert = false;
     int web_port = 8080;
 
-    CLI::App app{"ns-backend - Switch Input Server\n\n  By default, UDP and WebSocket input are both enabled."};
+    CLI::App app{"ns-backend - Switch Input Server\n\n  By default, UDP, WebSocket, Bluetooth controller input, and Switch 2 wake are enabled when available/configured."};
     std::string bind_arg;
     app.add_option("-b", bind_arg, "Bind UDP to ADDR[:PORT] or PORT");
     app.add_flag("-v", g_ctx.verbose, "Enable verbose output");
     app.add_flag("--wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup and exit");
     app.add_flag("--hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget");
-    app.add_flag("--bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth controller input");
     app.add_flag("--pair", pair_explicit, "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
-    app.add_flag("--disable-bt", disable_bt, "Disable all Bluetooth features and block Bluetooth adapter");
+    app.add_flag("--no-bt", no_bt, "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
     app.add_flag("--revert", do_revert, "Revert host USB gadget boot configurations and reboot");
     app.add_flag("--upnp", do_upnp, "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
@@ -151,21 +153,11 @@ int main(int argc, char** argv) {
     } catch (const CLI::ParseError &e) { return app.exit(e); }
 
     g_ctx.bluetooth_pairing_enabled = pair_explicit;
-    g_ctx.bluetooth_disabled = disable_bt;
+    g_ctx.bluetooth_input_disabled = no_bt;
 
-    if (disable_bt) {
-        if (bt_explicit) {
-            std::println(stderr, "error: cannot request Bluetooth gamepad input (-bt) while Bluetooth is disabled (-disable-bt)");
-            return 1;
-        }
-        if (pair_explicit) {
-            std::println(stderr, "error: cannot request Bluetooth pairing (-pair) while Bluetooth is disabled (-disable-bt)");
-            return 1;
-        }
-        if (g_ctx.switch2_wakeup_setup_requested) {
-            std::println(stderr, "error: cannot run Switch 2 wake setup when Bluetooth is disabled (-disable-bt)");
-            return 1;
-        }
+    if (no_bt && pair_explicit) {
+        std::println(stderr, "error: cannot request Bluetooth pairing (-pair) while local Bluetooth controller input is disabled (-no-bt)");
+        return 1;
     }
 
     if (legacy_p) {
@@ -191,40 +183,21 @@ int main(int argc, char** argv) {
     if (do_revert) return run_revert_gadget_host() ? 0 : 1;
     if (g_ctx.switch2_wakeup_setup_requested) return run_switch2_wakeup_setup();
 
-    struct BtBlockGuard {
-        bool active = false;
-        ~BtBlockGuard() {
-            if (active) {
-                std::println("[bt] Unblocking Bluetooth...");
-                int dummy = std::system("sudo rfkill unblock bluetooth >/dev/null 2>&1 || rfkill unblock bluetooth >/dev/null 2>&1 || true");
-                (void)dummy;
-            }
-        }
-    } bt_block_guard;
+    g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
+    bluetooth_enabled = !no_bt && bluetooth_input_available();
 
-    if (disable_bt) {
-        bluetooth_enabled = false;
-        g_ctx.switch2_wake_adv_enabled = false;
-        std::println("[bt] Disabling and blocking Bluetooth...");
-        int dummy = std::system("sudo rfkill block bluetooth >/dev/null 2>&1 || rfkill block bluetooth >/dev/null 2>&1 || true");
-        (void)dummy;
-        bt_block_guard.active = true;
-    } else if (bt_explicit) {
-        g_ctx.switch2_wake_adv_enabled = false;
-        if (!bluetooth_input_available()) {
-            std::println(stderr, "error: -bt requested, but built without SDL3 support"); return 1;
-        }
+    if (bluetooth_enabled) {
         enter_bluetooth_runtime_mode();
-        bluetooth_enabled = true;
-    } else {
-        g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
-        if (g_ctx.switch2_wake_adv_enabled) {
-            bluetooth_enabled = false; enter_switch2_wake_runtime_mode();
-            if (g_ctx.verbose) std::println("[wake] Switch 2 wake mode active, Bluetooth disabled");
-        } else {
-            bluetooth_enabled = bluetooth_input_available();
-            if (g_ctx.verbose && bluetooth_enabled) std::println("[bt] Bluetooth controller mode active");
+        if (g_ctx.verbose) {
+            std::println("[bt] Bluetooth controller mode active");
+            if (g_ctx.switch2_wake_adv_enabled) std::println("[wake] Switch 2 wake is armed and will coexist with Bluetooth controller mode");
         }
+    } else if (g_ctx.switch2_wake_adv_enabled) {
+        // No local Bluetooth controller input is running. Wake remains armed and will
+        // prepare/restore the adapter on demand when UDP/WebSocket input arrives.
+        if (g_ctx.verbose) std::println("[wake] Switch 2 wake armed without local Bluetooth controller input");
+    } else if (g_ctx.verbose && no_bt) {
+        std::println("[bt] Local Bluetooth controller input disabled by -no-bt");
     }
 
     if (bluetooth_enabled) {

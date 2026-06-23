@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <vector>
 #include <iostream>
+#include <mutex>
 
 namespace fs = std::filesystem;
 using namespace ns;
@@ -30,6 +31,7 @@ static std::string g_saved_bt_mac;
 static std::string g_saved_bt_hci;
 static std::string g_switch2_wake_original_bt_mac;
 static std::atomic<bool> g_bt_modified_for_wake{false};
+static std::mutex g_wake_bt_mtx;
 
 bool hidg_nodes_ready() {
     for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -183,7 +185,7 @@ WakeCmdResult run_wake_command(const std::vector<std::string>& args, bool verbos
             }
         }
         if (is_bt) {
-            if (verbose) std::println("[exec] (blocked by -disable-bt) {}", args[0]);
+            if (verbose) std::println("[exec] (Bluetooth stack access disabled) {}", args[0]);
             return res;
         }
     }
@@ -216,6 +218,24 @@ static std::string read_hci_address(const std::string& hci_dev) {
 
 void wake_disable_advertising_quiet(const std::string& hci_dev) {
     run_wake_command({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "00"}, false);
+}
+
+void wake_clear_scan_response_quiet(const std::string& hci_dev, bool verbose) {
+    // LE Set Scan Response Data: zero-length payload padded to 31 bytes.
+    wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x0009",
+                 "00", "00", "00", "00", "00", "00", "00", "00", "00", "00", "00", "00",
+                 "00", "00", "00", "00", "00", "00", "00", "00", "00", "00", "00", "00",
+                 "00", "00", "00", "00", "00", "00", "00", "00"}, verbose);
+}
+
+void restore_bluetooth_controller_state(const std::string& hci, bool restart_bluez);
+
+void finish_prepared_wake_controller(const std::string& hci_dev, bool restart_bluez) {
+    if (!g_bt_modified_for_wake.load(std::memory_order_relaxed)) return;
+    restore_bluetooth_controller_state(hci_dev, restart_bluez);
+    g_saved_bt_mac.clear();
+    g_saved_bt_hci.clear();
+    g_bt_modified_for_wake.store(false, std::memory_order_relaxed);
 }
 
 std::string paired_adapter_mac_from_bluez_store(const std::string& wake_mac) {
@@ -319,6 +339,7 @@ bool start_wake_raw_advertising(const std::string& hci_dev, const std::string& m
         !wake_cmd_ok(cmd, verbose)) {
         return false;
     }
+    wake_clear_scan_response_quiet(hci_dev, verbose);
     if (verbose) std::println("[wake] Enable advertising as {} for {}s", mac_lc, seconds);
     if (!wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "01"}, verbose)) return false;
     auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
@@ -336,25 +357,55 @@ bool send_switch2_wake_advert_once(const std::string& mac, const std::string& ad
     std::string mac_lc = to_lower(mac), adv_uc = to_upper_no_space(adv_hex);
     std::string hci_dev = valid_hci(g_ctx.switch2_wake_hci_dev) ? g_ctx.switch2_wake_hci_dev : "hci0";
 
+    // Do not let two wake attempts fight over the same HCI controller.
+    std::lock_guard<std::mutex> wake_lock(g_wake_bt_mtx);
+
+    const bool bt_controller_active = any_client_source_active(InputSource::Bluetooth, now_us());
+    const bool allow_full_prepare = force_prepare || !bt_controller_active;
+
     if (verbose) {
         std::println("[wake] Wake MAC: {}\n[wake] ADV bytes: {}\n[wake] Duration: {}s", mac_lc, adv_uc.size() / 2, seconds);
-        if (!force_prepare) std::println("[wake] Fast runtime path: sending ADV directly on {} without Bluetooth prep", hci_dev);
+        if (allow_full_prepare) {
+            std::println("[wake] Reliable path: prepare adapter as captured Joy-Con 2 MAC on {}", hci_dev);
+        } else {
+            std::println("[wake] Soft path: Bluetooth controller is connected; sending raw ADV without adapter reset/MAC spoof");
+        }
     }
+
     bool ok = false;
-    if (!force_prepare) {
+    bool prepared_adapter = false;
+
+    if (allow_full_prepare) {
+        if (prepare_wake_controller(hci_dev, mac_lc, verbose)) {
+            prepared_adapter = true;
+            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose);
+        }
+        if (!ok && force_prepare) {
+            if (verbose) std::println(stderr, "[wake] Raw advertising failed. Trying one Bluetooth stack reset, then retrying once.");
+            if (reset_wake_bt_stack(hci_dev, verbose) && prepare_wake_controller(hci_dev, mac_lc, verbose)) {
+                prepared_adapter = true;
+                ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose);
+            }
+        }
+    } else {
+        // Important: when a local BT controller is connected, do not stop bluetoothd,
+        // power-cycle hci0, disable BR/EDR, or change the public address. Those actions
+        // break the connected controller. This best-effort path only pokes the LE
+        // advertising commands directly and then immediately disables advertising.
         ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose);
-        if (!ok && verbose) std::println(stderr, "[wake] Fast ADV failed; falling back to full Bluetooth prepare once.");
+        if (!ok) {
+            std::println(stderr, "[wake] soft wake advert failed while Bluetooth controller is connected; not resetting adapter to avoid disconnecting it");
+        }
     }
-    if (!ok) {
-        if (prepare_wake_controller(hci_dev, mac_lc, verbose))
-            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose);
-    }
-    if (!ok && force_prepare) {
-        if (verbose) std::println(stderr, "[wake] Raw advertising failed. Trying one Bluetooth stack reset, then retrying once.");
-        if (reset_wake_bt_stack(hci_dev, verbose) && prepare_wake_controller(hci_dev, mac_lc, verbose))
-            ok = start_wake_raw_advertising(hci_dev, mac_lc, adv_uc, seconds, verbose);
-    }
+
     wake_disable_advertising_quiet(hci_dev);
+
+    if (prepared_adapter && !force_prepare) {
+        // Runtime wake borrowed the adapter for Joy-Con-MAC advertising; return it to
+        // normal BlueZ/SDL controller mode before future local controllers connect.
+        finish_prepared_wake_controller(hci_dev, true);
+    }
+
     return ok;
 }
 

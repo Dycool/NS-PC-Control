@@ -95,7 +95,8 @@ struct ServerContext {
     std::string usb_serial;
     bool legacy_mode = false;
     bool bluetooth_pairing_enabled = false;
-    bool bluetooth_disabled = false;
+    bool bluetooth_input_disabled = false;
+    bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
     std::atomic<bool> gadget_setup_attempted{false};
     bool switch2_wake_adv_enabled = false;
     bool switch2_wakeup_setup_requested = false;
@@ -133,6 +134,7 @@ void mark_switch2_usb_host_disconnected();
 void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
 bool any_recent_client_active(uint64_t now);
+bool any_client_source_active(InputSource source, uint64_t now = 0);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);
 void clear_motion(ClientSession& c, int subpad);
 void clear_all_motion(ClientSession& c);

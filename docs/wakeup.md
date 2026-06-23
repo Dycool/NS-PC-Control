@@ -54,6 +54,24 @@ The wizard runs 4 steps:
 4. **Test**: Immediately sends a 1-second test wake advert to verify the setup works.
 >Note: Taking the joycon from the switch 2 might make this configuration stop working. Make sure to reconfigure it.
 
+### Runtime behavior
+
+After `sudo ./ns-backend -wake` saves a valid config, normal runtime automatically arms Switch 2 wake. You do not need a separate wake-only mode.
+
+```bash
+sudo ./ns-backend -w
+```
+
+Runtime inputs can coexist:
+
+- UDP client connects/sends input → wake is triggered if the USB host looks asleep.
+- WebSocket client connects/sends input → wake is triggered if the USB host looks asleep.
+- Previously paired Bluetooth controller connects → wake is triggered while preserving that controller connection when possible.
+
+When no local Bluetooth controller is connected, the backend may use the reliable wake path: temporarily prepare the adapter as the captured Joy-Con 2 MAC, send the advertisement, then restore normal BlueZ/SDL controller mode. When a local Bluetooth controller is already connected, the backend uses a non-destructive soft wake path and will not restart BlueZ, power-cycle `hci0`, disable BR/EDR, or change the adapter public address.
+
+Use `-no-bt` only if you want to disable local SDL Bluetooth controller input. Switch 2 wake can still run if configured.
+
 ### Important Notes
 
 - Make sure the raspberry pi does not have it's bluetooth locked, otherwise the setup will fail.

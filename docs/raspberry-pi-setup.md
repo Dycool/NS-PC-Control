@@ -91,7 +91,9 @@ TimeoutStopSec=15
 WantedBy=multi-user.target
 ```
 
-If you want the service to force local Bluetooth controller mode even when a Switch 2 wake config exists, add `-bt` to `ExecStart`.
+Bluetooth controller input is enabled by default. If a Switch 2 wake config exists, the service also arms wake automatically; UDP, WebSocket, Bluetooth controllers, and wake can coexist in normal runtime.
+
+If you want to disable local Bluetooth controller input for a service install, add `-no-bt` to `ExecStart`. Switch 2 wake can still use the Bluetooth adapter if configured.
 
 3. Enable and start the service:
 
