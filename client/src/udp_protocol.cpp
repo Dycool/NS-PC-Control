@@ -12,13 +12,14 @@ void set_pad_present_flag(ns::HIDReport& r, bool present) {
 }
 
 void fill_extended_pad(ns::HIDReport& dst, const ns::HoriHIDReport& input,
-                              bool present, const ns::MotionReport motion[3], int battery_percent) {
+                              bool present, const ns::MotionReport motion[3], int battery_percent, bool battery_charging) {
     dst.reset();
     dst.input = input;
     set_pad_present_flag(dst, present);
     if (battery_percent >= 0 && battery_percent <= 100) {
         dst.reserved[0] = static_cast<uint8_t>(battery_percent);
         dst.reserved[1] |= ns::EXT_STATUS_BATTERY_VALID;
+        if (battery_charging) dst.reserved[1] |= ns::EXT_STATUS_BATTERY_CHARGING;
     }
     if (motion) {
         dst.motion[0] = motion[0];

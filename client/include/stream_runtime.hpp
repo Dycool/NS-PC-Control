@@ -33,6 +33,7 @@ struct ClientFrame {
     bool has_motion[4] = {false, false, false, false};
     int controller_for_slot[4] = {-1, -1, -1, -1};
     int battery_percent[4] = {-1, -1, -1, -1};
+    bool battery_charging[4] = {false, false, false, false};
     int active_count = 0;
 
     void reset();

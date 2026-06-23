@@ -559,8 +559,9 @@ void SDLInputManager::refresh_states_locked(uint64_t now) {
             st.pid = d.pid;
             st.instance_id = d.id;
             int battery_percent = -1;
-            (void)SDL_GetGamepadPowerInfo(d.pad, &battery_percent);
+            SDL_PowerState power_state = SDL_GetGamepadPowerInfo(d.pad, &battery_percent);
             st.battery_percent = (battery_percent >= 0 && battery_percent <= 100) ? battery_percent : -1;
+            st.battery_charging = (power_state == SDL_POWERSTATE_CHARGING || power_state == SDL_POWERSTATE_CHARGED);
             apply_motion(d, st.motion_samples, st.has_motion);
             st.motion = st.has_motion ? st.motion_samples[2] : ns::MotionReport{};
             if (report_non_neutral(st.input) || st.has_motion) st.last_input_us = now;

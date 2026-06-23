@@ -98,6 +98,7 @@ enum Flags : uint8_t {
 static constexpr uint8_t EXT_PAD_PRESENT = 0x01;
 // Extended HIDReport::reserved[1] status flags. Older clients leave these zero.
 static constexpr uint8_t EXT_STATUS_BATTERY_VALID = 0x01;
+static constexpr uint8_t EXT_STATUS_BATTERY_CHARGING = 0x02;
 static constexpr uint8_t EXT_STATUS_BATTERY_PERCENT_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;

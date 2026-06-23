@@ -36,6 +36,7 @@ struct SdlPadState {
     uint16_t pid = 0;
     SDL_JoystickID instance_id = 0;
     int battery_percent = -1; // 0..100, or -1 when SDL/controller does not report it.
+    bool battery_charging = false; // true when SDL reports charging or charged/external power.
 };
 
 uint8_t sdl_axis_to_byte(Sint16 val, bool invert = false, int deadzone = 8000);

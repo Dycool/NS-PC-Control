@@ -32,6 +32,7 @@ private enum ProtocolWire {
     static let flagReset = 0x01
     static let flagSinglePad = 0x04
     static let extStatusBatteryValid = 0x01
+    static let extStatusBatteryCharging = 0x02
 
     static let btnY       = 1 << 0
     static let btnB       = 1 << 1
@@ -170,12 +171,13 @@ private enum ProtocolWire {
         }
     }
 
-    static func setFrameBatteryPercent(_ frame: inout [UInt8], pad: Int, percent: Int) {
+    static func setFrameBatteryPercent(_ frame: inout [UInt8], pad: Int, percent: Int, charging: Bool = false) {
         guard pad >= 0 && pad < padCount && percent >= 0 && percent <= 100 else { return }
         let base = 20 + pad * 48
         guard frame.count >= base + 48 else { return }
         frame[base + 45] = UInt8(percent)
         frame[base + 46] |= UInt8(extStatusBatteryValid)
+        if charging { frame[base + 46] |= UInt8(extStatusBatteryCharging) }
     }
 
     static func extractPad0Hid(from frame: [UInt8]) -> [UInt8]? {
@@ -989,10 +991,13 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
     }
 
-    private func phoneBatteryPercent() -> Int? {
+    private func phoneBatteryStatus() -> (percent: Int, charging: Bool)? {
         let level = UIDevice.current.batteryLevel
         guard level >= 0.0 else { return nil }
-        return max(0, min(100, Int((level * 100.0).rounded())))
+        let percent = max(0, min(100, Int((level * 100.0).rounded())))
+        let state = UIDevice.current.batteryState
+        let charging = state == .charging || state == .full
+        return (percent, charging)
     }
 
     private func sendFrame() {
@@ -1014,8 +1019,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             if let samples = phoneMotionSamples() {
                 ProtocolWire.setFrameMotionSamples(&frame, pad: 0, samples: samples)
             }
-            if let percent = phoneBatteryPercent() {
-                ProtocolWire.setFrameBatteryPercent(&frame, pad: 0, percent: percent)
+            if let status = phoneBatteryStatus() {
+                ProtocolWire.setFrameBatteryPercent(&frame, pad: 0, percent: status.percent, charging: status.charging)
             }
         } else if physicalActive {
             physicalPads.withLock { pads in

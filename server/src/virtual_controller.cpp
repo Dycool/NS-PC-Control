@@ -127,14 +127,20 @@ uint8_t pro_conn_info_from_hid(const HIDReport& src) {
     if ((src.reserved[1] & EXT_STATUS_BATTERY_VALID) == 0 || src.reserved[0] > 100) return PRO_BAT_CON;
 
     const int pct = src.reserved[0];
-    uint8_t level = 0x10;
-    if (pct >= 90) level = 0x90;
-    else if (pct >= 70) level = 0x70;
-    else if (pct >= 45) level = 0x50;
-    else if (pct >= 20) level = 0x30;
-    else level = 0x10;
+    uint8_t coarse_level = 0;
+    if (pct >= 90) coarse_level = 4;      // full
+    else if (pct >= 70) coarse_level = 3; // high
+    else if (pct >= 45) coarse_level = 2; // medium
+    else if (pct >= 20) coarse_level = 1; // low
+    else coarse_level = 0;                // critical/empty
 
-    return static_cast<uint8_t>(level | (PRO_BAT_CON & 0x0F));
+    // Pro Controller bat_con byte:
+    //   bits 7..5 = coarse battery level (0..4)
+    //   bit 4     = charging/external power
+    //   bit 0     = controller connected/host-powered flag used by our capture profile
+    uint8_t bat_con = static_cast<uint8_t>((coarse_level << 5) | (PRO_BAT_CON & 0x01));
+    if (src.reserved[1] & EXT_STATUS_BATTERY_CHARGING) bat_con |= 0x10;
+    return bat_con;
 }
 
 void fill_neutral_controls(ProInputReport30& r) {

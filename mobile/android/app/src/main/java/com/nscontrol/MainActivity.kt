@@ -444,12 +444,15 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun phoneBatteryPercent(): Int? {
+    private fun phoneBatteryStatus(): Pair<Int, Boolean>? {
         val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null
         val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
         if (level < 0 || scale <= 0) return null
-        return ((level * 100f) / scale).roundToInt().coerceIn(0, 100)
+        val percent = ((level * 100f) / scale).roundToInt().coerceIn(0, 100)
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        return percent to charging
     }
 
     private fun sendFrame() {
@@ -478,7 +481,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     Protocol.setFrameHid(frame, 0, hid)
                     phoneMotionSamples()?.let { Protocol.setFrameMotionSamples(frame, 0, it) }
-                    phoneBatteryPercent()?.let { Protocol.setFrameBatteryPercent(frame, 0, it) }
+                    phoneBatteryStatus()?.let { (percent, charging) -> Protocol.setFrameBatteryPercent(frame, 0, percent, charging) }
                 }
                 activeClientMode == ClientMode.PHYSICAL && !forceNeutral -> {
                     synchronized(physicalLock) {
