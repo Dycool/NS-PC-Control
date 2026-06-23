@@ -224,8 +224,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     if (pad_present[s]) { c.pad_present[s] = true; c.pad_last_present_us[s] = now; }
                 }
             }
-            if (sd->ws_slot >= 0 && (wake_on_new_client || multi_report_has_real_input(report, pad_present, true))) {
-                maybe_send_switch2_wake_advert(wake_on_new_client ? "client connected via WebSocket input" : "WebSocket input");
+            if (sd->ws_slot >= 0 && wake_on_new_client) {
+                maybe_send_switch2_wake_advert("WebSocket client connected");
             }
             break;
         }

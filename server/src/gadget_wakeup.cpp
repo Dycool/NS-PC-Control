@@ -573,16 +573,9 @@ void maybe_send_switch2_wake_advert(const char* reason) {
     // trusted as wake/active evidence.
     if (switch2_usb_host_recently_active(now)) return;
 
-    // Product rule: waking is a single-client intent. If multiple clients are
-    // connected while the Switch is asleep, do not spam wake adverts or guess
-    // which player is trying to wake the console.
-    const int clients = active_client_count(now);
-    if (clients != 1) {
-        if (g_ctx.verbose) {
-            std::println("[wake] skipped: Switch quiet but {} clients are connected", clients);
-        }
-        return;
-    }
+    // Wake is only triggered from fresh client/session allocation call sites.
+    // Do not gate on the total active client count here: multiple BT controllers
+    // may already be connected, and the wake cooldown prevents spam.
 
     if (g_ctx.switch2_wake_adv_running.exchange(true)) return;
 

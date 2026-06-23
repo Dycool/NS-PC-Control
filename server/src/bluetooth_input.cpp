@@ -330,7 +330,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
                         last_rumble_seq[i] = g_ctx.clients[client_for_sdl[i]].rumble_seq[0];
                     }
-                    maybe_send_switch2_wake_advert(real_bt_input ? "Bluetooth controller input" : "Bluetooth controller connected");
+                    maybe_send_switch2_wake_advert("Bluetooth controller connected");
                 }
             }
 
@@ -344,9 +344,6 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 last_rumble_seq[i] = 0;
                 rumble_until_us[i] = 0;
                 continue;
-            }
-            if (real_bt_input) {
-                maybe_send_switch2_wake_advert("Bluetooth controller input");
             }
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
         }

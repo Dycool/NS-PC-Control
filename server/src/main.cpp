@@ -371,7 +371,6 @@ int main(int argc, char** argv) {
             uint64_t now = now_us();
             bool wake_on_new_client = false;
             const bool sleeping = switch2_sleep_confirmed(now);
-            const bool real_input = multi_report_has_real_input(report, pad_present, true);
             for (int i = 0; i < MAX_CLIENTS; ++i) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
                 if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
@@ -443,8 +442,8 @@ int main(int argc, char** argv) {
 
             if (!accepted) continue;
             ++g_ctx.pkts_rx;
-            if (wake_on_new_client || real_input) {
-                maybe_send_switch2_wake_advert(wake_on_new_client ? "client connected via UDP input" : "UDP input");
+            if (wake_on_new_client) {
+                maybe_send_switch2_wake_advert("UDP client connected");
             }
             flush_rumble_to_udp(sock, cidx);
         }
