@@ -5,11 +5,13 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <print>
 #include <cstdlib>
 #include <csignal>
 #include <sys/wait.h>
+#include <string>
 #include <thread>
 #include <unistd.h>
 
@@ -144,7 +146,17 @@ while :; do
         is_gamepad_name "$name" || continue
 
         info="$(bt_timeout 3s bluetoothctl info "$mac" 2>/dev/null || true)"
-        printf '%s\n' "$info" | grep -q 'Connected: yes' && continue
+        if printf '%s\n' "$info" | grep -q 'Connected: yes'; then
+            # BlueZ can occasionally keep a controller stuck as Connected while the HID service
+            # is not resolved anymore. Kick only that broken state; healthy connected devices are left alone.
+            if printf '%s\n' "$info" | grep -q 'ServicesResolved: no'; then
+                printf '[bt] stale connected state for %s (%s), reconnecting\n' "$name" "$mac"
+                bt_quiet 4s bluetoothctl disconnect "$mac"
+                sleep 1
+                bt_quiet 5s bluetoothctl connect "$mac"
+            fi
+            continue
+        fi
 
         if printf '%s\n' "$info" | grep -q 'Paired: yes\|Trusted: yes'; then
             bt_quiet 4s bluetoothctl trust "$mac"
@@ -207,7 +219,17 @@ while :; do
         is_gamepad_name "$name" || continue
 
         info="$(bt_timeout 3s bluetoothctl info "$mac" 2>/dev/null || true)"
-        printf '%s\n' "$info" | grep -q 'Connected: yes' && continue
+        if printf '%s\n' "$info" | grep -q 'Connected: yes'; then
+            # BlueZ can occasionally keep a controller stuck as Connected while the HID service
+            # is not resolved anymore. Kick only that broken state; healthy connected devices are left alone.
+            if printf '%s\n' "$info" | grep -q 'ServicesResolved: no'; then
+                printf '[bt] stale connected state for %s (%s), reconnecting\n' "$name" "$mac"
+                bt_quiet 4s bluetoothctl disconnect "$mac"
+                sleep 1
+                bt_quiet 5s bluetoothctl connect "$mac"
+            fi
+            continue
+        fi
 
         if printf '%s\n' "$info" | grep -q 'Paired: yes\|Trusted: yes'; then
             bt_quiet 4s bluetoothctl trust "$mac"
@@ -231,6 +253,27 @@ using namespace ns;
 
 #ifdef NS_ENABLE_SDL_BT
 bool bluetooth_input_available() { return true; }
+
+static bool bt_contains_case_insensitive(const std::string& haystack, const char* needle) {
+    if (!needle || !*needle) return false;
+    std::string h;
+    std::string n;
+    h.reserve(haystack.size());
+    for (unsigned char c : haystack) h.push_back(static_cast<char>(std::tolower(c)));
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(needle); *p; ++p) {
+        n.push_back(static_cast<char>(std::tolower(*p)));
+    }
+    return h.find(n) != std::string::npos;
+}
+
+static bool bt_is_playstation_controller(const SdlPadState& pad) {
+    return pad.vid == 0x054c ||
+           bt_contains_case_insensitive(pad.name, "playstation") ||
+           bt_contains_case_insensitive(pad.name, "dualsense") ||
+           bt_contains_case_insensitive(pad.name, "dualshock") ||
+           bt_contains_case_insensitive(pad.name, "wireless controller") ||
+           bt_contains_case_insensitive(pad.name, "wirless controller");
+}
 
 static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -298,8 +341,7 @@ static void apply_bluetooth_controller_status(SDLInputManager& input, int sdl_sl
     last_seq = seq;
     last_apply_us = now;
     int player_index = (sp.player_index < 4) ? static_cast<int>(sp.player_index) : -1;
-    const uint8_t* body_rgb = (sp.reserved[3] & ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID) ? sp.reserved : nullptr;
-    input.set_player_status(sdl_slot, player_index, sp.player_leds, body_rgb);
+    input.set_player_status(sdl_slot, player_index, sp.player_leds, nullptr);
 }
 
 void bluetooth_input_thread(std::stop_token stoken) {
@@ -330,6 +372,8 @@ void bluetooth_input_thread(std::stop_token stoken) {
     std::array<uint32_t, 4> last_status_seq{};
     std::array<uint64_t, 4> last_status_apply_us{};
     std::array<uint64_t, 4> rumble_until_us{};
+    std::array<uint64_t, 4> last_live_input_or_motion_us{};
+    std::array<bool, 4> motion_seen{};
     std::array<bool, 4> dormant_until_input{};
     uint64_t seen_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
     bool waiting_logged = false;
@@ -353,6 +397,8 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 last_status_seq[i] = 0;
                 last_status_apply_us[i] = 0;
                 rumble_until_us[i] = 0;
+                last_live_input_or_motion_us[i] = 0;
+                motion_seen[i] = false;
                 input.clear_player_status(i);
             }
             dormant_until_input.fill(true);
@@ -381,9 +427,13 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     last_status_seq[i] = 0;
                     last_status_apply_us[i] = 0;
                     rumble_until_us[i] = 0;
+                    last_live_input_or_motion_us[i] = 0;
+                    motion_seen[i] = false;
                     input.clear_player_status(i);
                 }
                 if (!switch_sleeping) dormant_until_input[i] = false;
+                last_live_input_or_motion_us[i] = 0;
+                motion_seen[i] = false;
                 continue;
             }
 
@@ -399,11 +449,44 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     last_status_seq[i] = 0;
                     last_status_apply_us[i] = 0;
                     rumble_until_us[i] = 0;
+                    last_live_input_or_motion_us[i] = 0;
+                    motion_seen[i] = false;
                     input.clear_player_status(i);
                 }
             }
 
             const bool real_bt_input = !input_is_neutral(pads[i].input);
+            if (pads[i].has_motion) motion_seen[i] = true;
+            if (last_live_input_or_motion_us[i] == 0 || real_bt_input || pads[i].has_motion) {
+                last_live_input_or_motion_us[i] = now;
+            }
+
+            // RPi/BlueZ can leave a DualShock/DualSense in a zombie state: SDL still says
+            // connected, but motion/input stops and BlueZ also still says Connected. For PS pads
+            // that previously delivered motion, no motion for a few seconds is a good stale-link
+            // signal. Do not apply this to Xbox/default controllers, because idle pads can be
+            // completely silent there.
+            if (client_for_sdl[i] >= 0 && motion_seen[i] && bt_is_playstation_controller(pads[i]) &&
+                last_live_input_or_motion_us[i] != 0 && now - last_live_input_or_motion_us[i] > 5'000'000ULL) {
+                if (g_ctx.verbose) {
+                    std::println("[bt] {} appears connected but stopped sending input/motion; forcing reconnect", pads[i].name);
+                }
+                reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
+                client_for_sdl[i] = -1;
+                last_rumble_seq[i] = 0;
+                last_status_seq[i] = 0;
+                last_status_apply_us[i] = 0;
+                rumble_until_us[i] = 0;
+                last_live_input_or_motion_us[i] = 0;
+                motion_seen[i] = false;
+                input.clear_player_status(i);
+                g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
+                input.disconnect_all();
+                disconnect_connected_bluetooth_gamepads();
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+
             if (client_for_sdl[i] < 0) {
                 if (dormant_until_input[i] && switch_sleeping && !real_bt_input) {
                     continue;
@@ -420,12 +503,6 @@ void bluetooth_input_thread(std::stop_token stoken) {
                         last_status_seq[i] = g_ctx.clients[client_for_sdl[i]].controller_status_seq[0];
                         last_status_apply_us[i] = 0;
                     }
-                    // Provisional immediate RGB: PS/ARGB lightbars should show the virtual controller color
-                    // as soon as this local BT controller is allocated. The Switch-confirmed mapping status
-                    // will override this if the virtual HID port differs from the server client slot.
-                    if (client_for_sdl[i] >= 0 && client_for_sdl[i] < 4) {
-                        input.set_player_status(i, -1, 0, VIRTUAL_BODY_RGB[client_for_sdl[i]]);
-                    }
                     maybe_send_switch2_wake_advert("Bluetooth controller connected");
                 }
             }
@@ -441,6 +518,8 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 last_status_seq[i] = 0;
                 last_status_apply_us[i] = 0;
                 rumble_until_us[i] = 0;
+                last_live_input_or_motion_us[i] = 0;
+                motion_seen[i] = false;
                 input.clear_player_status(i);
                 continue;
             }

@@ -11,9 +11,6 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#ifdef __linux__
-#include <array>
-#endif
 
 constexpr uint64_t SDL_DIGITAL_RELEASE_GRACE_US = 35000ULL;
 
@@ -83,10 +80,6 @@ private:
         std::string name;
         uint16_t vid = 0;
         uint16_t pid = 0;
-#ifdef __linux__
-        std::array<std::string, 3> linux_rgb_led_paths{};
-        bool linux_rgb_led_valid = false;
-#endif
         ns::MotionReport motion_samples[3]{};
         bool has_motion_samples = false;
     };
