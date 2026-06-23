@@ -26,6 +26,21 @@ Connect the Raspberry Pi to the console dock via USB:
 
 ---
 
+
+## Bluetooth Controller Pairing
+
+`ns-backend` performs best-effort Bluetooth runtime setup automatically on Raspberry Pi OS: it starts BlueZ, unblocks Bluetooth, loads `uhid`, and installs missing runtime Bluetooth packages when possible. Users should normally just run the backend.
+
+For first-time pairing, start the backend with:
+
+```bash
+sudo ./ns-backend --pair
+```
+
+`--pair` opens a 2-minute pairing window for new controllers. Already paired/trusted controllers reconnect anytime while Bluetooth input is enabled. When a trusted controller reconnects, the backend also opens a fresh 2-minute pairing window so another new controller can be added without restarting with `--pair`.
+
+Xbox Bluetooth controllers can still require extra kernel/input support on some Raspberry Pi OS builds. If BlueZ says the Xbox controller is connected but no SDL controller appears, update the controller firmware first and consider xpadneo as an optional compatibility driver.
+
 ## Running the Server
 
  Just run:
@@ -75,12 +90,14 @@ sudo nano /etc/systemd/system/ns-control.service
 ```ini
 [Unit]
 Description=NS PC Control Backend
-After=network-online.target dbus.service
-Wants=network-online.target
+After=network-online.target bluetooth.service dbus.service
+Wants=network-online.target bluetooth.service
 
 [Service]
 Type=simple
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=-/usr/sbin/rfkill unblock bluetooth
+ExecStartPre=-/sbin/modprobe uhid
 ExecStart=/usr/bin/chrt -f 99 /home/YOUR_USER/NS-PC-Control/server/ns-backend
 Restart=always
 RestartSec=5

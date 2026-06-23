@@ -858,8 +858,8 @@ void enter_bluetooth_runtime_mode() {
     } else {
         run_wake_command({"systemctl", "start", "bluetooth"}, false);
         run_wake_command({"bluetoothctl", "power", "on"}, false);
-        run_wake_command({"bluetoothctl", "agent", "NoInputNoOutput"}, false);
-        run_wake_command({"bluetoothctl", "default-agent"}, false);
+        // Pairing/reconnect is owned by the BlueZ D-Bus manager in bluetooth_manager.cpp.
+        // Do not register a one-shot bluetoothctl agent here; it exits immediately.
     }
 
     wait_for_bluetooth_runtime_ready(g_ctx.verbose);

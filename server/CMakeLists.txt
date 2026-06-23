@@ -33,6 +33,8 @@ FetchContent_MakeAvailable(cli11)
 option(USE_UPNP "Enable UPnP port forwarding via miniupnpc" ON)
 option(USE_SDL_BT "Enable local Bluetooth/controller input via SDL3" ON)
 option(REQUIRE_SDL_BT "Fail configure if SDL3 Bluetooth/controller support is unavailable" OFF)
+option(USE_BLUEZ_DBUS "Use BlueZ D-Bus manager for Bluetooth pairing/reconnect on Linux" ON)
+option(REQUIRE_BLUEZ_DBUS "Fail configure if BlueZ D-Bus manager dependencies are unavailable" OFF)
 
 # Allow passing paths directly (e.g. from cross-compiled miniupnpc)
 set(MINIUPNPC_INCLUDE_DIRS "" CACHE STRING "miniupnpc include path")
@@ -79,6 +81,24 @@ if(USE_SDL_BT)
     endif()
 else()
     message(STATUS "Bluetooth/local controller support disabled by user")
+endif()
+
+
+if(USE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SYSTEMD libsystemd)
+    endif()
+    if(SYSTEMD_FOUND)
+        add_definitions(-DNS_ENABLE_BLUEZ_DBUS)
+        message(STATUS "BlueZ D-Bus manager enabled (libsystemd/sd-bus found)")
+    elseif(REQUIRE_BLUEZ_DBUS)
+        message(FATAL_ERROR "BlueZ D-Bus manager requires libsystemd-dev/pkg-config, but libsystemd was not found")
+    else()
+        message(STATUS "BlueZ D-Bus manager disabled (libsystemd not found); bluetoothctl fallback will be used")
+    endif()
+else()
+    message(STATUS "BlueZ D-Bus manager disabled")
 endif()
 
 find_package(OpenSSL REQUIRED)
@@ -132,6 +152,7 @@ add_executable(ns-backend
     src/virtual_controller.cpp
     src/writers.cpp
     src/bluetooth_input.cpp
+    src/bluetooth_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
     ${WEBAPP_EMBED}
 )
@@ -154,6 +175,12 @@ endif()
 
 if(SDL3_FOUND)
     target_link_libraries(ns-backend PRIVATE SDL3::SDL3)
+endif()
+
+if(SYSTEMD_FOUND)
+    target_include_directories(ns-backend PRIVATE ${SYSTEMD_INCLUDE_DIRS})
+    target_link_libraries(ns-backend PRIVATE ${SYSTEMD_LIBRARIES})
+    target_compile_options(ns-backend PRIVATE ${SYSTEMD_CFLAGS_OTHER})
 endif()
 
 if(MINIUPNPC_FOUND)

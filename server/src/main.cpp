@@ -49,6 +49,7 @@ static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxe
 #include "writers.hpp"
 #include "web_server.hpp"
 #include "bluetooth_input.hpp"
+#include "bluetooth_manager.hpp"
 
 #ifdef USE_UPNP
 static bool     g_upnp_active = false;
@@ -185,6 +186,9 @@ int main(int argc, char** argv) {
 
     g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
     bluetooth_enabled = !no_bt && bluetooth_input_available();
+    if (bluetooth_enabled) {
+        bluetooth_manager_runtime_setup(g_ctx.verbose || pair_explicit);
+    }
 
     if (bluetooth_enabled) {
         enter_bluetooth_runtime_mode();
@@ -198,20 +202,6 @@ int main(int argc, char** argv) {
         if (g_ctx.verbose) std::println("[wake] Switch 2 wake armed without local Bluetooth controller input");
     } else if (g_ctx.verbose && no_bt) {
         std::println("[bt] Local Bluetooth controller input disabled by -no-bt");
-    }
-
-    if (bluetooth_enabled) {
-        int rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
-        if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
-            std::println(stderr, "[bt] Bluetooth adapter is blocked. Attempting to unblock...");
-            int dummy = std::system("sudo rfkill unblock bluetooth"); (void)dummy;
-            rc = std::system("rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'");
-            if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
-                std::println(stderr, "[bt] WARNING: Bluetooth adapter is still blocked. Unblock manually with: sudo rfkill unblock bluetooth");
-            } else {
-                std::println("[bt] Bluetooth adapter unblocked successfully.");
-            }
-        }
     }
 
     randomize_controller_identity();
