@@ -5,16 +5,19 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
-#include <csignal>
+#include <cstdint>
 #include <cstdlib>
-#include <cstring>
+#include <exception>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <optional>
 #include <print>
 #include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <sys/wait.h>
@@ -30,20 +33,12 @@ std::atomic<bool> g_runtime_pair_window_requested{false};
 std::thread g_manager_thread;
 constexpr const char* BT_RECONNECT_PAUSE_FILE = "/tmp/ns-pc-control-bt-reconnect-paused";
 
-[[maybe_unused]] std::string lower_copy(std::string s) {
+std::string lower_copy(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
 
-[[maybe_unused]] std::string mac_to_path_addr(std::string s) {
-    for (char& c : s) {
-        if (c == ':') c = '_';
-        else c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
-    return s;
-}
-
-[[maybe_unused]] std::string path_to_mac(const std::string& path) {
+std::string path_to_mac(const std::string& path) {
     const std::string marker = "/dev_";
     const size_t p = path.rfind(marker);
     if (p == std::string::npos) return {};
@@ -55,23 +50,11 @@ constexpr const char* BT_RECONNECT_PAUSE_FILE = "/tmp/ns-pc-control-bt-reconnect
     return mac;
 }
 
-[[maybe_unused]] bool looks_like_mac(const std::string& s) {
-    if (s.size() != 17) return false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        if ((i + 1) % 3 == 0) {
-            if (s[i] != ':') return false;
-        } else if (!std::isxdigit(static_cast<unsigned char>(s[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool command_exists(const char* name) {
     std::string cmd = "command -v ";
     cmd += name;
     cmd += " >/dev/null 2>&1";
-    int rc = std::system(cmd.c_str());
+    const int rc = std::system(cmd.c_str());
     return rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
 }
 
@@ -83,20 +66,6 @@ bool proc_modules_contains(const char* module) {
         if (line.rfind(prefix, 0) == 0) return true;
     }
     return false;
-}
-
-bool env_is_true(const char* name) {
-    const char* v = std::getenv(name);
-    if (!v || !*v) return false;
-    std::string s = lower_copy(v);
-    return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
-bool env_is_false(const char* name) {
-    const char* v = std::getenv(name);
-    if (!v || !*v) return false;
-    std::string s = lower_copy(v);
-    return s == "0" || s == "false" || s == "no" || s == "off";
 }
 
 std::string shell_quote(const std::string& s) {
@@ -111,161 +80,28 @@ std::string shell_quote(const std::string& s) {
 
 int run_cmd(const std::string& cmd, bool verbose = false) {
     if (verbose) std::println("[bt] setup: {}", cmd);
-    // ns-backend is often launched with chrt -f 99. Do not let apt/systemctl/modprobe
-    // inherit realtime priority; that can make boot/service recovery ugly.
+    // ns-backend can run under chrt -f 99. Keep service/setup commands on normal priority.
     const std::string wrapped = "if command -v chrt >/dev/null 2>&1; then chrt -o 0 /bin/sh -c " + shell_quote(cmd) +
                                 "; else /bin/sh -c " + shell_quote(cmd) + "; fi";
-    int rc = std::system(wrapped.c_str());
+    const int rc = std::system(wrapped.c_str());
     if (rc == -1) return 127;
     if (WIFEXITED(rc)) return WEXITSTATUS(rc);
     return 126;
 }
 
-bool package_installed(const char* pkg) {
-    std::string cmd = "dpkg-query -W -f='${Status}' ";
-    cmd += pkg;
-    cmd += " 2>/dev/null | grep -q 'install ok installed'";
-    return run_cmd(cmd) == 0;
-}
-
-bool write_uhid_modules_load(bool verbose) {
-    const char* path = "/etc/modules-load.d/uhid.conf";
-    {
-        std::ifstream in(path);
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line == "uhid") return true;
-        }
-    }
-    std::ofstream out(path, std::ios::app);
-    if (!out) {
-        if (verbose) std::println(stderr, "[bt] setup: could not write {}; uhid will not persist after reboot", path);
-        return false;
-    }
-    out << "uhid\n";
-    if (verbose) std::println("[bt] setup: made uhid persistent in {}", path);
-    return true;
-}
-
-void ensure_bluez_fast_connect_config(bool verbose) {
-    // Make the adapter quick to accept incoming connections from already trusted controllers.
-    // This is the closest we can get to “press any controller button and reconnect immediately”
-    // without scanning forever. It affects bluetoothd, so restart bluetooth.service only when
-    // we actually change the file and before the D-Bus manager starts.
-    const char* script = R"SH(
-set -eu
-conf=/etc/bluetooth/main.conf
-mkdir -p /etc/bluetooth
-[ -f "$conf" ] || printf '[General]
-
-[Policy]
-' > "$conf"
-cp -n "$conf" "$conf.ns-pc-control.bak" 2>/dev/null || true
-changed=0
-ensure_section() {
-    section="$1"
-    grep -q "^\[$section\]" "$conf" || { printf '
-[%s]
-' "$section" >> "$conf"; changed=1; }
-}
-set_key() {
-    section="$1"; key="$2"; value="$3"
-    ensure_section "$section"
-    if awk -v sec="$section" -v key="$key" '
-        $0 ~ "^\[" { insec = ($0 == "[" sec "]") }
-        insec && $0 ~ "^[#[:space:]]*" key "[[:space:]]*=" { found=1 }
-        END { exit found ? 0 : 1 }
-    ' "$conf"; then
-        tmp="${conf}.tmp.$$"
-        awk -v sec="$section" -v key="$key" -v value="$value" '
-            $0 ~ "^\[" { insec = ($0 == "[" sec "]") }
-            insec && $0 ~ "^[#[:space:]]*" key "[[:space:]]*=" {
-                print key " = " value
-                done=1
-                next
-            }
-            { print }
-        ' "$conf" > "$tmp"
-        if ! cmp -s "$conf" "$tmp"; then mv "$tmp" "$conf"; changed=1; else rm -f "$tmp"; fi
-    else
-        tmp="${conf}.tmp.$$"
-        awk -v sec="$section" -v key="$key" -v value="$value" '
-            $0 == "[" sec "]" { print; print key " = " value; next }
-            { print }
-        ' "$conf" > "$tmp"
-        mv "$tmp" "$conf"
-        changed=1
-    fi
-}
-set_key General FastConnectable true
-set_key General ControllerMode dual
-set_key Policy AutoEnable true
-set_key Policy ReconnectAttempts 7
-set_key Policy ReconnectIntervals 1,2,4,8
-exit "$changed"
-)SH";
-    const int rc = run_cmd(std::string("/bin/sh -c ") + shell_quote(script), verbose);
-    if (rc == 1) {
-        if (verbose) std::println("[bt] setup: enabled BlueZ fast trusted-controller reconnect settings");
-        if (command_exists("systemctl")) {
-            (void)run_cmd("systemctl restart bluetooth.service >/dev/null 2>&1", verbose);
-        } else if (command_exists("service")) {
-            (void)run_cmd("service bluetooth restart >/dev/null 2>&1", verbose);
-        }
-    } else if (rc != 0 && verbose) {
-        std::println(stderr, "[bt] setup: could not tune /etc/bluetooth/main.conf for fast reconnect");
-    }
-}
-
 void runtime_setup_impl(bool verbose) {
     if (geteuid() != 0) {
-        if (verbose) std::println(stderr, "[bt] setup: not root; cannot auto-install packages, unblock rfkill, or load uhid");
+        if (verbose) std::println(stderr, "[bt] setup skipped; run as root for rfkill/uhid/bluetooth.service prep");
         return;
     }
 
-    // Runtime packages only. libsystemd-dev/pkg-config are build-time dependencies: if this
-    // binary is already running, installing them now cannot change how it was compiled.
-    std::vector<const char*> packages = {"bluez", "bluetooth", "rfkill"};
-    std::vector<const char*> missing;
-    if (command_exists("dpkg-query")) {
-        for (const char* pkg : packages) {
-            if (!package_installed(pkg)) missing.push_back(pkg);
-        }
-    }
-
-    const bool skip_auto_apt = env_is_true("NS_BACKEND_SKIP_AUTO_APT") || env_is_false("NS_BACKEND_AUTO_APT");
-    if (!missing.empty()) {
-        if (!command_exists("apt-get")) {
-            std::println(stderr, "[bt] setup: missing packages but apt-get was not found");
-        } else if (skip_auto_apt) {
-            std::ostringstream oss;
-            for (const char* pkg : missing) oss << ' ' << pkg;
-            std::println(stderr, "[bt] setup: missing packages:{}", oss.str());
-        } else {
-            std::ostringstream install;
-            install << "DEBIAN_FRONTEND=noninteractive apt-get install -y";
-            for (const char* pkg : missing) install << ' ' << pkg;
-            std::println("[bt] setup: installing missing runtime Bluetooth packages");
-            (void)run_cmd("DEBIAN_FRONTEND=noninteractive apt-get update", verbose);
-            if (run_cmd(install.str(), true) != 0) {
-                std::println(stderr, "[bt] setup: apt install failed; continuing with whatever is available");
-            }
-        }
-    }
-
-    if (command_exists("rfkill")) {
-        (void)run_cmd("rfkill unblock bluetooth >/dev/null 2>&1", verbose);
-    }
+    if (command_exists("rfkill")) (void)run_cmd("rfkill unblock bluetooth >/dev/null 2>&1", verbose);
 
     if (!proc_modules_contains("uhid")) {
-        if (run_cmd("modprobe uhid >/dev/null 2>&1", verbose) == 0) {
-            if (verbose) std::println("[bt] setup: loaded uhid");
-        } else {
-            std::println(stderr, "[bt] setup: failed to load uhid; Xbox BLE controllers may connect without creating input devices");
+        if (run_cmd("modprobe uhid >/dev/null 2>&1", verbose) != 0) {
+            std::println(stderr, "[bt] warning: uhid module not loaded; some BLE controllers may not expose input devices");
         }
     }
-    (void)write_uhid_modules_load(verbose);
-    ensure_bluez_fast_connect_config(verbose);
 
     if (command_exists("systemctl")) {
         (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
@@ -276,39 +112,29 @@ void runtime_setup_impl(bool verbose) {
 
 } // namespace
 
-#include <systemd/sd-bus.h>
+#ifdef NS_ENABLE_BLUEZ_DBUS
+
+#include <sdbus-c++/sdbus-c++.h>
 
 namespace {
 
 constexpr const char* BLUEZ_SERVICE = "org.bluez";
-constexpr const char* OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager";
-constexpr const char* PROPERTIES = "org.freedesktop.DBus.Properties";
+constexpr const char* OBJECT_MANAGER_IFACE = "org.freedesktop.DBus.ObjectManager";
 constexpr const char* ADAPTER_IFACE = "org.bluez.Adapter1";
 constexpr const char* DEVICE_IFACE = "org.bluez.Device1";
 constexpr const char* AGENT_MANAGER_IFACE = "org.bluez.AgentManager1";
 constexpr const char* AGENT_IFACE = "org.bluez.Agent1";
 constexpr const char* AGENT_PATH = "/com/ns_pc_control/agent";
 constexpr const char* HID_UUID = "00001124-0000-1000-8000-00805f9b34fb";
-constexpr uint64_t BLUEZ_DBUS_CALL_TIMEOUT_US = 500'000ULL;
-constexpr uint64_t BLUEZ_DBUS_CONNECT_TIMEOUT_US = 3'000'000ULL;
-constexpr uint64_t BLUEZ_DBUS_PAIR_TIMEOUT_US = 12'000'000ULL;
-constexpr uint64_t BLUEZ_DBUS_DISCONNECT_TIMEOUT_US = 1'000'000ULL;
-constexpr uint64_t BLUEZ_DBUS_SHUTDOWN_TIMEOUT_US = 50'000ULL;
+constexpr const char* HOGP_UUID = "00001812-0000-1000-8000-00805f9b34fb";
 
-struct SdBusErrorGuard {
-    sd_bus_error error = SD_BUS_ERROR_NULL;
-    ~SdBusErrorGuard() { sd_bus_error_free(&error); }
-};
+constexpr auto DBUS_FAST_TIMEOUT = std::chrono::milliseconds(600);
+constexpr auto DBUS_DISCOVERY_TIMEOUT = std::chrono::milliseconds(1200);
+constexpr auto DBUS_CONNECT_TIMEOUT = std::chrono::milliseconds(2500);
+constexpr auto DBUS_PAIR_TIMEOUT = std::chrono::seconds(10);
 
-struct SdBusMessageGuard {
-    sd_bus_message* msg = nullptr;
-    ~SdBusMessageGuard() { sd_bus_message_unref(msg); }
-};
-
-struct SdBusSlotGuard {
-    sd_bus_slot* slot = nullptr;
-    ~SdBusSlotGuard() { sd_bus_slot_unref(slot); }
-};
+using ManagedObjects = std::map<sdbus::ObjectPath, std::map<std::string, std::map<std::string, sdbus::Variant>>>;
+using PropertyMap = std::map<std::string, sdbus::Variant>;
 
 struct DeviceInfo {
     std::string path;
@@ -318,12 +144,12 @@ struct DeviceInfo {
     std::string icon;
     std::vector<std::string> uuids;
     uint32_t klass = 0;
+    uint16_t appearance = 0;
     int16_t rssi = 0;
     bool has_rssi = false;
     bool paired = false;
     bool trusted = false;
     bool connected = false;
-    bool services_resolved = false;
     bool blocked = false;
 
     std::string display_name() const {
@@ -334,372 +160,195 @@ struct DeviceInfo {
     }
 
     bool has_hid_uuid() const {
-        for (const std::string& uuid : uuids) {
-            if (lower_copy(uuid) == HID_UUID) return true;
+        for (const auto& uuid : uuids) {
+            const std::string u = lower_copy(uuid);
+            if (u == HID_UUID || u == HOGP_UUID) return true;
         }
         return false;
+    }
+
+    bool has_hid_appearance() const {
+        return appearance >= 960 && appearance <= 968;
     }
 
     bool is_peripheral_class() const {
         return (klass & 0x1f00u) == 0x0500u;
     }
 
-    bool is_gamepad_like() const {
+    bool is_controller_like() const {
         const std::string s = lower_copy(display_name() + " " + icon);
-        return has_hid_uuid() || is_peripheral_class() ||
+        return has_hid_uuid() || has_hid_appearance() || is_peripheral_class() ||
                s.find("gamepad") != std::string::npos ||
                s.find("joystick") != std::string::npos ||
                s.find("controller") != std::string::npos ||
-               s.find("wireless") != std::string::npos ||
+               s.find("hid") != std::string::npos ||
+               s.find("wireless controller") != std::string::npos ||
                s.find("xbox") != std::string::npos ||
-               s.find("dualshock") != std::string::npos ||
+               s.find("elite") != std::string::npos ||
                s.find("dualsense") != std::string::npos ||
+               s.find("dualshock") != std::string::npos ||
                s.find("playstation") != std::string::npos ||
                s.find("8bitdo") != std::string::npos ||
+               s.find("gulikit") != std::string::npos ||
+               s.find("gamesir") != std::string::npos ||
                s.find("pro controller") != std::string::npos ||
                s.find("joy-con") != std::string::npos ||
                s.find("nintendo") != std::string::npos;
     }
 
-    bool is_xbox_like() const {
-        const std::string s = lower_copy(display_name());
-        return s.find("xbox") != std::string::npos || s.find("elite") != std::string::npos || s.find("microsoft") != std::string::npos;
+    bool looks_fresh_from_discovery() const {
+        return has_rssi || !name.empty() || !alias.empty() || !icon.empty() || !uuids.empty() || klass != 0 || appearance != 0;
     }
 };
+
+template <typename T>
+bool read_prop(const PropertyMap& props, const char* key, T& out) {
+    const auto it = props.find(key);
+    if (it == props.end()) return false;
+    try {
+        out = it->second.get<T>();
+        return true;
+    } catch (const sdbus::Error&) {
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
 
 class BluezManager {
 public:
-    explicit BluezManager(bool pair_window) : pair_window_requested(pair_window) {}
+    explicit BluezManager(bool open_pair_window_on_start) : startup_pair_window(open_pair_window_on_start) {}
     void run();
-    void request_urgent_tick() { urgent_tick = true; }
     static void disconnect_gamepads();
 
 private:
-    bool pair_window_requested = false;
-    sd_bus* bus = nullptr;
-    SdBusSlotGuard agent_slot;
-    SdBusSlotGuard properties_slot;
-    std::string adapter_path;
-    bool discovery_active = false;
+    bool startup_pair_window = false;
     bool pair_window_open = false;
-    bool initial_device_snapshot_done = false;
-    bool urgent_tick = false;
+    bool discovery_active = false;
+    bool logged_ready = false;
+    bool first_snapshot_done = false;
+    std::atomic<bool> dbus_activity{false};
     Clock::time_point pair_window_end{};
-    std::map<std::string, Clock::time_point> stale_since;
-    std::set<std::string> connect_logged;
-    std::set<std::string> connected_paths;
-    std::set<std::string> missing_sdl_warned;
-    std::map<std::string, Clock::time_point> next_connect_attempt;
-    std::map<std::string, int> connect_failures;
-    std::set<std::string> xbox_driver_warned;
+    std::string adapter_path;
+    std::set<std::string> logged_connected;
+    std::set<std::string> pairing_attempted;
+
+    std::unique_ptr<sdbus::IConnection> connection;
+    std::unique_ptr<sdbus::IObject> agent_object;
+    sdbus::Slot bluez_signal_slot;
 
     bool connect_bus();
     void close_bus();
+    std::unique_ptr<sdbus::IProxy> proxy(const std::string& path);
     bool register_agent();
-    bool install_property_watch();
     bool ensure_adapter();
-    bool adapter_set_bool(const char* property, bool value);
+    bool adapter_set_bool(const char* prop, bool value);
     bool start_discovery();
     bool stop_discovery();
+    ManagedObjects managed_objects();
     std::vector<DeviceInfo> list_devices();
     bool set_trusted(const DeviceInfo& dev, bool trusted);
-    bool call_device_method(const DeviceInfo& dev, const char* method, uint64_t timeout_us, const char* log_action);
     bool pair_device(const DeviceInfo& dev);
-    bool connect_device(const DeviceInfo& dev);
+    bool connect_device_once(const DeviceInfo& dev);
     bool disconnect_device(const DeviceInfo& dev);
-    bool connect_allowed(const DeviceInfo& dev, Clock::time_point now) const;
-    void schedule_connect_retry(const DeviceInfo& dev, Clock::time_point now, bool failed);
-    void clear_connect_retry(const DeviceInfo& dev);
-    void maybe_warn_xbox_driver_path(const DeviceInfo& dev);
-    void tick();
     void open_pair_window(const char* reason);
-    void note_connected(const DeviceInfo& dev, const char* action);
-};
-
-static int agent_release(sd_bus_message* m, void*, sd_bus_error*) {
-    return sd_bus_reply_method_return(m, "");
-}
-
-static int agent_request_pin_code(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    (void)sd_bus_message_read(m, "o", &device);
-    return sd_bus_reply_method_return(m, "s", "0000");
-}
-
-static int agent_request_passkey(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    (void)sd_bus_message_read(m, "o", &device);
-    return sd_bus_reply_method_return(m, "u", 0u);
-}
-
-static int agent_display_pin_code(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    const char* pincode = nullptr;
-    (void)sd_bus_message_read(m, "os", &device, &pincode);
-    return sd_bus_reply_method_return(m, "");
-}
-
-static int agent_display_passkey(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    uint32_t passkey = 0;
-    uint16_t entered = 0;
-    (void)sd_bus_message_read(m, "ouq", &device, &passkey, &entered);
-    return sd_bus_reply_method_return(m, "");
-}
-
-static int agent_request_confirmation(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    uint32_t passkey = 0;
-    (void)sd_bus_message_read(m, "ou", &device, &passkey);
-    // Headless appliance mode: accept controller confirmations automatically.
-    return sd_bus_reply_method_return(m, "");
-}
-
-static int agent_request_authorization(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    (void)sd_bus_message_read(m, "o", &device);
-    return sd_bus_reply_method_return(m, "");
-}
-
-static int agent_authorize_service(sd_bus_message* m, void*, sd_bus_error*) {
-    const char* device = nullptr;
-    const char* uuid = nullptr;
-    (void)sd_bus_message_read(m, "os", &device, &uuid);
-    return sd_bus_reply_method_return(m, "");
-}
-
-static int agent_cancel(sd_bus_message* m, void*, sd_bus_error*) {
-    return sd_bus_reply_method_return(m, "");
-}
-
-static const sd_bus_vtable agent_vtable[] = {
-    SD_BUS_VTABLE_START(0),
-    SD_BUS_METHOD("Release", "", "", agent_release, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestPinCode", "o", "s", agent_request_pin_code, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestPasskey", "o", "u", agent_request_passkey, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("DisplayPinCode", "os", "", agent_display_pin_code, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("DisplayPasskey", "ouq", "", agent_display_passkey, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestConfirmation", "ou", "", agent_request_confirmation, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("RequestAuthorization", "o", "", agent_request_authorization, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("AuthorizeService", "os", "", agent_authorize_service, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_METHOD("Cancel", "", "", agent_cancel, SD_BUS_VTABLE_UNPRIVILEGED),
-    SD_BUS_VTABLE_END
+    void close_pair_window();
+    void tick();
+    void note_connected(const DeviceInfo& dev);
 };
 
 bool BluezManager::connect_bus() {
-    close_bus();
-    int r = sd_bus_default_system(&bus);
-    if (r < 0) {
-        std::println(stderr, "[bt] BlueZ D-Bus unavailable: {}", std::strerror(-r));
-        bus = nullptr;
-        return false;
+    try {
+        connection = sdbus::createSystemBusConnection();
+        connection->setMethodCallTimeout(DBUS_FAST_TIMEOUT);
+        bluez_signal_slot = connection->addMatch(
+            "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
+            [this](sdbus::Message&) { dbus_activity.store(true, std::memory_order_relaxed); },
+            sdbus::return_slot);
+        connection->enterEventLoopAsync();
+        return true;
+    } catch (const sdbus::Error& e) {
+        std::println(stderr, "[bt] BlueZ D-Bus unavailable: {}", e.getMessage());
+    } catch (const std::exception& e) {
+        std::println(stderr, "[bt] BlueZ D-Bus unavailable: {}", e.what());
     }
-    // Never let BlueZ method calls make Ctrl+C/systemd shutdown feel stuck.
-    // Controllers, especially Xbox BLE pads, can leave Connect() waiting for many seconds.
-    // A short global D-Bus timeout keeps reconnects opportunistic and shutdown fast.
-    (void)sd_bus_set_method_call_timeout(bus, BLUEZ_DBUS_CALL_TIMEOUT_US);
-    return true;
+    close_bus();
+    return false;
 }
 
 void BluezManager::close_bus() {
-    agent_slot.slot = nullptr;
-    if (bus) {
-        sd_bus_flush(bus);
-        sd_bus_unref(bus);
-        bus = nullptr;
+    bluez_signal_slot.reset();
+    agent_object.reset();
+    if (connection) {
+        try { connection->leaveEventLoop(); } catch (...) {}
+        connection.reset();
     }
+}
+
+std::unique_ptr<sdbus::IProxy> BluezManager::proxy(const std::string& path) {
+    return sdbus::createProxy(*connection, sdbus::ServiceName{BLUEZ_SERVICE}, sdbus::ObjectPath{path});
 }
 
 bool BluezManager::register_agent() {
-    if (!bus) return false;
-    int r = sd_bus_add_object_vtable(bus, &agent_slot.slot, AGENT_PATH, AGENT_IFACE, agent_vtable, this);
-    if (r < 0 && r != -EEXIST) {
-        std::println(stderr, "[bt] failed to export pairing agent: {}", std::strerror(-r));
-        return false;
-    }
+    if (!connection) return false;
+    try {
+        agent_object = sdbus::createObject(*connection, sdbus::ObjectPath{AGENT_PATH});
+        agent_object->addVTable(
+            sdbus::registerMethod("Release").implementedAs([] {}),
+            sdbus::registerMethod("RequestPinCode").implementedAs([](const sdbus::ObjectPath&) { return std::string{"0000"}; }),
+            sdbus::registerMethod("RequestPasskey").implementedAs([](const sdbus::ObjectPath&) { return uint32_t{0}; }),
+            sdbus::registerMethod("DisplayPinCode").implementedAs([](const sdbus::ObjectPath&, const std::string&) {}),
+            sdbus::registerMethod("DisplayPasskey").implementedAs([](const sdbus::ObjectPath&, uint32_t, uint16_t) {}),
+            sdbus::registerMethod("RequestConfirmation").implementedAs([](const sdbus::ObjectPath&, uint32_t) {}),
+            sdbus::registerMethod("RequestAuthorization").implementedAs([](const sdbus::ObjectPath&) {}),
+            sdbus::registerMethod("AuthorizeService").implementedAs([](const sdbus::ObjectPath&, const std::string&) {}),
+            sdbus::registerMethod("Cancel").implementedAs([] {})
+        ).forInterface(AGENT_IFACE);
 
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    r = sd_bus_call_method(bus, BLUEZ_SERVICE, "/org/bluez", AGENT_MANAGER_IFACE,
-                           "RegisterAgent", &err.error, &reply.msg, "os", AGENT_PATH, "NoInputNoOutput");
-    if (r < 0 && !sd_bus_error_has_name(&err.error, "org.bluez.Error.AlreadyExists")) {
-        std::println(stderr, "[bt] failed to register pairing agent: {}", err.error.message ? err.error.message : std::strerror(-r));
-        return false;
+        auto mgr = proxy("/org/bluez");
+        try {
+            mgr->callMethod("RegisterAgent")
+                .onInterface(AGENT_MANAGER_IFACE)
+                .withTimeout(DBUS_FAST_TIMEOUT)
+                .withArguments(sdbus::ObjectPath{AGENT_PATH}, std::string{"NoInputNoOutput"})
+                .storeResultsTo();
+        } catch (const sdbus::Error& e) {
+            if (std::string(e.getName()) != "org.bluez.Error.AlreadyExists") throw;
+        }
+        mgr->callMethod("RequestDefaultAgent")
+            .onInterface(AGENT_MANAGER_IFACE)
+            .withTimeout(DBUS_FAST_TIMEOUT)
+            .withArguments(sdbus::ObjectPath{AGENT_PATH})
+            .storeResultsTo();
+        return true;
+    } catch (const sdbus::Error& e) {
+        std::println(stderr, "[bt] pairing agent unavailable: {}", e.getMessage());
+    } catch (const std::exception& e) {
+        std::println(stderr, "[bt] pairing agent unavailable: {}", e.what());
     }
-
-    sd_bus_error_free(&err.error);
-    sd_bus_message_unref(reply.msg);
-    reply.msg = nullptr;
-    r = sd_bus_call_method(bus, BLUEZ_SERVICE, "/org/bluez", AGENT_MANAGER_IFACE,
-                           "RequestDefaultAgent", &err.error, &reply.msg, "o", AGENT_PATH);
-    if (r < 0) {
-        std::println(stderr, "[bt] failed to make pairing agent default: {}", err.error.message ? err.error.message : std::strerror(-r));
-        return false;
-    }
-    return true;
+    agent_object.reset();
+    return false;
 }
 
-static int bluez_device_properties_changed(sd_bus_message*, void* userdata, sd_bus_error*) {
-    auto* mgr = static_cast<BluezManager*>(userdata);
-    if (mgr) mgr->request_urgent_tick();
-    return 0;
-}
-
-bool BluezManager::install_property_watch() {
-    if (!bus) return false;
-    const char* match = "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
-                        "member='PropertiesChanged',arg0='org.bluez.Device1'";
-    int r = sd_bus_add_match(bus, &properties_slot.slot, match, bluez_device_properties_changed, this);
-    if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] failed to watch BlueZ device events: {}", std::strerror(-r));
-        return false;
+ManagedObjects BluezManager::managed_objects() {
+    ManagedObjects objects;
+    if (!connection) return objects;
+    try {
+        proxy("/")->callMethod("GetManagedObjects")
+            .onInterface(OBJECT_MANAGER_IFACE)
+            .withTimeout(DBUS_FAST_TIMEOUT)
+            .storeResultsTo(objects);
+    } catch (const sdbus::Error& e) {
+        if (g_ctx.verbose) std::println(stderr, "[bt] GetManagedObjects failed: {}", e.getMessage());
     }
-    return true;
-}
-
-static bool read_variant_into_device(sd_bus_message* m, const char* prop, DeviceInfo& dev) {
-    const char* contents = nullptr;
-    int r = sd_bus_message_peek_type(m, nullptr, &contents);
-    if (r < 0) return false;
-    r = sd_bus_message_enter_container(m, SD_BUS_TYPE_VARIANT, contents);
-    if (r < 0) return false;
-
-    if (std::strcmp(prop, "Address") == 0 || std::strcmp(prop, "Name") == 0 ||
-        std::strcmp(prop, "Alias") == 0 || std::strcmp(prop, "Icon") == 0) {
-        const char* s = nullptr;
-        if (sd_bus_message_read(m, "s", &s) >= 0 && s) {
-            if (std::strcmp(prop, "Address") == 0) dev.address = s;
-            else if (std::strcmp(prop, "Name") == 0) dev.name = s;
-            else if (std::strcmp(prop, "Alias") == 0) dev.alias = s;
-            else if (std::strcmp(prop, "Icon") == 0) dev.icon = s;
-        }
-    } else if (std::strcmp(prop, "Paired") == 0 || std::strcmp(prop, "Trusted") == 0 ||
-               std::strcmp(prop, "Connected") == 0 || std::strcmp(prop, "ServicesResolved") == 0 ||
-               std::strcmp(prop, "Blocked") == 0) {
-        int b = 0;
-        if (sd_bus_message_read(m, "b", &b) >= 0) {
-            if (std::strcmp(prop, "Paired") == 0) dev.paired = b;
-            else if (std::strcmp(prop, "Trusted") == 0) dev.trusted = b;
-            else if (std::strcmp(prop, "Connected") == 0) dev.connected = b;
-            else if (std::strcmp(prop, "ServicesResolved") == 0) dev.services_resolved = b;
-            else if (std::strcmp(prop, "Blocked") == 0) dev.blocked = b;
-        }
-    } else if (std::strcmp(prop, "Class") == 0) {
-        uint32_t klass = 0;
-        if (sd_bus_message_read(m, "u", &klass) >= 0) dev.klass = klass;
-    } else if (std::strcmp(prop, "RSSI") == 0) {
-        int16_t rssi = 0;
-        if (sd_bus_message_read(m, "n", &rssi) >= 0) { dev.rssi = rssi; dev.has_rssi = true; }
-    } else if (std::strcmp(prop, "UUIDs") == 0) {
-        if (sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "s") >= 0) {
-            const char* uuid = nullptr;
-            while (sd_bus_message_read(m, "s", &uuid) > 0) {
-                if (uuid) dev.uuids.emplace_back(uuid);
-            }
-            (void)sd_bus_message_exit_container(m);
-        }
-    } else {
-        (void)sd_bus_message_skip(m, contents);
-    }
-
-    (void)sd_bus_message_exit_container(m);
-    return true;
-}
-
-static bool read_bool_prop(sd_bus* bus, const std::string& path, const char* iface, const char* prop, bool& out) {
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_get_property(bus, BLUEZ_SERVICE, path.c_str(), iface, prop, &err.error, &reply.msg, "b");
-    if (r < 0) return false;
-    int b = 0;
-    if (sd_bus_message_read(reply.msg, "b", &b) < 0) return false;
-    out = b;
-    return true;
-}
-
-std::vector<DeviceInfo> BluezManager::list_devices() {
-    std::vector<DeviceInfo> out;
-    if (!bus) return out;
-
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, "/", OBJECT_MANAGER, "GetManagedObjects", &err.error, &reply.msg, "");
-    if (r < 0) return out;
-
-    r = sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_ARRAY, "{oa{sa{sv}}}");
-    if (r < 0) return out;
-
-    while (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_DICT_ENTRY, "oa{sa{sv}}") > 0) {
-        const char* obj_path = nullptr;
-        (void)sd_bus_message_read(reply.msg, "o", &obj_path);
-        DeviceInfo dev{};
-        if (obj_path) dev.path = obj_path;
-        bool is_device = false;
-
-        if (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_ARRAY, "{sa{sv}}") >= 0) {
-            while (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_DICT_ENTRY, "sa{sv}") > 0) {
-                const char* iface = nullptr;
-                (void)sd_bus_message_read(reply.msg, "s", &iface);
-                if (iface && std::strcmp(iface, DEVICE_IFACE) == 0) is_device = true;
-
-                if (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_ARRAY, "{sv}") >= 0) {
-                    while (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_DICT_ENTRY, "sv") > 0) {
-                        const char* prop = nullptr;
-                        (void)sd_bus_message_read(reply.msg, "s", &prop);
-                        if (iface && prop && std::strcmp(iface, DEVICE_IFACE) == 0) {
-                            (void)read_variant_into_device(reply.msg, prop, dev);
-                        } else {
-                            (void)sd_bus_message_skip(reply.msg, "v");
-                        }
-                        (void)sd_bus_message_exit_container(reply.msg);
-                    }
-                    (void)sd_bus_message_exit_container(reply.msg);
-                }
-                (void)sd_bus_message_exit_container(reply.msg);
-            }
-            (void)sd_bus_message_exit_container(reply.msg);
-        }
-        (void)sd_bus_message_exit_container(reply.msg);
-
-        if (is_device) {
-            if (dev.address.empty()) dev.address = path_to_mac(dev.path);
-            out.push_back(std::move(dev));
-        }
-    }
-    return out;
+    return objects;
 }
 
 bool BluezManager::ensure_adapter() {
-    if (!bus) return false;
-
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, "/", OBJECT_MANAGER, "GetManagedObjects", &err.error, &reply.msg, "");
-    if (r < 0) {
-        std::println(stderr, "[bt] BlueZ object manager failed: {}", err.error.message ? err.error.message : std::strerror(-r));
-        return false;
-    }
-
-    r = sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_ARRAY, "{oa{sa{sv}}}");
-    if (r < 0) return false;
-
-    while (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_DICT_ENTRY, "oa{sa{sv}}") > 0) {
-        const char* obj_path = nullptr;
-        (void)sd_bus_message_read(reply.msg, "o", &obj_path);
-        bool is_adapter = false;
-        if (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_ARRAY, "{sa{sv}}") >= 0) {
-            while (sd_bus_message_enter_container(reply.msg, SD_BUS_TYPE_DICT_ENTRY, "sa{sv}") > 0) {
-                const char* iface = nullptr;
-                (void)sd_bus_message_read(reply.msg, "s", &iface);
-                if (iface && std::strcmp(iface, ADAPTER_IFACE) == 0) is_adapter = true;
-                (void)sd_bus_message_skip(reply.msg, "a{sv}");
-                (void)sd_bus_message_exit_container(reply.msg);
-            }
-            (void)sd_bus_message_exit_container(reply.msg);
-        }
-        (void)sd_bus_message_exit_container(reply.msg);
-        if (is_adapter && obj_path) {
-            adapter_path = obj_path;
+    adapter_path.clear();
+    for (const auto& [obj_path, ifaces] : managed_objects()) {
+        if (ifaces.find(ADAPTER_IFACE) != ifaces.end()) {
+            adapter_path = static_cast<const std::string&>(obj_path);
             break;
         }
     }
@@ -709,154 +358,172 @@ bool BluezManager::ensure_adapter() {
         return false;
     }
 
-    adapter_set_bool("Powered", true);
+    (void)adapter_set_bool("Powered", true);
     return true;
 }
 
-bool BluezManager::adapter_set_bool(const char* property, bool value) {
-    if (!bus || adapter_path.empty()) return false;
-    SdBusErrorGuard err;
-    int r = sd_bus_set_property(bus, BLUEZ_SERVICE, adapter_path.c_str(), ADAPTER_IFACE,
-                                property, &err.error, "b", value ? 1 : 0);
-    if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] failed to set adapter {}={}: {}", property, value, err.error.message ? err.error.message : std::strerror(-r));
+bool BluezManager::adapter_set_bool(const char* prop, bool value) {
+    if (!connection || adapter_path.empty()) return false;
+    try {
+        proxy(adapter_path)->setProperty(prop).onInterface(ADAPTER_IFACE).toValue(value);
+        return true;
+    } catch (const sdbus::Error& e) {
+        if (g_ctx.verbose) std::println(stderr, "[bt] adapter {}={} failed: {}", prop, value, e.getMessage());
         return false;
     }
-    return true;
 }
 
 bool BluezManager::start_discovery() {
-    if (!bus || adapter_path.empty() || discovery_active) return false;
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, adapter_path.c_str(), ADAPTER_IFACE,
-                               "StartDiscovery", &err.error, &reply.msg, "");
-    if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] StartDiscovery failed: {}", err.error.message ? err.error.message : std::strerror(-r));
+    if (!connection || adapter_path.empty() || discovery_active) return true;
+    try {
+        proxy(adapter_path)->callMethod("StartDiscovery")
+            .onInterface(ADAPTER_IFACE)
+            .withTimeout(DBUS_DISCOVERY_TIMEOUT)
+            .storeResultsTo();
+        discovery_active = true;
+        return true;
+    } catch (const sdbus::Error& e) {
+        if (std::string(e.getName()) == "org.bluez.Error.InProgress") {
+            discovery_active = true;
+            return true;
+        }
+        if (g_ctx.verbose) std::println(stderr, "[bt] StartDiscovery failed: {}", e.getMessage());
         return false;
     }
-    discovery_active = true;
-    return true;
 }
 
 bool BluezManager::stop_discovery() {
-    if (!bus || adapter_path.empty() || !discovery_active) return true;
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, adapter_path.c_str(), ADAPTER_IFACE,
-                               "StopDiscovery", &err.error, &reply.msg, "");
+    if (!connection || adapter_path.empty() || !discovery_active) return true;
     discovery_active = false;
-    if (r < 0 && !sd_bus_error_has_name(&err.error, "org.bluez.Error.Failed")) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] StopDiscovery failed: {}", err.error.message ? err.error.message : std::strerror(-r));
+    try {
+        proxy(adapter_path)->callMethod("StopDiscovery")
+            .onInterface(ADAPTER_IFACE)
+            .withTimeout(DBUS_DISCOVERY_TIMEOUT)
+            .storeResultsTo();
+        return true;
+    } catch (const sdbus::Error& e) {
+        const std::string name = e.getName();
+        if (name == "org.bluez.Error.Failed" || name == "org.bluez.Error.NotReady") return true;
+        if (g_ctx.verbose) std::println(stderr, "[bt] StopDiscovery failed: {}", e.getMessage());
         return false;
     }
-    return true;
+}
+
+std::vector<DeviceInfo> BluezManager::list_devices() {
+    std::vector<DeviceInfo> out;
+    for (const auto& [obj_path, ifaces] : managed_objects()) {
+        const auto dev_iface = ifaces.find(DEVICE_IFACE);
+        if (dev_iface == ifaces.end()) continue;
+
+        const PropertyMap& props = dev_iface->second;
+        DeviceInfo dev{};
+        dev.path = static_cast<const std::string&>(obj_path);
+        read_prop(props, "Address", dev.address);
+        read_prop(props, "Name", dev.name);
+        read_prop(props, "Alias", dev.alias);
+        read_prop(props, "Icon", dev.icon);
+        read_prop(props, "UUIDs", dev.uuids);
+        read_prop(props, "Class", dev.klass);
+        read_prop(props, "Appearance", dev.appearance);
+        dev.has_rssi = read_prop(props, "RSSI", dev.rssi);
+        read_prop(props, "Paired", dev.paired);
+        read_prop(props, "Trusted", dev.trusted);
+        read_prop(props, "Connected", dev.connected);
+        read_prop(props, "Blocked", dev.blocked);
+        if (dev.address.empty()) dev.address = path_to_mac(dev.path);
+        out.push_back(std::move(dev));
+    }
+    return out;
 }
 
 bool BluezManager::set_trusted(const DeviceInfo& dev, bool trusted) {
-    if (!bus || dev.path.empty()) return false;
-    SdBusErrorGuard err;
-    int r = sd_bus_set_property(bus, BLUEZ_SERVICE, dev.path.c_str(), DEVICE_IFACE,
-                                "Trusted", &err.error, "b", trusted ? 1 : 0);
-    if (r < 0) {
-        if (g_ctx.verbose) std::println(stderr, "[bt] failed to trust {}: {}", dev.display_name(), err.error.message ? err.error.message : std::strerror(-r));
+    if (!connection || dev.path.empty()) return false;
+    if (dev.trusted == trusted) return true;
+    try {
+        proxy(dev.path)->setProperty("Trusted").onInterface(DEVICE_IFACE).toValue(trusted);
+        return true;
+    } catch (const sdbus::Error& e) {
+        if (g_ctx.verbose) std::println(stderr, "[bt] failed to trust {}: {}", dev.display_name(), e.getMessage());
         return false;
     }
-    return true;
-}
-
-bool BluezManager::call_device_method(const DeviceInfo& dev, const char* method, uint64_t timeout_us, const char* log_action) {
-    if (!bus || dev.path.empty()) return false;
-
-    // The normal manager timeout is intentionally short so Ctrl+C/service stop is snappy.
-    // Pair/Connect need a little longer on Raspberry Pi Bluetooth, otherwise BlueZ often
-    // times out before HID/SDL has actually settled and the controller appears to take
-    // many repeated attempts to connect.
-    (void)sd_bus_set_method_call_timeout(bus, timeout_us);
-    SdBusErrorGuard err;
-    SdBusMessageGuard reply;
-    int r = sd_bus_call_method(bus, BLUEZ_SERVICE, dev.path.c_str(), DEVICE_IFACE,
-                               method, &err.error, &reply.msg, "");
-    (void)sd_bus_set_method_call_timeout(bus, BLUEZ_DBUS_CALL_TIMEOUT_US);
-
-    if (r < 0) {
-        if (g_ctx.verbose) {
-            std::println(stderr, "[bt] {} failed for {} ({}): {}", log_action, dev.display_name(), dev.address,
-                         err.error.message ? err.error.message : std::strerror(-r));
-        }
-        return false;
-    }
-    return true;
 }
 
 bool BluezManager::pair_device(const DeviceInfo& dev) {
-    return call_device_method(dev, "Pair", BLUEZ_DBUS_PAIR_TIMEOUT_US, "pair");
+    if (!connection || dev.path.empty()) return false;
+    try {
+        proxy(dev.path)->callMethod("Pair")
+            .onInterface(DEVICE_IFACE)
+            .withTimeout(DBUS_PAIR_TIMEOUT)
+            .storeResultsTo();
+        return true;
+    } catch (const sdbus::Error& e) {
+        const std::string name = e.getName();
+        if (name == "org.bluez.Error.AlreadyExists") return true;
+        if (g_ctx.verbose) std::println(stderr, "[bt] pair failed for {} ({}): {}", dev.display_name(), dev.address, e.getMessage());
+        return false;
+    }
 }
 
-bool BluezManager::connect_device(const DeviceInfo& dev) {
-    return call_device_method(dev, "Connect", BLUEZ_DBUS_CONNECT_TIMEOUT_US, "connect");
+bool BluezManager::connect_device_once(const DeviceInfo& dev) {
+    if (!connection || dev.path.empty() || dev.connected) return true;
+    try {
+        proxy(dev.path)->callMethod("Connect")
+            .onInterface(DEVICE_IFACE)
+            .withTimeout(DBUS_CONNECT_TIMEOUT)
+            .storeResultsTo();
+        return true;
+    } catch (const sdbus::Error& e) {
+        const std::string name = e.getName();
+        if (name == "org.bluez.Error.AlreadyConnected") return true;
+        if (name != "org.bluez.Error.NotReady" && g_ctx.verbose) {
+            std::println(stderr, "[bt] connect failed for {} ({}): {}", dev.display_name(), dev.address, e.getMessage());
+        }
+        return false;
+    }
 }
 
 bool BluezManager::disconnect_device(const DeviceInfo& dev) {
-    return call_device_method(dev, "Disconnect", BLUEZ_DBUS_DISCONNECT_TIMEOUT_US, "disconnect");
-}
-
-bool BluezManager::connect_allowed(const DeviceInfo& dev, Clock::time_point now) const {
-    const auto it = next_connect_attempt.find(dev.path);
-    return it == next_connect_attempt.end() || now >= it->second;
-}
-
-void BluezManager::schedule_connect_retry(const DeviceInfo& dev, Clock::time_point now, bool failed) {
-    if (failed) {
-        ++connect_failures[dev.path];
-        maybe_warn_xbox_driver_path(dev);
+    if (!connection || dev.path.empty() || !dev.connected) return true;
+    try {
+        proxy(dev.path)->callMethod("Disconnect")
+            .onInterface(DEVICE_IFACE)
+            .withTimeout(DBUS_CONNECT_TIMEOUT)
+            .storeResultsTo();
+        return true;
+    } catch (const sdbus::Error& e) {
+        const std::string name = e.getName();
+        if (name == "org.bluez.Error.NotConnected") return true;
+        if (g_ctx.verbose) std::println(stderr, "[bt] disconnect failed for {}: {}", dev.display_name(), e.getMessage());
+        return false;
     }
-
-    // Retrying Connect() too aggressively keeps BlueZ busy and can make controller
-    // reconnects slower, not faster. Back off while the pad is asleep/offline; when a
-    // trusted controller actually reconnects by itself, the PropertiesChanged signal
-    // still wakes this loop immediately.
-    const int failures = std::max(1, connect_failures[dev.path]);
-    int delay_s = 0;
-    if (dev.is_xbox_like()) {
-        delay_s = std::min(45, 6 + failures * 6);
-    } else {
-        delay_s = std::min(30, 1 << std::min(failures, 5));
-    }
-    next_connect_attempt[dev.path] = now + std::chrono::seconds(delay_s);
-}
-
-void BluezManager::clear_connect_retry(const DeviceInfo& dev) {
-    next_connect_attempt.erase(dev.path);
-    connect_failures.erase(dev.path);
-    missing_sdl_warned.erase(dev.path);
-}
-
-void BluezManager::maybe_warn_xbox_driver_path(const DeviceInfo& dev) {
-    (void)dev;
-    // Keep this silent in normal logs. Xbox/Elite BLE reconnects can legitimately fail
-    // a few times while the controller is asleep or the BLE HID path is settling; the
-    // reconnect backoff already handles it without user-facing noise.
 }
 
 void BluezManager::open_pair_window(const char* reason) {
-    const bool was_open = pair_window_open;
     pair_window_open = true;
     pair_window_end = Clock::now() + std::chrono::minutes(2);
-    adapter_set_bool("Pairable", true);
-    adapter_set_bool("Discoverable", true);
-    if (!discovery_active) start_discovery();
-    if (!was_open) {
-        std::println("[bt] pairing window open for 2 minutes ({})", reason ? reason : "requested");
-    } else if (g_ctx.verbose) {
-        std::println("[bt] pairing window extended for 2 minutes ({})", reason ? reason : "requested");
-    }
+    pairing_attempted.clear();
+    (void)adapter_set_bool("Pairable", true);
+    (void)adapter_set_bool("Discoverable", true);
+    (void)start_discovery();
+    std::println("[bt] pairing open for 2 minutes ({})", reason ? reason : "requested");
 }
 
-void BluezManager::note_connected(const DeviceInfo& dev, const char* action) {
-    connected_paths.insert(dev.path);
-    if (connect_logged.insert(dev.path + action).second) {
-        std::println("[bt] {} {} ({})", action, dev.display_name(), dev.address);
+void BluezManager::close_pair_window() {
+    if (!pair_window_open && !discovery_active) return;
+    pair_window_open = false;
+    (void)stop_discovery();
+    (void)adapter_set_bool("Discoverable", false);
+    (void)adapter_set_bool("Pairable", false);
+    std::println("[bt] pairing closed; trusted controllers can still reconnect");
+}
+
+void BluezManager::note_connected(const DeviceInfo& dev) {
+    if (!first_snapshot_done) {
+        logged_connected.insert(dev.path);
+        return;
+    }
+    if (logged_connected.insert(dev.path).second) {
+        std::println("[bt] connected {} ({})", dev.display_name(), dev.address);
     }
 }
 
@@ -864,18 +531,8 @@ void BluezManager::tick() {
     const auto now = Clock::now();
 
     if (!g_proactive_reconnect_enabled.load(std::memory_order_relaxed)) {
-        if (pair_window_open || discovery_active) {
-            pair_window_open = false;
-            stop_discovery();
-            adapter_set_bool("Discoverable", false);
-            adapter_set_bool("Pairable", false);
-            if (g_ctx.verbose) std::println("[bt] Switch suspended; proactive Bluetooth reconnect paused");
-        }
-        for (const DeviceInfo& dev : list_devices()) {
-            if (dev.is_gamepad_like() && dev.connected) connected_paths.insert(dev.path);
-            else connected_paths.erase(dev.path);
-        }
-        initial_device_snapshot_done = true;
+        close_pair_window();
+        first_snapshot_done = true;
         return;
     }
 
@@ -884,117 +541,71 @@ void BluezManager::tick() {
     }
 
     if (pair_window_open && now >= pair_window_end) {
-        pair_window_open = false;
-        stop_discovery();
-        adapter_set_bool("Discoverable", false);
-        adapter_set_bool("Pairable", false);
-        std::println("[bt] pairing window closed; trusted reconnect stays active");
+        close_pair_window();
     }
 
-    auto devices = list_devices();
-    bool restarted_discovery = false;
-
-    for (const DeviceInfo& dev : devices) {
-        if (dev.blocked || !dev.is_gamepad_like()) continue;
-
-        if (dev.connected) {
-            stale_since.erase(dev.path);
-            clear_connect_retry(dev);
-            if (dev.paired || dev.trusted) {
-                if (initial_device_snapshot_done && !connected_paths.contains(dev.path)) {
-                    note_connected(dev, "connected");
-                } else {
-                    connected_paths.insert(dev.path);
-                }
-            }
-            continue;
-        }
-
-        stale_since.erase(dev.path);
-        connected_paths.erase(dev.path);
+    bool have_connected_controller = false;
+    for (const DeviceInfo& dev : list_devices()) {
+        if (dev.blocked || !dev.is_controller_like()) continue;
 
         if (dev.paired || dev.trusted) {
-            set_trusted(dev, true);
-            // Attempt proactive reconnect for trusted devices even without RSSI.
-            // This reduces connection latency when controllers wake up. The retry
-            // backoff prevents spamming while the controller is offline.
-            if (!connect_allowed(dev, now)) continue;
-
-            const bool was_discovering = discovery_active;
-            if (was_discovering) stop_discovery();
-            if (connect_device(dev)) {
-                clear_connect_retry(dev);
-                note_connected(dev, "reconnected");
+            if (!dev.trusted) (void)set_trusted(dev, true);
+            if (dev.connected) {
+                have_connected_controller = true;
+                note_connected(dev);
             } else {
-                schedule_connect_retry(dev, now, true);
+                logged_connected.erase(dev.path);
             }
-            if (was_discovering && pair_window_open) { start_discovery(); restarted_discovery = true; }
             continue;
         }
 
         if (!pair_window_open) continue;
-        // Only pair devices created/updated by the discovery session. RSSI is not mandatory on every adapter,
-        // but it is a good signal that this is a nearby live device, not ancient BlueZ cache.
-        if (!dev.has_rssi && dev.uuids.empty() && dev.name.empty()) continue;
+        if (!dev.looks_fresh_from_discovery()) continue;
+        if (!pairing_attempted.insert(dev.path).second) continue;
 
-        stop_discovery();
+        (void)stop_discovery();
         std::println("[bt] pairing {} ({})", dev.display_name(), dev.address);
         if (pair_device(dev)) {
-            DeviceInfo paired_dev = dev;
-            paired_dev.paired = true;
-            set_trusted(paired_dev, true);
-
-            // Xbox Elite/Series pads commonly need a short BLE/BlueZ settle after Pair()
-            // before Connect(); without this they often return InProgress/timeout loops.
-            if (paired_dev.is_xbox_like()) std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-
-            if (connect_device(paired_dev)) {
-                clear_connect_retry(paired_dev);
-                note_connected(paired_dev, "paired");
-            } else {
-                schedule_connect_retry(paired_dev, now, true);
-            }
+            DeviceInfo paired = dev;
+            paired.paired = true;
+            (void)set_trusted(paired, true);
+            // Pair() often already establishes the HID profile. Connect once only as a finishing nudge;
+            // never keep retrying sleeping controllers in the background.
+            (void)connect_device_once(paired);
+            std::println("[bt] paired {} ({})", dev.display_name(), dev.address);
         }
-        if (pair_window_open) { start_discovery(); restarted_discovery = true; }
+        if (pair_window_open) (void)start_discovery();
     }
 
-    if (pair_window_open && !discovery_active && !restarted_discovery) start_discovery();
-    initial_device_snapshot_done = true;
+    if (!logged_ready) {
+        std::println("[bt] Bluetooth controller manager ready");
+        logged_ready = true;
+    }
+
+    (void)have_connected_controller;
+    first_snapshot_done = true;
 }
 
 void BluezManager::run() {
     if (!connect_bus()) return;
-    register_agent();
-    install_property_watch();
+    (void)register_agent();
     if (!ensure_adapter()) { close_bus(); return; }
 
-    adapter_set_bool("Pairable", false);
-    adapter_set_bool("Discoverable", false);
-    std::println("[bt] BlueZ D-Bus manager active; trusted controllers may reconnect anytime");
-    if (pair_window_requested) {
-        open_pair_window("startup --pair");
-    }
+    (void)adapter_set_bool("Pairable", false);
+    (void)adapter_set_bool("Discoverable", false);
+
+    if (startup_pair_window) open_pair_window("startup --pair");
 
     while (g_manager_running.load(std::memory_order_relaxed)) {
-        (void)sd_bus_process(bus, nullptr);
         tick();
-
-        // Use D-Bus wakeups instead of a fixed 2 s sleep. Already-paired controllers
-        // usually initiate the reconnect themselves when the user presses any button;
-        // PropertiesChanged wakes this loop so SDL can see/map the controller quickly.
-        const int wait_ms = (pair_window_open || discovery_active) ? 100 : 250;
-        urgent_tick = false;
-        for (int waited = 0; waited < wait_ms && g_manager_running.load(std::memory_order_relaxed); waited += 50) {
-            (void)sd_bus_wait(bus, 50 * 1000); // microseconds
-            while (sd_bus_process(bus, nullptr) > 0) {}
-            if (urgent_tick) break;
+        const int wait_ms = pair_window_open || discovery_active ? 100 : 250;
+        for (int waited = 0; waited < wait_ms && g_manager_running.load(std::memory_order_relaxed); waited += 25) {
+            if (dbus_activity.exchange(false, std::memory_order_relaxed)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
     }
 
-    (void)sd_bus_set_method_call_timeout(bus, BLUEZ_DBUS_SHUTDOWN_TIMEOUT_US);
-    stop_discovery();
-    adapter_set_bool("Discoverable", false);
-    adapter_set_bool("Pairable", false);
+    close_pair_window();
     close_bus();
 }
 
@@ -1002,16 +613,28 @@ void BluezManager::disconnect_gamepads() {
     BluezManager mgr(false);
     if (!mgr.connect_bus()) return;
     if (!mgr.ensure_adapter()) { mgr.close_bus(); return; }
-    for (const auto& d : mgr.list_devices()) {
-        if (!d.is_gamepad_like() || !d.connected) continue;
-        std::println("[bt] disconnecting {} ({}) because Switch suspended", d.display_name(), d.address);
-        (void)mgr.disconnect_device(d);
+    for (const auto& dev : mgr.list_devices()) {
+        if (!dev.connected || !dev.is_controller_like()) continue;
+        std::println("[bt] disconnecting {} ({}) because Switch suspended", dev.display_name(), dev.address);
+        (void)mgr.disconnect_device(dev);
     }
     mgr.close_bus();
 }
 
-
 } // namespace
+
+#else
+
+namespace {
+class BluezManager {
+public:
+    explicit BluezManager(bool) {}
+    void run() { std::println(stderr, "[bt] built without BlueZ D-Bus controller manager"); }
+    static void disconnect_gamepads() {}
+};
+} // namespace
+
+#endif
 
 void bluetooth_manager_runtime_setup(bool verbose) {
     static std::atomic<bool> already_done{false};
@@ -1024,6 +647,7 @@ void bluetooth_manager_start(bool open_pair_window) {
     g_proactive_reconnect_enabled.store(true, std::memory_order_relaxed);
     g_runtime_pair_window_requested.store(false, std::memory_order_relaxed);
     (void)unlink(BT_RECONNECT_PAUSE_FILE);
+
     bool expected = false;
     if (!g_manager_running.compare_exchange_strong(expected, true)) return;
     if (g_manager_thread.joinable()) g_manager_thread.join();
@@ -1032,7 +656,7 @@ void bluetooth_manager_start(bool open_pair_window) {
         BluezManager mgr(open_pair_window);
         mgr.run();
         g_manager_running.store(false, std::memory_order_relaxed);
-        std::println("[bt] BlueZ manager stopped");
+        if (g_ctx.verbose) std::println("[bt] Bluetooth controller manager stopped");
     });
 }
 
@@ -1043,15 +667,15 @@ bool bluetooth_manager_request_pairing_window() {
 }
 
 void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {
-    const bool was_enabled = g_proactive_reconnect_enabled.exchange(enabled, std::memory_order_relaxed);
+    const bool old = g_proactive_reconnect_enabled.exchange(enabled, std::memory_order_relaxed);
     if (enabled) {
         (void)unlink(BT_RECONNECT_PAUSE_FILE);
     } else {
         std::ofstream out(BT_RECONNECT_PAUSE_FILE);
         if (out) out << "1\n";
     }
-    if (g_ctx.verbose && was_enabled != enabled) {
-        std::println("[bt] proactive Bluetooth reconnect {}", enabled ? "enabled" : "paused");
+    if (g_ctx.verbose && old != enabled) {
+        std::println("[bt] Bluetooth reconnect {}", enabled ? "enabled" : "paused");
     }
 }
 
