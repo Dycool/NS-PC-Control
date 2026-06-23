@@ -662,6 +662,12 @@ void BluezManager::run_pairing_wizard() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    std::println("\nDisconnecting controllers...");
+    for (const auto& dev : list_devices() | std::views::filter([](const auto& d) { return d.connected && d.is_controller_like(); })) {
+        std::println("[bt] disconnecting {} ({})", dev.display_name(), dev.address);
+        (void)disconnect_device(dev);
+    }
+
     std::println("\nExiting pairing wizard...");
     close_pair_window();
     close_bus();
