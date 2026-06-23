@@ -25,7 +25,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 std::atomic<bool> g_manager_running{false};
+std::atomic<bool> g_proactive_reconnect_enabled{true};
 std::thread g_manager_thread;
+constexpr const char* BT_RECONNECT_PAUSE_FILE = "/tmp/ns-pc-control-bt-reconnect-paused";
 
 [[maybe_unused]] std::string lower_copy(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -216,6 +218,7 @@ scan_pid=""
 pair_open=0
 pair_end=0
 seen_connected=" "
+pause_file="/tmp/ns-pc-control-bt-reconnect-paused"
 cleanup() {
     [ -n "$scan_pid" ] && kill "$scan_pid" 2>/dev/null || true
     [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
@@ -241,14 +244,18 @@ open_pair_window() {
     start_scan
     printf '[bt] pairing window open for 2 minutes (%s)\n' "$reason"
 }
-close_pair_window_if_due() {
+close_pair_window_now() {
     [ "$pair_open" = "1" ] || return 0
-    [ "$(date +%s)" -lt "$pair_end" ] && return 0
     pair_open=0
     stop_scan
     bt_quiet 4s bluetoothctl discoverable off
     bt_quiet 4s bluetoothctl pairable off
     printf '[bt] pairing window closed; trusted reconnect helper stays active\n'
+}
+close_pair_window_if_due() {
+    [ "$pair_open" = "1" ] || return 0
+    [ "$(date +%s)" -lt "$pair_end" ] && return 0
+    close_pair_window_now
 }
 mark_seen_connected() { seen_connected="$seen_connected$1 "; }
 was_seen_connected() { case "$seen_connected" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -267,6 +274,11 @@ fi
 
 while :; do
     close_pair_window_if_due
+    if [ -e "$pause_file" ]; then
+        close_pair_window_now
+        sleep 4
+        continue
+    fi
     tmp="/tmp/ns-pc-control-bt-devices.$$"
     bluetoothctl devices 2>/dev/null > "$tmp" || true
     while read -r tag mac name_rest; do
@@ -904,6 +916,22 @@ void BluezManager::note_connected(const DeviceInfo& dev, const char* action, boo
 void BluezManager::tick() {
     const auto now = Clock::now();
 
+    if (!g_proactive_reconnect_enabled.load(std::memory_order_relaxed)) {
+        if (pair_window_open || discovery_active) {
+            pair_window_open = false;
+            stop_discovery();
+            adapter_set_bool("Discoverable", false);
+            adapter_set_bool("Pairable", false);
+            if (g_ctx.verbose) std::println("[bt] Switch suspended; proactive Bluetooth reconnect paused");
+        }
+        for (const DeviceInfo& dev : list_devices()) {
+            if (dev.is_gamepad_like() && dev.connected) connected_paths.insert(dev.path);
+            else connected_paths.erase(dev.path);
+        }
+        initial_device_snapshot_done = true;
+        return;
+    }
+
     if (pair_window_open && now >= pair_window_end) {
         pair_window_open = false;
         stop_discovery();
@@ -1043,6 +1071,8 @@ void bluetooth_manager_runtime_setup(bool verbose) {
 }
 
 void bluetooth_manager_start(bool open_pair_window) {
+    g_proactive_reconnect_enabled.store(true, std::memory_order_relaxed);
+    (void)unlink(BT_RECONNECT_PAUSE_FILE);
     bool expected = false;
     if (!g_manager_running.compare_exchange_strong(expected, true)) return;
     if (g_manager_thread.joinable()) g_manager_thread.join();
@@ -1062,6 +1092,19 @@ void bluetooth_manager_start(bool open_pair_window) {
         std::println("[bt] fallback Bluetooth manager stopped");
     });
 #endif
+}
+
+void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {
+    const bool was_enabled = g_proactive_reconnect_enabled.exchange(enabled, std::memory_order_relaxed);
+    if (enabled) {
+        (void)unlink(BT_RECONNECT_PAUSE_FILE);
+    } else {
+        std::ofstream out(BT_RECONNECT_PAUSE_FILE);
+        if (out) out << "1\n";
+    }
+    if (g_ctx.verbose && was_enabled != enabled) {
+        std::println("[bt] proactive Bluetooth reconnect {}", enabled ? "enabled" : "paused");
+    }
 }
 
 void bluetooth_manager_stop() {

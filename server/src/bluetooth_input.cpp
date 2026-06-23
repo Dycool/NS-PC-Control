@@ -24,6 +24,9 @@
 
 using namespace ns;
 
+// Kept here so older bluetooth_manager.hpp snapshots still compile when only the .cpp files are updated.
+void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled);
+
 #ifdef NS_ENABLE_SDL_BT
 bool bluetooth_input_available() { return true; }
 
@@ -150,6 +153,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     std::array<bool, 4> dormant_until_input{};
     uint64_t seen_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
     bool waiting_logged = false;
+    bool proactive_reconnect_paused_by_sleep = false;
     std::println("[bt] Bluetooth/local controller input enabled");
 
     while (!stoken.stop_requested()) {
@@ -176,13 +180,21 @@ void bluetooth_input_thread(std::stop_token stoken) {
             }
             dormant_until_input.fill(true);
             g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
+            bluetooth_manager_set_proactive_reconnect_enabled(false);
+            proactive_reconnect_paused_by_sleep = true;
             input.disconnect_all();
             bluetooth_manager_disconnect_connected_gamepads();
             if (g_ctx.verbose) std::println("[bt] Switch suspended; local Bluetooth controllers were disconnected");
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             continue;
         }
-        if (!switch_sleeping) dormant_until_input.fill(false);
+        if (!switch_sleeping) {
+            dormant_until_input.fill(false);
+            if (proactive_reconnect_paused_by_sleep) {
+                bluetooth_manager_set_proactive_reconnect_enabled(true);
+                proactive_reconnect_paused_by_sleep = false;
+            }
+        }
 
         uint8_t bt_reserved_mask = 0;
         for (int i = 0; i < 4; ++i) {
