@@ -639,7 +639,9 @@ void BluezManager::tick() {
     }
 
     if (g_runtime_pair_window_requested.exchange(false, std::memory_order_relaxed)) {
-        open_pair_window("Switch Change Grip/Order");
+        if (startup_pair_window) {
+            open_pair_window("Switch Change Grip/Order");
+        }
     }
 
     if (pair_window_open && now >= pair_window_end) {

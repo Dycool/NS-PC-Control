@@ -179,12 +179,10 @@ void poll_switch2_sleep_state(uint64_t now) {
                 g_ctx.switch2_dormant_udp_valid[i] = true;
                 reset_client_session_locked(c);
                 stop_macros = true;
-            } else if (c.source == InputSource::WebSocket) {
+            } else if (c.source == InputSource::WebSocket || c.source == InputSource::Bluetooth) {
                 reset_client_session_locked(c);
                 stop_macros = true;
             }
-            // Bluetooth is handled by the SDL/BT thread: on a real stable-active
-            // -> RX-silent transition it physically disconnects local BT controllers.
         }
         if (stop_macros) server_macro_stop_all_for_client(i);
     }
@@ -487,13 +485,8 @@ bool client_session_is_source(int client_idx, InputSource source) {
 
 int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,
                             InputSource source, int preferred_client_idx) {
-    const uint8_t bt_reserved = g_ctx.bluetooth_reserved_client_slots_mask.load(std::memory_order_relaxed);
-
     auto try_slot = [&](int i) -> bool {
         if (i < 0 || i >= MAX_CLIENTS) return false;
-        if (source != InputSource::Bluetooth && (bt_reserved & (1u << i))) {
-            return false;
-        }
 
         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
         repair_future_client_timestamp(g_ctx.clients[i], now);

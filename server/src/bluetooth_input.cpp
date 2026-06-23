@@ -111,17 +111,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     input.set_motion_enabled(true);
     input.set_home_shortcut_enabled(true);
     input.set_capture_shortcut_enabled(true);
-    input.set_connection_callback([](int slot, bool connected) {
-        if (slot < 0 || slot >= MAX_CLIENTS) return;
-        const uint8_t bit = static_cast<uint8_t>(1u << slot);
-        uint8_t old_mask = g_ctx.bluetooth_reserved_client_slots_mask.load(std::memory_order_relaxed);
-        uint8_t new_mask = 0;
-        do {
-            new_mask = connected ? static_cast<uint8_t>(old_mask | bit)
-                                 : static_cast<uint8_t>(old_mask & static_cast<uint8_t>(~bit));
-        } while (!g_ctx.bluetooth_reserved_client_slots_mask.compare_exchange_weak(
-            old_mask, new_mask, std::memory_order_relaxed, std::memory_order_relaxed));
-    });
+
     if (!input.start()) {
         std::println(stderr, "[bt] SDL3 input failed: {}", input.error());
         return;
@@ -165,7 +155,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 input.clear_player_status(i);
             }
             dormant_until_input.fill(true);
-            g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
+
             bluetooth_manager_set_proactive_reconnect_enabled(false);
             proactive_reconnect_paused_by_sleep = true;
             input.disconnect_all();
@@ -182,11 +172,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
             }
         }
 
-        uint8_t bt_reserved_mask = 0;
-        for (int i = 0; i < 4; ++i) {
-            if (pads[i].connected) bt_reserved_mask |= static_cast<uint8_t>(1u << i);
-        }
-        g_ctx.bluetooth_reserved_client_slots_mask.store(bt_reserved_mask, std::memory_order_relaxed);
+
 
         for (int i = 0; i < 4; ++i) {
             if (!pads[i].connected) {
@@ -288,7 +274,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     }
 
     const bool process_stopping = !g_ctx.running.load(std::memory_order_relaxed) || stoken.stop_requested();
-    g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
+
     for (int i = 0; i < 4; ++i) {
         input.set_rumble(i, 0, 0, 0);
         if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
