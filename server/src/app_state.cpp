@@ -61,10 +61,17 @@ void disconnect_all_input_sessions() {
 }
 
 void mark_switch2_usb_host_disconnected() {
-    clear_switch2_usb_activity();
-    disconnect_all_input_sessions();
+    // Only treat this as a suspend/disconnect event on a real transition from
+    // active USB host -> quiet USB host. If the console is already asleep, a
+    // newly connected BT/UDP/WebSocket client must be allowed to stay attached
+    // long enough to trigger wake.
+    const bool was_connected = g_ctx.switch2_usb_host_connected.exchange(false, std::memory_order_relaxed);
+    const uint64_t last_activity = g_ctx.switch2_last_usb_activity_us.exchange(0, std::memory_order_relaxed);
     g_ctx.switch2_force_next_wake.store(true, std::memory_order_relaxed);
-    g_ctx.switch2_suspend_disconnect_seq.fetch_add(1, std::memory_order_relaxed);
+    if (was_connected || last_activity != 0) {
+        disconnect_all_input_sessions();
+        g_ctx.switch2_suspend_disconnect_seq.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 bool switch2_usb_host_recently_active(uint64_t now) {

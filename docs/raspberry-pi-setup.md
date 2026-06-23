@@ -48,10 +48,11 @@ To enable the web server:
 sudo chrt -f 99 ./ns-backend -w
 ```
 
-To setup wake for the switch 2:
+To setup wake for the Switch 2, put the console to sleep and press HOME on the Joy-Con 2 when prompted:
 ```bash
 sudo ./ns-backend -wake
 ```
+During wake setup, the HOME advert may only appear after several sleep/wake cycles. If capture does not happen immediately, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
 
 If you want to debug a specific issue:
 ```bash

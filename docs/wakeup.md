@@ -46,14 +46,14 @@ hci=hci0
 
 ### Setup Wizard (`-wake`)
 
-The wizard runs 4 steps:
+The wizard captures the Joy-Con 2 HOME wake advertisement and saves it. It does not need the SYNC button and it does not send a test wake advert.
 
-1. **Find Joy-Con 2**: Scans for the joycon mac address. You need to click on the SYNC button on your switch 2 right joycon.
-2. **Capture HOME advert**: Put the Switch 2 to sleep, keep the Joy-Con 2 close to the Pi, and press HOME. The setup listens in longer windows and retries automatically.
-3. **Save config**: Writes the MAC, ADV hex, and HCI device to the config file.
-4. **Test**: Restores normal Bluetooth state and sends a runtime-style wake advert.
+1. Put the Switch 2 to sleep.
+2. Keep the Joy-Con 2 close to the Pi.
+3. Press HOME on the Joy-Con 2 until the setup captures the HOME advert.
+4. The setup saves the Joy-Con 2 MAC, ADV payload, and HCI device to the config file.
 
-> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working.
+> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working. During setup, the HOME advert may only appear after several sleep/wake cycles. If capture does not happen immediately, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
 
 ### Runtime behavior
 
@@ -69,7 +69,7 @@ Runtime inputs can coexist:
 - WebSocket client connects/sends input → wake is triggered if the USB host looks asleep.
 - Previously paired Bluetooth controller connects → wake is triggered while preserving that controller connection when possible.
 
-When no local Bluetooth controller is connected, the backend may use the reliable wake path: temporarily prepare the adapter as the captured Joy-Con 2 MAC, send the advertisement, then restore normal BlueZ/SDL controller mode. When a local Bluetooth controller is already connected, the backend uses a non-destructive soft wake path and will not restart BlueZ, power-cycle `hci0`, disable BR/EDR, or change the adapter public address.
+Runtime wake uses a non-destructive raw HCI advertising path: it keeps the Pi public Bluetooth address unchanged, keeps BlueZ/controller links alive, loads the captured Joy-Con 2 MAC into the LE random address register, and sends the captured HOME ADV payload. It does not restart BlueZ, power-cycle `hci0`, disable BR/EDR, or change the adapter public address.
 
 Use `-no-bt` only if you want to disable local SDL Bluetooth controller input. Switch 2 wake can still run if configured.
 
