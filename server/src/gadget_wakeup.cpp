@@ -168,9 +168,10 @@ std::vector<std::string> adv_hex_to_cmd_args(const std::string& adv_hex) {
 
 struct WakeCmdResult { int exit_code = -1; std::string output; };
 
-WakeCmdResult run_wake_command(const std::vector<std::string>& args, bool verbose, bool capture = false) {
+WakeCmdResult run_wake_command(const std::vector<std::string>& args, bool verbose, bool capture = false, int timeout_sec = 3) {
     WakeCmdResult res;
     if (args.empty()) return res;
+    if (timeout_sec <= 0) timeout_sec = 3;
     if (g_ctx.bluetooth_disabled) {
         bool is_bt = false;
         for (const auto& a : args) {
@@ -186,7 +187,7 @@ WakeCmdResult run_wake_command(const std::vector<std::string>& args, bool verbos
             return res;
         }
     }
-    std::string cmd;
+    std::string cmd = "timeout --kill-after=1s " + std::to_string(timeout_sec) + "s ";
     for (const auto& a : args) cmd += a + " ";
     cmd += "2>&1";
     if (verbose) std::println("[exec] {}", cmd);
@@ -320,7 +321,10 @@ bool start_wake_raw_advertising(const std::string& hci_dev, const std::string& m
     }
     if (verbose) std::println("[wake] Enable advertising as {} for {}s", mac_lc, seconds);
     if (!wake_cmd_ok({"hcitool", "-i", hci_dev, "cmd", "0x08", "0x000A", "01"}, verbose)) return false;
-    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    while (g_ctx.running.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     wake_disable_advertising_quiet(hci_dev);
     return true;
 }
@@ -587,13 +591,17 @@ void enter_bluetooth_runtime_mode() {
 
 bool wake_bt_state_was_modified() { return g_bt_modified_for_wake.load(); }
 
-void restore_wake_bt_state() {
+void restore_wake_bt_state(bool restart_bluez) {
     if (g_ctx.bluetooth_disabled) return;
-    for (int i = 0; i < 50 && g_ctx.switch2_wake_adv_running.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    if (!g_ctx.switch2_wake_adv_enabled && !wake_bt_state_was_modified()) return;
+    for (int i = 0; i < 10 && g_ctx.switch2_wake_adv_running.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     std::string hci = !g_saved_bt_hci.empty() ? g_saved_bt_hci : g_ctx.switch2_wake_hci_dev;
+    if (!valid_hci(hci)) hci = "hci0";
+    wake_disable_advertising_quiet(hci);
+    if (!wake_bt_state_was_modified()) return;
     if (g_bt_modified_for_wake.load() && !g_saved_bt_mac.empty()) g_switch2_wake_original_bt_mac = g_saved_bt_mac;
-    restore_bluetooth_controller_state(hci, true);
+    restore_bluetooth_controller_state(hci, restart_bluez);
     g_saved_bt_mac.clear();
     g_saved_bt_hci.clear();
     g_bt_modified_for_wake = false;
@@ -772,7 +780,7 @@ bool setup_gadget_builtin(bool force, const char* reason) {
 }
 
 void teardown_gadget() {
-    restore_wake_bt_state();
+    restore_wake_bt_state(false);
     clear_switch2_usb_activity();
     std::error_code ec;
     if (!fs::exists(GADGET_DIR, ec)) return;

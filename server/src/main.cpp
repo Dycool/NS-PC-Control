@@ -458,11 +458,20 @@ int main(int argc, char** argv) {
     }
 
     std::println("[backend] shutting down");
+    g_ctx.running.store(false, std::memory_order_relaxed);
     upnp_remove_mapping(port);
     close(sock);
-    wt.request_stop(); st.request_stop();
+
+    wt.request_stop();
+    st.request_stop();
     if (web_thread.joinable()) web_thread.request_stop();
     if (bluetooth_thread.joinable()) bluetooth_thread.request_stop();
+
+    if (wt.joinable()) wt.join();
+    if (st.joinable()) st.join();
+    if (bluetooth_thread.joinable()) bluetooth_thread.join();
+    if (web_thread.joinable()) web_thread.join();
+
     teardown_gadget();
     return 0;
 }
