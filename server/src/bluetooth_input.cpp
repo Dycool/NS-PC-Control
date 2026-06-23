@@ -77,15 +77,15 @@ done
     (void)rc;
 }
 
-static void start_bluetooth_pairing_window() {
+static void start_bluetooth_reconnect_helper() {
     bool expected = false;
     if (!g_bt_pair_window_started.compare_exchange_strong(expected, true)) return;
     if (g_bt_pair_window_thread.joinable()) g_bt_pair_window_thread.join();
     g_bt_pair_window_stop.store(false, std::memory_order_relaxed);
-    g_bt_pair_window_thread = std::thread([] {
-        std::println("[bt] pairing window open for 2 minutes");
-        run_pairing_window_script(R"BT(
+
+    const char* script = g_ctx.bluetooth_pairing_enabled ? R"BT(
 set +e
+PAIR_WINDOW=1
 
 bt_timeout() {
     secs="$1"
@@ -105,67 +105,125 @@ bt_quiet() {
 
 is_gamepad_name() {
     case "$1" in
-        *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*|*DualSense*|*DualShock*|*PLAYSTATION*) return 0 ;;
+        *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*|*DualSense*|*DualShock*|*PLAYSTATION*|*Controller*|*Gamepad*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
+cleanup() {
+    [ -n "$scan_pid" ] && kill "$scan_pid" 2>/dev/null || true
+    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
+    bt_quiet 4s bluetoothctl scan off
+    bt_quiet 4s bluetoothctl discoverable off
+    bt_quiet 4s bluetoothctl pairable off
+}
+trap cleanup INT TERM EXIT
+
 bt_quiet 4s bluetoothctl power on
+# Keep the agent process alive. A one-shot `bluetoothctl agent ...` exits and unregisters the agent.
+(printf "agent NoInputNoOutput\ndefault-agent\n"; while :; do sleep 3600; done) | bluetoothctl >/dev/null 2>&1 & agent_pid=$!
+
+printf '[bt] pairing window open for 2 minutes; trusted controllers may reconnect anytime\n'
 bt_quiet 4s bluetoothctl pairable on
 bt_quiet 4s bluetoothctl discoverable on
-(printf "agent NoInputNoOutput\ndefault-agent\n"; sleep 125) | bluetoothctl >/dev/null 2>&1 & agent=$!
-(printf "scan on\n"; sleep 120) | bluetoothctl >/dev/null 2>&1 & scan=$!
+(printf "scan on\n"; sleep 120; printf "scan off\n"; sleep 1) | bluetoothctl >/dev/null 2>&1 & scan_pid=$!
+pair_end=$(( $(date +%s) + 120 ))
+pair_closed=0
 
-faildir=/tmp/ns-pc-control-bt-pair-fails
-mkdir -p "$faildir" 2>/dev/null || true
+while :; do
+    now="$(date +%s)"
+    if [ "$pair_closed" = "0" ] && [ "$now" -ge "$pair_end" ]; then
+        pair_closed=1
+        bt_quiet 4s bluetoothctl pairable off
+        bt_quiet 4s bluetoothctl discoverable off
+        printf '[bt] pairing window closed; trusted reconnect helper stays active\n'
+    fi
 
-for i in $(seq 1 24); do
-    sleep 5
     bluetoothctl devices 2>/dev/null | while read -r tag mac name; do
         [ "$tag" = "Device" ] || continue
         is_gamepad_name "$name" || continue
 
         info="$(bt_timeout 3s bluetoothctl info "$mac" 2>/dev/null || true)"
-        printf '%s\n' "$info" | grep -q 'Connected: yes' && { rm -f "$faildir/$(printf '%s' "$mac" | tr ':' '_')" 2>/dev/null; continue; }
+        printf '%s\n' "$info" | grep -q 'Connected: yes' && continue
 
-        # bluetoothctl devices includes old cached devices. Only repair entries that were seen during
-        # this scan window; otherwise an off/out-of-range controller could be deleted by accident.
-        printf '%s\n' "$info" | grep -q 'RSSI:' || continue
-
-        safe_mac="$(printf '%s' "$mac" | tr ':' '_')"
-        fail_file="$faildir/$safe_mac"
-
-        if printf '%s\n' "$info" | grep -q 'Paired: yes'; then
-            if bt_quiet 8s bluetoothctl connect "$mac"; then
-                bt_quiet 4s bluetoothctl trust "$mac"
-                rm -f "$fail_file" 2>/dev/null
-                continue
-            fi
-
-            echo "[bt] reconnect failed for $name ($mac); stale pairing suspected, removing old BlueZ key"
-            bt_quiet 5s bluetoothctl remove "$mac"
-            rm -f "$fail_file" 2>/dev/null
-            sleep 1
-            if bt_quiet 12s bluetoothctl pair "$mac"; then
-                bt_quiet 4s bluetoothctl trust "$mac"
-                bt_quiet 8s bluetoothctl connect "$mac"
+        if printf '%s\n' "$info" | grep -q 'Paired: yes\|Trusted: yes'; then
+            bt_quiet 4s bluetoothctl trust "$mac"
+            if bt_quiet 5s bluetoothctl connect "$mac"; then
+                printf '[bt] reconnected %s (%s)\n' "$name" "$mac"
             fi
             continue
         fi
 
-        rm -f "$fail_file" 2>/dev/null
+        # Only pair new devices during the startup window, and only if they were seen in this scan.
+        [ "$pair_closed" = "0" ] || continue
+        printf '%s\n' "$info" | grep -q 'RSSI:' || continue
         if bt_quiet 10s bluetoothctl pair "$mac"; then
             bt_quiet 4s bluetoothctl trust "$mac"
             bt_quiet 8s bluetoothctl connect "$mac"
         fi
     done
+    sleep 5
 done
+)BT" : R"BT(
+set +e
+PAIR_WINDOW=0
 
-kill $scan $agent 2>/dev/null
-bt_quiet 4s bluetoothctl discoverable off
-)BT");
+bt_timeout() {
+    secs="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+bt_quiet() {
+    secs="$1"
+    shift
+    bt_timeout "$secs" "$@" >/dev/null 2>&1
+}
+
+is_gamepad_name() {
+    case "$1" in
+        *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*|*DualSense*|*DualShock*|*PLAYSTATION*|*Controller*|*Gamepad*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cleanup() {
+    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+
+bt_quiet 4s bluetoothctl power on
+# Keep the agent process alive. A one-shot `bluetoothctl agent ...` exits and unregisters the agent.
+(printf "agent NoInputNoOutput\ndefault-agent\n"; while :; do sleep 3600; done) | bluetoothctl >/dev/null 2>&1 & agent_pid=$!
+printf '[bt] trusted-controller reconnect helper active\n'
+
+while :; do
+    bluetoothctl devices 2>/dev/null | while read -r tag mac name; do
+        [ "$tag" = "Device" ] || continue
+        is_gamepad_name "$name" || continue
+
+        info="$(bt_timeout 3s bluetoothctl info "$mac" 2>/dev/null || true)"
+        printf '%s\n' "$info" | grep -q 'Connected: yes' && continue
+
+        if printf '%s\n' "$info" | grep -q 'Paired: yes\|Trusted: yes'; then
+            bt_quiet 4s bluetoothctl trust "$mac"
+            if bt_quiet 5s bluetoothctl connect "$mac"; then
+                printf '[bt] reconnected %s (%s)\n' "$name" "$mac"
+            fi
+        fi
+    done
+    sleep 5
+done
+)BT";
+
+    g_bt_pair_window_thread = std::thread([script] {
+        run_pairing_window_script(script);
         g_bt_pair_window_started.store(false, std::memory_order_relaxed);
-        std::println("[bt] pairing/reconnect helper stopped");
+        std::println("[bt] reconnect helper stopped");
     });
 }
 
@@ -264,9 +322,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
         std::println(stderr, "[bt] SDL3 input failed: {}", input.error());
         return;
     }
-    if (g_ctx.bluetooth_pairing_enabled) {
-        start_bluetooth_pairing_window();
-    }
+    start_bluetooth_reconnect_helper();
 
     std::array<int, 4> client_for_sdl;
     client_for_sdl.fill(-1);
