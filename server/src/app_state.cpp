@@ -54,24 +54,13 @@ void clear_switch2_usb_activity() {
     g_ctx.switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
 }
 
-void disconnect_all_input_sessions() {
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
-        reset_client_session(i);
-    }
-}
-
 void mark_switch2_usb_host_disconnected() {
-    // Only treat this as a suspend/disconnect event on a real transition from
-    // active USB host -> quiet USB host. If the console is already asleep, a
-    // newly connected BT/UDP/WebSocket client must be allowed to stay attached
-    // long enough to trigger wake.
-    const bool was_connected = g_ctx.switch2_usb_host_connected.exchange(false, std::memory_order_relaxed);
-    const uint64_t last_activity = g_ctx.switch2_last_usb_activity_us.exchange(0, std::memory_order_relaxed);
-    g_ctx.switch2_force_next_wake.store(true, std::memory_order_relaxed);
-    if (was_connected || last_activity != 0) {
-        disconnect_all_input_sessions();
-        g_ctx.switch2_suspend_disconnect_seq.fetch_add(1, std::memory_order_relaxed);
-    }
+    // USB gadget write/open errors are only transport noise. They are not a reason
+    // to tear down clients or Bluetooth controllers. The only clean proof that the
+    // Switch is active is host-originated HID OUT/protocol traffic, recorded by
+    // mark_switch2_usb_activity(). When that RX traffic stops becoming fresh, the
+    // backend simply treats the console as sleeping/dormant.
+    g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
 }
 
 bool switch2_usb_host_recently_active(uint64_t now) {
@@ -84,7 +73,8 @@ bool switch2_usb_host_recently_active(uint64_t now) {
 }
 
 void rearm_switch2_wake_after_client_disconnect() {
-    if (!switch2_usb_host_recently_active(now_us())) g_ctx.switch2_force_next_wake.store(true, std::memory_order_relaxed);
+    // Kept for older call sites. Disconnecting a client no longer forces the next
+    // wake; wake is decided from fresh Switch RX activity plus cooldown.
 }
 
 bool any_recent_client_active(uint64_t now) {
@@ -365,6 +355,15 @@ bool motion_is_neutral(const MotionReport& m) {
 
 bool hid_is_neutral(const HIDReport& r) {
     return input_is_neutral(r.input) && (!r.has_motion || (motion_is_neutral(r.motion[0]) && motion_is_neutral(r.motion[1]) && motion_is_neutral(r.motion[2])));
+}
+
+bool multi_report_has_real_input(const MultiReport& report, const bool pad_present[4], bool uses_pad_presence) {
+    const HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    for (int i = 0; i < 4; ++i) {
+        if (uses_pad_presence && pad_present && !pad_present[i]) continue;
+        if (!hid_is_neutral(*pads[i])) return true;
+    }
+    return false;
 }
 
 bool parse_client_packet(const uint8_t* data, size_t len,

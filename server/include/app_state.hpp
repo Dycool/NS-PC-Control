@@ -27,9 +27,8 @@ constexpr int MAX_CLIENTS = 4;
 constexpr uint64_t RATE_WINDOW_US = 1'000'000;
 constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
-// Number of slots to probe when the primary hash slot holds a different IP.
 constexpr int RATE_PROBE = 4;
-constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 2'000'000ULL;
+constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 20'000'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;
 
@@ -96,7 +95,7 @@ struct ServerContext {
     bool legacy_mode = false;
     bool bluetooth_pairing_enabled = false;
     bool bluetooth_input_disabled = false;
-    bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
+    bool bluetooth_disabled = false; 
     std::atomic<bool> gadget_setup_attempted{false};
     bool switch2_wake_adv_enabled = false;
     bool switch2_wakeup_setup_requested = false;
@@ -111,7 +110,6 @@ struct ServerContext {
     std::atomic<uint64_t> switch2_last_usb_activity_us{0};
     std::atomic<bool> switch2_force_next_wake{false};
     std::atomic<bool> switch2_delayed_wake_check_running{false};
-    std::atomic<uint64_t> switch2_suspend_disconnect_seq{0};
     std::atomic<uint8_t> bluetooth_reserved_client_slots_mask{0};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};
@@ -131,7 +129,6 @@ bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit);
 void mark_switch2_usb_activity(uint64_t now = 0);
 void clear_switch2_usb_activity();
 void mark_switch2_usb_host_disconnected();
-void disconnect_all_input_sessions();
 void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
 bool any_recent_client_active(uint64_t now);
@@ -152,6 +149,7 @@ bool parse_client_packet(const uint8_t* data, size_t len,
                          ns::MultiReport& report,
                          bool pad_present[4]);
 bool hid_is_neutral(const ns::HIDReport& r);
+bool multi_report_has_real_input(const ns::MultiReport& report, const bool pad_present[4], bool uses_pad_presence);
 bool input_is_neutral(const ns::HoriHIDReport& r);
 bool motion_is_neutral(const ns::MotionReport& m);
 

@@ -567,19 +567,22 @@ void maybe_send_switch2_wake_advert(const char* reason) {
     (void)reason;
     if (!g_ctx.switch2_wake_adv_enabled || !g_ctx.switch2_wake_config_loaded || g_ctx.switch2_wake_adv_running.exchange(true)) return;
     uint64_t now = now_us();
-    if (g_ctx.switch2_usb_host_connected.load() && !g_ctx.switch2_force_next_wake.load()) {
+
+    // Clean adapter rule: the Switch is awake only when it recently sent HID OUT
+    // traffic to us. Successful writes to /dev/hidg* or USB gadget state are not
+    // trusted as wake/active evidence.
+    if (switch2_usb_host_recently_active(now)) {
         g_ctx.switch2_wake_adv_running.store(false);
         return;
     }
-    if (!g_ctx.switch2_force_next_wake.load()) {
-        uint64_t last = g_ctx.switch2_last_wake_adv_us.load();
-        if (last && now - last < SWITCH2_WAKE_ADV_COOLDOWN_US) {
-            g_ctx.switch2_wake_adv_running.store(false);
-            return;
-        }
+
+    uint64_t last = g_ctx.switch2_last_wake_adv_us.load(std::memory_order_relaxed);
+    if (last && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US) {
+        g_ctx.switch2_wake_adv_running.store(false);
+        return;
     }
-    g_ctx.switch2_force_next_wake.store(false);
-    g_ctx.switch2_last_wake_adv_us.store(now);
+
+    g_ctx.switch2_last_wake_adv_us.store(now, std::memory_order_relaxed);
     std::println("[wake] waking up Switch 2");
     std::thread(switch2_wake_adv_worker, SWITCH2_WAKE_ADV_BURST_MS).detach();
 }
@@ -773,8 +776,8 @@ int run_switch2_wakeup_setup() {
     std::println("[wake] Config will be saved to: {}", g_ctx.switch2_wakeup_config_path);
     std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_ctx.switch2_wake_hci_dev);
     std::println("[wake] Put the Switch 2 to sleep, keep the Joy-Con 2 close to the Pi, then press HOME.");
-    std::println("[wake] This is turn on the Switch 2. Suspend it and press HOME again.");
-    std::println("[wake] After repeating this for about 6-10 tries, the rpi will capture and save the advertised packet.");
+    std::println("[wake] The Switch 2 may only broadcast the HOME advert after several sleep/wake cycles.");
+    std::println("[wake] If needed, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until captured.");
 
     std::string cap_mac, cap_adv;
     bool captured = false;

@@ -290,7 +290,10 @@ int main(int argc, char** argv) {
                         .udp_interval_ms = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
                         .udp_hz = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ)
                     };
-                    if (!switch2_usb_host_recently_active(now_us())) reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
+                    // Do not ask UDP clients to disconnect just because the Switch is sleeping.
+                    // Sleep/wake is handled server-side: clients can remain connected/dormant,
+                    // and their next real input can trigger the wake advert.
+                    (void)switch2_usb_host_recently_active(now_us());
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen); continue;
                 }
             }
@@ -426,7 +429,9 @@ int main(int argc, char** argv) {
 
             if (!accepted) continue;
             ++g_ctx.pkts_rx;
-            if (wake_on_new_client) maybe_send_switch2_wake_advert("client connected via UDP input");
+            if (wake_on_new_client || multi_report_has_real_input(report, pad_present, true)) {
+                maybe_send_switch2_wake_advert(wake_on_new_client ? "client connected via UDP input" : "UDP input");
+            }
             flush_rumble_to_udp(sock, cidx);
         }
     }
