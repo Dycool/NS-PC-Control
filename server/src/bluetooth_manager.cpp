@@ -152,7 +152,7 @@ void runtime_setup_impl(bool verbose) {
 
     // Runtime packages only. libsystemd-dev/pkg-config are build-time dependencies: if this
     // binary is already running, installing them now cannot change how it was compiled.
-    std::vector<const char*> packages = {"bluez", "bluetooth", "rfkill", "evtest", "joystick"};
+    std::vector<const char*> packages = {"bluez", "bluetooth", "rfkill"};
     std::vector<const char*> missing;
     if (command_exists("dpkg-query")) {
         for (const char* pkg : packages) {
@@ -451,6 +451,9 @@ private:
     std::set<std::string> connect_logged;
     std::set<std::string> connected_paths;
     std::set<std::string> missing_sdl_warned;
+    std::map<std::string, Clock::time_point> next_connect_attempt;
+    std::map<std::string, int> connect_failures;
+    std::set<std::string> xbox_driver_warned;
 
     bool connect_bus();
     void close_bus();
@@ -464,6 +467,10 @@ private:
     bool pair_device(const DeviceInfo& dev);
     bool connect_device(const DeviceInfo& dev);
     bool disconnect_device(const DeviceInfo& dev);
+    bool connect_allowed(const DeviceInfo& dev, Clock::time_point now) const;
+    void schedule_connect_retry(const DeviceInfo& dev, Clock::time_point now, bool failed);
+    void clear_connect_retry(const DeviceInfo& dev);
+    void maybe_warn_xbox_driver_path(const DeviceInfo& dev);
     void tick();
     void open_pair_window(const char* reason);
     void note_connected(const DeviceInfo& dev, const char* action, bool trigger_followup_pair_window = false);
@@ -835,6 +842,41 @@ bool BluezManager::disconnect_device(const DeviceInfo& dev) {
     return true;
 }
 
+bool BluezManager::connect_allowed(const DeviceInfo& dev, Clock::time_point now) const {
+    const auto it = next_connect_attempt.find(dev.path);
+    return it == next_connect_attempt.end() || now >= it->second;
+}
+
+void BluezManager::schedule_connect_retry(const DeviceInfo& dev, Clock::time_point now, bool failed) {
+    if (failed) {
+        ++connect_failures[dev.path];
+        maybe_warn_xbox_driver_path(dev);
+    }
+
+    // Xbox Bluetooth controllers, especially Elite/Series pads, often leave BlueZ with
+    // org.bluez.Error.InProgress while the BLE/HID path is still settling. Retrying
+    // every tick just spams Connect() and can make the adapter/controller more stuck.
+    const auto delay = dev.is_xbox_like() ? std::chrono::seconds(15) : std::chrono::seconds(5);
+    next_connect_attempt[dev.path] = now + delay;
+}
+
+void BluezManager::clear_connect_retry(const DeviceInfo& dev) {
+    next_connect_attempt.erase(dev.path);
+    connect_failures.erase(dev.path);
+    missing_sdl_warned.erase(dev.path);
+}
+
+void BluezManager::maybe_warn_xbox_driver_path(const DeviceInfo& dev) {
+    if (!dev.is_xbox_like()) return;
+    if (connect_failures[dev.path] < 2) return;
+    if (!xbox_driver_warned.insert(dev.path).second) return;
+
+    std::println(stderr,
+        "[bt] Xbox controller {} ({}) is paired/trusted but Bluetooth connect keeps failing; "
+        "on Raspberry Pi/Linux this usually needs a stable BLE path plus uhid/xpadneo, not more pairing attempts",
+        dev.display_name(), dev.address);
+}
+
 void BluezManager::open_pair_window(const char* reason) {
     const bool was_open = pair_window_open;
     pair_window_open = true;
@@ -879,6 +921,7 @@ void BluezManager::tick() {
         if (dev.connected) {
             if (dev.services_resolved) {
                 stale_since.erase(dev.path);
+                clear_connect_retry(dev);
                 if (dev.paired || dev.trusted) {
                     if (initial_device_snapshot_done && !connected_paths.contains(dev.path)) {
                         note_connected(dev, "connected", true);
@@ -888,11 +931,13 @@ void BluezManager::tick() {
                 }
             } else {
                 auto [it, inserted] = stale_since.emplace(dev.path, now);
-                if (!inserted && now - it->second > std::chrono::seconds(8)) {
+                const auto stale_limit = dev.is_xbox_like() ? std::chrono::seconds(20) : std::chrono::seconds(8);
+                if (!inserted && now - it->second > stale_limit) {
                     std::println("[bt] stale connected state for {} ({}), reconnecting", dev.display_name(), dev.address);
                     disconnect_device(dev);
                     std::this_thread::sleep_for(std::chrono::milliseconds(600));
-                    connect_device(dev);
+                    if (connect_allowed(dev, now) && connect_device(dev)) clear_connect_retry(dev);
+                    else schedule_connect_retry(dev, now, true);
                     it->second = now;
                 }
             }
@@ -904,9 +949,16 @@ void BluezManager::tick() {
 
         if (dev.paired || dev.trusted) {
             set_trusted(dev, true);
+            if (!connect_allowed(dev, now)) continue;
+
             const bool was_discovering = discovery_active;
             if (was_discovering) stop_discovery();
-            if (connect_device(dev)) note_connected(dev, "reconnected", true);
+            if (connect_device(dev)) {
+                clear_connect_retry(dev);
+                note_connected(dev, "reconnected", true);
+            } else {
+                schedule_connect_retry(dev, now, true);
+            }
             if (was_discovering && pair_window_open) { start_discovery(); restarted_discovery = true; }
             continue;
         }
@@ -922,7 +974,17 @@ void BluezManager::tick() {
             DeviceInfo paired_dev = dev;
             paired_dev.paired = true;
             set_trusted(paired_dev, true);
-            if (connect_device(paired_dev)) note_connected(paired_dev, "paired");
+
+            // Xbox Elite/Series pads commonly need a short BLE/BlueZ settle after Pair()
+            // before Connect(); without this they often return InProgress/timeout loops.
+            if (paired_dev.is_xbox_like()) std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+            if (connect_device(paired_dev)) {
+                clear_connect_retry(paired_dev);
+                note_connected(paired_dev, "paired");
+            } else {
+                schedule_connect_retry(paired_dev, now, true);
+            }
         }
         if (pair_window_open) { start_discovery(); restarted_discovery = true; }
     }
