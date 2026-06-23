@@ -52,6 +52,8 @@ enum ServerBackend : uint8_t {
     SERVER_BACKEND_PRO     = 2,
 };
 
+static constexpr uint8_t SERVER_INFO_FLAG_SWITCH_ASLEEP = 1u << 0;
+
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {
     BTN_Y       = 1u <<  0,

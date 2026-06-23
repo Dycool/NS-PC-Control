@@ -24,6 +24,17 @@ let isConnected = false;
 let loopId = null;
 let seqCounter = 0;
 let lastActivePads = [];
+function resetMainConnectionUi(text) {
+    isConnected = false;
+    if (loopId) { clearInterval(loopId); loopId = null; }
+    const btn = document.getElementById('btnConnect');
+    if (btn) btn.innerText = 'Connect';
+    const kb = document.getElementById('kbMode');
+    if (kb) kb.disabled = false;
+    const status = document.getElementById('statusText');
+    if (status && text) status.innerText = text;
+}
+window.__nsMainDisconnected = resetMainConnectionUi;
 const keysDown = new Set();
 const defaultBindings = {
     'BTN_Y': 'KeyZ', 'BTN_B': 'KeyX', 'BTN_A': 'KeyV', 'BTN_X': 'KeyC',
@@ -361,10 +372,8 @@ function buildAndSendPacket() {
 }
 document.getElementById('btnConnect').onclick = async () => {
     if (isConnected) {
-        clearInterval(loopId); ws.close(); isConnected = false;
-        document.getElementById('btnConnect').innerText = "Connect";
-        document.getElementById('statusText').innerText = "Disconnected";
-        document.getElementById('kbMode').disabled = false;
+        if (ws) ws.close();
+        resetMainConnectionUi('Disconnected');
         return;
     }
     const wsUrl = makeWsUrl();
@@ -382,11 +391,8 @@ document.getElementById('btnConnect').onclick = async () => {
         document.getElementById('statusText').innerText = "Connection failed";
     };
     ws.onclose = () => {
-        isConnected = false; clearInterval(loopId);
-        document.getElementById('btnConnect').innerText = "Connect";
-        document.getElementById('kbMode').disabled = false;
-        if (document.getElementById('statusText').innerText !== "Connection failed")
-            document.getElementById('statusText').innerText = "Disconnected";
+        const current = document.getElementById('statusText').innerText;
+        resetMainConnectionUi(current === 'Connection failed' ? 'Connection failed' : 'Disconnected');
     }
 };
 function formatKeyName(code) {

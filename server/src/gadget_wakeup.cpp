@@ -724,14 +724,14 @@ bool auto_find_joycon_for_setup(std::string& joycon_mac) {
     std::println("[wake] Put the Joy-Con 2 very close to the Pi and hold/press the small SYNC button.");
     std::string adv;
     for (int attempt = 1; attempt <= 4; ++attempt) {
-        std::println("[wake] Scanning for Nintendo/Joy-Con 2 advert... attempt {}/4, 30 seconds", attempt);
+        std::println("[wake] Scanning for Joy-Con 2... attempt {}/4", attempt);
         if (capture_switch2_wake_advert(30, joycon_mac, joycon_mac, adv)) {
             std::println("[wake] Found Nintendo controller: {}", joycon_mac);
             return true;
         }
-        std::println("[wake] No Nintendo advert yet. Keep holding SYNC or press it again; retrying...");
+        std::println("[wake] Joy-Con 2 not found yet. Keep it close and press SYNC again.");
     }
-    std::println("[wake] Joy-Con discovery did not lock onto a MAC; continuing to HOME capture anyway.");
+    std::println("[wake] Joy-Con 2 not found by SYNC; HOME capture can still detect it.");
     return false;
 }
 
@@ -785,7 +785,12 @@ int run_switch2_wakeup_setup() {
         }
         g_ctx.switch2_wake_hci_dev = setup_hci;
     }
-    auto restore_setup_bt_state = [&] { restore_bluetooth_controller_state(g_ctx.switch2_wake_hci_dev, true); };
+    bool setup_bt_state_restored = false;
+    auto restore_setup_bt_state = [&] {
+        if (setup_bt_state_restored) return;
+        restore_bluetooth_controller_state(g_ctx.switch2_wake_hci_dev, true);
+        setup_bt_state_restored = true;
+    };
 
     std::println("NS-PC-Control Switch 2 Joy-Con 2 wake setup");
     std::println("[wake] Config will be saved to: {}", g_ctx.switch2_wakeup_config_path);
@@ -796,13 +801,12 @@ int run_switch2_wakeup_setup() {
 
     std::println("\n[wake] Step 2/4: Capture the Joy-Con 2 HOME wake advertisement.");
     std::println("[wake] Put the Switch 2 to sleep, keep the Joy-Con 2 close to the Pi, then press HOME.");
-    std::println("[wake] No Enter needed now. I will keep listening; press HOME again if it does not capture.");
     std::string cap_mac, cap_adv;
     bool captured = false;
     for (int attempt = 1; attempt <= 6; ++attempt) {
-        std::println("[wake] HOME capture attempt {}/6: listening for 45 seconds...", attempt);
+        std::println("[wake] Listening for HOME advert... attempt {}/6", attempt);
         if (capture_switch2_wake_advert(45, mac, cap_mac, cap_adv)) { captured = true; break; }
-        std::println("[wake] No HOME wake advert captured yet. Keep the Switch 2 asleep and press HOME again; retrying...");
+        std::println("[wake] HOME advert not captured. Keep the Switch 2 asleep and press HOME again.");
     }
     if (!captured) {
         std::println(stderr, "[wake] Could not capture the HOME wake advert. Try again with the Joy-Con 2 closer to the Pi.");
@@ -812,22 +816,26 @@ int run_switch2_wakeup_setup() {
 
     mac = cap_mac;
     std::println("[wake] Captured wake MAC: {}\n[wake] Captured wake ADV: {}", mac, cap_adv);
-    wait_for_enter("[wake] Pair/attach the Joy-Con 2 back to the Switch 2, put the Switch 2 asleep, then press Enter to test wake... ");
+    wait_for_enter("[wake] Attach the Joy-Con 2 back to the Switch 2, put the console to sleep, then press Enter to test wake... ");
 
     if (!save_switch2_wakeup_config(mac, cap_adv, g_ctx.switch2_wake_hci_dev, orig_mac)) { restore_setup_bt_state(); return 1; }
 
     g_ctx.switch2_wake_mac = to_lower(mac);
     g_ctx.switch2_wake_adv_hex = to_upper_no_space(cap_adv);
     g_ctx.switch2_wake_config_loaded = true;
+    g_ctx.switch2_wake_adv_enabled = true;
 
-    std::println("[wake] Step 4/4: Sending no-drop random-address test wake advert for 5 seconds...");
+    std::println("[wake] Restoring Bluetooth before the test...");
+    restore_setup_bt_state();
+    enter_switch2_wake_runtime_mode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    std::println("[wake] Step 4/4: Sending test wake advert...");
     bool test_ok = send_switch2_wake_advert_once(g_ctx.switch2_wake_mac, g_ctx.switch2_wake_adv_hex, 5, g_ctx.verbose, false);
     if (!test_ok) {
-        std::println(stderr, "[wake] Test wake advert failed to send. Retry with -wake -v if you need low-level Bluetooth logs.");
-        restore_setup_bt_state();
+        std::println(stderr, "[wake] Test wake advert failed to send. Run -wake -v for Bluetooth logs.");
         return 1;
     }
-    restore_setup_bt_state();
     std::println("[wake] Test wake advert sent. If the Switch 2 woke up, setup is complete.");
     return 0;
 }

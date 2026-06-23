@@ -131,6 +131,7 @@ bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit);
 void mark_switch2_usb_activity(uint64_t now = 0);
 void clear_switch2_usb_activity();
 void mark_switch2_usb_host_disconnected();
+void disconnect_all_input_sessions();
 void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
 bool any_recent_client_active(uint64_t now);

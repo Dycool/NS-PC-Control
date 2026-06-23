@@ -344,18 +344,27 @@ class MainActivity : AppCompatActivity() {
     private fun handleWsClosed(socket: WebSocket, text: String) {
         if (ws !== socket) return
         statusText.text = text
+        senderToken.incrementAndGet()
         sending = false
         controlClientActive = false
         touchHid = null
         touchFrame = null
         lastTouchFrameMs = 0
+        lastBridgeFrameParseMs = 0
         ws = null
         stopPhoneSensors()
+        stopPhysicalControllerSensors()
+        stopAllPhysicalRumble()
+        activeClientMode = ClientMode.NONE
+        updatePhysicalStatusOnPage(text)
         try { Toast.makeText(this, text, Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
+        val escaped = jsEscape(text)
         try { webView.evaluateJavascript("""(function(){
-            window._connectionFailed = true;
+            if (window.__nsTouchDisconnected) window.__nsTouchDisconnected('$escaped');
+            if (window.__nsMainDisconnected) window.__nsMainDisconnected('$escaped');
+            window._connectionFailed = '$escaped' === 'Connection failed';
             var s=document.getElementById('statusText');
-            if(s)s.innerText='$text';
+            if(s)s.innerText='$escaped';
             var btn=document.getElementById('btnConnect');
             if(btn){btn.innerText='Connect';btn.classList.remove('connected');btn.style.display='block';}
             var dot=document.getElementById('statusDot');
@@ -1113,6 +1122,8 @@ class MainActivity : AppCompatActivity() {
             if (clearPads) physicalPads[i].reset()
         }
     }
+
+    private fun jsEscape(v: String): String = v.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
 
     private fun updatePhysicalStatusOnPage(prefix: String? = null) {
         if (currentPage != Page.MAIN_MENU) return

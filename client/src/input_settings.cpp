@@ -20,6 +20,7 @@ std::mutex g_pressedKeysMutex;
 std::unordered_set<std::string> g_pressedKeys;
 SDLInputManager g_sdlInput;
 std::atomic<uint64_t> g_serverLastReplyUs{0};
+std::atomic<bool> g_serverRequestedDisconnect{false};
 std::mutex g_kbCacheMutex;
 std::unordered_map<std::string, bool> g_kbStateCache;
 

@@ -59,6 +59,7 @@ struct SessionData {
     uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
     bool has_pending_rumble[4] = {};
+    uint64_t suspend_disconnect_seq = 0;
 };
 
 static bool g_serve_http_webapp = false;
@@ -116,6 +117,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
             std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
+            sd->suspend_disconnect_seq = g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed);
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
             break;
@@ -130,6 +132,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             break;
 
         case LWS_CALLBACK_RECEIVE: {
+            if (sd->suspend_disconnect_seq != g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed)) {
+                if (sd->ws_slot >= 0) reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
+                return -1;
+            }
             uint8_t* payload = (uint8_t*)in;
             if (!lws_frame_is_binary(wsi)) {
                 std::string text((char*)payload, len);
@@ -233,6 +239,14 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_TIMER: {
+            if (sd->suspend_disconnect_seq != g_ctx.switch2_suspend_disconnect_seq.load(std::memory_order_relaxed)) {
+                if (sd->ws_slot >= 0) {
+                    std::println("[ws] Switch USB host suspended, closing WebSocket Slot {}", sd->ws_slot + 1);
+                    reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
+                    sd->ws_slot = -1;
+                }
+                return -1;
+            }
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);

@@ -68,6 +68,9 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             std::memcpy(&reply, buf, sizeof(reply));
             if (reply.magic == ns::SERVER_INFO_MAGIC && reply.version == ns::SERVER_INFO_VERSION) {
                 g_serverLastReplyUs.store(ns::now_us());
+                if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
+                    g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
+                }
             }
         } else if (n == sizeof(ns::PrecisionRumblePacket)) {
             ns::PrecisionRumblePacket rp{};

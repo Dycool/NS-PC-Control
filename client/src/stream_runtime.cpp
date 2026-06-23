@@ -183,6 +183,11 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
 
         send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
+        if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
+            set_status_message("Disconnected");
+            running.store(false, std::memory_order_relaxed);
+            break;
+        }
         rumble.update_timeouts(frame.controller_for_slot);
         ++g_packetCount;
 
@@ -243,6 +248,7 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     load_macro_entries();
     g_packetCount.store(0);
     g_serverLastReplyUs.store(0);
+    g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
     g_lastError.clear();
     g_connected.store(true);
     if (g_senderThread.joinable()) {

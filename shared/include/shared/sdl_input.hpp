@@ -56,6 +56,7 @@ public:
     void set_capture_shortcut_enabled(bool enabled);
     void set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble = true);
     void stop_all_rumble();
+    void disconnect_all();
 
 private:
     struct Device {

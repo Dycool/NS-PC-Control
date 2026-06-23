@@ -32,6 +32,21 @@ const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
 const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
+function resetTouchConnectionUi(text) {
+    isConnected = false;
+    if (loopId) { clearInterval(loopId); loopId = null; }
+    if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
+    const btn = document.getElementById('btnConnect');
+    if (btn) {
+        btn.style.display = 'block';
+        btn.innerText = 'Connect';
+        btn.classList.remove('connected');
+    }
+    const dot = document.getElementById('statusDot');
+    if (dot) dot.style.display = 'none';
+    if (text) window._connectionFailed = (text === 'Connection failed');
+}
+window.__nsTouchDisconnected = resetTouchConnectionUi;
 let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };
 const buttonControls = Array.from(document.querySelectorAll('.btn-map,.btn-dpad'));
 const activeTouchControls = new Map();
@@ -214,7 +229,11 @@ function sendPacket() {
     ws.send(buffer);
 }
 document.getElementById('btnConnect').onclick = async () => {
-    if (isConnected) { ws.close(); return; }
+    if (isConnected) {
+        if (ws) ws.close();
+        resetTouchConnectionUi('Disconnected');
+        return;
+    }
     if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen().catch(()=>{}); }
     const wsUrl = makeWsUrl();
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
@@ -224,16 +243,11 @@ document.getElementById('btnConnect').onclick = async () => {
         connectTimeout = setTimeout(() => {
             if (window._connectionFailed) { window._connectionFailed = false; return; }
             btn.style.display = 'none'; document.getElementById('statusDot').style.display = 'block';
-        }, 2000);
+        }, 3000);
         publishTouchState();
         loopId = setInterval(sendPacket, 16);
     };
-    ws.onerror = () => alert("Connection failed!");
-    ws.onclose = () => {
-        isConnected = false; clearInterval(loopId); clearTimeout(connectTimeout);
-        const btn = document.getElementById('btnConnect');
-        btn.style.display = 'block'; btn.innerText = "Connect"; btn.classList.remove('connected');
-        document.getElementById('statusDot').style.display = 'none';
-    };
+    ws.onerror = () => { resetTouchConnectionUi('Connection failed'); alert("Connection failed"); };
+    ws.onclose = () => { resetTouchConnectionUi('Disconnected'); };
 };
 document.getElementById('statusDot').onclick = () => { if(ws) ws.close(); };

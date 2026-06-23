@@ -253,6 +253,15 @@ void SDLInputManager::stop_all_rumble() {
         stop_all_rumble_locked();
     }
 
+void SDLInputManager::disconnect_all() {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (!initialized) return;
+        stop_all_rumble_locked();
+        close_all_locked();
+        clear_states_locked();
+        force_scan = true;
+    }
+
 
 Uint16 SDLInputManager::motor_word(uint8_t v) { return (Uint16)((uint32_t)v * 65535u / 255u); }
 bool SDLInputManager::button(SDL_Gamepad* pad, SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); }

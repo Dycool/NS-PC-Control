@@ -908,23 +908,32 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
 
     private func handleWsClosed(text: String) {
         statusLabel.text = text
+        senderToken += 1
         sending = false
         controlClientActive = false
         touchHid = nil
         touchFrame = nil
         lastTouchFrameMs = 0
+        lastBridgeFrameParseMs = 0
         pingTimer?.invalidate()
         pingTimer = nil
         webSocket = nil
         stopPhoneSensors()
+        stopAllPhysicalRumble()
+        clearPhysicalControllers()
+        activeClientMode = .none
+        updatePhysicalStatusOnPage(prefix: text)
         let ac = UIAlertController(title: nil, message: text, preferredStyle: .alert)
         ac.addAction(UIAlertAction(title: "OK", style: .default))
         present(ac, animated: true)
+        let escaped = jsEscape(text)
         let js = """
         (function(){
-            window._connectionFailed = true;
+            if (window.__nsTouchDisconnected) window.__nsTouchDisconnected('\(escaped)');
+            if (window.__nsMainDisconnected) window.__nsMainDisconnected('\(escaped)');
+            window._connectionFailed = '\(escaped)' === 'Connection failed';
             var s=document.getElementById('statusText');
-            if(s)s.innerText='\(text)';
+            if(s)s.innerText='\(escaped)';
             var btn=document.getElementById('btnConnect');
             if(btn){btn.innerText='Connect';btn.classList.remove('connected');btn.style.display='block';}
             var dot=document.getElementById('statusDot');

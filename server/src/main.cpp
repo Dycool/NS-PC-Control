@@ -290,6 +290,7 @@ int main(int argc, char** argv) {
                         .udp_interval_ms = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
                         .udp_hz = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ)
                     };
+                    if (!switch2_usb_host_recently_active(now_us())) reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen); continue;
                 }
             }

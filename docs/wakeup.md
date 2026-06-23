@@ -48,11 +48,12 @@ hci=hci0
 
 The wizard runs 4 steps:
 
-1. **Auto-find Joy-Con 2**: Scans for joycons to 12 attempts (10s each). Press and hold the pair button. If the joycon is not detected try again.
-2. **Capture HOME advert**: Prompts you to press HOME on the Joy-Con 2 while `btmon` captures the raw advertisement for 20 seconds. You will need to wake up and suspend the switch 2 up to 5-6 times until the raspberry actually picks up the data. This is normal.
-3. **Save config**: Writes the MAC and ADV hex to the config file.
-4. **Test**: Immediately sends a 1-second test wake advert to verify the setup works.
->Note: Taking the joycon from the switch 2 might make this configuration stop working. Make sure to reconfigure it.
+1. **Find Joy-Con 2**: Scans for the joycon mac address. You need to click on the SYNC button on your switch 2 right joycon.
+2. **Capture HOME advert**: Put the Switch 2 to sleep, keep the Joy-Con 2 close to the Pi, and press HOME. The setup listens in longer windows and retries automatically.
+3. **Save config**: Writes the MAC, ADV hex, and HCI device to the config file.
+4. **Test**: Restores normal Bluetooth state and sends a runtime-style wake advert.
+
+> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working.
 
 ### Runtime behavior
 

@@ -54,8 +54,15 @@ void clear_switch2_usb_activity() {
     g_ctx.switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
 }
 
+void disconnect_all_input_sessions() {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        reset_client_session(i);
+    }
+}
+
 void mark_switch2_usb_host_disconnected() {
     clear_switch2_usb_activity();
+    disconnect_all_input_sessions();
     g_ctx.switch2_force_next_wake.store(true, std::memory_order_relaxed);
     g_ctx.switch2_suspend_disconnect_seq.fetch_add(1, std::memory_order_relaxed);
 }

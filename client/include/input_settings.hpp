@@ -25,6 +25,7 @@ extern std::mutex g_pressedKeysMutex;
 extern std::unordered_set<std::string> g_pressedKeys;
 extern SDLInputManager g_sdlInput;
 extern std::atomic<uint64_t> g_serverLastReplyUs;
+extern std::atomic<bool> g_serverRequestedDisconnect;
 
 void sync_sdl_input_options();
 std::string macros_path();
