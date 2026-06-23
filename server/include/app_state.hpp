@@ -34,6 +34,9 @@ constexpr int RATE_PROBE = 4;
 // that RX stream stops after having been active, treat the console as suspended.
 // Writes to /dev/hidg* are intentionally not used as wake/sleep evidence.
 constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 1'500'000ULL;
+// A few RX packets can appear while the Switch is entering sleep. Do not re-arm
+// suspend disconnects until the Switch has answered continuously for this long.
+constexpr uint64_t SWITCH2_USB_ACTIVITY_STABLE_US = 3'000'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;
 
@@ -113,6 +116,8 @@ struct ServerContext {
     std::atomic<uint64_t> switch2_last_wake_adv_us{0};
     std::atomic<bool> switch2_usb_host_connected{false};
     std::atomic<uint64_t> switch2_last_usb_activity_us{0};
+    std::atomic<uint64_t> switch2_rx_stream_since_us{0};
+    std::atomic<bool> switch2_rx_stream_stable{false};
     std::atomic<bool> switch2_sleep_confirmed{false};
     std::atomic<uint64_t> switch2_sleep_seq{0};
     sockaddr_in switch2_dormant_udp_addrs[MAX_CLIENTS]{};

@@ -45,14 +45,35 @@ bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit) {
 
 void mark_switch2_usb_activity(uint64_t now) {
     if (now == 0) now = now_us();
-    g_ctx.switch2_last_usb_activity_us.store(now, std::memory_order_relaxed);
+
+    const uint64_t prev_last = g_ctx.switch2_last_usb_activity_us.exchange(now, std::memory_order_relaxed);
+    uint64_t stream_since = g_ctx.switch2_rx_stream_since_us.load(std::memory_order_relaxed);
+
+    // The Switch can produce tiny RX flickers while suspending/re-enumerating.
+    // Treat them as a new candidate stream, not as a full awake state. Only a
+    // continuous RX stream re-arms suspend handling.
+    if (prev_last == 0 || elapsed_us_saturated(now, prev_last) > SWITCH2_USB_ACTIVITY_FRESH_US || stream_since == 0) {
+        stream_since = now;
+        g_ctx.switch2_rx_stream_since_us.store(stream_since, std::memory_order_relaxed);
+        g_ctx.switch2_rx_stream_stable.store(false, std::memory_order_relaxed);
+    }
+
     g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
-    g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+
+    if (elapsed_us_saturated(now, stream_since) >= SWITCH2_USB_ACTIVITY_STABLE_US) {
+        bool was_stable = g_ctx.switch2_rx_stream_stable.exchange(true, std::memory_order_relaxed);
+        g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+        if (!was_stable && g_ctx.verbose) {
+            std::println("[switch] USB RX stream stable; Switch active");
+        }
+    }
 }
 
 void clear_switch2_usb_activity() {
     g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
     g_ctx.switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+    g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+    g_ctx.switch2_rx_stream_stable.store(false, std::memory_order_relaxed);
     g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
 }
 
@@ -72,8 +93,7 @@ bool switch2_usb_host_recently_active(uint64_t now) {
         return false;
     }
     g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
-    g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
-    return true;
+    return g_ctx.switch2_rx_stream_stable.load(std::memory_order_relaxed);
 }
 
 static bool same_udp_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
@@ -109,16 +129,29 @@ void poll_switch2_sleep_state(uint64_t now) {
     if (now == 0) now = now_us();
     uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
     if (last == 0) {
-        g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+        g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+        g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+        g_ctx.switch2_rx_stream_stable.store(false, std::memory_order_relaxed);
         return;
     }
-    if (elapsed_us_saturated(now, last) <= SWITCH2_USB_ACTIVITY_FRESH_US) {
+
+    const uint64_t quiet_us = elapsed_us_saturated(now, last);
+    if (quiet_us <= SWITCH2_USB_ACTIVITY_FRESH_US) {
         g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
-        g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
         return;
     }
 
     g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+
+    // If the last RX stream was only a short flicker, ignore it. This happens
+    // during the Switch 2 suspend/reconnect dance and should not cause repeated
+    // BT disconnects / UDP slot churn / wake spam.
+    if (!g_ctx.switch2_rx_stream_stable.exchange(false, std::memory_order_relaxed)) {
+        g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+        return;
+    }
+    g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+
     bool expected = false;
     if (!g_ctx.switch2_sleep_confirmed.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
         return;
@@ -142,15 +175,14 @@ void poll_switch2_sleep_state(uint64_t now) {
                 reset_client_session_locked(c);
                 stop_macros = true;
             }
-            // Bluetooth is handled by the SDL/BT thread: on a real active->sleep
-            // transition it physically disconnects local BT controllers, matching
-            // normal console behavior without trusting noisy USB write/open errors.
+            // Bluetooth is handled by the SDL/BT thread: on a real stable-active
+            // -> RX-silent transition it physically disconnects local BT controllers.
         }
         if (stop_macros) server_macro_stop_all_for_client(i);
     }
     if (g_ctx.verbose) {
-        std::println("[switch] confirmed asleep after {:.1f}s without Switch USB RX; UDP/WebSocket sessions released",
-                     (double)elapsed_us_saturated(now, last) / 1000000.0);
+        std::println("[switch] confirmed asleep after {:.1f}s without stable Switch USB RX; UDP/WebSocket sessions released",
+                     (double)quiet_us / 1000000.0);
     }
 }
 

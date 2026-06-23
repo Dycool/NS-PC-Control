@@ -291,7 +291,7 @@ void writer_thread(std::stop_token stoken, int hz) {
             }
 
             if (!ok) {
-                if (!error_shown) { std::println("Host disconnected — waiting for reconnect..."); error_shown = true; }
+                if (!error_shown && g_ctx.verbose) { std::println("Host USB transport disconnected; waiting for reconnect..."); error_shown = true; }
                 mark_switch2_usb_host_disconnected();
                 for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
                 for (int wait_i = 0; wait_i < 100 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
