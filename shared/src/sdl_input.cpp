@@ -10,8 +10,8 @@
 #include <utility>
 
 namespace {
-constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 85;
-constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 100;
+constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 60;
+constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 60;
 constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 20;
 
 uint8_t scale_sdl_rumble_motor(uint8_t v, int gain_percent) {
@@ -218,6 +218,10 @@ void SDLInputManager::set_home_shortcut_enabled(bool enabled) {
 
 void SDLInputManager::set_capture_shortcut_enabled(bool enabled) {
         capture_shortcut_enabled.store(enabled, std::memory_order_relaxed);
+    }
+
+void SDLInputManager::set_controller_leds_enabled(bool enabled) {
+        controller_leds_enabled.store(enabled, std::memory_order_relaxed);
     }
 
 void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble) {
@@ -465,10 +469,12 @@ void SDLInputManager::apply_player_status_locked(Device& d, int player_index, ui
         d.applied_player_leds = 0;
         d.applied_body_rgb_valid = false;
 
-        // Keep only the generic SDL player-index call. The old Linux/RPi
-        // /sys/class/leds DualShock/DualSense RGB fallback was unreliable and
-        // just added useless sysfs pokes on Bluetooth controllers.
         (void)SDL_SetGamepadPlayerIndex(d.pad, player_index);
+
+        // Turn off the lightbar color/LED for PlayStation controllers to minimize Bluetooth overhead/disconnects if disabled.
+        if (!controller_leds_enabled.load(std::memory_order_relaxed) && is_playstation_controller(d.name, d.vid)) {
+            (void)SDL_SetGamepadLED(d.pad, 0, 0, 0);
+        }
     }
 
 void SDLInputManager::scan_locked(bool initial) {

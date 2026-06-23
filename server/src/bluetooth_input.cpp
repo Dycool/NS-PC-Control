@@ -86,8 +86,13 @@ static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int cli
     uint32_t dur_ms = neutral ? 0 : std::max(40u, (uint32_t)ev.duration_10ms * 10);
     uint64_t dur_us = (uint64_t)dur_ms * 1000;
 
-    if (!neutral && last_low == ev.low_freq && last_high == ev.high_freq && now - last_set_us < 100000ULL) {
-        rumble_until_us = now + dur_us;
+    // Enforce a minimum interval of 50ms between rumble changes to prevent choking the Bluetooth interface.
+    // However, always allow transitions to/from neutral immediately for low-latency starts and stops.
+    bool was_neutral = (last_low == 0 && last_high == 0);
+    if (neutral == was_neutral && now - last_set_us < 50000ULL) {
+        if (!neutral && last_low == ev.low_freq && last_high == ev.high_freq) {
+            rumble_until_us = now + dur_us;
+        }
         return;
     }
 
@@ -118,6 +123,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     input.set_motion_enabled(true);
     input.set_home_shortcut_enabled(true);
     input.set_capture_shortcut_enabled(true);
+    input.set_controller_leds_enabled(false);
 
     if (!input.start()) {
         std::println(stderr, "[bt] SDL3 input failed: {}", input.error());

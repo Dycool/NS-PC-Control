@@ -56,6 +56,7 @@ public:
     void set_motion_enabled(bool enabled);
     void set_home_shortcut_enabled(bool enabled);
     void set_capture_shortcut_enabled(bool enabled);
+    void set_controller_leds_enabled(bool enabled);
     void set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble = true);
     void set_player_status(int sdl_slot, int player_index, uint8_t player_leds = 0,
                            const uint8_t* body_rgb = nullptr);
@@ -95,6 +96,7 @@ private:
     std::atomic<bool> motion_enabled{true};
     std::atomic<bool> home_shortcut_enabled{true};
     std::atomic<bool> capture_shortcut_enabled{true};
+    std::atomic<bool> controller_leds_enabled{true};
 
     static Uint16 motor_word(uint8_t v);
     static bool button(SDL_Gamepad* pad, SDL_GamepadButton b);
