@@ -46,6 +46,13 @@ uint8_t CTRL_MAC_BE[4][6] = {
 
 std::string CTRL_SERIAL[4] = { "NSGP260606A0", "NSGP260606A1", "NSGP260606A2", "NSGP260606A3" };
 
+const uint8_t VIRTUAL_BODY_RGB[4][3] = {
+    {0xE6, 0x00, 0x12}, // virtual Pro Controller 1: red
+    {0xFF, 0xCC, 0x00}, // virtual Pro Controller 2: yellow
+    {0x00, 0x64, 0xFF}, // virtual Pro Controller 3: blue
+    {0x00, 0xC8, 0x53}, // virtual Pro Controller 4: green
+};
+
 bool read_random_bytes(uint8_t* dst, size_t len) {
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
@@ -93,9 +100,8 @@ void init_spi_flash(int ctrl) {
     put16(0x6080, 0); put16(0x6082, 0); put16(0x6084, 0); pack12(flash + 0x6089, 0x0A0, 0x100);
     for (size_t i = 6; i < 0x24; ++i) flash[0x6086 + i] = (i & 1) ? 0x30 : 0x0F;
 
-    static const uint8_t BODY_RGB[4][3] = { {0xE6, 0x00, 0x12}, {0xFF, 0xCC, 0x00}, {0x00, 0x64, 0xFF}, {0x00, 0xC8, 0x53} };
-    std::memcpy(flash + 0x6050, BODY_RGB[ctrl], 3); std::memset(flash + 0x6053, 0xFF, 3);
-    std::memcpy(flash + 0x6056, BODY_RGB[ctrl], 3); std::memset(flash + 0x6059, 0xFF, 3);
+    std::memcpy(flash + 0x6050, VIRTUAL_BODY_RGB[ctrl], 3); std::memset(flash + 0x6053, 0xFF, 3);
+    std::memcpy(flash + 0x6056, VIRTUAL_BODY_RGB[ctrl], 3); std::memset(flash + 0x6059, 0xFF, 3);
     flash[0x605C] = 0x00; g_spi_initialized[ctrl] = true;
 }
 
@@ -115,6 +121,20 @@ void build_get_device_info_response(uint8_t* out, int ctrl) {
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
     out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3]; out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
     out[10] = 0x01; out[11] = 0x02;
+}
+
+uint8_t pro_conn_info_from_hid(const HIDReport& src) {
+    if ((src.reserved[1] & EXT_STATUS_BATTERY_VALID) == 0 || src.reserved[0] > 100) return PRO_BAT_CON;
+
+    const int pct = src.reserved[0];
+    uint8_t level = 0x10;
+    if (pct >= 90) level = 0x90;
+    else if (pct >= 70) level = 0x70;
+    else if (pct >= 45) level = 0x50;
+    else if (pct >= 20) level = 0x30;
+    else level = 0x10;
+
+    return static_cast<uint8_t>(level | (PRO_BAT_CON & 0x0F));
 }
 
 void fill_neutral_controls(ProInputReport30& r) {
@@ -159,12 +179,13 @@ void map_buttons(uint16_t in_btns, uint8_t hat, uint8_t out_btns[3]) {
 }
 
 void apply_input_controls_to_pro21(const HIDReport& src, ProInputReport21& out) {
+    out.conn_info = pro_conn_info_from_hid(src);
     out.vibrator = PRO_VIBRATOR_REPORT; map_buttons(src.input.buttons, src.input.hat, out.buttons);
     pack_stick_12(out.left_stick, src.input.lx, src.input.ly); pack_stick_12(out.right_stick, src.input.rx, src.input.ry);
 }
 
 void build_standard_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, ProInputReport30& out) {
-    memset(&out, 0, sizeof(out)); out.id = RID_INPUT_STANDARD; out.timer = timer; out.conn_info = PRO_BAT_CON; out.vibrator = PRO_VIBRATOR_REPORT;
+    memset(&out, 0, sizeof(out)); out.id = RID_INPUT_STANDARD; out.timer = timer; out.conn_info = pro_conn_info_from_hid(src); out.vibrator = PRO_VIBRATOR_REPORT;
     map_buttons(src.input.buttons, src.input.hat, out.buttons);
     pack_stick_12(out.left_stick, src.input.lx, src.input.ly); pack_stick_12(out.right_stick, src.input.rx, src.input.ry);
     MotionReport imu[3]{};

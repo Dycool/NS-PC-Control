@@ -43,6 +43,7 @@ static constexpr std::size_t HMAC_TAG_SIZE = 16;
 
 static constexpr uint32_t RUMBLE_MAGIC = 0x4E535652u; // 'NSVR'
 static constexpr uint32_t PRECISION_RUMBLE_MAGIC = 0x4E535648u; // 'NSVH'
+static constexpr uint32_t CONTROLLER_STATUS_MAGIC = 0x4E534353u; // 'NSCS'
 static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 
@@ -95,6 +96,11 @@ enum Flags : uint8_t {
 // Extended clients set this in HoriHIDReport::vendor inside HIDReport.
 // Server code should clear vendor before writing legacy 8-byte reports.
 static constexpr uint8_t EXT_PAD_PRESENT = 0x01;
+// Extended HIDReport::reserved[1] status flags. Older clients leave these zero.
+static constexpr uint8_t EXT_STATUS_BATTERY_VALID = 0x01;
+static constexpr uint8_t EXT_STATUS_BATTERY_PERCENT_UNKNOWN = 0xFF;
+static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
+static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;
 
 // ── Legacy input reports ─────────────────────────────────────────────────────
 // Exactly 8 bytes. This is the complete HID report written to the old
@@ -181,6 +187,17 @@ struct ServerInfoReply {
     uint16_t udp_hz = PRO_UDP_HZ;
     uint8_t  reserved[6]{};
 } NS_PACKED_ATTR;
+
+struct ControllerStatusPacket {
+    uint32_t magic = CONTROLLER_STATUS_MAGIC;
+    uint8_t  version = SERVER_INFO_VERSION;
+    uint8_t  subpad = 0;          // 0..3 logical pad inside the client.
+    uint8_t  player_index = CONTROLLER_PLAYER_INDEX_UNKNOWN; // 0..3, or 0xFF unknown/off.
+    uint8_t  player_leds = 0;     // Raw Switch subcommand 0x30 LED bitfield.
+    // reserved[0..2]: virtual Pro Controller body RGB for RGB/lightbar controllers.
+    // reserved[3]: CONTROLLER_STATUS_FLAG_* bitfield.
+    uint8_t  reserved[4]{};
+} NS_PACKED_ATTR;
 // ── Unified UDP packet ───────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;
@@ -214,6 +231,8 @@ static_assert(sizeof(RumblePacket) == 8,
               "RumblePacket wire layout changed");
 static_assert(sizeof(PrecisionRumblePacket) == 20,
               "PrecisionRumblePacket wire layout changed");
+static_assert(sizeof(ControllerStatusPacket) == 12,
+              "ControllerStatusPacket wire layout changed");
 static_assert(sizeof(ServerInfoProbe) == 8,
               "ServerInfoProbe wire layout changed");
 static_assert(sizeof(ServerInfoReply) == 16,

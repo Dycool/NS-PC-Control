@@ -61,6 +61,13 @@ enum class InputSource : uint8_t {
 
 const char* input_source_name(InputSource source);
 
+struct ControllerStatusState {
+    uint8_t player_leds = 0;
+    uint8_t player_index = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    uint8_t body_rgb[3]{};
+    bool body_rgb_valid = false;
+};
+
 struct ClientSession {
     bool active = false;
     InputSource source = InputSource::None;
@@ -74,6 +81,9 @@ struct ClientSession {
     ns::PrecisionRumblePacket precision_rumble[4]{};
     uint32_t rumble_seq[4]{};
     bool rumble_active[4]{};
+    ControllerStatusState controller_status[4]{};
+    uint32_t controller_status_seq[4]{};
+    uint32_t udp_last_controller_status_seq[4]{};
     bool udp_rumble_enabled = false;
     uint32_t udp_last_rumble_seq[4]{};
     bool pad_present[4]{};
@@ -130,6 +140,7 @@ struct ServerContext {
     std::atomic<bool> switch2_force_next_wake{false}; // compatibility/no-op; runtime wake is RX-state based
     std::atomic<bool> switch2_delayed_wake_check_running{false};
     std::atomic<uint8_t> bluetooth_reserved_client_slots_mask{0};
+    std::atomic<uint8_t> console_player_leds[HID_PORT_COUNT]{};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};
     std::mutex mtx[MAX_CLIENTS];
@@ -157,6 +168,10 @@ void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 int active_client_count(uint64_t now = 0);
+uint8_t switch_player_index_from_leds(uint8_t player_leds);
+void publish_controller_status_event(int client_idx, int sub_idx, uint8_t player_leds,
+                                     const uint8_t* body_rgb = nullptr);
+bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns::ControllerStatusPacket& packet);
 bool any_client_source_active(InputSource source, uint64_t now = 0);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);
 void clear_motion(ClientSession& c, int subpad);

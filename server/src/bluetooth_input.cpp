@@ -182,6 +182,10 @@ static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
     c.last_rx_us = now;
     c.report.reset();
     c.report.p1.input = pad.input;
+    if (pad.battery_percent >= 0 && pad.battery_percent <= 100) {
+        c.report.p1.reserved[0] = static_cast<uint8_t>(pad.battery_percent);
+        c.report.p1.reserved[1] |= EXT_STATUS_BATTERY_VALID;
+    }
     c.report.p1.has_motion = pad.has_motion ? 1 : 0;
     if (pad.has_motion) {
         c.report.p1.motion[0] = pad.motion_samples[0];
@@ -223,6 +227,17 @@ static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int cli
     input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
 }
 
+static void apply_bluetooth_controller_status(SDLInputManager& input, int sdl_slot, int client_idx, uint32_t& last_seq) {
+    uint32_t seq = 0;
+    ControllerStatusPacket sp{};
+    if (!get_controller_status_packet(client_idx, 0, seq, sp)) return;
+    if (seq == last_seq) return;
+    last_seq = seq;
+    int player_index = (sp.player_index < 4) ? static_cast<int>(sp.player_index) : -1;
+    const uint8_t* body_rgb = (sp.reserved[3] & ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID) ? sp.reserved : nullptr;
+    input.set_player_status(sdl_slot, player_index, sp.player_leds, body_rgb);
+}
+
 void bluetooth_input_thread(std::stop_token stoken) {
     SDLInputManager input;
     input.set_motion_enabled(true);
@@ -250,6 +265,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     std::array<int, 4> client_for_sdl;
     client_for_sdl.fill(-1);
     std::array<uint32_t, 4> last_rumble_seq{};
+    std::array<uint32_t, 4> last_status_seq{};
     std::array<uint64_t, 4> rumble_until_us{};
     std::array<bool, 4> dormant_until_input{};
     uint64_t seen_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
@@ -271,7 +287,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
                 client_for_sdl[i] = -1;
                 last_rumble_seq[i] = 0;
+                last_status_seq[i] = 0;
                 rumble_until_us[i] = 0;
+                input.clear_player_status(i);
             }
             dormant_until_input.fill(true);
             g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
@@ -296,7 +314,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
+                    last_status_seq[i] = 0;
                     rumble_until_us[i] = 0;
+                    input.clear_player_status(i);
                 }
                 if (!switch_sleeping) dormant_until_input[i] = false;
                 continue;
@@ -311,7 +331,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 if (!still_active) {
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
+                    last_status_seq[i] = 0;
                     rumble_until_us[i] = 0;
+                    input.clear_player_status(i);
                 }
             }
 
@@ -329,6 +351,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     {
                         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
                         last_rumble_seq[i] = g_ctx.clients[client_for_sdl[i]].rumble_seq[0];
+                        last_status_seq[i] = g_ctx.clients[client_for_sdl[i]].controller_status_seq[0];
                     }
                     maybe_send_switch2_wake_advert("Bluetooth controller connected");
                 }
@@ -342,10 +365,13 @@ void bluetooth_input_thread(std::stop_token stoken) {
             if (!publish_bluetooth_state_to_client(client_for_sdl[i], pads[i], now)) {
                 client_for_sdl[i] = -1;
                 last_rumble_seq[i] = 0;
+                last_status_seq[i] = 0;
                 rumble_until_us[i] = 0;
+                input.clear_player_status(i);
                 continue;
             }
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);
+            apply_bluetooth_controller_status(input, i, client_for_sdl[i], last_status_seq[i]);
         }
 
         if (any_waiting && !waiting_logged) {

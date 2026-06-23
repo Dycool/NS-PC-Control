@@ -220,6 +220,58 @@ int active_client_count(uint64_t now) {
     return count;
 }
 
+uint8_t switch_player_index_from_leds(uint8_t player_leds) {
+    const uint8_t solid = static_cast<uint8_t>(player_leds & 0x0F);
+    const uint8_t flashing = static_cast<uint8_t>((player_leds >> 4) & 0x0F);
+    const uint8_t bits = solid ? solid : flashing;
+    switch (bits) {
+        case 0x01: return 0;
+        case 0x02: return 1;
+        case 0x04: return 2;
+        case 0x08: return 3;
+        default: return ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    }
+}
+
+void publish_controller_status_event(int client_idx, int sub_idx, uint8_t player_leds, const uint8_t* body_rgb) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return;
+    ControllerStatusState& st = c.controller_status[sub_idx];
+    const uint8_t player_index = switch_player_index_from_leds(player_leds);
+    bool changed = st.player_leds != player_leds || st.player_index != player_index;
+    st.player_leds = player_leds;
+    st.player_index = player_index;
+    if (body_rgb) {
+        if (!st.body_rgb_valid || st.body_rgb[0] != body_rgb[0] || st.body_rgb[1] != body_rgb[1] || st.body_rgb[2] != body_rgb[2]) changed = true;
+        st.body_rgb[0] = body_rgb[0];
+        st.body_rgb[1] = body_rgb[1];
+        st.body_rgb[2] = body_rgb[2];
+        st.body_rgb_valid = true;
+    }
+    if (changed) c.controller_status_seq[sub_idx]++;
+}
+
+bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns::ControllerStatusPacket& packet) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return false;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    const ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return false;
+    seq = c.controller_status_seq[sub_idx];
+    packet = ns::ControllerStatusPacket{};
+    packet.subpad = static_cast<uint8_t>(sub_idx);
+    packet.player_index = c.controller_status[sub_idx].player_index;
+    packet.player_leds = c.controller_status[sub_idx].player_leds;
+    if (c.controller_status[sub_idx].body_rgb_valid) {
+        packet.reserved[0] = c.controller_status[sub_idx].body_rgb[0];
+        packet.reserved[1] = c.controller_status[sub_idx].body_rgb[1];
+        packet.reserved[2] = c.controller_status[sub_idx].body_rgb[2];
+        packet.reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
+    }
+    return true;
+}
+
 bool any_client_source_active(InputSource source, uint64_t now) {
     if (now == 0) now = now_us();
     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -395,7 +447,10 @@ void reset_client_session_locked(ClientSession& c) {
     for (int s = 0; s < 4; ++s) {
         c.rumble[s] = RumblePacket{}; c.precision_rumble[s] = PrecisionRumblePacket{};
         c.rumble_active[s] = false; c.rumble_seq[s]++;
+        c.controller_status[s] = ControllerStatusState{};
+        c.controller_status_seq[s]++;
         c.udp_last_rumble_seq[s] = c.rumble_seq[s];
+        c.udp_last_controller_status_seq[s] = c.controller_status_seq[s];
         c.pad_present[s] = false; c.pad_last_present_us[s] = 0;
     }
 }
@@ -461,7 +516,10 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
             g_ctx.clients[i].precision_rumble[s] = PrecisionRumblePacket{};
             g_ctx.clients[i].rumble_active[s] = false;
             g_ctx.clients[i].rumble_seq[s]++;
+            g_ctx.clients[i].controller_status[s] = ControllerStatusState{};
+            g_ctx.clients[i].controller_status_seq[s]++;
             g_ctx.clients[i].udp_last_rumble_seq[s] = g_ctx.clients[i].rumble_seq[s];
+            g_ctx.clients[i].udp_last_controller_status_seq[s] = g_ctx.clients[i].controller_status_seq[s];
             g_ctx.clients[i].pad_present[s] = false;
             g_ctx.clients[i].pad_last_present_us[s] = 0;
         }

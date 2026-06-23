@@ -26,6 +26,8 @@ void flush_rumble_to_udp(int sock, int client_idx) {
     sockaddr_in dest{};
     ns::RumblePacket pending[4]{};
     bool has[4]{};
+    ns::ControllerStatusPacket pending_status[4]{};
+    bool has_status[4]{};
 
     {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -39,10 +41,31 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 c.udp_last_rumble_seq[s] = seq;
                 has[s] = true;
             }
+            uint32_t status_seq = c.controller_status_seq[s];
+            if (status_seq != c.udp_last_controller_status_seq[s]) {
+                pending_status[s] = ns::ControllerStatusPacket{};
+                pending_status[s].subpad = static_cast<uint8_t>(s);
+                pending_status[s].player_index = c.controller_status[s].player_index;
+                pending_status[s].player_leds = c.controller_status[s].player_leds;
+                if (c.controller_status[s].body_rgb_valid) {
+                    pending_status[s].reserved[0] = c.controller_status[s].body_rgb[0];
+                    pending_status[s].reserved[1] = c.controller_status[s].body_rgb[1];
+                    pending_status[s].reserved[2] = c.controller_status[s].body_rgb[2];
+                    pending_status[s].reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
+                }
+                c.udp_last_controller_status_seq[s] = status_seq;
+                has_status[s] = true;
+            }
         }
     }
 
     for (int s = 0; s < 4; ++s) {
+        if (has_status[s]) {
+            ssize_t sent = sendto(sock, &pending_status[s], sizeof(ns::ControllerStatusPacket), 0,
+                                  reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+            if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::ControllerStatusPacket)))
+                std::println(stderr, "[udp] failed to send controller status packet: {}", std::strerror(errno));
+        }
         if (!has[s]) continue;
         ssize_t sent = sendto(sock, &pending[s], sizeof(ns::RumblePacket), 0,
                               reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -56,9 +79,12 @@ struct SessionData {
     uint32_t ws_seq = 0;
     bool ws_first = true;
     uint32_t last_rumble_seq[4] = {};
+    uint32_t last_status_seq[4] = {};
     uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
+    uint8_t pending_status[4][sizeof(ControllerStatusPacket)];
     bool has_pending_rumble[4] = {};
+    bool has_pending_status[4] = {};
     uint64_t assigned_sleep_seq = 0;
     bool had_slot = false;
 };
@@ -118,8 +144,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
             sd->had_slot = false;
             std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
+            std::fill(sd->last_status_seq, sd->last_status_seq + 4, 0);
             std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
+            std::fill(sd->has_pending_status, sd->has_pending_status + 4, false);
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
             break;
@@ -199,7 +227,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     sd->had_slot = true;
                     std::println("[ws] Allocated WebSocket client to Slot {}", sd->ws_slot + 1);
                     wake_on_new_client = true;
-                    for (int s = 0; s < 4; ++s) sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
+                    for (int s = 0; s < 4; ++s) {
+                        sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
+                        sd->last_status_seq[s] = g_ctx.clients[sd->ws_slot].controller_status_seq[s];
+                    }
                 }
             }
 
@@ -233,6 +264,13 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         case LWS_CALLBACK_SERVER_WRITEABLE: {
             if (sd->ws_slot < 0) break;
             for (int s = 0; s < 4; ++s) {
+                if (sd->has_pending_status[s]) {
+                    uint8_t buffer[LWS_PRE + sizeof(ControllerStatusPacket)];
+                    memcpy(buffer + LWS_PRE, sd->pending_status[s], sizeof(ControllerStatusPacket));
+                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ControllerStatusPacket), LWS_WRITE_BINARY) != sizeof(ControllerStatusPacket)) return -1;
+                    sd->has_pending_status[s] = false;
+                    break;
+                }
                 if (sd->has_pending_rumble[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(RumblePacket)];
                     memcpy(buffer + LWS_PRE, sd->pending_rumble[s], sizeof(RumblePacket));
@@ -242,7 +280,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     break;
                 }
             }
-            if (std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) lws_callback_on_writable(wsi);
+            if (std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) ||
+                std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) lws_callback_on_writable(wsi);
             break;
         }
 
@@ -259,6 +298,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
 
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
+                bool new_status = false;
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) {
                     sd->ws_slot = -1;
@@ -272,8 +312,25 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         sd->has_pending_rumble[s] = true;
                         new_rumble = true;
                     }
+                    uint32_t status_seq = g_ctx.clients[sd->ws_slot].controller_status_seq[s];
+                    if (status_seq != sd->last_status_seq[s]) {
+                        ControllerStatusPacket sp{};
+                        sp.subpad = static_cast<uint8_t>(s);
+                        sp.player_index = g_ctx.clients[sd->ws_slot].controller_status[s].player_index;
+                        sp.player_leds = g_ctx.clients[sd->ws_slot].controller_status[s].player_leds;
+                        if (g_ctx.clients[sd->ws_slot].controller_status[s].body_rgb_valid) {
+                            sp.reserved[0] = g_ctx.clients[sd->ws_slot].controller_status[s].body_rgb[0];
+                            sp.reserved[1] = g_ctx.clients[sd->ws_slot].controller_status[s].body_rgb[1];
+                            sp.reserved[2] = g_ctx.clients[sd->ws_slot].controller_status[s].body_rgb[2];
+                            sp.reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
+                        }
+                        memcpy(sd->pending_status[s], &sp, sizeof(sp));
+                        sd->last_status_seq[s] = status_seq;
+                        sd->has_pending_status[s] = true;
+                        new_status = true;
+                    }
                 }
-                if (new_rumble) lws_callback_on_writable(wsi);
+                if (new_rumble || new_status) lws_callback_on_writable(wsi);
             }
             lws_set_timer_usecs(wsi, 10 * 1000);
             break;

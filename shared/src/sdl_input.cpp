@@ -45,6 +45,13 @@ bool is_xbox_controller(const std::string& name, uint16_t vid) {
            contains_case_insensitive(name, "microsoft") ||
            contains_case_insensitive(name, "elite");
 }
+
+struct PlayerColor { uint8_t r, g, b; };
+
+PlayerColor rgb_from_body_color(const uint8_t* body_rgb) {
+    if (!body_rgb) return {0, 0, 0};
+    return {body_rgb[0], body_rgb[1], body_rgb[2]};
+}
 }
 
 void DigitalReleaseFilter::reset() {
@@ -248,6 +255,26 @@ void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32
         }
     }
 
+void SDLInputManager::set_player_status(int sdl_slot, int player_index, uint8_t player_leds, const uint8_t* body_rgb) {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return;
+        Device* d = device_for_slot_locked(sdl_slot);
+        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
+        apply_player_status_locked(*d, player_index, player_leds, body_rgb);
+    }
+
+void SDLInputManager::clear_player_status(int sdl_slot) {
+        set_player_status(sdl_slot, -1, 0);
+    }
+
+void SDLInputManager::clear_all_player_status() {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (!initialized) return;
+        for (auto& d : devices) {
+            if (d.pad && SDL_GamepadConnected(d.pad)) apply_player_status_locked(d, -1, 0, nullptr);
+        }
+    }
+
 void SDLInputManager::stop_all_rumble() {
         std::lock_guard<std::mutex> lk(mtx);
         stop_all_rumble_locked();
@@ -408,6 +435,7 @@ void SDLInputManager::close_device_locked(Device& d) {
         if (d.pad) {
             SDL_RumbleGamepad(d.pad, 0, 0, 0);
             SDL_RumbleGamepadTriggers(d.pad, 0, 0, 0);
+            apply_player_status_locked(d, -1, 0, nullptr);
             SDL_CloseGamepad(d.pad);
             d.pad = nullptr;
         }
@@ -428,6 +456,38 @@ void SDLInputManager::stop_all_rumble_locked() {
                 SDL_RumbleGamepad(d.pad, 0, 0, 0);
                 SDL_RumbleGamepadTriggers(d.pad, 0, 0, 0);
             }
+        }
+    }
+
+void SDLInputManager::apply_player_status_locked(Device& d, int player_index, uint8_t player_leds, const uint8_t* body_rgb) {
+        if (!d.pad || !SDL_GamepadConnected(d.pad)) return;
+        if (player_index < 0 || player_index >= 4) player_index = -1;
+
+        const bool rgb_valid = body_rgb != nullptr;
+        bool same_rgb = d.applied_body_rgb_valid == rgb_valid;
+        if (same_rgb && rgb_valid) {
+            same_rgb = d.applied_body_rgb[0] == body_rgb[0] &&
+                       d.applied_body_rgb[1] == body_rgb[1] &&
+                       d.applied_body_rgb[2] == body_rgb[2];
+        }
+        if (d.applied_player_index == player_index && d.applied_player_leds == player_leds && same_rgb) return;
+
+        d.applied_player_index = player_index;
+        d.applied_player_leds = player_leds;
+        d.applied_body_rgb_valid = rgb_valid;
+        if (rgb_valid) {
+            d.applied_body_rgb[0] = body_rgb[0];
+            d.applied_body_rgb[1] = body_rgb[1];
+            d.applied_body_rgb[2] = body_rgb[2];
+        }
+
+        // Switch player lights and RGB/lightbar color are separate concepts:
+        // - player_index mirrors Switch subcommand 0x30 for controllers with player LEDs.
+        // - body_rgb mirrors the virtual Pro Controller body color exposed in SPI.
+        (void)SDL_SetGamepadPlayerIndex(d.pad, player_index);
+        if (rgb_valid) {
+            PlayerColor c = rgb_from_body_color(body_rgb);
+            (void)SDL_SetGamepadLED(d.pad, c.r, c.g, c.b);
         }
     }
 
@@ -464,6 +524,9 @@ void SDLInputManager::scan_locked(bool initial) {
             d.name = (name && *name) ? name : "SDL3 Gamepad";
             d.vid = SDL_GetGamepadVendor(pad);
             d.pid = SDL_GetGamepadProduct(pad);
+            d.applied_player_index = -2;
+            d.applied_player_leds = 0xFF;
+            d.applied_body_rgb_valid = false;
             SDL_PropertiesID props = SDL_GetGamepadProperties(pad);
             if (props) {
                 d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
@@ -495,6 +558,9 @@ void SDLInputManager::refresh_states_locked(uint64_t now) {
             st.vid = d.vid;
             st.pid = d.pid;
             st.instance_id = d.id;
+            int battery_percent = -1;
+            (void)SDL_GetGamepadPowerInfo(d.pad, &battery_percent);
+            st.battery_percent = (battery_percent >= 0 && battery_percent <= 100) ? battery_percent : -1;
             apply_motion(d, st.motion_samples, st.has_motion);
             st.motion = st.has_motion ? st.motion_samples[2] : ns::MotionReport{};
             if (report_non_neutral(st.input) || st.has_motion) st.last_input_us = now;

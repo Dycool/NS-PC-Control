@@ -2,11 +2,14 @@ package com.nscontrol
 
 import android.content.pm.ActivityInfo
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.input.InputManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -441,6 +444,14 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun phoneBatteryPercent(): Int? {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level < 0 || scale <= 0) return null
+        return ((level * 100f) / scale).roundToInt().coerceIn(0, 100)
+    }
+
     private fun sendFrame() {
         sendFrameInternal()
     }
@@ -467,6 +478,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     Protocol.setFrameHid(frame, 0, hid)
                     phoneMotionSamples()?.let { Protocol.setFrameMotionSamples(frame, 0, it) }
+                    phoneBatteryPercent()?.let { Protocol.setFrameBatteryPercent(frame, 0, it) }
                 }
                 activeClientMode == ClientMode.PHYSICAL && !forceNeutral -> {
                     synchronized(physicalLock) {

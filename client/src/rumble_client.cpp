@@ -48,6 +48,7 @@ void RumbleManager::stop_all() {
     int none[4] = {-1, -1, -1, -1};
     for (int i = 0; i < 4; ++i) set_output(i, 0, 0, 0, none[i]);
     g_sdlInput.stop_all_rumble();
+    g_sdlInput.clear_all_player_status();
 }
 
 void RumbleManager::set_output(int slot, uint8_t low, uint8_t high, uint32_t duration_ms, int pad_idx) {
@@ -70,6 +71,17 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
                 g_serverLastReplyUs.store(ns::now_us());
                 if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
                     g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
+                }
+            }
+        } else if (n == sizeof(ns::ControllerStatusPacket)) {
+            ns::ControllerStatusPacket sp{};
+            std::memcpy(&sp, buf, sizeof(sp));
+            if (sp.magic == ns::CONTROLLER_STATUS_MAGIC && sp.version == ns::SERVER_INFO_VERSION && sp.subpad < 4) {
+                int controller = controller_for_slot[sp.subpad];
+                if (controller >= 0) {
+                    int player_index = (sp.player_index < 4) ? static_cast<int>(sp.player_index) : -1;
+                    const uint8_t* body_rgb = (sp.reserved[3] & ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID) ? sp.reserved : nullptr;
+                    g_sdlInput.set_player_status(controller, player_index, sp.player_leds, body_rgb);
                 }
             }
         } else if (n == sizeof(ns::PrecisionRumblePacket)) {

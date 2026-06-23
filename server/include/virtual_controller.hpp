@@ -76,6 +76,7 @@ static_assert(sizeof(ProInputReport21) == PRO_REPORT_SIZE, "ProInputReport21 mus
 
 extern uint8_t CTRL_MAC_BE[4][6];
 extern std::string CTRL_SERIAL[4];
+extern const uint8_t VIRTUAL_BODY_RGB[4][3];
 
 struct ControllerRuntime {
     int fd = -1;
@@ -101,6 +102,7 @@ size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl);
 void build_get_device_info_response(uint8_t* out, int ctrl);
 void fill_neutral_controls(ProInputReport30& r);
 void fill_neutral_controls(ProInputReport21& r);
+uint8_t pro_conn_info_from_hid(const ns::HIDReport& src);
 uint16_t axis8_to_12(uint8_t v);
 uint8_t invert_axis8_centered(uint8_t v);
 void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8);

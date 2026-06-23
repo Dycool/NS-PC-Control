@@ -21,6 +21,7 @@ object Protocol {
     const val FLAG_SINGLE_PAD = 0x04
 
     private const val PAD_PRESENT = 0x01
+    private const val EXT_STATUS_BATTERY_VALID = 0x01
 
     const val BTN_Y       = 1 shl 0
     const val BTN_B       = 1 shl 1
@@ -105,6 +106,14 @@ object Protocol {
     fun setFrameMotionSamples(frame: ByteArray, padIndex: Int, samples: Array<ByteArray>) {
         if (samples.size < MOTION_SAMPLE_COUNT) return
         NativeProtocol.nativeSetFrameMotionSamples(frame, padIndex, samples[0], samples[1], samples[2])
+    }
+
+    fun setFrameBatteryPercent(frame: ByteArray, padIndex: Int, percent: Int) {
+        if (padIndex !in 0 until PAD_COUNT || percent !in 0..100) return
+        val base = 20 + padIndex * EXT_PAD_SIZE
+        if (frame.size < base + EXT_PAD_SIZE) return
+        frame[base + 45] = percent.toByte()
+        frame[base + 46] = (frame[base + 46].toInt() or EXT_STATUS_BATTERY_VALID).toByte()
     }
 
     fun extractPad0HidFromWebFrame(src: ByteArray): ByteArray? =

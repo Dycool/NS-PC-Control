@@ -28,10 +28,21 @@ applyLayout();
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 5;
 const PAD_PRESENT = 1;
 const FLAG_SINGLE_PAD = 0x04;
+const EXT_STATUS_BATTERY_VALID = 0x01;
 const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
 const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
+let touchBatteryPercent = null;
+if (navigator.getBattery) {
+    navigator.getBattery().then(b => {
+        const update = () => {
+            touchBatteryPercent = Number.isFinite(b.level) ? Math.max(0, Math.min(100, Math.round(b.level * 100))) : null;
+        };
+        update();
+        b.addEventListener('levelchange', update);
+    }).catch(() => { touchBatteryPercent = null; });
+}
 function resetTouchConnectionUi(text) {
     isConnected = false;
     if (loopId) { clearInterval(loopId); loopId = null; }
@@ -221,6 +232,10 @@ function sendPacket() {
     view.setUint16(off, sendButtons, true); view.setUint8(off+2, state.hat);
     view.setUint8(off+3, state.lx); view.setUint8(off+4, state.ly); view.setUint8(off+5, state.rx); view.setUint8(off+6, state.ry); view.setUint8(off+7, PAD_PRESENT);
     for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(off + k, 0);
+    if (touchBatteryPercent !== null) {
+        view.setUint8(off + 45, touchBatteryPercent);
+        view.setUint8(off + 46, view.getUint8(off + 46) | EXT_STATUS_BATTERY_VALID);
+    }
     for(let p=1; p<4; p++) {
         off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);
         view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);

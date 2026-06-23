@@ -173,6 +173,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     if (chosen != -1) {
                         hw_slots[chosen].client_idx = c; hw_slots[chosen].sub_idx = s;
                         if (g_ctx.verbose) std::println("Map -> PC {} (Pad {}) took console Port {}", c + 1, s + 1, chosen + 1);
+                        publish_controller_status_event(c, s, g_ctx.console_player_leds[chosen].load(std::memory_order_relaxed), VIRTUAL_BODY_RGB[chosen]);
                     }
                 }
             }
@@ -268,8 +269,17 @@ void writer_thread(std::stop_token stoken, int hz) {
                         uint8_t id = read_buf[0];
                         if (id == RID_OUTPUT_CMD) {
                             if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, false);
+                            const uint8_t subcmd = read_buf[10];
+                            std::span<const uint8_t> cmd_data(read_buf + 11, r > 11 ? std::min<size_t>(53, r - 11) : 0);
+                            if ((subcmd == CMD_SET_PLAYER_LIGHTS || subcmd == 0x33) && !cmd_data.empty()) {
+                                const uint8_t player_leds = cmd_data[0];
+                                g_ctx.console_player_leds[h].store(player_leds, std::memory_order_relaxed);
+                                if (hw_slots[h].client_idx != -1) {
+                                    publish_controller_status_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, player_leds, VIRTUAL_BODY_RGB[h]);
+                                }
+                            }
                             memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
-                            int reply_len = handle_subcommand(rt[h], read_buf[10], std::span<const uint8_t>(read_buf + 11, r > 11 ? std::min<size_t>(53, r - 11) : 0), &rt[h].pending_reply);
+                            int reply_len = handle_subcommand(rt[h], subcmd, cmd_data, &rt[h].pending_reply);
                             rt[h].pending_subcmd_reply = (reply_len >= 0);
                         } else if (id == RID_OUTPUT_RUMBLE) {
                             if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);

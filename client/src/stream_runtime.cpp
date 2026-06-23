@@ -68,6 +68,7 @@ void ClientFrame::reset() {
         present[i] = false;
         has_motion[i] = false;
         controller_for_slot[i] = -1;
+        battery_percent[i] = -1;
     }
 }
 
@@ -87,6 +88,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         frame.present[i] = true;
         frame.has_motion[i] = send_motion && sdl[i].has_motion;
         frame.controller_for_slot[i] = i;
+        frame.battery_percent[i] = sdl[i].battery_percent;
         ++frame.active_count;
     }
 
@@ -100,6 +102,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
                 frame.has_motion[target] = frame.has_motion[0];
                 frame.present[target] = true;
                 frame.controller_for_slot[target] = frame.controller_for_slot[0];
+                frame.battery_percent[target] = frame.battery_percent[0];
                 ++frame.active_count;
             }
         }
@@ -109,6 +112,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         frame.present[0] = true;
         frame.has_motion[0] = false;
         frame.controller_for_slot[0] = -1;
+        frame.battery_percent[0] = -1;
         frame.active_count = std::max(frame.active_count, 1);
     } else if (keyboard_mode == KB_OVERRIDE) {
         apply_keyboard_to_report(frame.reports[0], true);
@@ -129,7 +133,7 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
     pkt.report.reset();
     for (int i = 0; i < 4; ++i) {
         ns::HIDReport* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
-        fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr);
+        fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr, frame.battery_percent[i]);
     }
     sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }

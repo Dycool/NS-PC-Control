@@ -35,6 +35,7 @@ struct SdlPadState {
     uint16_t vid = 0;
     uint16_t pid = 0;
     SDL_JoystickID instance_id = 0;
+    int battery_percent = -1; // 0..100, or -1 when SDL/controller does not report it.
 };
 
 uint8_t sdl_axis_to_byte(Sint16 val, bool invert = false, int deadzone = 8000);
@@ -55,6 +56,10 @@ public:
     void set_home_shortcut_enabled(bool enabled);
     void set_capture_shortcut_enabled(bool enabled);
     void set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble = true);
+    void set_player_status(int sdl_slot, int player_index, uint8_t player_leds = 0,
+                           const uint8_t* body_rgb = nullptr);
+    void clear_player_status(int sdl_slot);
+    void clear_all_player_status();
     void stop_all_rumble();
     void disconnect_all();
 
@@ -67,6 +72,10 @@ private:
         bool accel_enabled = false;
         bool rumble_capable = false;
         bool trigger_rumble_capable = false;
+        int applied_player_index = -2;
+        uint8_t applied_player_leds = 0xFF;
+        uint8_t applied_body_rgb[3]{};
+        bool applied_body_rgb_valid = false;
         std::string name;
         uint16_t vid = 0;
         uint16_t pid = 0;
@@ -100,6 +109,8 @@ private:
     void close_all_locked();
     void clear_states_locked();
     void stop_all_rumble_locked();
+    void apply_player_status_locked(Device& d, int player_index, uint8_t player_leds,
+                                    const uint8_t* body_rgb);
     void scan_locked(bool initial);
     void refresh_states_locked(uint64_t now);
 };
