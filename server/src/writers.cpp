@@ -73,7 +73,7 @@ void writer_thread(std::stop_token stoken, int hz) {
             continue;
         }
 
-        if (g_ctx.verbose || !was_connected) {
+        if (g_ctx.verbose) {
             std::println("{}x {} /dev/hidg* opened", HID_PORT_COUNT, g_ctx.legacy_mode ? "legacy" : "Pro");
         }
         was_connected = true;
@@ -113,8 +113,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                         g_ctx.clients[c].pad_present[s] = false;
                         g_ctx.clients[c].pad_last_present_us[s] = 0;
                     }
-                    if (g_ctx.verbose && !timeout_printed[c]) {
-                        std::println("PC {} timed out after {:.1f}s without UDP input and was disconnected.", c + 1, (double)client_idle_us / 1000000.0);
+                    if (!timeout_printed[c]) {
+                        std::println("UDP client released from Slot {} (timeout)", c + 1);
                         timeout_printed[c] = true;
                     }
                 } else if (g_ctx.clients[c].active) {

@@ -153,7 +153,6 @@ int main(int argc, char** argv) {
         app.parse((int)cli_argv.size(), cli_argv.data());
     } catch (const CLI::ParseError &e) { return app.exit(e); }
 
-    g_ctx.bluetooth_pairing_enabled = pair_explicit;
     g_ctx.bluetooth_input_disabled = no_bt;
 
     if (no_bt && pair_explicit) {
@@ -183,6 +182,10 @@ int main(int argc, char** argv) {
 
     if (do_revert) return run_revert_gadget_host() ? 0 : 1;
     if (g_ctx.switch2_wakeup_setup_requested) return run_switch2_wakeup_setup();
+    if (pair_explicit) {
+        bluetooth_manager_runtime_setup(true);
+        return run_bluetooth_pairing_wizard() ? 0 : 1;
+    }
 
     g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
     bluetooth_enabled = !no_bt && bluetooth_input_available();
@@ -244,7 +247,31 @@ int main(int argc, char** argv) {
     std::jthread bluetooth_thread;
     if (bluetooth_enabled) bluetooth_thread = std::jthread(bluetooth_input_thread);
 
-    std::println("UDP {}:{} writer={} Hz mode={}", bind_addr, port, PRO_WRITER_HZ, g_ctx.legacy_mode ? "hori" : "modern");
+    if (g_ctx.verbose) {
+        std::println("UDP {}:{} writer={} Hz mode={}", bind_addr, port, PRO_WRITER_HZ, g_ctx.legacy_mode ? "hori" : "modern");
+    }
+
+    std::string start_msg = std::format("Started ns-backend server on {}:{}", bind_addr, port);
+    if (serve_http_webapp) {
+        start_msg += std::format(" with webapp on {}:{}", bind_addr, web_port);
+    }
+    std::vector<std::string> extras;
+    if (pair_explicit) extras.push_back("pairing enabled");
+    if (no_bt) extras.push_back("Bluetooth disabled");
+    if (g_ctx.legacy_mode) extras.push_back("HORI mode");
+    if (do_upnp) extras.push_back("UPnP mapping");
+    if (g_ctx.switch2_wake_adv_enabled) extras.push_back("Switch 2 wake armed");
+    if (g_ctx.verbose) extras.push_back("verbose");
+    if (!extras.empty()) {
+        start_msg += " (";
+        for (size_t i = 0; i < extras.size(); ++i) {
+            if (i > 0) start_msg += ", ";
+            start_msg += extras[i];
+        }
+        start_msg += ")";
+    }
+    std::println("{}", start_msg);
+
     std::jthread wt(writer_thread, PRO_WRITER_HZ), st(stats_thread);
 
     std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
@@ -352,7 +379,7 @@ int main(int argc, char** argv) {
                 forget_switch2_dormant_udp_endpoint(sender);
                 if (cidx >= 0) {
                     reset_client_session(cidx); rearm_switch2_wake_after_client_disconnect();
-                    std::println("UDP client {} disconnected.", cidx + 1);
+                    std::println("UDP client released from Slot {}", cidx + 1);
                 }
                 ++g_ctx.pkts_rx; continue;
             }
@@ -439,10 +466,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::println("[backend] shutting down");
+    std::cout << "Shutting down" << std::flush;
+
     g_ctx.running.store(false, std::memory_order_relaxed);
     upnp_remove_mapping(port);
     close(sock);
+    std::cout << "." << std::flush;
 
     wt.request_stop();
     st.request_stop();
@@ -452,12 +481,14 @@ int main(int argc, char** argv) {
         bluetooth_manager_stop();
         bluetooth_thread.request_stop();
     }
+    std::cout << "." << std::flush;
 
-    if (wt.joinable()) wt.join();
-    if (st.joinable()) st.join();
-    if (bluetooth_thread.joinable()) bluetooth_thread.join();
-    if (web_thread.joinable()) web_thread.join();
+    if (wt.joinable()) { wt.join(); std::cout << "." << std::flush; }
+    if (st.joinable()) { st.join(); std::cout << "." << std::flush; }
+    if (bluetooth_thread.joinable()) { bluetooth_thread.join(); std::cout << "." << std::flush; }
+    if (web_thread.joinable()) { web_thread.join(); std::cout << "." << std::flush; }
 
     teardown_gadget();
+    std::cout << ".\n";
     return 0;
 }

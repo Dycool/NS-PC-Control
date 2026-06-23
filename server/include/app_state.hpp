@@ -116,7 +116,6 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     bool legacy_mode = false;
-    bool bluetooth_pairing_enabled = false;
     bool bluetooth_input_disabled = false;
     bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
     std::atomic<bool> gadget_setup_attempted{false};

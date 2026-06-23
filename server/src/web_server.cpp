@@ -154,10 +154,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
 
         case LWS_CALLBACK_CLOSED:
             if (sd->ws_slot >= 0) {
-                std::println("[ws] Connection closed, releasing Slot {}", sd->ws_slot + 1);
+                std::println("WebSocket client released from Slot {}", sd->ws_slot + 1);
                 reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
             } else {
-                std::println("[ws] Connection closed");
+                if (g_ctx.verbose) std::println("[ws] Connection closed");
             }
             break;
 
@@ -172,7 +172,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         if (sd->ws_slot >= 0) {
                             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                             sd->had_slot = true;
-                            std::println("[ws] Allocated WebSocket client to Slot {} (triggered by macro)", sd->ws_slot + 1);
+                            std::println("New WebSocket client accepted into Slot {} (macro)", sd->ws_slot + 1);
                         }
                     }
                     if (sd->ws_slot >= 0) {
@@ -198,7 +198,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         if (sd->ws_slot >= 0) {
                             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                             sd->had_slot = true;
-                            std::println("[ws] Allocated WebSocket client to Slot {} (triggered by macro chunk)", sd->ws_slot + 1);
+                            std::println("New WebSocket client accepted into Slot {} (macro chunk)", sd->ws_slot + 1);
                         }
                     }
                     if (sd->ws_slot >= 0) server_macro_handle_ws_chunk_packet(sd->ws_slot, {payload, len});
@@ -225,7 +225,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (sd->ws_slot >= 0) {
                     sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                     sd->had_slot = true;
-                    std::println("[ws] Allocated WebSocket client to Slot {}", sd->ws_slot + 1);
+                    std::println("New WebSocket client accepted into Slot {}", sd->ws_slot + 1);
                     wake_on_new_client = true;
                     for (int s = 0; s < 4; ++s) {
                         sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
@@ -360,14 +360,16 @@ void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, 
 
     g_ctx.lws_context = lws_create_context(&info);
     if (!g_ctx.lws_context) {
-        std::println("libwebsockets init failed");
+        std::println(stderr, "libwebsockets init failed");
         return;
     }
 
-    if (serve_http_webapp)
-        std::println("[web] HTTP webapp + WebSocket proxy listening on port {}", web_port);
-    else
-        std::println("[ws] WebSocket proxy listening on port {}; HTTP webapp disabled (use -w to enable)", web_port);
+    if (g_ctx.verbose) {
+        if (serve_http_webapp)
+            std::println("[web] HTTP webapp + WebSocket proxy listening on port {}", web_port);
+        else
+            std::println("[ws] WebSocket proxy listening on port {}; HTTP webapp disabled (use -w to enable)", web_port);
+    }
 
     while (!stoken.stop_requested()) {
         lws_service(g_ctx.lws_context, 5);

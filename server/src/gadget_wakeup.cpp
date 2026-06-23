@@ -1054,7 +1054,7 @@ bool setup_gadget_builtin(bool force, const char* reason) {
             chmod(path, 0666);
         }
         if (all_seen && hidg_nodes_ready()) {
-            std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})", HID_PORT_COUNT, HID_PORT_COUNT - 1);
+            if (g_ctx.verbose) std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})", HID_PORT_COUNT, HID_PORT_COUNT - 1);
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1067,7 +1067,7 @@ void teardown_gadget() {
     clear_switch2_usb_activity();
     std::error_code ec;
     if (!fs::exists(GADGET_DIR, ec)) return;
-    std::println("[gadget] Closing USB gadget...");
+    if (g_ctx.verbose) std::println("[gadget] Closing USB gadget...");
     write_file(fs::path(GADGET_DIR) / "UDC", "");
     for (int i = 0; i < 4; ++i) {
         fs::remove(fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(i)), ec);
@@ -1077,7 +1077,7 @@ void teardown_gadget() {
     fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1", ec);
     fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409", ec);
     fs::remove(GADGET_DIR, ec);
-    std::println("[gadget] USB gadget closed");
+    if (g_ctx.verbose) std::println("[gadget] USB gadget closed");
 }
 
 bool run_gadget_setup_if_needed(bool force, const char* reason) { return setup_gadget_builtin(force, reason); }

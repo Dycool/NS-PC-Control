@@ -123,7 +123,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
         std::println(stderr, "[bt] SDL3 input failed: {}", input.error());
         return;
     }
-    bluetooth_manager_start(g_ctx.bluetooth_pairing_enabled);
+    bluetooth_manager_start();
 
     std::array<int, 4> client_for_sdl;
     client_for_sdl.fill(-1);
@@ -140,7 +140,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     uint64_t seen_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
     bool waiting_logged = false;
     bool proactive_reconnect_paused_by_sleep = false;
-    std::println("[bt] Bluetooth/local controller input enabled");
+    if (g_ctx.verbose) std::println("[bt] Bluetooth/local controller input enabled");
 
     while (!stoken.stop_requested()) {
         input.poll();
@@ -190,6 +190,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
         for (int i = 0; i < 4; ++i) {
             if (!pads[i].connected) {
                 if (client_for_sdl[i] >= 0) {
+                    std::println("Bluetooth client released from Slot {}", client_for_sdl[i] + 1);
                     input.set_rumble(i, 0, 0, 0);
                     reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
                     client_for_sdl[i] = -1;
@@ -217,6 +218,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     still_active = g_ctx.clients[client_for_sdl[i]].active && g_ctx.clients[client_for_sdl[i]].source == InputSource::Bluetooth;
                 }
                 if (!still_active) {
+                    std::println("Bluetooth client released from Slot {}", client_for_sdl[i] + 1);
                     client_for_sdl[i] = -1;
                     last_rumble_seq[i] = 0;
                     last_status_seq[i] = 0;
@@ -249,6 +251,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 }
                 client_for_sdl[i] = allocate_client_session(now, nullptr, true, InputSource::Bluetooth, i);
                 if (client_for_sdl[i] >= 0) {
+                    std::println("New Bluetooth client accepted into Slot {}", client_for_sdl[i] + 1);
                     waiting_logged = false;
                     dormant_until_input[i] = false;
                     input.set_rumble(i, 0, 0, 0);

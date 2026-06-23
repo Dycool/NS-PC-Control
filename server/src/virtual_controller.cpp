@@ -210,11 +210,6 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uin
     switch (subcmd) {
     case CMD_BT_MANUAL_PAIRING:
         reply->ack = 0x81;
-        // The Switch sends this when the user enters Controllers -> Change Grip/Order.
-        // Treat it as a convenient on-console request to open the Pi's Bluetooth
-        // pairing window for external controllers. Trusted reconnect is still always
-        // active; discovery/pairable mode is only opened by this explicit menu action.
-        if (!cmd_data.empty() && cmd_data[0] == 0x01) bluetooth_manager_request_pairing_window();
         if (!cmd_data.empty() && (cmd_data[0] == 0x02 || cmd_data[0] == 0x03)) { std::ranges::fill_n(reply->reply_data, 16, 0x00); return 16; }
         return 0;
     case CMD_TRIGGER_BUTTONS: reply->ack = 0x83; reply->reply_data[0] = 0x00; return 1;
