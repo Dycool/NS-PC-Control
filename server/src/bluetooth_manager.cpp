@@ -641,6 +641,10 @@ bool BluezManager::connect_bus() {
         bus = nullptr;
         return false;
     }
+    // Never let BlueZ method calls make Ctrl+C/systemd shutdown feel stuck.
+    // Controllers, especially Xbox BLE pads, can leave Connect() waiting for many seconds.
+    // A short global D-Bus timeout keeps reconnects opportunistic and shutdown fast.
+    (void)sd_bus_set_method_call_timeout(bus, 2'000'000ULL);
     return true;
 }
 
@@ -972,14 +976,10 @@ void BluezManager::clear_connect_retry(const DeviceInfo& dev) {
 }
 
 void BluezManager::maybe_warn_xbox_driver_path(const DeviceInfo& dev) {
-    if (!dev.is_xbox_like()) return;
-    if (connect_failures[dev.path] < 2) return;
-    if (!xbox_driver_warned.insert(dev.path).second) return;
-
-    std::println(stderr,
-        "[bt] Xbox controller {} ({}) is paired/trusted but Bluetooth connect keeps failing; "
-        "on Raspberry Pi/Linux this usually needs a stable BLE path plus uhid/xpadneo, not more pairing attempts",
-        dev.display_name(), dev.address);
+    (void)dev;
+    // Keep this silent in normal logs. Xbox/Elite BLE reconnects can legitimately fail
+    // a few times while the controller is asleep or the BLE HID path is settling; the
+    // reconnect backoff already handles it without user-facing noise.
 }
 
 void BluezManager::open_pair_window(const char* reason) {
@@ -1070,6 +1070,15 @@ void BluezManager::tick() {
 
         if (dev.paired || dev.trusted) {
             set_trusted(dev, true);
+            // Do not repeatedly Connect() cached/offline trusted devices.
+            // A controller that the user wakes by pressing any button normally initiates
+            // the reconnect itself; this branch is only a fallback for live devices seen
+            // during discovery/pair-window. This avoids misleading "reconnected" logs
+            // after SDL already has the pad and avoids useless reconnect attempts when
+            // the user intentionally turned controllers off.
+            if (!dev.has_rssi && !pair_window_open) {
+                continue;
+            }
             if (!connect_allowed(dev, now)) continue;
 
             const bool was_discovering = discovery_active;

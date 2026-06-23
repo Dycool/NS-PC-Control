@@ -30,6 +30,9 @@ void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled);
 #ifdef NS_ENABLE_SDL_BT
 bool bluetooth_input_available() { return true; }
 
+
+constexpr uint32_t BT_RUMBLE_MAX_PULSE_MS = 50;
+
 static bool bt_contains_case_insensitive(const std::string& haystack, const char* needle) {
     if (!needle || !*needle) return false;
     std::string h;
@@ -101,7 +104,15 @@ static void apply_bluetooth_rumble(SDLInputManager& input, int sdl_slot, int cli
     }
     last_seq = seq;
     bool neutral = (ev.low_freq == 0 && ev.high_freq == 0) || ev.duration_10ms == 0;
-    uint32_t duration_ms = neutral ? 0 : std::max<uint32_t>(RUMBLE_BT_MIN_DURATION_MS, (uint32_t)ev.duration_10ms * 10U);
+    uint32_t duration_ms = 0;
+    if (!neutral) {
+        duration_ms = std::max<uint32_t>(RUMBLE_BT_MIN_DURATION_MS, (uint32_t)ev.duration_10ms * 10U);
+        // Keep Bluetooth controller rumble as short pulses. The Switch sends fresh
+        // rumble packets while an effect is active, so continuous rumble still works,
+        // but a missing/late neutral packet cannot leave Mario Kart-style lingering
+        // vibration on the physical controller.
+        duration_ms = std::min<uint32_t>(duration_ms, BT_RUMBLE_MAX_PULSE_MS);
+    }
     rumble_until_us = neutral ? 0 : now_us() + (uint64_t)duration_ms * 1000ULL;
     input.set_rumble(sdl_slot, neutral ? 0 : ev.low_freq, neutral ? 0 : ev.high_freq, duration_ms);
 }
@@ -326,6 +337,13 @@ void bluetooth_input_thread(std::stop_token stoken) {
         input.set_rumble(i, 0, 0, 0);
         if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
     }
+    // Ctrl+C/service stop should be decisive: stop publishing, stop rumble,
+    // disconnect physical BT controllers once, and prevent the manager from
+    // racing shutdown by starting another proactive Connect().
+    input.stop_all_rumble();
+    bluetooth_manager_set_proactive_reconnect_enabled(false);
+    input.disconnect_all();
+    bluetooth_manager_disconnect_connected_gamepads();
     bluetooth_manager_stop();
     input.stop();
     std::println("[bt] Bluetooth/local SDL controller input stopped");
