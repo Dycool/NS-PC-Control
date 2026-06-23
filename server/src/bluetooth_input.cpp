@@ -308,7 +308,6 @@ void bluetooth_input_thread(std::stop_token stoken) {
         std::this_thread::sleep_for(std::chrono::milliseconds(PRO_UDP_INTERVAL_MS));
     }
 
-    const bool process_stopping = !g_ctx.running.load(std::memory_order_relaxed) || stoken.stop_requested();
 
     for (int i = 0; i < 4; ++i) {
         input.set_rumble(i, 0, 0, 0);
@@ -319,7 +318,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     input.stop_all_rumble();
     bluetooth_manager_set_proactive_reconnect_enabled(false);
     input.disconnect_all();
-    if (!process_stopping) bluetooth_manager_disconnect_connected_gamepads();
+    bluetooth_manager_disconnect_connected_gamepads();
     bluetooth_manager_stop();
     input.stop();
     std::println("[bt] Bluetooth/local SDL controller input stopped");
