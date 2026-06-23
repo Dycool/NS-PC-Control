@@ -32,10 +32,12 @@ static void run_pairing_window_script(const char* script) {
     int status = 0;
     while (g_ctx.running.load(std::memory_order_relaxed) && !g_bt_pair_window_stop.load(std::memory_order_relaxed)) {
         if (waitpid(pid, &status, WNOHANG) == pid) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     kill(-pid, SIGTERM);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    for (int wait_i = 0; wait_i < 5 && waitpid(pid, &status, WNOHANG) != pid; ++wait_i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     kill(-pid, SIGKILL);
     waitpid(pid, &status, 0);
 }
@@ -135,7 +137,9 @@ void bluetooth_input_thread(std::stop_token stoken) {
         std::println(stderr, "[bt] SDL3 input failed: {}", input.error());
         return;
     }
-    start_bluetooth_pairing_window();
+    if (g_ctx.bluetooth_pairing_enabled) {
+        start_bluetooth_pairing_window();
+    }
 
     std::array<int, 4> client_for_sdl;
     client_for_sdl.fill(-1);

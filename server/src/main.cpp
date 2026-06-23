@@ -119,13 +119,14 @@ int main(int argc, char** argv) {
         if (s == "-wake") s = "--wake";
         else if (s == "-hori") s = "--hori";
         else if (s == "-bt") s = "--bt";
+        else if (s == "-pair") s = "--pair";
         else if (s == "-revert") s = "--revert";
         cli_args.push_back(s);
     }
 
     uint16_t port = DEFAULT_PORT;
     std::string bind_addr = "0.0.0.0";
-    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, bt_explicit = false, legacy_p = false, do_revert = false;
+    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, bt_explicit = false, pair_explicit = false, legacy_p = false, do_revert = false;
     int web_port = 8080;
 
     CLI::App app{"ns-backend - Switch Input Server\n\n  By default, UDP and WebSocket input are both enabled."};
@@ -135,6 +136,7 @@ int main(int argc, char** argv) {
     app.add_flag("--wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup and exit");
     app.add_flag("--hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget");
     app.add_flag("--bt", bt_explicit, "Explicitly enable local SDL3 Bluetooth controller input");
+    app.add_flag("--pair", pair_explicit, "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
     app.add_flag("--revert", do_revert, "Revert host USB gadget boot configurations and reboot");
     app.add_flag("--upnp", do_upnp, "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
@@ -145,6 +147,8 @@ int main(int argc, char** argv) {
         for (std::string& arg : cli_args) cli_argv.push_back(arg.data());
         app.parse((int)cli_argv.size(), cli_argv.data());
     } catch (const CLI::ParseError &e) { return app.exit(e); }
+
+    g_ctx.bluetooth_pairing_enabled = pair_explicit;
 
     if (legacy_p) {
         std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead"); return 1;
@@ -175,6 +179,7 @@ int main(int argc, char** argv) {
             std::println(stderr, "error: -bt requested, but built without SDL3 support"); return 1;
         }
         enter_bluetooth_runtime_mode();
+        bluetooth_enabled = true;
     } else {
         g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
         if (g_ctx.switch2_wake_adv_enabled) {
@@ -206,7 +211,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     derive_key(DEFAULT_SECRET, g_ctx.hmac_key);
-    signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
+
+    struct sigaction sa{};
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // Clear SA_RESTART to ensure blocking operations are interrupted
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
+    struct sigaction sa_pipe{};
+    sa_pipe.sa_handler = SIG_IGN;
+    sigemptyset(&sa_pipe.sa_mask);
+    sa_pipe.sa_flags = 0;
+    sigaction(SIGPIPE, &sa_pipe, nullptr);
 
     if (do_upnp) upnp_add_mapping(port);
 

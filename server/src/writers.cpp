@@ -307,7 +307,7 @@ std::mutex g_rate_mtx;
 void stats_thread(std::stop_token stoken) {
     uint64_t last_cleanup = 0;
     while (!stoken.stop_requested()) {
-        for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(100));
+        for (int wait_i = 0; wait_i < 500 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
         if (stoken.stop_requested()) break;
 
         uint64_t now = now_us();
