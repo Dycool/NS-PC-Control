@@ -262,15 +262,18 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     bool dd = !get("DPAD_DOWN").empty() && key_is_down(get("DPAD_DOWN"));
     bool dl = !get("DPAD_LEFT").empty() && key_is_down(get("DPAD_LEFT"));
     bool dr = !get("DPAD_RIGHT").empty() && key_is_down(get("DPAD_RIGHT"));
-    rep.hat = ns::HAT_NEUTRAL;
-    if (du && dr) rep.hat = ns::HAT_NE;
-    else if (du && dl) rep.hat = ns::HAT_NW;
-    else if (dd && dr) rep.hat = ns::HAT_SE;
-    else if (dd && dl) rep.hat = ns::HAT_SW;
-    else if (du) rep.hat = ns::HAT_N;
-    else if (dd) rep.hat = ns::HAT_S;
-    else if (dr) rep.hat = ns::HAT_E;
-    else if (dl) rep.hat = ns::HAT_W;
+    const bool dpad_active = du || dd || dl || dr;
+    if (dpad_active || !override_mode) {
+        rep.hat = ns::HAT_NEUTRAL;
+        if (du && dr) rep.hat = ns::HAT_NE;
+        else if (du && dl) rep.hat = ns::HAT_NW;
+        else if (dd && dr) rep.hat = ns::HAT_SE;
+        else if (dd && dl) rep.hat = ns::HAT_SW;
+        else if (du) rep.hat = ns::HAT_N;
+        else if (dd) rep.hat = ns::HAT_S;
+        else if (dr) rep.hat = ns::HAT_E;
+        else if (dl) rep.hat = ns::HAT_W;
+    }
 
     auto apply_axis = [&](const char* min_key, const char* max_key, uint8_t& val) {
         bool min_d = !get(min_key).empty() && key_is_down(get(min_key));
