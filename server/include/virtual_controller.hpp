@@ -14,7 +14,8 @@ uint8_t pro_timer_from_us(uint64_t t_us);
 constexpr size_t PRO_REPORT_SIZE = 64;
 constexpr uint64_t PRO_REPORT_INTERVAL_US = 4'000ULL;
 constexpr int PRO_WRITER_HZ = 1'000'000 / PRO_REPORT_INTERVAL_US;
-constexpr uint8_t PRO_BAT_CON = 0x91;
+// Default Pro Controller battery/connection byte: full battery, connected, not charging.
+constexpr uint8_t PRO_BAT_CON = 0x81;
 constexpr uint8_t PRO_VIBRATOR_REPORT = 0x0B;
 constexpr int PRO_IDLE_REPORT_HZ = 30;
 constexpr uint64_t PRO_IDLE_REPORT_INTERVAL_US = 1'000'000ULL / PRO_IDLE_REPORT_HZ;

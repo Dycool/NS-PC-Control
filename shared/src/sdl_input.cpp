@@ -8,6 +8,13 @@
 #include <format>
 #include <cstdlib>
 #include <utility>
+#ifdef __linux__
+#include <dirent.h>
+#include <fstream>
+#include <map>
+#include <optional>
+#include <sys/stat.h>
+#endif
 
 namespace {
 constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 85;
@@ -52,6 +59,96 @@ PlayerColor rgb_from_body_color(const uint8_t* body_rgb) {
     if (!body_rgb) return {0, 0, 0};
     return {body_rgb[0], body_rgb[1], body_rgb[2]};
 }
+
+#ifdef __linux__
+struct LinuxRgbLedPaths {
+    std::array<std::string, 3> paths{}; // red, green, blue brightness files
+    bool valid = false;
+};
+
+bool path_exists(const std::string& path) {
+    struct stat st{};
+    return ::stat(path.c_str(), &st) == 0;
+}
+
+bool write_text_file(const std::string& path, const std::string& value) {
+    std::ofstream f(path);
+    if (!f) return false;
+    f << value;
+    return (bool)f;
+}
+
+bool write_led_brightness(const std::string& brightness_path, uint8_t v) {
+    return write_text_file(brightness_path, std::to_string((int)v));
+}
+
+std::string basename_of(const std::string& p) {
+    auto pos = p.find_last_of('/');
+    return pos == std::string::npos ? p : p.substr(pos + 1);
+}
+
+std::optional<std::pair<std::string, int>> led_group_and_color(const std::string& led_name) {
+    // Linux PlayStation LEDs commonly look like:
+    //   0005:054C:09CC.0006:red:global
+    //   input3:blue:global
+    // Group by everything except the color component.
+    static constexpr const char* colors[3] = {":red:", ":green:", ":blue:"};
+    for (int c = 0; c < 3; ++c) {
+        std::string needle = colors[c];
+        auto pos = led_name.find(needle);
+        if (pos == std::string::npos) continue;
+        std::string group = led_name;
+        group.replace(pos, needle.size(), ":*:");
+        return std::make_pair(group, c);
+    }
+    return std::nullopt;
+}
+
+std::vector<LinuxRgbLedPaths> find_linux_rgb_leds() {
+    std::vector<LinuxRgbLedPaths> out;
+    DIR* dir = opendir("/sys/class/leds");
+    if (!dir) return out;
+    std::map<std::string, LinuxRgbLedPaths> groups;
+    while (dirent* de = readdir(dir)) {
+        if (!de || de->d_name[0] == '.') continue;
+        std::string name = de->d_name;
+        auto parsed = led_group_and_color(name);
+        if (!parsed) continue;
+        const auto& [group, color] = *parsed;
+        std::string brightness = "/sys/class/leds/" + name + "/brightness";
+        if (!path_exists(brightness)) continue;
+        groups[group].paths[(size_t)color] = brightness;
+    }
+    closedir(dir);
+    for (auto& [_, g] : groups) {
+        g.valid = !g.paths[0].empty() && !g.paths[1].empty() && !g.paths[2].empty();
+        if (g.valid) out.push_back(g);
+    }
+    std::sort(out.begin(), out.end(), [](const LinuxRgbLedPaths& a, const LinuxRgbLedPaths& b) {
+        return a.paths[0] < b.paths[0];
+    });
+    return out;
+}
+
+LinuxRgbLedPaths pick_linux_rgb_led_for_playstation_ordinal(int ordinal) {
+    LinuxRgbLedPaths none{};
+    auto leds = find_linux_rgb_leds();
+    if (leds.empty()) return none;
+    if (ordinal < 0) ordinal = 0;
+    if (ordinal >= (int)leds.size()) ordinal = (int)leds.size() - 1;
+    return leds[(size_t)ordinal];
+}
+
+bool set_linux_rgb_led(const LinuxRgbLedPaths& leds, uint8_t r, uint8_t g, uint8_t b) {
+    if (!leds.valid) return false;
+    bool ok = true;
+    ok = write_led_brightness(leds.paths[0], r) && ok;
+    ok = write_led_brightness(leds.paths[1], g) && ok;
+    ok = write_led_brightness(leds.paths[2], b) && ok;
+    return ok;
+}
+#endif
+
 }
 
 void DigitalReleaseFilter::reset() {
@@ -487,7 +584,22 @@ void SDLInputManager::apply_player_status_locked(Device& d, int player_index, ui
         (void)SDL_SetGamepadPlayerIndex(d.pad, player_index);
         if (rgb_valid) {
             PlayerColor c = rgb_from_body_color(body_rgb);
-            (void)SDL_SetGamepadLED(d.pad, c.r, c.g, c.b);
+            bool led_ok = SDL_SetGamepadLED(d.pad, c.r, c.g, c.b);
+#ifdef __linux__
+            // Some Linux/RPi Bluetooth stacks expose the DualShock/DualSense lightbar through
+            // /sys/class/leds instead of SDL/HIDAPI. Try that fallback after SDL so local BT
+            // PlayStation controllers can still mirror the virtual Pro Controller body color.
+            if (d.linux_rgb_led_valid) {
+                LinuxRgbLedPaths leds{};
+                leds.paths = d.linux_rgb_led_paths;
+                leds.valid = true;
+                // Try sysfs even if SDL returned success; on some RPi/BlueZ stacks SDL reports
+                // success while the kernel LED class is still the path that visibly controls DS4 LEDs.
+                led_ok = set_linux_rgb_led(leds, c.r, c.g, c.b) || led_ok;
+            }
+#else
+            (void)led_ok;
+#endif
         }
     }
 
@@ -524,6 +636,17 @@ void SDLInputManager::scan_locked(bool initial) {
             d.name = (name && *name) ? name : "SDL3 Gamepad";
             d.vid = SDL_GetGamepadVendor(pad);
             d.pid = SDL_GetGamepadProduct(pad);
+#ifdef __linux__
+            if (is_playstation_controller(d.name, d.vid)) {
+                int ps_ordinal = 0;
+                for (const auto& existing : devices) {
+                    if (is_playstation_controller(existing.name, existing.vid)) ++ps_ordinal;
+                }
+                auto linux_leds = pick_linux_rgb_led_for_playstation_ordinal(ps_ordinal);
+                d.linux_rgb_led_paths = linux_leds.paths;
+                d.linux_rgb_led_valid = linux_leds.valid;
+            }
+#endif
             d.applied_player_index = -2;
             d.applied_player_leds = 0xFF;
             d.applied_body_rgb_valid = false;
@@ -561,7 +684,9 @@ void SDLInputManager::refresh_states_locked(uint64_t now) {
             int battery_percent = -1;
             SDL_PowerState power_state = SDL_GetGamepadPowerInfo(d.pad, &battery_percent);
             st.battery_percent = (battery_percent >= 0 && battery_percent <= 100) ? battery_percent : -1;
-            st.battery_charging = (power_state == SDL_POWERSTATE_CHARGING || power_state == SDL_POWERSTATE_CHARGED);
+            // SDL_POWERSTATE_CHARGED often means "full/not discharging", not necessarily actively charging.
+            // Only set the Switch charging bit when SDL explicitly reports charging.
+            st.battery_charging = (power_state == SDL_POWERSTATE_CHARGING);
             apply_motion(d, st.motion_samples, st.has_motion);
             st.motion = st.has_motion ? st.motion_samples[2] : ns::MotionReport{};
             if (report_non_neutral(st.input) || st.has_motion) st.last_input_us = now;
