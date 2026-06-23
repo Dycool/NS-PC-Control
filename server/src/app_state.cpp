@@ -119,6 +119,14 @@ bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr) {
     return false;
 }
 
+
+bool switch2_wake_recent(uint64_t now) {
+    if (now == 0) now = now_us();
+    if (g_ctx.switch2_wake_adv_running.load(std::memory_order_relaxed)) return true;
+    uint64_t last = g_ctx.switch2_last_wake_adv_us.load(std::memory_order_relaxed);
+    return last != 0 && elapsed_us_saturated(now, last) <= SWITCH2_WAKE_CLIENT_GRACE_US;
+}
+
 bool switch2_sleep_confirmed(uint64_t now) {
     if (now == 0) now = now_us();
     poll_switch2_sleep_state(now);

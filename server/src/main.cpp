@@ -290,7 +290,8 @@ int main(int argc, char** argv) {
                         .udp_interval_ms = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
                         .udp_hz = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ)
                     };
-                    if (switch2_sleep_confirmed(now_us())) {
+                    const uint64_t reply_now = now_us();
+                    if (switch2_sleep_confirmed(reply_now) && !switch2_wake_recent(reply_now)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     }
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen); continue;

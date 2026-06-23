@@ -38,6 +38,11 @@ constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 1'500'000ULL;
 // suspend disconnects until the Switch has answered continuously for this long.
 constexpr uint64_t SWITCH2_USB_ACTIVITY_STABLE_US = 3'000'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
+// While a wake advert has just been sent, UDP clients must be allowed to stay
+// connected even though Switch RX has not resumed yet. Otherwise a desktop
+// client can connect, trigger wake, receive "Switch asleep" on its next probe,
+// and immediately disconnect during the wake window.
+constexpr uint64_t SWITCH2_WAKE_CLIENT_GRACE_US = 30'000'000ULL;
 constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;
 
 
@@ -146,6 +151,7 @@ void mark_switch2_usb_host_disconnected();
 void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
 bool switch2_sleep_confirmed(uint64_t now = 0);
+bool switch2_wake_recent(uint64_t now = 0);
 void poll_switch2_sleep_state(uint64_t now = 0);
 void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
