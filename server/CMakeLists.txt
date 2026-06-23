@@ -89,29 +89,34 @@ if(USE_SDL_BT AND UNIX AND NOT APPLE AND NOT USE_BLUEZ_DBUS)
 endif()
 
 if(USE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
-    find_package(sdbus-c++ QUIET CONFIG)
-    if(NOT TARGET SDBusCpp::sdbus-c++)
-        message(STATUS "sdbus-c++ not installed; fetching it for the BlueZ manager")
-        set(SDBUSCPP_BUILD_CODEGEN OFF CACHE BOOL "" FORCE)
-        set(SDBUSCPP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-        set(SDBUSCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        FetchContent_Declare(
-            sdbus_cpp
-            GIT_REPOSITORY https://github.com/Kistler-Group/sdbus-cpp.git
-            GIT_TAG v2.3.1
-            GIT_SHALLOW TRUE
-        )
-        FetchContent_MakeAvailable(sdbus_cpp)
-    endif()
+    set(NS_SDBUS_CPP_TAG "v2.3.1" CACHE STRING "Pinned sdbus-c++ v2 tag used by the BlueZ manager")
 
-    if(TARGET SDBusCpp::sdbus-c++ OR TARGET sdbus-c++)
+    # Do not use find_package() here: distro packages can still be sdbus-c++ v1.x/old-v2,
+    # which silently changes the public API and breaks clean v2 code. Fetching the pinned
+    # tag keeps CI, Raspberry Pi builds, and local builds on the exact same D-Bus API.
+    set(SDBUSCPP_INSTALL OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_CODEGEN OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_DOXYGEN_DOCS OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        sdbus_cpp
+        GIT_REPOSITORY https://github.com/Kistler-Group/sdbus-cpp.git
+        GIT_TAG ${NS_SDBUS_CPP_TAG}
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(sdbus_cpp)
+
+    if(TARGET SDBusCpp::sdbus-c++)
         add_definitions(-DNS_ENABLE_BLUEZ_DBUS)
         set(BLUEZ_DBUS_FOUND TRUE)
-        message(STATUS "BlueZ D-Bus manager enabled (sdbus-c++)")
+        message(STATUS "BlueZ D-Bus manager enabled (pinned sdbus-c++ ${NS_SDBUS_CPP_TAG})")
     elseif(REQUIRE_BLUEZ_DBUS)
-        message(FATAL_ERROR "BlueZ D-Bus manager requires sdbus-c++ (install libsdbus-c++-dev or allow FetchContent)")
+        message(FATAL_ERROR "BlueZ D-Bus manager requires pinned sdbus-c++ v2, but the FetchContent target was not created")
     else()
-        message(STATUS "BlueZ D-Bus manager disabled (sdbus-c++ not found)")
+        message(STATUS "BlueZ D-Bus manager disabled (pinned sdbus-c++ target unavailable)")
     endif()
 elseif(REQUIRE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
     message(FATAL_ERROR "BlueZ D-Bus manager requires sdbus-c++ on Linux; shell fallback was removed")

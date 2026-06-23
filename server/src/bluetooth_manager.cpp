@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -89,6 +90,101 @@ int run_cmd(const std::string& cmd, bool verbose = false) {
     return 126;
 }
 
+std::string trim_copy(const std::string& s) {
+    size_t a = 0;
+    while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    size_t b = s.size();
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+bool line_is_section(const std::string& line, const std::string& section) {
+    const std::string t = trim_copy(line);
+    return t == "[" + section + "]";
+}
+
+bool line_sets_key(const std::string& line, const std::string& key) {
+    std::string t = trim_copy(line);
+    if (!t.empty() && t[0] == '#') t = trim_copy(t.substr(1));
+    if (t.rfind(key, 0) != 0) return false;
+    if (t.size() == key.size()) return true;
+    return std::isspace(static_cast<unsigned char>(t[key.size()])) || t[key.size()] == '=';
+}
+
+bool ensure_ini_key(std::vector<std::string>& lines, const std::string& section, const std::string& key, const std::string& value) {
+    const std::string wanted = key + " = " + value;
+    size_t sec = lines.size();
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (line_is_section(lines[i], section)) { sec = i; break; }
+    }
+    if (sec == lines.size()) {
+        if (!lines.empty() && !lines.back().empty()) lines.emplace_back();
+        lines.push_back("[" + section + "]");
+        lines.push_back(wanted);
+        return true;
+    }
+
+    size_t end = lines.size();
+    for (size_t i = sec + 1; i < lines.size(); ++i) {
+        const std::string t = trim_copy(lines[i]);
+        if (t.size() >= 2 && t.front() == '[' && t.back() == ']') { end = i; break; }
+    }
+
+    for (size_t i = sec + 1; i < end; ++i) {
+        if (!line_sets_key(lines[i], key)) continue;
+        if (trim_copy(lines[i]) == wanted) return false;
+        lines[i] = wanted;
+        return true;
+    }
+
+    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(end), wanted);
+    return true;
+}
+
+void configure_bluez_reconnect_policy(bool verbose) {
+    if (geteuid() != 0) return;
+
+    (void)run_cmd("mkdir -p /etc/bluetooth >/dev/null 2>&1", false);
+    const char* conf = "/etc/bluetooth/main.conf";
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(conf);
+        std::string line;
+        while (std::getline(in, line)) lines.push_back(line);
+    }
+    if (lines.empty()) {
+        lines = {"[General]", "", "[Policy]"};
+    }
+
+    bool changed = false;
+    changed |= ensure_ini_key(lines, "General", "FastConnectable", "true");
+    changed |= ensure_ini_key(lines, "Policy", "ReconnectUUIDs",
+                              std::string("00001124-0000-1000-8000-00805f9b34fb") + "," + "00001812-0000-1000-8000-00805f9b34fb");
+    changed |= ensure_ini_key(lines, "Policy", "ReconnectAttempts", "7");
+    changed |= ensure_ini_key(lines, "Policy", "ReconnectIntervals", "1,1,2,4,8,16,32");
+    changed |= ensure_ini_key(lines, "Policy", "AutoEnable", "true");
+
+    if (changed) {
+        std::ofstream out(conf, std::ios::trunc);
+        if (!out) {
+            if (verbose) std::println(stderr, "[bt] warning: could not update {}", conf);
+        } else {
+            for (const auto& line : lines) out << line << '\n';
+            if (verbose) std::println("[bt] configured BlueZ fast reconnect policy");
+        }
+    }
+
+    if (command_exists("btmgmt")) {
+        // These are best-effort live adapter knobs. Some adapters/kernels do not support
+        // fast-conn; keep it quiet unless verbose so normal users do not see scary noise.
+        (void)run_cmd("btmgmt power on >/dev/null 2>&1", verbose);
+        (void)run_cmd("btmgmt connectable on >/dev/null 2>&1", verbose);
+        (void)run_cmd("btmgmt bondable on >/dev/null 2>&1", verbose);
+        (void)run_cmd("btmgmt ssp on >/dev/null 2>&1", verbose);
+        (void)run_cmd("btmgmt fast-conn on >/dev/null 2>&1", verbose);
+    }
+}
+
 void runtime_setup_impl(bool verbose) {
     if (geteuid() != 0) {
         if (verbose) std::println(stderr, "[bt] setup skipped; run as root for rfkill/uhid/bluetooth.service prep");
@@ -108,6 +204,8 @@ void runtime_setup_impl(bool verbose) {
     } else if (command_exists("service")) {
         (void)run_cmd("service bluetooth start >/dev/null 2>&1", verbose);
     }
+
+    configure_bluez_reconnect_policy(verbose);
 }
 
 } // namespace
@@ -235,7 +333,6 @@ private:
 
     std::unique_ptr<sdbus::IConnection> connection;
     std::unique_ptr<sdbus::IObject> agent_object;
-    sdbus::Slot bluez_signal_slot;
 
     bool connect_bus();
     void close_bus();
@@ -261,10 +358,9 @@ bool BluezManager::connect_bus() {
     try {
         connection = sdbus::createSystemBusConnection();
         connection->setMethodCallTimeout(DBUS_FAST_TIMEOUT);
-        bluez_signal_slot = connection->addMatch(
-            "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
-            [this](sdbus::Message&) { dbus_activity.store(true, std::memory_order_relaxed); },
-            sdbus::return_slot);
+        // Keep the bus event loop alive for the BlueZ pairing agent. Device state is
+        // intentionally polled at a low rate below instead of wiring fragile
+        // version-specific signal registration APIs.
         connection->enterEventLoopAsync();
         return true;
     } catch (const sdbus::Error& e) {
@@ -277,7 +373,6 @@ bool BluezManager::connect_bus() {
 }
 
 void BluezManager::close_bus() {
-    bluez_signal_slot.reset();
     agent_object.reset();
     if (connection) {
         try { connection->leaveEventLoop(); } catch (...) {}
@@ -295,15 +390,22 @@ bool BluezManager::register_agent() {
         agent_object = sdbus::createObject(*connection, sdbus::ObjectPath{AGENT_PATH});
         agent_object->addVTable(
             sdbus::registerMethod("Release").implementedAs([] {}),
-            sdbus::registerMethod("RequestPinCode").implementedAs([](const sdbus::ObjectPath&) { return std::string{"0000"}; }),
-            sdbus::registerMethod("RequestPasskey").implementedAs([](const sdbus::ObjectPath&) { return uint32_t{0}; }),
-            sdbus::registerMethod("DisplayPinCode").implementedAs([](const sdbus::ObjectPath&, const std::string&) {}),
-            sdbus::registerMethod("DisplayPasskey").implementedAs([](const sdbus::ObjectPath&, uint32_t, uint16_t) {}),
-            sdbus::registerMethod("RequestConfirmation").implementedAs([](const sdbus::ObjectPath&, uint32_t) {}),
-            sdbus::registerMethod("RequestAuthorization").implementedAs([](const sdbus::ObjectPath&) {}),
-            sdbus::registerMethod("AuthorizeService").implementedAs([](const sdbus::ObjectPath&, const std::string&) {}),
+            sdbus::registerMethod("RequestPinCode").implementedAs(
+                [](const sdbus::ObjectPath&) { return std::string{"0000"}; }),
+            sdbus::registerMethod("RequestPasskey").implementedAs(
+                [](const sdbus::ObjectPath&) { return uint32_t{0}; }),
+            sdbus::registerMethod("DisplayPinCode").implementedAs(
+                [](const sdbus::ObjectPath&, const std::string&) {}),
+            sdbus::registerMethod("DisplayPasskey").implementedAs(
+                [](const sdbus::ObjectPath&, uint32_t, uint16_t) {}),
+            sdbus::registerMethod("RequestConfirmation").implementedAs(
+                [](const sdbus::ObjectPath&, uint32_t) {}),
+            sdbus::registerMethod("RequestAuthorization").implementedAs(
+                [](const sdbus::ObjectPath&) {}),
+            sdbus::registerMethod("AuthorizeService").implementedAs(
+                [](const sdbus::ObjectPath&, const std::string&) {}),
             sdbus::registerMethod("Cancel").implementedAs([] {})
-        ).forInterface(AGENT_IFACE);
+        ).forInterface(sdbus::InterfaceName{AGENT_IFACE});
 
         auto mgr = proxy("/org/bluez");
         try {
