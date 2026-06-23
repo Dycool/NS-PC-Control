@@ -331,7 +331,7 @@ int main(int argc, char** argv) {
                 }
                 if (cidx >= 0) {
                     reset_client_session(cidx); rearm_switch2_wake_after_client_disconnect();
-                    if (g_ctx.verbose) std::println("UDP client {} disconnected.", cidx + 1);
+                    std::println("UDP client {} disconnected.", cidx + 1);
                 }
                 ++g_ctx.pkts_rx; continue;
             }
@@ -350,7 +350,7 @@ int main(int argc, char** argv) {
                 cidx = allocate_client_session(now, &sender, true);
                 if (cidx >= 0) {
                     wake_on_new_client = true;
-                    if (g_ctx.verbose) std::println("New UDP client accepted into Slot {}", cidx + 1);
+                    std::println("New UDP client accepted into Slot {}", cidx + 1);
                 }
             }
 

@@ -217,7 +217,7 @@ document.getElementById('btnConnect').onclick = async () => {
     if (isConnected) { ws.close(); return; }
     if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen().catch(()=>{}); }
     const wsUrl = makeWsUrl();
-    ws = new WebSocket(wsUrl); ws.binaryType = "arraybuffer";
+    ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
     ws.onopen = () => {
         isConnected = true; const btn = document.getElementById('btnConnect');
         btn.innerText = "Connected"; btn.classList.add('connected');

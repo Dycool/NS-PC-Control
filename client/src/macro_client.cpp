@@ -159,21 +159,23 @@ std::expected<void, std::string> upsert_macro_entry(ns::macro::Entry e, bool for
     if (!ns::macro::validate_to_pretty_json(e.json, pretty, err, e.name.empty() ? "Macro" : e.name)) {
         return std::unexpected(err);
     }
-    std::lock_guard<std::mutex> lk(g_macro_mtx);
-    e.name = ns::macro::trim(e.name);
-    if (e.name.empty()) e.name = ns::macro::extract_name_or_default(pretty, "Macro");
-    if (force_unique_name) e.name = unique_macro_name(e.name);
-    e.hotkey = normalize_key_name(e.hotkey);
-    e.json = ns::macro::pretty_json_with_forced_name(pretty, e.name);
-    int existing = force_unique_name ? -1 : find_macro_entry_by_name(e.name);
-    std::string conflict;
-    if (macro_hotkey_conflicts(e.hotkey, &conflict) || macro_entry_hotkey_conflicts(e.hotkey, existing, &conflict)) {
-        e.hotkey.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_macro_mtx);
+        e.name = ns::macro::trim(e.name);
+        if (e.name.empty()) e.name = ns::macro::extract_name_or_default(pretty, "Macro");
+        if (force_unique_name) e.name = unique_macro_name(e.name);
+        e.hotkey = normalize_key_name(e.hotkey);
+        e.json = ns::macro::pretty_json_with_forced_name(pretty, e.name);
+        int existing = force_unique_name ? -1 : find_macro_entry_by_name(e.name);
+        std::string conflict;
+        if (macro_hotkey_conflicts(e.hotkey, &conflict) || macro_entry_hotkey_conflicts(e.hotkey, existing, &conflict)) {
+            e.hotkey.clear();
+        }
+        if (existing >= 0) g_macro_entries[existing] = std::move(e);
+        else g_macro_entries.push_back(std::move(e));
+        rebuild_macro_hotkey_state();
     }
-    if (existing >= 0) g_macro_entries[existing] = std::move(e);
-    else g_macro_entries.push_back(std::move(e));
     save_macro_entries_to_disk();
-    rebuild_macro_hotkey_state();
     return {};
 }
 

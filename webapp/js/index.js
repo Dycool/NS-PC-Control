@@ -369,7 +369,7 @@ document.getElementById('btnConnect').onclick = async () => {
         return;
     }
     const wsUrl = makeWsUrl();
-    ws = new WebSocket(wsUrl); ws.binaryType = "arraybuffer";
+    ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
     ws.onmessage = null;
     ws.onopen = () => {
         isConnected = true;
