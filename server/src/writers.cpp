@@ -83,6 +83,7 @@ void writer_thread(std::stop_token stoken, int hz) {
         bool timeout_printed[MAX_CLIENTS] = {};
         HoriHIDReport prev[HID_PORT_COUNT];
         for (int i = 0; i < HID_PORT_COUNT; ++i) prev[i].buttons = 0xFFFF;
+        uint64_t last_switch_sleep_poll_us = 0;
 
         while (!stoken.stop_requested()) {
             std::this_thread::sleep_until(next);
@@ -90,6 +91,10 @@ void writer_thread(std::stop_token stoken, int hz) {
             next = std::max(next + tick, now + tick);
 
             uint64_t now_stamp = now_us();
+            if (last_switch_sleep_poll_us == 0 || elapsed_us_saturated(now_stamp, last_switch_sleep_poll_us) >= 100'000ULL) {
+                poll_switch2_sleep_state(now_stamp);
+                last_switch_sleep_poll_us = now_stamp;
+            }
             ClientSession snap[MAX_CLIENTS];
             bool stale[MAX_CLIENTS] = {};
 
@@ -324,6 +329,7 @@ void stats_thread(std::stop_token stoken) {
                 if (g_ctx.rate_table[i].ip != 0 && now - g_ctx.rate_table[i].window_start > RATE_WINDOW_US * 2) g_ctx.rate_table[i].ip = 0;
             }
         }
+        poll_switch2_sleep_state(now);
         if (g_ctx.verbose) {
             std::println("pkts_rx={:<8}  hid_writes={:<8}", (unsigned long long)g_ctx.pkts_rx.load(), (unsigned long long)g_ctx.hid_writes.load());
         }

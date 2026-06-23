@@ -55,6 +55,7 @@ struct SessionData {
     int ws_slot = -1;
     uint32_t ws_seq = 0;
     bool ws_first = true;
+    uint64_t seen_sleep_seq = 0;
     uint32_t last_rumble_seq[4] = {};
     uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
@@ -113,6 +114,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
             sd->ws_slot = -1; sd->ws_seq = 0; sd->ws_first = true;
+            sd->seen_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
             std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
             std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
@@ -237,6 +239,15 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_TIMER: {
+            uint64_t sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+            if (sd->ws_slot >= 0 && sleep_seq != sd->seen_sleep_seq && g_ctx.switch2_sleep_confirmed.load(std::memory_order_relaxed)) {
+                if (g_ctx.verbose) std::println("[ws] Switch asleep, closing WebSocket Slot {}", sd->ws_slot + 1);
+                reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
+                sd->ws_slot = -1;
+                sd->seen_sleep_seq = sleep_seq;
+                return -1;
+            }
+            sd->seen_sleep_seq = sleep_seq;
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);

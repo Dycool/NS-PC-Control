@@ -27,8 +27,13 @@ constexpr int MAX_CLIENTS = 4;
 constexpr uint64_t RATE_WINDOW_US = 1'000'000;
 constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
+// Number of slots to probe when the primary hash slot holds a different IP.
 constexpr int RATE_PROBE = 4;
-constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 20'000'000ULL;
+// Switch activity is confirmed only by host-originated HID OUT/protocol RX.
+// The Switch answers the Pro Controller protocol frequently while awake; when
+// that RX stream stops after having been active, treat the console as suspended.
+// Writes to /dev/hidg* are intentionally not used as wake/sleep evidence.
+constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 1'500'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;
 
@@ -95,7 +100,7 @@ struct ServerContext {
     bool legacy_mode = false;
     bool bluetooth_pairing_enabled = false;
     bool bluetooth_input_disabled = false;
-    bool bluetooth_disabled = false; 
+    bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
     std::atomic<bool> gadget_setup_attempted{false};
     bool switch2_wake_adv_enabled = false;
     bool switch2_wakeup_setup_requested = false;
@@ -108,7 +113,11 @@ struct ServerContext {
     std::atomic<uint64_t> switch2_last_wake_adv_us{0};
     std::atomic<bool> switch2_usb_host_connected{false};
     std::atomic<uint64_t> switch2_last_usb_activity_us{0};
-    std::atomic<bool> switch2_force_next_wake{false};
+    std::atomic<bool> switch2_sleep_confirmed{false};
+    std::atomic<uint64_t> switch2_sleep_seq{0};
+    sockaddr_in switch2_dormant_udp_addrs[MAX_CLIENTS]{};
+    bool switch2_dormant_udp_valid[MAX_CLIENTS]{};
+    std::atomic<bool> switch2_force_next_wake{false}; // compatibility/no-op; runtime wake is RX-state based
     std::atomic<bool> switch2_delayed_wake_check_running{false};
     std::atomic<uint8_t> bluetooth_reserved_client_slots_mask{0};
     uint8_t hmac_key[32]{0};
@@ -131,6 +140,10 @@ void clear_switch2_usb_activity();
 void mark_switch2_usb_host_disconnected();
 void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
+bool switch2_sleep_confirmed(uint64_t now = 0);
+void poll_switch2_sleep_state(uint64_t now = 0);
+void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
+bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 bool any_client_source_active(InputSource source, uint64_t now = 0);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);

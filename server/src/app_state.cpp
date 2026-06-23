@@ -47,11 +47,13 @@ void mark_switch2_usb_activity(uint64_t now) {
     if (now == 0) now = now_us();
     g_ctx.switch2_last_usb_activity_us.store(now, std::memory_order_relaxed);
     g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+    g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
 }
 
 void clear_switch2_usb_activity() {
     g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
     g_ctx.switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
+    g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
 }
 
 void mark_switch2_usb_host_disconnected() {
@@ -64,12 +66,92 @@ void mark_switch2_usb_host_disconnected() {
 }
 
 bool switch2_usb_host_recently_active(uint64_t now) {
-    if (g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed) == 0 ||
-        elapsed_us_saturated(now, g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed)) > SWITCH2_USB_ACTIVITY_FRESH_US) {
-        clear_switch2_usb_activity(); return false;
+    uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
+    if (last == 0 || elapsed_us_saturated(now, last) > SWITCH2_USB_ACTIVITY_FRESH_US) {
+        g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+        return false;
     }
     g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+    g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
     return true;
+}
+
+static bool same_udp_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
+    return a.sin_family == b.sin_family &&
+           a.sin_addr.s_addr == b.sin_addr.s_addr &&
+           a.sin_port == b.sin_port;
+}
+
+void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr) {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        if (g_ctx.switch2_dormant_udp_valid[i] && same_udp_endpoint(g_ctx.switch2_dormant_udp_addrs[i], addr)) {
+            g_ctx.switch2_dormant_udp_valid[i] = false;
+        }
+    }
+}
+
+bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr) {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        if (g_ctx.switch2_dormant_udp_valid[i] && same_udp_endpoint(g_ctx.switch2_dormant_udp_addrs[i], addr)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool switch2_sleep_confirmed(uint64_t now) {
+    if (now == 0) now = now_us();
+    poll_switch2_sleep_state(now);
+    return g_ctx.switch2_sleep_confirmed.load(std::memory_order_relaxed);
+}
+
+void poll_switch2_sleep_state(uint64_t now) {
+    if (now == 0) now = now_us();
+    uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
+    if (last == 0) {
+        g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+        return;
+    }
+    if (elapsed_us_saturated(now, last) <= SWITCH2_USB_ACTIVITY_FRESH_US) {
+        g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+        g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+    bool expected = false;
+    if (!g_ctx.switch2_sleep_confirmed.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+        return;
+    }
+
+    g_ctx.switch2_sleep_seq.fetch_add(1, std::memory_order_relaxed);
+    for (int i = 0; i < MAX_CLIENTS; ++i) g_ctx.switch2_dormant_udp_valid[i] = false;
+
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        bool stop_macros = false;
+        {
+            std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+            ClientSession& c = g_ctx.clients[i];
+            if (!c.active) continue;
+            if (c.source == InputSource::Udp) {
+                g_ctx.switch2_dormant_udp_addrs[i] = c.addr;
+                g_ctx.switch2_dormant_udp_valid[i] = true;
+                reset_client_session_locked(c);
+                stop_macros = true;
+            } else if (c.source == InputSource::WebSocket) {
+                reset_client_session_locked(c);
+                stop_macros = true;
+            }
+            // Bluetooth is handled by the SDL/BT thread: on a real active->sleep
+            // transition it physically disconnects local BT controllers, matching
+            // normal console behavior without trusting noisy USB write/open errors.
+        }
+        if (stop_macros) server_macro_stop_all_for_client(i);
+    }
+    if (g_ctx.verbose) {
+        std::println("[switch] confirmed asleep after {:.1f}s without Switch USB RX; UDP/WebSocket sessions released",
+                     (double)elapsed_us_saturated(now, last) / 1000000.0);
+    }
 }
 
 void rearm_switch2_wake_after_client_disconnect() {

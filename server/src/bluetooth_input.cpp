@@ -43,6 +43,39 @@ static void run_pairing_window_script(const char* script) {
     waitpid(pid, &status, 0);
 }
 
+static void disconnect_connected_bluetooth_gamepads() {
+    const char* script = R"BT(
+set +e
+bt_timeout() {
+    secs="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+is_gamepad_name() {
+    case "$1" in
+        *Wireless*|*Xbox*|*Pro*|*Nintendo*|*Joy-Con*|*8BitDo*|*DualSense*|*DualShock*|*PLAYSTATION*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+bluetoothctl devices 2>/dev/null | while read -r tag mac name; do
+    [ "$tag" = "Device" ] || continue
+    is_gamepad_name "$name" || continue
+    info="$(bt_timeout 2s bluetoothctl info "$mac" 2>/dev/null || true)"
+    echo "$info" | grep -q 'Connected: yes' || continue
+    echo "[bt] disconnecting $name ($mac) because Switch suspended"
+    bt_timeout 3s bluetoothctl disconnect "$mac" >/dev/null 2>&1 || true
+done
+)BT";
+    int rc = std::system(script);
+    (void)rc;
+}
+
 static void start_bluetooth_pairing_window() {
     bool expected = false;
     if (!g_bt_pair_window_started.compare_exchange_strong(expected, true)) return;
@@ -218,6 +251,8 @@ void bluetooth_input_thread(std::stop_token stoken) {
     client_for_sdl.fill(-1);
     std::array<uint32_t, 4> last_rumble_seq{};
     std::array<uint64_t, 4> rumble_until_us{};
+    std::array<bool, 4> dormant_until_input{};
+    uint64_t seen_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
     bool waiting_logged = false;
     std::println("[bt] Bluetooth/local controller input enabled");
 
@@ -226,6 +261,27 @@ void bluetooth_input_thread(std::stop_token stoken) {
         auto pads = input.snapshot();
         uint64_t now = now_us();
         bool any_waiting = false;
+        const bool switch_sleeping = switch2_sleep_confirmed(now);
+        const uint64_t sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
+        const bool new_sleep_transition = switch_sleeping && sleep_seq != seen_sleep_seq;
+        if (new_sleep_transition) {
+            seen_sleep_seq = sleep_seq;
+            input.stop_all_rumble();
+            for (int i = 0; i < 4; ++i) {
+                if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
+                client_for_sdl[i] = -1;
+                last_rumble_seq[i] = 0;
+                rumble_until_us[i] = 0;
+            }
+            dormant_until_input.fill(true);
+            g_ctx.bluetooth_reserved_client_slots_mask.store(0, std::memory_order_relaxed);
+            input.disconnect_all();
+            disconnect_connected_bluetooth_gamepads();
+            if (g_ctx.verbose) std::println("[bt] Switch suspended; local Bluetooth controllers were disconnected");
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            continue;
+        }
+        if (!switch_sleeping) dormant_until_input.fill(false);
 
         uint8_t bt_reserved_mask = 0;
         for (int i = 0; i < 4; ++i) {
@@ -242,6 +298,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                     last_rumble_seq[i] = 0;
                     rumble_until_us[i] = 0;
                 }
+                if (!switch_sleeping) dormant_until_input[i] = false;
                 continue;
             }
 
@@ -258,17 +315,22 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 }
             }
 
+            const bool real_bt_input = !input_is_neutral(pads[i].input);
             if (client_for_sdl[i] < 0) {
+                if (dormant_until_input[i] && switch_sleeping && !real_bt_input) {
+                    continue;
+                }
                 client_for_sdl[i] = allocate_client_session(now, nullptr, true, InputSource::Bluetooth, i);
                 if (client_for_sdl[i] >= 0) {
                     waiting_logged = false;
+                    dormant_until_input[i] = false;
                     input.set_rumble(i, 0, 0, 0);
                     rumble_until_us[i] = 0;
                     {
                         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_for_sdl[i]]);
                         last_rumble_seq[i] = g_ctx.clients[client_for_sdl[i]].rumble_seq[0];
                     }
-                    maybe_send_switch2_wake_advert("Bluetooth controller connected");
+                    maybe_send_switch2_wake_advert(real_bt_input ? "Bluetooth controller input" : "Bluetooth controller connected");
                 }
             }
 
@@ -283,7 +345,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 rumble_until_us[i] = 0;
                 continue;
             }
-            if (!input_is_neutral(pads[i].input)) {
+            if (real_bt_input) {
                 maybe_send_switch2_wake_advert("Bluetooth controller input");
             }
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i]);

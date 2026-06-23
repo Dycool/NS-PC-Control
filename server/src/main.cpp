@@ -290,10 +290,9 @@ int main(int argc, char** argv) {
                         .udp_interval_ms = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
                         .udp_hz = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ)
                     };
-                    // Do not ask UDP clients to disconnect just because the Switch is sleeping.
-                    // Sleep/wake is handled server-side: clients can remain connected/dormant,
-                    // and their next real input can trigger the wake advert.
-                    (void)switch2_usb_host_recently_active(now_us());
+                    if (switch2_sleep_confirmed(now_us())) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
+                    }
                     sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen); continue;
                 }
             }
@@ -359,6 +358,7 @@ int main(int argc, char** argv) {
                         cidx = i; break;
                     }
                 }
+                forget_switch2_dormant_udp_endpoint(sender);
                 if (cidx >= 0) {
                     reset_client_session(cidx); rearm_switch2_wake_after_client_disconnect();
                     std::println("UDP client {} disconnected.", cidx + 1);
@@ -369,6 +369,8 @@ int main(int argc, char** argv) {
             int cidx = -1;
             uint64_t now = now_us();
             bool wake_on_new_client = false;
+            const bool sleeping = switch2_sleep_confirmed(now);
+            const bool real_input = multi_report_has_real_input(report, pad_present, true);
             for (int i = 0; i < MAX_CLIENTS; ++i) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
                 if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
@@ -376,10 +378,16 @@ int main(int argc, char** argv) {
                 }
             }
 
+            const bool dormant_endpoint = sleeping && switch2_dormant_udp_endpoint_matches(sender);
             if (cidx == -1) {
+                if (dormant_endpoint && !real_input) {
+                    ++g_ctx.pkts_rx;
+                    continue;
+                }
                 cidx = allocate_client_session(now, &sender, true, InputSource::Udp);
                 if (cidx >= 0) {
                     wake_on_new_client = true;
+                    forget_switch2_dormant_udp_endpoint(sender);
                     std::println("New UDP client accepted into Slot {}", cidx + 1);
                 }
             }
@@ -429,7 +437,7 @@ int main(int argc, char** argv) {
 
             if (!accepted) continue;
             ++g_ctx.pkts_rx;
-            if (wake_on_new_client || multi_report_has_real_input(report, pad_present, true)) {
+            if (wake_on_new_client || real_input) {
                 maybe_send_switch2_wake_advert(wake_on_new_client ? "client connected via UDP input" : "UDP input");
             }
             flush_rumble_to_udp(sock, cidx);
