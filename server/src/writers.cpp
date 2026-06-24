@@ -32,7 +32,6 @@ void writer_thread(std::stop_token stoken, int hz) {
     const auto tick = us(1'000'000 / hz);
     int fds[HID_PORT_COUNT] = {-1, -1, -1, -1};
     std::string devs[HID_PORT_COUNT] = {"/dev/hidg0", "/dev/hidg1", "/dev/hidg2", "/dev/hidg3"};
-    bool was_connected = false;
 
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[HID_PORT_COUNT];
@@ -76,8 +75,6 @@ void writer_thread(std::stop_token stoken, int hz) {
         if (g_ctx.verbose) {
             std::println("{}x {} /dev/hidg* opened", HID_PORT_COUNT, g_ctx.legacy_mode ? "legacy" : "Pro");
         }
-        was_connected = true;
-
         auto next = Clock::now() + tick;
         bool error_shown = false;
         bool timeout_printed[MAX_CLIENTS] = {};

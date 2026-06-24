@@ -507,7 +507,7 @@ static bool reset_wake_bt_stack(std::string& hci_dev, bool verbose) {
     return true;
 }
 
-static bool prepare_wake_controller(std::string& hci_dev,
+[[maybe_unused]] static bool prepare_wake_controller(std::string& hci_dev,
                                      const std::string& mac_lc, bool verbose) {
     if (hci_dev.empty()) hci_dev = "hci0";
     run_wake_command({"systemctl", "stop",    "bluetooth"}, false);
@@ -676,7 +676,7 @@ static void switch2_wake_adv_worker(int burst_ms) {
     g_ctx.switch2_wake_adv_running.store(false, std::memory_order_relaxed);
 }
 
-static void switch2_delayed_wake_check_worker(const char* reason) {
+[[maybe_unused]] static void switch2_delayed_wake_check_worker(const char* reason) {
     std::string w_reason = reason ? reason : "client connected";
     for (int i = 0; i < 32 && g_ctx.running.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -969,6 +969,7 @@ void enter_switch2_wake_runtime_mode() {
 }
 
 static void wait_for_bluetooth_runtime_ready(bool verbose) {
+    (void)verbose;
     if (g_ctx.bluetooth_disabled) return;
     std::string hci = valid_hci(g_ctx.switch2_wake_hci_dev)
                         ? g_ctx.switch2_wake_hci_dev : "hci0";

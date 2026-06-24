@@ -7,8 +7,11 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <cstddef>
+#include <cerrno>
 #include <cstdlib>
+#include <csignal>
 #include <exception>
 #include <fcntl.h>
 #include <fstream>
@@ -26,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -238,8 +242,9 @@ bool start_bundled_bluetoothd(bool verbose) {
     if (!extract_bundled_bluetoothd(verbose)) return false;
 
     if (verbose) std::println("[bt] stopping system bluetoothd...");
-    std::system("systemctl stop bluetooth.service >/dev/null 2>&1 "
-                "|| service bluetooth stop >/dev/null 2>&1 || true");
+    int stop_rc = std::system("systemctl stop bluetooth.service >/dev/null 2>&1 "
+                              "|| service bluetooth stop >/dev/null 2>&1 || true");
+    (void)stop_rc;
     // Give the system daemon time to fully release D-Bus and HCI before we take over.
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
 
@@ -312,8 +317,9 @@ void stop_bundled_bluetoothd(bool verbose) {
         g_bundled_bt_path.clear();
     }
     if (verbose) std::println("[bt] restoring system bluetoothd...");
-    std::system("systemctl start bluetooth.service >/dev/null 2>&1 "
-                "|| service bluetooth start >/dev/null 2>&1 || true");
+    int start_rc = std::system("systemctl start bluetooth.service >/dev/null 2>&1 "
+                               "|| service bluetooth start >/dev/null 2>&1 || true");
+    (void)start_rc;
 }
 
 } // namespace
