@@ -267,6 +267,7 @@ int main(int argc, char** argv) {
         }
     } else if (g_ctx.switch2_wake_adv_enabled) {
         // Wake remains armed without local BT controller input.
+        enter_switch2_wake_runtime_mode();
         if (g_ctx.verbose) std::println("[wake] Switch 2 wake armed without local Bluetooth controller input");
     } else if (g_ctx.verbose && no_bt) {
         std::println("[bt] Local Bluetooth controller input disabled by -no-bt");
