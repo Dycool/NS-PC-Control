@@ -104,8 +104,7 @@ jobs:
             --disable-hog \
             --disable-a2dp \
             --disable-avrcp \
-            --disable-network \
-            --enable-experimental
+            --disable-network
 
           make -j"$(nproc)"
           mkdir -p "$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth"
