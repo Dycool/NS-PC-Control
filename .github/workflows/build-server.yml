@@ -107,7 +107,7 @@ jobs:
             --disable-network \
             --enable-experimental
 
-          make -j"$(nproc)" bluetoothd
+          make -j"$(nproc)"
           mkdir -p "$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth"
           cp src/bluetoothd "$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth/bluetoothd"
 
