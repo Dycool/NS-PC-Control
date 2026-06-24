@@ -29,16 +29,12 @@ Connect the Raspberry Pi to the console dock via USB:
 
 ## Bluetooth Controller Pairing
 
-`ns-backend` performs best-effort Bluetooth runtime setup automatically on Raspberry Pi OS: it starts BlueZ, unblocks Bluetooth, loads `uhid`, and installs missing runtime Bluetooth packages when possible. Users should normally just run the backend.
-
-For first-time pairing, start the backend with:
+To pair your bluetooth controlers, start the server with the --pair flag. This will launch a small setup that lets you connect up to 4 controllers.
 
 ```bash
 sudo ./ns-backend --pair
 ```
-
-`--pair` opens a 2-minute pairing window for new controllers. Already paired/trusted controllers reconnect anytime while Bluetooth input is enabled. When a trusted controller reconnects, the backend also opens a fresh 2-minute pairing window so another new controller can be added without restarting with `--pair`.
-
+> Playstation controllers have some issues with BlueZ, and may not work. Use the clients instead.
 
 
 ## Running the Server
