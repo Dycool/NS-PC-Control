@@ -14,7 +14,7 @@ permissions:
 
 env:
   SDL_REF: release-3.4.10
-  BLUEZ_VERSION: "5.72"
+  BLUEZ_VERSION: "5.68"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:

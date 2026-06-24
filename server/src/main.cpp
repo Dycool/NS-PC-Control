@@ -170,7 +170,6 @@ int main(int argc, char** argv) {
         }
         else if (s == "-pair")                  s = "--pair";
         else if (s == "-no-bt")                 s = "--no-bt";
-        else if (s == "-revert")                s = "--revert";
         cli_args.push_back(s);
     }
 
@@ -185,7 +184,6 @@ int main(int argc, char** argv) {
     bool        pair_explicit     = false;
     bool        no_bt             = false;
     bool        legacy_p          = false;
-    bool        do_revert         = false;
     int         web_port          = 8080;
 
     CLI::App app{"ns-backend - Switch Input Server\n\n"
@@ -199,7 +197,6 @@ int main(int argc, char** argv) {
     app.add_flag  ("--hori",   g_ctx.legacy_mode,          "Expose the legacy 8-byte HORI controller gadget");
     app.add_flag  ("--pair",   pair_explicit,              "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
     app.add_flag  ("--no-bt",  no_bt,                      "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
-    app.add_flag  ("--revert", do_revert,                  "Revert host USB gadget boot configurations and reboot");
     app.add_flag  ("--upnp",   do_upnp,                   "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag  ("-p",       legacy_p,                   "")->group("");
@@ -246,7 +243,6 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     // Early-exit sub-commands
     // -----------------------------------------------------------------------
-    if (do_revert)                             return run_revert_gadget_host() ? 0 : 1;
     if (g_ctx.switch2_wakeup_setup_requested) return run_switch2_wakeup_setup();
     if (pair_explicit) {
         bluetooth_manager_runtime_setup(true);

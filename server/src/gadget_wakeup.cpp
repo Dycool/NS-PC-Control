@@ -1060,80 +1060,12 @@ void drain_hid_output_queue(int fd) {
 }
 
 // ===========================================================================
-// USB gadget boot configuration (check / enable / revert)
+// USB gadget boot configuration check
 // ===========================================================================
 
-static bool check_and_enable_gadget_host() {
-    std::string config_path  = fs::exists("/boot/firmware/config.txt")
-                                 ? "/boot/firmware/config.txt"  : "/boot/config.txt";
-    std::string cmdline_path = fs::exists("/boot/firmware/cmdline.txt")
-                                 ? "/boot/firmware/cmdline.txt" : "/boot/cmdline.txt";
-    if (!fs::exists(config_path) || !fs::exists(cmdline_path)) return false;
-
-    bool has_dwc2      = false;
-    bool has_otg_active = false;
-    std::vector<std::string> config_lines;
-    {
-        std::ifstream f(config_path);
-        std::string line;
-        while (std::getline(f, line)) {
-            config_lines.push_back(line);
-            size_t hash_pos = line.find('#');
-            size_t dwc_pos  = line.find("dtoverlay=dwc2");
-            size_t otg_pos  = line.find("otg_mode=1");
-            if (dwc_pos != std::string::npos
-                    && (hash_pos == std::string::npos || hash_pos > dwc_pos))
-                has_dwc2 = true;
-            if (otg_pos != std::string::npos
-                    && (hash_pos == std::string::npos || hash_pos > otg_pos))
-                has_otg_active = true;
-        }
-    }
-
-    bool has_modules = false;
-    std::string cmdline_content;
-    {
-        std::ifstream f(cmdline_path);
-        if (std::getline(f, cmdline_content)) {
-            if (cmdline_content.find("modules-load=dwc2,libcomposite") != std::string::npos)
-                has_modules = true;
-        }
-    }
-
-    if (has_dwc2 && !has_otg_active && has_modules) return false; // Already configured.
-
+static void print_gadget_host_config_error() {
     std::println(stderr, "[gadget] USB gadget host configurations are missing or conflicting.");
-    std::println(stderr, "[gadget] Required changes:");
-    if (has_otg_active) std::println(stderr, "[gadget]   - Comment out 'otg_mode=1' in {} (conflicts with gadget mode)", config_path);
-    if (!has_dwc2)      std::println(stderr, "[gadget]   - Add 'dtoverlay=dwc2' to {}", config_path);
-    if (!has_modules)   std::println(stderr, "[gadget]   - Add 'modules-load=dwc2,libcomposite' to {}", cmdline_path);
-
-    if (!isatty(STDIN_FILENO)) {
-        std::println(stderr, "[gadget] Run interactively or configure manually.");
-        return false;
-    }
-
-    std::print(stderr, "USB gadget mode not enabled. Enable and reboot? (y/N): ");
-    std::fflush(stderr);
-    std::string ans;
-    if (!std::getline(std::cin, ans) || (ans != "y" && ans != "Y")) return false;
-
-    int dummy = 0;
-    if (has_otg_active) {
-        dummy = std::system(("sudo sed -i 's/^otg_mode=1/#otg_mode=1/g' " + config_path).c_str());
-    }
-    if (!has_dwc2) {
-        dummy = std::system(("echo \"dtoverlay=dwc2\" | sudo tee -a " + config_path + " >/dev/null").c_str());
-    }
-    if (!has_modules) {
-        dummy = std::system(("sudo sed -i 's/rootwait/rootwait modules-load=dwc2,libcomposite/' " + cmdline_path).c_str());
-    }
-    (void)dummy;
-
-    std::println(stderr, "[gadget] Rebooting system in 3 seconds to apply boot configurations...");
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-    int rb = std::system("sudo reboot"); (void)rb;
-    return true;
+    std::println(stderr, "[gadget] Make sure the raspberry pi is configured as a USB gadget, check docs for details.");
 }
 
 static bool setup_gadget_builtin(bool force, const char* reason) {
@@ -1198,8 +1130,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     std::string UDC = first_udc_name();
     if (UDC.empty()) {
-        if (check_and_enable_gadget_host()) std::exit(0);
-        std::println(stderr, "[gadget] No UDC found. Check dtoverlay=dwc2 in /boot/config.txt.");
+        print_gadget_host_config_error();
         return false;
     }
     if (!write_file(gd / "UDC", UDC)) return false;
@@ -1245,64 +1176,4 @@ void teardown_gadget() {
 
 bool run_gadget_setup_if_needed(bool force, const char* reason) {
     return setup_gadget_builtin(force, reason);
-}
-
-// ===========================================================================
-// --revert: undo USB gadget boot configuration changes
-// ===========================================================================
-
-bool run_revert_gadget_host() {
-    std::string config_path  = fs::exists("/boot/firmware/config.txt")
-                                 ? "/boot/firmware/config.txt"  : "/boot/config.txt";
-    std::string cmdline_path = fs::exists("/boot/firmware/cmdline.txt")
-                                 ? "/boot/firmware/cmdline.txt" : "/boot/cmdline.txt";
-
-    if (!fs::exists(config_path) || !fs::exists(cmdline_path)) {
-        std::println(stderr, "[gadget] Boot configuration files not found. Revert skipped.");
-        return false;
-    }
-
-    bool needs_revert = false;
-    {
-        std::ifstream f(config_path);
-        std::string   line;
-        while (std::getline(f, line)) {
-            size_t hash_pos = line.find('#');
-            size_t dwc_pos  = line.find("dtoverlay=dwc2");
-            size_t otg_pos  = line.find("otg_mode=1");
-            if (dwc_pos != std::string::npos
-                    && (hash_pos == std::string::npos || hash_pos > dwc_pos)) {
-                needs_revert = true; break;
-            }
-            if (otg_pos != std::string::npos
-                    && hash_pos != std::string::npos && hash_pos < otg_pos) {
-                needs_revert = true; break;
-            }
-        }
-    }
-    if (!needs_revert) {
-        std::ifstream f(cmdline_path);
-        std::string content;
-        if (std::getline(f, content)
-                && content.find("modules-load=dwc2,libcomposite") != std::string::npos)
-            needs_revert = true;
-    }
-
-    if (!needs_revert) {
-        std::println(stderr, "[gadget] Boot configurations are already in their default state. No action taken.");
-        return true;
-    }
-
-    std::println(stderr, "[gadget] Reverting USB gadget host configurations...");
-    int dummy = 0;
-    dummy = std::system(("sudo sed -i '/dtoverlay=dwc2/d' "                          + config_path).c_str());
-    dummy = std::system(("sudo sed -i 's/#otg_mode=1/otg_mode=1/g' "                + config_path).c_str());
-    dummy = std::system(("sudo sed -i 's/modules-load=dwc2,libcomposite//g' "       + cmdline_path).c_str());
-    dummy = std::system(("sudo sed -i 's/  / /g' "                                  + cmdline_path).c_str());
-    (void)dummy;
-
-    std::println(stderr, "[gadget] Rebooting system in 3 seconds to apply reverted boot configurations...");
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-    int rb = std::system("sudo reboot"); (void)rb;
-    return true;
 }
