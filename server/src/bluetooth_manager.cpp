@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -25,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -90,8 +92,8 @@ int run_cmd(const std::string& cmd, bool verbose = false) {
         "if command -v chrt >/dev/null 2>&1; then chrt -o 0 /bin/sh -c {}; else /bin/sh -c {}; fi",
         shell_quote(cmd), shell_quote(cmd));
     const int rc = std::system(wrapped.c_str());
-    if (rc == -1)        return 127;
-    if (WIFEXITED(rc))   return WEXITSTATUS(rc);
+    if (rc == -1)      return 127;
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
     return 126;
 }
 
@@ -116,7 +118,6 @@ bool ensure_ini_key(std::vector<std::string>& lines,
     auto sec_it = std::ranges::find_if(lines, [&](const auto& l) {
         return trim_copy(l) == sec_header;
     });
-
     if (sec_it == lines.end()) {
         lines.push_back("");
         lines.push_back(sec_header);
@@ -128,7 +129,6 @@ bool ensure_ini_key(std::vector<std::string>& lines,
         auto t = trim_copy(l);
         return t.starts_with('[') && t.ends_with(']');
     });
-
     for (auto it = sec_it + 1; it != end_it; ++it) {
         std::string t = trim_copy(*it);
         if (t.starts_with('#')) t = trim_copy(t.substr(1));
@@ -139,7 +139,6 @@ bool ensure_ini_key(std::vector<std::string>& lines,
             return true;
         }
     }
-
     lines.insert(end_it, wanted);
     return true;
 }
@@ -155,26 +154,19 @@ void configure_bluez_reconnect_policy(bool verbose) {
         std::string   line;
         while (std::getline(in, line)) lines.push_back(line);
     }
-    if (lines.empty()) {
-        lines = {"[General]", "", "[Policy]"};
-    }
+    if (lines.empty()) lines = {"[General]", "", "[Policy]"};
 
     bool changed = false;
-    // General: enable fast-connectable mode so the adapter responds to
-    // incoming connection requests at a higher duty cycle.
-    changed |= ensure_ini_key(lines, "General", "FastConnectable",        "true");
-    // BR: interlaced page scan with tighter interval/window for faster
-    // discovery of incoming BR/EDR connect requests (DS4 / DualSense need this).
-    changed |= ensure_ini_key(lines, "BR",      "PageScanType",           "1");
-    changed |= ensure_ini_key(lines, "BR",      "PageScanInterval",       "128");
-    changed |= ensure_ini_key(lines, "BR",      "PageScanWindow",         "48");
-    // Policy: reconnect both classic HID (0x1124) and HOGP (0x1812) services.
+    changed |= ensure_ini_key(lines, "General", "FastConnectable",    "true");
+    changed |= ensure_ini_key(lines, "BR",      "PageScanType",       "1");
+    changed |= ensure_ini_key(lines, "BR",      "PageScanInterval",   "128");
+    changed |= ensure_ini_key(lines, "BR",      "PageScanWindow",     "48");
     changed |= ensure_ini_key(lines, "Policy",  "ReconnectUUIDs",
                               "00001124-0000-1000-8000-00805f9b34fb,"
                               "00001812-0000-1000-8000-00805f9b34fb");
-    changed |= ensure_ini_key(lines, "Policy",  "ReconnectAttempts",      "15");
-    changed |= ensure_ini_key(lines, "Policy",  "ReconnectIntervals",     "1,1,1,2,2,2,4,4,8,8,16,16,32");
-    changed |= ensure_ini_key(lines, "Policy",  "AutoEnable",             "true");
+    changed |= ensure_ini_key(lines, "Policy",  "ReconnectAttempts",  "15");
+    changed |= ensure_ini_key(lines, "Policy",  "ReconnectIntervals", "1,1,1,2,2,2,4,4,8,8,16,16,32");
+    changed |= ensure_ini_key(lines, "Policy",  "AutoEnable",         "true");
 
     if (changed) {
         std::ofstream out(conf, std::ios::trunc);
@@ -183,7 +175,6 @@ void configure_bluez_reconnect_policy(bool verbose) {
         } else {
             for (const auto& line : lines) out << line << '\n';
             if (verbose) std::println("[bt] configured BlueZ fast reconnect policy");
-            // Restart bluetoothd so the new page-scan settings take effect.
             if (verbose) std::println("[bt] restarting bluetooth service to apply changes...");
             if      (command_exists("systemctl")) (void)run_cmd("systemctl restart bluetooth.service >/dev/null 2>&1", verbose);
             else if (command_exists("service"))   (void)run_cmd("service bluetooth restart >/dev/null 2>&1",           verbose);
@@ -191,7 +182,7 @@ void configure_bluez_reconnect_policy(bool verbose) {
     }
 
     if (command_exists("btmgmt")) {
-        (void)run_cmd("btmgmt power on     >/dev/null 2>&1", verbose);
+        (void)run_cmd("btmgmt power on      >/dev/null 2>&1", verbose);
         (void)run_cmd("btmgmt connectable on >/dev/null 2>&1", verbose);
         (void)run_cmd("btmgmt bondable    on >/dev/null 2>&1", verbose);
         (void)run_cmd("btmgmt ssp         on >/dev/null 2>&1", verbose);
@@ -199,19 +190,170 @@ void configure_bluez_reconnect_policy(bool verbose) {
     }
 }
 
+} // namespace
+
+// ===========================================================================
+// Bundled bluetoothd (embedded via xxd at build time)
+// ===========================================================================
+
+#ifdef NS_BUNDLE_BLUETOOTHD
+#include "bluetoothd_embed.h"
+// Provides: unsigned char bluetoothd_staged[];
+//           unsigned int  bluetoothd_staged_len;
+
+namespace {
+
+std::string g_bundled_bt_path;
+pid_t       g_bundled_bt_pid = -1;
+
+// Extract the embedded binary to a temp file and make it executable.
+bool extract_bundled_bluetoothd(bool verbose) {
+    g_bundled_bt_path = std::format("/tmp/ns-pc-control-bluetoothd-{}", getpid());
+    {
+        std::ofstream f(g_bundled_bt_path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            std::println(stderr, "[bt] failed to extract bundled bluetoothd to {}",
+                         g_bundled_bt_path);
+            g_bundled_bt_path.clear();
+            return false;
+        }
+        f.write(reinterpret_cast<const char*>(bluetoothd_staged),
+                static_cast<std::streamsize>(bluetoothd_staged_len));
+    }
+    if (chmod(g_bundled_bt_path.c_str(), 0755) != 0) {
+        std::println(stderr, "[bt] failed to chmod bundled bluetoothd: {}",
+                     std::strerror(errno));
+        unlink(g_bundled_bt_path.c_str());
+        g_bundled_bt_path.clear();
+        return false;
+    }
+    if (verbose) std::println("[bt] extracted bundled bluetoothd ({} bytes) to {}",
+                              bluetoothd_staged_len, g_bundled_bt_path);
+    return true;
+}
+
+// Stop system bluetoothd, spawn ours on the system D-Bus, and wait for
+// org.bluez to appear before returning.
+bool start_bundled_bluetoothd(bool verbose) {
+    if (!extract_bundled_bluetoothd(verbose)) return false;
+
+    if (verbose) std::println("[bt] stopping system bluetoothd...");
+    std::system("systemctl stop bluetooth.service >/dev/null 2>&1 "
+                "|| service bluetooth stop >/dev/null 2>&1 || true");
+    // Give the system daemon time to fully release D-Bus and HCI before we take over.
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+    if (verbose) std::println("[bt] starting bundled bluetoothd (BlueZ 5.72)...");
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child: silence output unless verbose, then exec bluetoothd.
+        if (!verbose) {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
+        }
+        execl(g_bundled_bt_path.c_str(), g_bundled_bt_path.c_str(),
+              "--nodetach", "--noplugin=hostname", nullptr);
+        _exit(1);
+    }
+    if (pid < 0) {
+        std::println(stderr, "[bt] fork() failed for bundled bluetoothd: {}",
+                     std::strerror(errno));
+        unlink(g_bundled_bt_path.c_str());
+        g_bundled_bt_path.clear();
+        return false;
+    }
+    g_bundled_bt_pid = pid;
+
+    // Poll until org.bluez is registered on the system D-Bus (up to ~10s).
+    for (int i = 0; i < 40; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+        // Bail early if the child already exited.
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            std::println(stderr, "[bt] bundled bluetoothd exited unexpectedly (exit {})",
+                         WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            g_bundled_bt_pid = -1;
+            unlink(g_bundled_bt_path.c_str());
+            g_bundled_bt_path.clear();
+            return false;
+        }
+
+        if (std::system("busctl status org.bluez >/dev/null 2>&1") == 0) {
+            if (verbose) std::println("[bt] bundled bluetoothd ready on D-Bus");
+            return true;
+        }
+    }
+
+    std::println(stderr, "[bt] bundled bluetoothd did not appear on D-Bus within 10s");
+    return false;
+}
+
+// Terminate the bundled daemon, clean up the temp file, and restart the
+// system bluetoothd so the host is left in a clean state.
+void stop_bundled_bluetoothd(bool verbose) {
+    if (g_bundled_bt_pid > 0) {
+        if (verbose) std::println("[bt] stopping bundled bluetoothd...");
+        kill(g_bundled_bt_pid, SIGTERM);
+        // Wait up to 2s for a clean exit before giving up.
+        for (int i = 0; i < 20; ++i) {
+            int status = 0;
+            if (waitpid(g_bundled_bt_pid, &status, WNOHANG) == g_bundled_bt_pid) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        g_bundled_bt_pid = -1;
+    }
+    if (!g_bundled_bt_path.empty()) {
+        unlink(g_bundled_bt_path.c_str());
+        g_bundled_bt_path.clear();
+    }
+    if (verbose) std::println("[bt] restoring system bluetoothd...");
+    std::system("systemctl start bluetooth.service >/dev/null 2>&1 "
+                "|| service bluetooth start >/dev/null 2>&1 || true");
+}
+
+} // namespace
+#endif // NS_BUNDLE_BLUETOOTHD
+
+// ===========================================================================
+// Runtime setup
+// ===========================================================================
+
+namespace {
+
 void runtime_setup_impl(bool verbose) {
     if (geteuid() != 0) {
-        if (verbose) std::println(stderr, "[bt] setup skipped; run as root for rfkill/uhid/bluetooth.service prep");
+        if (verbose) std::println(stderr,
+            "[bt] setup skipped; run as root for rfkill/uhid/bluetooth.service prep");
         return;
     }
+
+    // Always unblock BT and load uhid regardless of which bluetoothd we use.
     if (command_exists("rfkill")) (void)run_cmd("rfkill unblock bluetooth >/dev/null 2>&1", verbose);
     if (!proc_modules_contains("uhid")) {
         if (run_cmd("modprobe uhid >/dev/null 2>&1", verbose) != 0) {
-            std::println(stderr, "[bt] warning: uhid module not loaded; some BLE controllers may not expose input devices");
+            std::println(stderr, "[bt] warning: uhid module not loaded; "
+                                 "some BLE controllers may not expose input devices");
         }
     }
+
+#ifdef NS_BUNDLE_BLUETOOTHD
+    // Replace the system bluetoothd with the embedded one.
+    if (!start_bundled_bluetoothd(verbose)) {
+        std::println(stderr, "[bt] warning: bundled bluetoothd failed to start; "
+                             "falling back to system bluetoothd");
+        if      (command_exists("systemctl")) (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
+        else if (command_exists("service"))   (void)run_cmd("service bluetooth start >/dev/null 2>&1",           verbose);
+    }
+#else
     if      (command_exists("systemctl")) (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
     else if (command_exists("service"))   (void)run_cmd("service bluetooth start >/dev/null 2>&1",           verbose);
+#endif
+
     configure_bluez_reconnect_policy(verbose);
 }
 
@@ -227,15 +369,15 @@ void runtime_setup_impl(bool verbose) {
 
 namespace {
 
-constexpr const char* BLUEZ_SERVICE         = "org.bluez";
-constexpr const char* OBJECT_MANAGER_IFACE  = "org.freedesktop.DBus.ObjectManager";
-constexpr const char* ADAPTER_IFACE         = "org.bluez.Adapter1";
-constexpr const char* DEVICE_IFACE          = "org.bluez.Device1";
-constexpr const char* AGENT_MANAGER_IFACE   = "org.bluez.AgentManager1";
-constexpr const char* AGENT_IFACE           = "org.bluez.Agent1";
-constexpr const char* AGENT_PATH            = "/com/ns_pc_control/agent";
-constexpr const char* HID_UUID              = "00001124-0000-1000-8000-00805f9b34fb";
-constexpr const char* HOGP_UUID             = "00001812-0000-1000-8000-00805f9b34fb";
+constexpr const char* BLUEZ_SERVICE        = "org.bluez";
+constexpr const char* OBJECT_MANAGER_IFACE = "org.freedesktop.DBus.ObjectManager";
+constexpr const char* ADAPTER_IFACE        = "org.bluez.Adapter1";
+constexpr const char* DEVICE_IFACE         = "org.bluez.Device1";
+constexpr const char* AGENT_MANAGER_IFACE  = "org.bluez.AgentManager1";
+constexpr const char* AGENT_IFACE          = "org.bluez.Agent1";
+constexpr const char* AGENT_PATH           = "/com/ns_pc_control/agent";
+constexpr const char* HID_UUID             = "00001124-0000-1000-8000-00805f9b34fb";
+constexpr const char* HOGP_UUID            = "00001812-0000-1000-8000-00805f9b34fb";
 
 constexpr auto DBUS_FAST_TIMEOUT      = std::chrono::milliseconds(600);
 constexpr auto DBUS_DISCOVERY_TIMEOUT = std::chrono::milliseconds(1200);
@@ -273,9 +415,9 @@ struct DeviceInfo {
     }
 
     bool is_controller_like() const {
-        if (has_hid_uuid)                            return true;
-        if (appearance >= 960 && appearance <= 968)  return true;
-        if ((klass & 0x1f00u) == 0x0500u)            return true;
+        if (has_hid_uuid)                           return true;
+        if (appearance >= 960 && appearance <= 968) return true;
+        if ((klass & 0x1f00u) == 0x0500u)           return true;
         std::string s = lower_copy(display_name() + " " + icon);
         static constexpr std::array<std::string_view, 11> keywords = {
             "gamepad", "joystick", "controller",
@@ -322,45 +464,40 @@ private:
     Clock::time_point pair_window_end{};
     std::string       adapter_path;
 
-    std::set<std::string>                logged_connected;
-    std::set<std::string>                pairing_attempted;
+    std::set<std::string>                    logged_connected;
+    std::set<std::string>                    pairing_attempted;
     std::map<std::string, Clock::time_point> reconnect_next; // per-device proactive reconnect throttle
 
     std::unique_ptr<sdbus::IConnection> connection;
     std::unique_ptr<sdbus::IObject>     agent_object;
 
-    // D-Bus helpers
-    bool connect_bus();
-    void close_bus();
+    bool            connect_bus();
+    void            close_bus();
     std::unique_ptr<sdbus::IProxy> proxy(const std::string& path) {
         return sdbus::createProxy(*connection,
                                   sdbus::ServiceName{BLUEZ_SERVICE},
                                   sdbus::ObjectPath{path});
     }
-    bool             register_agent();
-    bool             ensure_adapter();
-    bool             adapter_set_bool(const char* prop, bool value);
-    bool             start_discovery();
-    bool             stop_discovery();
-    ManagedObjects   managed_objects();
+    bool            register_agent();
+    bool            ensure_adapter();
+    bool            adapter_set_bool(const char* prop, bool value);
+    bool            start_discovery();
+    bool            stop_discovery();
+    ManagedObjects  managed_objects();
     std::vector<DeviceInfo> list_devices();
-    bool             set_trusted(const DeviceInfo& dev, bool trusted);
-    bool             call_device_method(const std::string& path,
-                                        const std::string& method,
-                                        std::chrono::milliseconds timeout,
-                                        std::string_view success_err = "");
-    bool             pair_device(const DeviceInfo& dev);
-    bool             connect_device_once(const DeviceInfo& dev);
-    bool             disconnect_device(const DeviceInfo& dev);
-
-    void             open_pair_window(const char* reason);
-    void             close_pair_window();
-    void             note_connected(const DeviceInfo& dev);
-
-    // Returns true if the device was paired (or already was).
-    bool try_pair_one(const DeviceInfo& dev);
-
-    void             tick();
+    bool            set_trusted(const DeviceInfo& dev, bool trusted);
+    bool            call_device_method(const std::string& path,
+                                       const std::string& method,
+                                       std::chrono::milliseconds timeout,
+                                       std::string_view success_err = "");
+    bool            pair_device(const DeviceInfo& dev);
+    bool            connect_device_once(const DeviceInfo& dev);
+    bool            disconnect_device(const DeviceInfo& dev);
+    void            open_pair_window(const char* reason);
+    void            close_pair_window();
+    void            note_connected(const DeviceInfo& dev);
+    bool            try_pair_one(const DeviceInfo& dev);
+    void            tick();
 };
 
 // ---------------------------------------------------------------------------
@@ -397,15 +534,15 @@ bool BluezManager::register_agent() {
     try {
         agent_object = sdbus::createObject(*connection, sdbus::ObjectPath{AGENT_PATH});
         agent_object->addVTable(
-            sdbus::registerMethod("Release")            .implementedAs([] {}),
-            sdbus::registerMethod("RequestPinCode")     .implementedAs([](const sdbus::ObjectPath&)                   { return std::string{"0000"}; }),
-            sdbus::registerMethod("RequestPasskey")     .implementedAs([](const sdbus::ObjectPath&)                   { return uint32_t{0}; }),
-            sdbus::registerMethod("DisplayPinCode")     .implementedAs([](const sdbus::ObjectPath&, const std::string&)         {}),
-            sdbus::registerMethod("DisplayPasskey")     .implementedAs([](const sdbus::ObjectPath&, uint32_t, uint16_t)         {}),
-            sdbus::registerMethod("RequestConfirmation").implementedAs([](const sdbus::ObjectPath&, uint32_t)                   {}),
-            sdbus::registerMethod("RequestAuthorization").implementedAs([](const sdbus::ObjectPath&)                            {}),
-            sdbus::registerMethod("AuthorizeService")   .implementedAs([](const sdbus::ObjectPath&, const std::string&)        {}),
-            sdbus::registerMethod("Cancel")             .implementedAs([] {})
+            sdbus::registerMethod("Release")             .implementedAs([] {}),
+            sdbus::registerMethod("RequestPinCode")      .implementedAs([](const sdbus::ObjectPath&)                    { return std::string{"0000"}; }),
+            sdbus::registerMethod("RequestPasskey")      .implementedAs([](const sdbus::ObjectPath&)                    { return uint32_t{0}; }),
+            sdbus::registerMethod("DisplayPinCode")      .implementedAs([](const sdbus::ObjectPath&, const std::string&)          {}),
+            sdbus::registerMethod("DisplayPasskey")      .implementedAs([](const sdbus::ObjectPath&, uint32_t, uint16_t)          {}),
+            sdbus::registerMethod("RequestConfirmation") .implementedAs([](const sdbus::ObjectPath&, uint32_t)                    {}),
+            sdbus::registerMethod("RequestAuthorization").implementedAs([](const sdbus::ObjectPath&)                              {}),
+            sdbus::registerMethod("AuthorizeService")    .implementedAs([](const sdbus::ObjectPath&, const std::string&)         {}),
+            sdbus::registerMethod("Cancel")              .implementedAs([] {})
         ).forInterface(sdbus::InterfaceName{AGENT_IFACE});
 
         auto mgr = proxy("/org/bluez");
@@ -645,8 +782,8 @@ bool BluezManager::try_pair_one(const DeviceInfo& dev) {
         if (pair_window_open) (void)start_discovery();
         return false;
     }
-    DeviceInfo paired  = dev;
-    paired.paired      = true;
+    DeviceInfo paired = dev;
+    paired.paired     = true;
     (void)set_trusted(paired, true);
     (void)connect_device_once(paired);
     std::println("[bt] paired {} ({})", dev.display_name(), dev.address);
@@ -667,43 +804,36 @@ void BluezManager::tick() {
         return;
     }
 
-    if (pair_window_open && now >= pair_window_end) {
-        close_pair_window();
-    }
+    if (pair_window_open && now >= pair_window_end) close_pair_window();
 
     auto devs = list_devices()
               | std::views::filter([](const auto& d) { return !d.blocked && d.is_controller_like(); });
 
     for (const DeviceInfo& dev : devs) {
         if (!dev.paired && !dev.trusted) {
-            // Unknown device — try to pair if the pairing window is open.
             if (pair_window_open
-                && dev.looks_fresh_from_discovery()
-                && pairing_attempted.insert(dev.path).second) {
+                    && dev.looks_fresh_from_discovery()
+                    && pairing_attempted.insert(dev.path).second) {
                 (void)try_pair_one(dev);
             }
             continue;
         }
 
-        // Trusted/paired controller.
         if (!dev.trusted) (void)set_trusted(dev, true);
 
         if (dev.connected) {
             note_connected(dev);
-            reconnect_next.erase(dev.path); // reset backoff once connected
+            reconnect_next.erase(dev.path);
         } else {
             logged_connected.erase(dev.path);
-            // Proactively try to reconnect trusted controllers that have
-            // dropped, subject to a per-device cooldown so we don't spam
-            // BlueZ with Connect() calls while it is already retrying.
+            // Proactively try to reconnect trusted controllers that have dropped,
+            // subject to a per-device cooldown so we don't spam BlueZ.
             auto& next_attempt = reconnect_next[dev.path];
             if (now >= next_attempt) {
                 if (g_ctx.verbose)
                     std::println("[bt] proactive reconnect attempt for {}", dev.display_name());
                 (void)connect_device_once(dev);
                 next_attempt = now + RECONNECT_COOLDOWN;
-                // While a reconnect is in flight, also open a fresh 2-minute
-                // pairing window so another controller can pair without -pair.
                 if (!pair_window_open)
                     open_pair_window("trusted controller reconnecting");
             }
@@ -809,7 +939,7 @@ void BluezManager::run_pairing_wizard() {
         wizard_done.store(true, std::memory_order_relaxed);
     });
 
-    int                  paired_count = 0;
+    int                   paired_count = 0;
     std::set<std::string> successfully_paired;
 
     while (!wizard_done.load(std::memory_order_relaxed) && paired_count < 4) {
@@ -826,9 +956,8 @@ void BluezManager::run_pairing_wizard() {
                 }
                 continue;
             }
-
             if (dev.looks_fresh_from_discovery()
-                && pairing_attempted.insert(dev.path).second) {
+                    && pairing_attempted.insert(dev.path).second) {
                 if (try_pair_one(dev) && successfully_paired.insert(dev.path).second) {
                     ++paired_count;
                     std::println("[bt] Successfully paired and trusted controller: {} ({}) [{}/4]",
@@ -915,6 +1044,9 @@ void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {
 void bluetooth_manager_stop() {
     g_manager_running.store(false, std::memory_order_relaxed);
     if (g_manager_thread.joinable()) g_manager_thread.join();
+#ifdef NS_BUNDLE_BLUETOOTHD
+    stop_bundled_bluetoothd(g_ctx.verbose);
+#endif
 }
 
 void bluetooth_manager_disconnect_connected_gamepads() {

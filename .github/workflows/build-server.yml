@@ -14,6 +14,7 @@ permissions:
 
 env:
   SDL_REF: release-3.4.10
+  BLUEZ_VERSION: "5.72"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -27,7 +28,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14 cmake ninja-build git wget xxd \
-            libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev pkg-config
+            libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev pkg-config \
+            libglib2.0-dev libdbus-1-dev libudev-dev libreadline-dev
 
       - name: Cache SDL3 aarch64 static
         id: cache-sdl3-aarch64
@@ -72,6 +74,42 @@ jobs:
           cmake --build /tmp/SDL3-build --parallel
           cmake --install /tmp/SDL3-build
 
+      - name: Cache bundled bluetoothd
+        id: cache-bluez
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/bluez-${{ env.BLUEZ_VERSION }}
+          key: bluez-${{ env.BLUEZ_VERSION }}-arm64-v1
+
+      - name: Build bundled bluetoothd (BlueZ ${{ env.BLUEZ_VERSION }})
+        if: steps.cache-bluez.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://www.kernel.org/pub/linux/bluetooth/bluez-${BLUEZ_VERSION}.tar.xz"
+          tar xf "bluez-${BLUEZ_VERSION}.tar.xz"
+          cd "bluez-${BLUEZ_VERSION}"
+
+          ./configure \
+            --prefix="$HOME/.local/bluez-${BLUEZ_VERSION}" \
+            --disable-systemd \
+            --disable-udev \
+            --disable-cups \
+            --disable-obex \
+            --disable-client \
+            --disable-mesh \
+            --disable-monitor \
+            --disable-tools \
+            --disable-health \
+            --disable-hid \
+            --disable-hog \
+            --disable-a2dp \
+            --disable-avrcp \
+            --disable-network \
+            --enable-experimental
+
+          make -j"$(nproc)" bluetoothd
+          mkdir -p "$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth"
+          cp src/bluetoothd "$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth/bluetoothd"
+
       - name: Build Unified Pi Server
         run: |
           cd server
@@ -82,7 +120,9 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
             -DUSE_SDL_BT=ON \
-            -DREQUIRE_SDL_BT=ON
+            -DREQUIRE_SDL_BT=ON \
+            -DBUNDLE_BLUETOOTHD=ON \
+            -DBUNDLED_BLUETOOTHD_PATH="$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth/bluetoothd"
 
           make -j"$(nproc)"
 

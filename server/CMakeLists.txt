@@ -30,15 +30,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cli11)
 
-option(USE_UPNP "Enable UPnP port forwarding via miniupnpc" ON)
-option(USE_SDL_BT "Enable local Bluetooth/controller input via SDL3" ON)
-option(REQUIRE_SDL_BT "Fail configure if SDL3 Bluetooth/controller support is unavailable" OFF)
-option(USE_BLUEZ_DBUS "Use BlueZ D-Bus manager for Bluetooth pairing/reconnect on Linux" ON)
-option(REQUIRE_BLUEZ_DBUS "Fail configure if BlueZ D-Bus manager dependencies are unavailable" ON)
+option(USE_UPNP           "Enable UPnP port forwarding via miniupnpc"                           ON)
+option(USE_SDL_BT         "Enable local Bluetooth/controller input via SDL3"                    ON)
+option(REQUIRE_SDL_BT     "Fail configure if SDL3 Bluetooth/controller support is unavailable"  OFF)
+option(USE_BLUEZ_DBUS     "Use BlueZ D-Bus manager for Bluetooth pairing/reconnect on Linux"    ON)
+option(REQUIRE_BLUEZ_DBUS "Fail configure if BlueZ D-Bus manager dependencies are unavailable"  ON)
+option(BUNDLE_BLUETOOTHD  "Embed a bundled bluetoothd binary into ns-backend"                   OFF)
+
+set(BUNDLED_BLUETOOTHD_PATH "" CACHE STRING "Path to the bluetoothd binary to embed (required when BUNDLE_BLUETOOTHD=ON)")
 
 # Allow passing paths directly (e.g. from cross-compiled miniupnpc)
 set(MINIUPNPC_INCLUDE_DIRS "" CACHE STRING "miniupnpc include path")
-set(MINIUPNPC_LIBRARIES "" CACHE STRING "miniupnpc library path")
+set(MINIUPNPC_LIBRARIES    "" CACHE STRING "miniupnpc library path")
 
 if(USE_UPNP)
     if(MINIUPNPC_INCLUDE_DIRS AND MINIUPNPC_LIBRARIES)
@@ -53,13 +56,12 @@ if(USE_UPNP)
 
         if(MINIUPNPC_FOUND)
             add_definitions(-DUSE_UPNP)
-            # Try to link statically if available, to make the binary more portable.
             find_library(MINIUPNPC_STATIC_LIBRARY NAMES libminiupnpc.a PATHS ${MINIUPNPC_LIBRARY_DIRS})
             if(MINIUPNPC_STATIC_LIBRARY)
                 set(MINIUPNPC_LIBRARIES ${MINIUPNPC_STATIC_LIBRARY})
-                message(STATUS "UPnP support enabled (using static miniupnpc library: ${MINIUPNPC_STATIC_LIBRARY})")
+                message(STATUS "UPnP support enabled (static: ${MINIUPNPC_STATIC_LIBRARY})")
             else()
-                message(STATUS "UPnP support enabled (miniupnpc found via pkg-config)")
+                message(STATUS "UPnP support enabled (miniupnpc via pkg-config)")
             endif()
         else()
             message(STATUS "UPnP support disabled (miniupnpc not found)")
@@ -83,7 +85,6 @@ else()
     message(STATUS "Bluetooth/local controller support disabled by user")
 endif()
 
-
 if(USE_SDL_BT AND UNIX AND NOT APPLE AND NOT USE_BLUEZ_DBUS)
     message(FATAL_ERROR "Bluetooth/local controller support requires USE_BLUEZ_DBUS=ON; shell fallback was removed")
 endif()
@@ -91,15 +92,12 @@ endif()
 if(USE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
     set(NS_SDBUS_CPP_TAG "v2.3.1" CACHE STRING "Pinned sdbus-c++ v2 tag used by the BlueZ manager")
 
-    # Do not use find_package() here: distro packages can still be sdbus-c++ v1.x/old-v2,
-    # which silently changes the public API and breaks clean v2 code. Fetching the pinned
-    # tag keeps CI, Raspberry Pi builds, and local builds on the exact same D-Bus API.
-    set(SDBUSCPP_INSTALL OFF CACHE BOOL "" FORCE)
-    set(SDBUSCPP_BUILD_CODEGEN OFF CACHE BOOL "" FORCE)
-    set(SDBUSCPP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_INSTALL          OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_CODEGEN    OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_DOCS       OFF CACHE BOOL "" FORCE)
     set(SDBUSCPP_BUILD_DOXYGEN_DOCS OFF CACHE BOOL "" FORCE)
-    set(SDBUSCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(SDBUSCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_EXAMPLES   OFF CACHE BOOL "" FORCE)
+    set(SDBUSCPP_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
 
     FetchContent_Declare(
         sdbus_cpp
@@ -131,27 +129,29 @@ if(NOT libwebsockets_FOUND)
     pkg_check_modules(LWS REQUIRED libwebsockets)
 endif()
 
-# Embed webapp HTML files into the binary via xxd
 find_program(XXD_EXECUTABLE xxd)
 if(NOT XXD_EXECUTABLE)
     message(FATAL_ERROR "xxd not found. Install it with: sudo apt install xxd   (or vim-common)")
 endif()
 
-set(WEBAPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../webapp)
+# ---------------------------------------------------------------------------
+# Embed webapp HTML/CSS/JS files
+# ---------------------------------------------------------------------------
+set(WEBAPP_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/../webapp)
 set(WEBAPP_EMBED ${CMAKE_CURRENT_BINARY_DIR}/webapp_embed.h)
 
 add_custom_command(
     OUTPUT ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i index.html > ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i mobile.html >> ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i editor.html >> ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/index.css >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i index.html    >  ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i mobile.html   >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i editor.html   >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/index.css  >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/mobile.css >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/editor.css >> ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/bridge.js >> ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/index.js >> ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/mobile.js >> ${WEBAPP_EMBED}
-    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/editor.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/bridge.js  >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/index.js   >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/mobile.js  >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/editor.js  >> ${WEBAPP_EMBED}
     DEPENDS
         ${WEBAPP_DIR}/index.html
         ${WEBAPP_DIR}/mobile.html
@@ -167,6 +167,37 @@ add_custom_command(
     VERBATIM
 )
 
+# ---------------------------------------------------------------------------
+# Embed bundled bluetoothd binary (optional)
+# ---------------------------------------------------------------------------
+if(BUNDLE_BLUETOOTHD)
+    if(NOT BUNDLED_BLUETOOTHD_PATH OR NOT EXISTS "${BUNDLED_BLUETOOTHD_PATH}")
+        message(FATAL_ERROR
+            "BUNDLE_BLUETOOTHD=ON requires a valid BUNDLED_BLUETOOTHD_PATH. "
+            "Got: '${BUNDLED_BLUETOOTHD_PATH}'")
+    endif()
+
+    # Stage the binary with a fixed filename so xxd produces a predictable
+    # C identifier (bluetoothd_staged / bluetoothd_staged_len).
+    set(BLUETOOTHD_STAGED ${CMAKE_CURRENT_BINARY_DIR}/bluetoothd_staged)
+    set(BLUETOOTHD_EMBED  ${CMAKE_CURRENT_BINARY_DIR}/bluetoothd_embed.h)
+
+    add_custom_command(
+        OUTPUT ${BLUETOOTHD_EMBED}
+        COMMAND ${CMAKE_COMMAND} -E copy "${BUNDLED_BLUETOOTHD_PATH}" "${BLUETOOTHD_STAGED}"
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_BINARY_DIR}
+                ${XXD_EXECUTABLE} -i bluetoothd_staged > "${BLUETOOTHD_EMBED}"
+        DEPENDS "${BUNDLED_BLUETOOTHD_PATH}"
+        COMMENT "Embedding bluetoothd ${BUNDLED_BLUETOOTHD_PATH} via xxd..."
+        VERBATIM
+    )
+    add_definitions(-DNS_BUNDLE_BLUETOOTHD)
+    message(STATUS "Bundling bluetoothd from: ${BUNDLED_BLUETOOTHD_PATH}")
+endif()
+
+# ---------------------------------------------------------------------------
+# Main executable
+# ---------------------------------------------------------------------------
 add_executable(ns-backend
     src/main.cpp
     src/app_state.cpp
@@ -180,15 +211,28 @@ add_executable(ns-backend
     ${WEBAPP_EMBED}
 )
 
+if(BUNDLE_BLUETOOTHD)
+    target_sources(ns-backend PRIVATE ${BLUETOOTHD_EMBED})
+endif()
+
 if(SDL3_FOUND)
     target_sources(ns-backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/sdl_input.cpp)
 endif()
+
 target_include_directories(ns-backend PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
     ${CMAKE_CURRENT_BINARY_DIR}
 )
-target_link_libraries(ns-backend PRIVATE pthread nlohmann_json::nlohmann_json CLI11::CLI11 OpenSSL::SSL OpenSSL::Crypto)
+
+target_link_libraries(ns-backend PRIVATE
+    pthread
+    nlohmann_json::nlohmann_json
+    CLI11::CLI11
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+
 if(libwebsockets_FOUND)
     target_link_libraries(ns-backend PRIVATE websockets)
 else()
