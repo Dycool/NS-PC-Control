@@ -665,7 +665,11 @@ void BluezManager::tick() {
 
     if (!g_proactive_reconnect_enabled.load(std::memory_order_relaxed)) {
         close_pair_window();
-        first_snapshot_done = true;
+    if (g_ctx.verbose && !logged_ready) {
+        std::println("[bt] Bluetooth controller manager ready");
+        logged_ready = true;
+    }
+    first_snapshot_done = true;
         return;
     }
 
@@ -699,16 +703,10 @@ void BluezManager::tick() {
                     std::println("[bt] proactive reconnect attempt for {}", dev.display_name());
                 (void)connect_device_once(dev);
                 next_attempt = now + RECONNECT_COOLDOWN;
-                if (!pair_window_open)
-                    open_pair_window("trusted controller reconnecting");
             }
         }
     }
 
-    if (!logged_ready) {
-        std::println("[bt] Bluetooth controller manager ready");
-        logged_ready = true;
-    }
     first_snapshot_done = true;
 }
 
