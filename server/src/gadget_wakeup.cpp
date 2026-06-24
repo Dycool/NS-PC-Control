@@ -18,6 +18,7 @@
 #include <signal.h>
 #include <sstream>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -799,6 +800,28 @@ static bool parse_nintendo_adv_from_btmon_log(const std::string& path,
 // Wake advert capture (setup mode)
 // ===========================================================================
 
+enum class WakeCaptureResult {
+    Captured,
+    Timeout,
+    Cancelled
+};
+
+static bool system_was_interrupted(int status) {
+    if (status == -1) return false;
+
+    if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        return sig == SIGINT || sig == SIGTERM || sig == SIGQUIT;
+    }
+
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        return code == 130 || code == 131 || code == 143;
+    }
+
+    return false;
+}
+
 static bool prepare_wake_capture_adapter(std::string& hci, bool verbose) {
     if (!valid_hci(hci)) hci = "hci0";
     run_wake_command({"systemctl", "stop",    "bluetooth"}, verbose);
@@ -819,8 +842,8 @@ static bool prepare_wake_capture_adapter(std::string& hci, bool verbose) {
     return true;
 }
 
-static bool capture_switch2_wake_advert(int seconds, const std::string& preferred_mac,
-                                         std::string& out_mac, std::string& out_adv) {
+static WakeCaptureResult capture_switch2_wake_advert(int seconds, const std::string& preferred_mac,
+                                                   std::string& out_mac, std::string& out_adv) {
     seconds = std::clamp(seconds, 5, 180);
     char log_path[128];
     std::snprintf(log_path, sizeof(log_path), "/tmp/ns_switch2_wake_%ld.log", (long)getpid());
@@ -835,21 +858,34 @@ static bool capture_switch2_wake_advert(int seconds, const std::string& preferre
         // Run btmon for 1 second while HCI scanning is active
         std::ostringstream cmd;
         cmd << "sh -c 'rm -f " << log_path
+            << "; mon=\"\""
+            << "; cleanup() { hcitool -i " << hci << " cmd 0x08 0x000C 00 00 >/dev/null 2>&1 || true; "
+            << "[ -n \"$mon\" ] && kill \"$mon\" >/dev/null 2>&1 || true; "
+            << "[ -n \"$mon\" ] && wait \"$mon\" >/dev/null 2>&1 || true; }"
+            << "; trap \"cleanup; exit 130\" INT TERM QUIT"
             << "; timeout --kill-after=1s 2s btmon -T > " << log_path << " 2>&1 & mon=$!"
             << "; sleep 0.1"
             << "; hcitool -i " << hci << " cmd 0x08 0x000B 01 04 00 04 00 00 00 >/dev/null 2>&1 || true"
             << "; hcitool -i " << hci << " cmd 0x08 0x000C 01 00 >/dev/null 2>&1 || true"
             << "; sleep 1"
-            << "; hcitool -i " << hci << " cmd 0x08 0x000C 00 00 >/dev/null 2>&1 || true"
-            << "; kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
-        int dummy = std::system(cmd.str().c_str()); (void)dummy;
+            << "; cleanup"
+            << "; exit 0'";
+        int status = std::system(cmd.str().c_str());
+        if (system_was_interrupted(status)) {
+            std::println("");
+            std::println("[wake] Setup cancelled.");
+            wake_disable_le_scan_quiet(hci);
+            unlink(log_path);
+            g_ctx.running.store(false, std::memory_order_relaxed);
+            return WakeCaptureResult::Cancelled;
+        }
 
         // Check if captured
         if (parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv)) {
             std::println("");  // newline after progress
             wake_disable_le_scan_quiet(hci);
             unlink(log_path);
-            return true;
+            return WakeCaptureResult::Captured;
         }
 
         // Show progress on same line using carriage return
@@ -861,7 +897,11 @@ static bool capture_switch2_wake_advert(int seconds, const std::string& preferre
     std::println("");  // newline after progress
     wake_disable_le_scan_quiet(hci);
     unlink(log_path);
-    return false;
+    if (!g_ctx.running.load(std::memory_order_relaxed)) {
+        std::println("[wake] Setup cancelled.");
+        return WakeCaptureResult::Cancelled;
+    }
+    return WakeCaptureResult::Timeout;
 }
 
 // ===========================================================================
@@ -935,9 +975,14 @@ int run_switch2_wakeup_setup() {
     std::println("[wake] Now listening for up to 3 minutes — press HOME on the Joy-Con 2.");
 
     std::string cap_mac, cap_adv;
-    bool captured = capture_switch2_wake_advert(180, "", cap_mac, cap_adv);
+    WakeCaptureResult capture_result = capture_switch2_wake_advert(180, "", cap_mac, cap_adv);
 
-    if (!captured) {
+    if (capture_result == WakeCaptureResult::Cancelled) {
+        restore_setup_bt_state();
+        return 130;
+    }
+
+    if (capture_result == WakeCaptureResult::Timeout) {
         std::println(stderr, "[wake] Could not capture the HOME wake advert. "
                              "Try again with the Joy-Con 2 closer to the Pi.");
         restore_setup_bt_state();
