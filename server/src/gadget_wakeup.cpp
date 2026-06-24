@@ -819,60 +819,52 @@ static bool prepare_wake_capture_adapter(std::string& hci, bool verbose) {
     return true;
 }
 
-static bool capture_switch2_wake_advert(int timeout_seconds, const std::string& preferred_mac,
+static bool capture_switch2_wake_advert(int seconds, const std::string& preferred_mac,
                                          std::string& out_mac, std::string& out_adv) {
-    timeout_seconds = std::clamp(timeout_seconds, 5, 600);
+    seconds = std::clamp(seconds, 5, 180);
     char log_path[128];
     std::snprintf(log_path, sizeof(log_path), "/tmp/ns_switch2_wake_%ld.log", (long)getpid());
-    std::string pid_path = std::string(log_path) + ".pid";
     std::string hci = valid_hci(g_ctx.switch2_wake_hci_dev)
                         ? g_ctx.switch2_wake_hci_dev : "hci0";
 
-    unlink(log_path);
     wake_disable_advertising_quiet(hci);
     wake_disable_le_scan_quiet(hci);
 
-    // Decode HCI traffic with btmon into a log we tail live. Line-buffer it (stdbuf) so a
-    // single HOME burst is flushed to the file immediately instead of waiting for a ~4 KB
-    // block buffer to fill — that delay is what made captures feel like they "missed".
-    const std::string btmon = command_exists("stdbuf") ? "stdbuf -oL -eL btmon -T" : "btmon -T";
-    std::ostringstream start;
-    start << "sh -c 'timeout --kill-after=1s " << (timeout_seconds + 5) << "s " << btmon
-          << " > " << log_path << " 2>&1 & echo $! > " << pid_path << "'";
-    int rc = std::system(start.str().c_str()); (void)rc;
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    // Start btmon and configure HCI for scanning in background
+    std::ostringstream cmd;
+    cmd << "sh -c 'rm -f " << log_path
+        << "; timeout --kill-after=1s " << (seconds + 10) << "s btmon -T > " << log_path << " 2>&1 &"
+        << "; sleep 1"
+        << "; hcitool -i " << hci << " cmd 0x08 0x000B 01 04 00 04 00 00 00 >/dev/null 2>&1 || true"
+        << "; hcitool -i " << hci << " cmd 0x08 0x000C 01 00 >/dev/null 2>&1 || true'";
+    int dummy = std::system(cmd.str().c_str()); (void)dummy;
 
-    // One continuous active LE scan: interval == window (100% duty cycle) and duplicates
-    // NOT filtered, so every HOME advert burst is reported the moment it arrives.
-    run_wake_command({"hcitool", "-i", hci, "cmd", "0x08", "0x000B",
-                      "01", "04", "00", "04", "00", "00", "00"}, false);
-    run_wake_command({"hcitool", "-i", hci, "cmd", "0x08", "0x000C", "01", "00"}, false);
-
-    // Tail the log: as soon as a valid Nintendo HOME advert is decoded, stop — a single HOME
-    // press is enough, detected within one poll instead of after a fixed multi-second window.
+    // Poll for advertisement capture with progress updates
     bool found = false;
-    const auto t0       = std::chrono::steady_clock::now();
-    const auto deadline = t0 + std::chrono::seconds(timeout_seconds);
-    auto next_heartbeat = t0 + std::chrono::seconds(15);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline = t0 + std::chrono::seconds(seconds);
+    auto next_heartbeat = t0;
+    
     while (g_ctx.running.load(std::memory_order_relaxed)
                && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        
         if (parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv)) {
             found = true;
             break;
         }
+        
         if (std::chrono::steady_clock::now() >= next_heartbeat) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - t0).count();
-            std::println("[wake] still listening for HOME... ({}s/{}s)", elapsed, timeout_seconds);
-            next_heartbeat += std::chrono::seconds(15);
+            std::println("[wake] scanning for HOME... ({}s/{}s)", elapsed, seconds);
+            next_heartbeat += std::chrono::seconds(1);
         }
     }
 
+    // Stop scanning
     run_wake_command({"hcitool", "-i", hci, "cmd", "0x08", "0x000C", "00", "00"}, false);
     wake_disable_le_scan_quiet(hci);
-    rc = std::system(std::format(
-        "sh -c 'kill $(cat {0}) >/dev/null 2>&1; rm -f {0}'", pid_path).c_str()); (void)rc;
     unlink(log_path);
     return found;
 }
@@ -945,9 +937,7 @@ int run_switch2_wakeup_setup() {
     std::println("[wake] Config will be saved to: {}", g_ctx.switch2_wakeup_config_path);
     std::println("[wake] Bluetooth adapter registered for runtime wake: {}", g_ctx.switch2_wake_hci_dev);
     std::println("[wake] Put the Switch 2 to sleep and keep the Joy-Con 2 close to the Pi.");
-    std::println("[wake] Now listening continuously for up to 3 minutes — press HOME on the Joy-Con 2.");
-    std::println("[wake] It is captured the instant it broadcasts; a single HOME press is usually enough.");
-    std::println("[wake] If nothing is captured, briefly wake the Switch 2 and press HOME again — no need to restart.");
+    std::println("[wake] Now listening for up to 3 minutes — press HOME on the Joy-Con 2.");
 
     std::string cap_mac, cap_adv;
     bool captured = capture_switch2_wake_advert(180, "", cap_mac, cap_adv);
