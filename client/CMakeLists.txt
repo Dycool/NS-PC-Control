@@ -15,6 +15,62 @@ find_package(SDL3 REQUIRED CONFIG)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(OpenSSL REQUIRED)
 
+if(APPLE)
+    function(ns_remove_agl_framework target)
+        if(NOT TARGET "${target}")
+            return()
+        endif()
+
+        foreach(prop IN ITEMS INTERFACE_LINK_LIBRARIES INTERFACE_LINK_OPTIONS)
+            get_target_property(values "${target}" "${prop}")
+            if(NOT values OR values STREQUAL "values-NOTFOUND")
+                continue()
+            endif()
+
+            set(filtered_values)
+            set(pending_framework FALSE)
+            foreach(value IN LISTS values)
+                if(pending_framework)
+                    set(pending_framework FALSE)
+                    if(value STREQUAL "AGL")
+                        continue()
+                    endif()
+
+                    list(APPEND filtered_values "-framework")
+                endif()
+
+                if(value STREQUAL "-framework")
+                    set(pending_framework TRUE)
+                    continue()
+                endif()
+
+                if(value STREQUAL "AGL"
+                    OR value STREQUAL "-framework AGL"
+                    OR value STREQUAL "SHELL:-framework AGL"
+                    OR value STREQUAL "LINKER:-framework,AGL")
+                    continue()
+                endif()
+
+                list(APPEND filtered_values "${value}")
+            endforeach()
+
+            if(pending_framework)
+                list(APPEND filtered_values "-framework")
+            endif()
+
+            set_target_properties("${target}" PROPERTIES "${prop}" "${filtered_values}")
+        endforeach()
+    endfunction()
+
+    # Qt 6.8.x can still propagate the removed AGL framework through QtGui's
+    # OpenGL wrapper. Xcode 26 SDKs no longer ship AGL, and this app does not
+    # use the legacy OpenGL entry points that required it.
+    ns_remove_agl_framework(Qt6::Gui)
+    ns_remove_agl_framework(Qt6::Widgets)
+    ns_remove_agl_framework(OpenGL::GL)
+    ns_remove_agl_framework(WrapOpenGL::WrapOpenGL)
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(
