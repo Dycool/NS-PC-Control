@@ -830,43 +830,38 @@ static bool capture_switch2_wake_advert(int seconds, const std::string& preferre
     wake_disable_advertising_quiet(hci);
     wake_disable_le_scan_quiet(hci);
 
-    // Start btmon and configure HCI for scanning in background
-    std::ostringstream cmd;
-    cmd << "sh -c 'rm -f " << log_path
-        << "; timeout --kill-after=1s " << (seconds + 10) << "s btmon -T > " << log_path << " 2>&1 &"
-        << "; sleep 1"
-        << "; hcitool -i " << hci << " cmd 0x08 0x000B 01 04 00 04 00 00 00 >/dev/null 2>&1 || true"
-        << "; hcitool -i " << hci << " cmd 0x08 0x000C 01 00 >/dev/null 2>&1 || true'";
-    int dummy = std::system(cmd.str().c_str()); (void)dummy;
+    // Attempt capture for each second
+    for (int attempt = 1; attempt <= seconds && g_ctx.running.load(std::memory_order_relaxed); ++attempt) {
+        // Run btmon for 1 second while HCI scanning is active
+        std::ostringstream cmd;
+        cmd << "sh -c 'rm -f " << log_path
+            << "; timeout --kill-after=1s 2s btmon -T > " << log_path << " 2>&1 & mon=$!"
+            << "; sleep 0.1"
+            << "; hcitool -i " << hci << " cmd 0x08 0x000B 01 04 00 04 00 00 00 >/dev/null 2>&1 || true"
+            << "; hcitool -i " << hci << " cmd 0x08 0x000C 01 00 >/dev/null 2>&1 || true"
+            << "; sleep 1"
+            << "; hcitool -i " << hci << " cmd 0x08 0x000C 00 00 >/dev/null 2>&1 || true"
+            << "; kill $mon >/dev/null 2>&1 || true; wait $mon >/dev/null 2>&1 || true'";
+        int dummy = std::system(cmd.str().c_str()); (void)dummy;
 
-    // Poll for advertisement capture with progress updates
-    bool found = false;
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto deadline = t0 + std::chrono::seconds(seconds);
-    auto next_heartbeat = t0;
-    
-    while (g_ctx.running.load(std::memory_order_relaxed)
-               && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        
+        // Check if captured
         if (parse_nintendo_adv_from_btmon_log(log_path, preferred_mac, out_mac, out_adv)) {
-            found = true;
-            break;
+            std::println("");  // newline after progress
+            wake_disable_le_scan_quiet(hci);
+            unlink(log_path);
+            return true;
         }
-        
-        if (std::chrono::steady_clock::now() >= next_heartbeat) {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - t0).count();
-            std::println("[wake] scanning for HOME... ({}s/{}s)", elapsed, seconds);
-            next_heartbeat += std::chrono::seconds(1);
-        }
+
+        // Show progress on same line using carriage return
+        std::fflush(stdout);
+        std::fprintf(stdout, "\r[wake] scanning for HOME... (%d/%d)", attempt, seconds);
+        std::fflush(stdout);
     }
 
-    // Stop scanning
-    run_wake_command({"hcitool", "-i", hci, "cmd", "0x08", "0x000C", "00", "00"}, false);
+    std::println("");  // newline after progress
     wake_disable_le_scan_quiet(hci);
     unlink(log_path);
-    return found;
+    return false;
 }
 
 // ===========================================================================
