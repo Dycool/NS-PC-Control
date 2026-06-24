@@ -35,9 +35,6 @@ option(USE_SDL_BT         "Enable local Bluetooth/controller input via SDL3"    
 option(REQUIRE_SDL_BT     "Fail configure if SDL3 Bluetooth/controller support is unavailable"  OFF)
 option(USE_BLUEZ_DBUS     "Use BlueZ D-Bus manager for Bluetooth pairing/reconnect on Linux"    ON)
 option(REQUIRE_BLUEZ_DBUS "Fail configure if BlueZ D-Bus manager dependencies are unavailable"  ON)
-option(BUNDLE_BLUETOOTHD  "Embed a bundled bluetoothd binary into ns-backend"                   OFF)
-
-set(BUNDLED_BLUETOOTHD_PATH "" CACHE STRING "Path to the bluetoothd binary to embed (required when BUNDLE_BLUETOOTHD=ON)")
 
 # Allow passing paths directly (e.g. from cross-compiled miniupnpc)
 set(MINIUPNPC_INCLUDE_DIRS "" CACHE STRING "miniupnpc include path")
@@ -168,34 +165,6 @@ add_custom_command(
 )
 
 # ---------------------------------------------------------------------------
-# Embed bundled bluetoothd binary (optional)
-# ---------------------------------------------------------------------------
-if(BUNDLE_BLUETOOTHD)
-    if(NOT BUNDLED_BLUETOOTHD_PATH OR NOT EXISTS "${BUNDLED_BLUETOOTHD_PATH}")
-        message(FATAL_ERROR
-            "BUNDLE_BLUETOOTHD=ON requires a valid BUNDLED_BLUETOOTHD_PATH. "
-            "Got: '${BUNDLED_BLUETOOTHD_PATH}'")
-    endif()
-
-    # Stage the binary with a fixed filename so xxd produces a predictable
-    # C identifier (bluetoothd_staged / bluetoothd_staged_len).
-    set(BLUETOOTHD_STAGED ${CMAKE_CURRENT_BINARY_DIR}/bluetoothd_staged)
-    set(BLUETOOTHD_EMBED  ${CMAKE_CURRENT_BINARY_DIR}/bluetoothd_embed.h)
-
-    add_custom_command(
-        OUTPUT ${BLUETOOTHD_EMBED}
-        COMMAND ${CMAKE_COMMAND} -E copy "${BUNDLED_BLUETOOTHD_PATH}" "${BLUETOOTHD_STAGED}"
-        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_BINARY_DIR}
-                ${XXD_EXECUTABLE} -i bluetoothd_staged > "${BLUETOOTHD_EMBED}"
-        DEPENDS "${BUNDLED_BLUETOOTHD_PATH}"
-        COMMENT "Embedding bluetoothd ${BUNDLED_BLUETOOTHD_PATH} via xxd..."
-        VERBATIM
-    )
-    add_definitions(-DNS_BUNDLE_BLUETOOTHD)
-    message(STATUS "Bundling bluetoothd from: ${BUNDLED_BLUETOOTHD_PATH}")
-endif()
-
-# ---------------------------------------------------------------------------
 # Main executable
 # ---------------------------------------------------------------------------
 add_executable(ns-backend
@@ -210,10 +179,6 @@ add_executable(ns-backend
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
     ${WEBAPP_EMBED}
 )
-
-if(BUNDLE_BLUETOOTHD)
-    target_sources(ns-backend PRIVATE ${BLUETOOTHD_EMBED})
-endif()
 
 if(SDL3_FOUND)
     target_sources(ns-backend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/sdl_input.cpp)

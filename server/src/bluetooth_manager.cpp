@@ -13,7 +13,6 @@
 #include <cstdlib>
 #include <csignal>
 #include <exception>
-#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -30,7 +29,6 @@
 #include <vector>
 
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -197,135 +195,6 @@ void configure_bluez_reconnect_policy(bool verbose) {
 } // namespace
 
 // ===========================================================================
-// Bundled bluetoothd (embedded via xxd at build time)
-// ===========================================================================
-
-#ifdef NS_BUNDLE_BLUETOOTHD
-#include "bluetoothd_embed.h"
-// Provides: unsigned char bluetoothd_staged[];
-//           unsigned int  bluetoothd_staged_len;
-
-namespace {
-
-std::string g_bundled_bt_path;
-pid_t       g_bundled_bt_pid = -1;
-
-// Extract the embedded binary to a temp file and make it executable.
-bool extract_bundled_bluetoothd(bool verbose) {
-    g_bundled_bt_path = std::format("/tmp/ns-pc-control-bluetoothd-{}", getpid());
-    {
-        std::ofstream f(g_bundled_bt_path, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            std::println(stderr, "[bt] failed to extract bundled bluetoothd to {}",
-                         g_bundled_bt_path);
-            g_bundled_bt_path.clear();
-            return false;
-        }
-        f.write(reinterpret_cast<const char*>(bluetoothd_staged),
-                static_cast<std::streamsize>(bluetoothd_staged_len));
-    }
-    if (chmod(g_bundled_bt_path.c_str(), 0755) != 0) {
-        std::println(stderr, "[bt] failed to chmod bundled bluetoothd: {}",
-                     std::strerror(errno));
-        unlink(g_bundled_bt_path.c_str());
-        g_bundled_bt_path.clear();
-        return false;
-    }
-    if (verbose) std::println("[bt] extracted bundled bluetoothd ({} bytes) to {}",
-                              bluetoothd_staged_len, g_bundled_bt_path);
-    return true;
-}
-
-// Stop system bluetoothd, spawn ours on the system D-Bus, and wait for
-// org.bluez to appear before returning.
-bool start_bundled_bluetoothd(bool verbose) {
-    if (!extract_bundled_bluetoothd(verbose)) return false;
-
-    if (verbose) std::println("[bt] stopping system bluetoothd...");
-    int stop_rc = std::system("systemctl stop bluetooth.service >/dev/null 2>&1 "
-                              "|| service bluetooth stop >/dev/null 2>&1 || true");
-    (void)stop_rc;
-    // Give the system daemon time to fully release D-Bus and HCI before we take over.
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-
-    if (verbose) std::println("[bt] starting bundled bluetoothd (BlueZ 5.72)...");
-    pid_t pid = fork();
-    if (pid == 0) {
-        // Child: silence output unless verbose, then exec bluetoothd.
-        if (!verbose) {
-            int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDOUT_FILENO);
-                dup2(devnull, STDERR_FILENO);
-                close(devnull);
-            }
-        }
-        execl(g_bundled_bt_path.c_str(), g_bundled_bt_path.c_str(),
-              "--nodetach", "--noplugin=hostname", nullptr);
-        _exit(1);
-    }
-    if (pid < 0) {
-        std::println(stderr, "[bt] fork() failed for bundled bluetoothd: {}",
-                     std::strerror(errno));
-        unlink(g_bundled_bt_path.c_str());
-        g_bundled_bt_path.clear();
-        return false;
-    }
-    g_bundled_bt_pid = pid;
-
-    // Poll until org.bluez is registered on the system D-Bus (up to ~10s).
-    for (int i = 0; i < 40; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-
-        // Bail early if the child already exited.
-        int status = 0;
-        if (waitpid(pid, &status, WNOHANG) == pid) {
-            std::println(stderr, "[bt] bundled bluetoothd exited unexpectedly (exit {})",
-                         WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-            g_bundled_bt_pid = -1;
-            unlink(g_bundled_bt_path.c_str());
-            g_bundled_bt_path.clear();
-            return false;
-        }
-
-        if (std::system("busctl status org.bluez >/dev/null 2>&1") == 0) {
-            if (verbose) std::println("[bt] bundled bluetoothd ready on D-Bus");
-            return true;
-        }
-    }
-
-    std::println(stderr, "[bt] bundled bluetoothd did not appear on D-Bus within 10s");
-    return false;
-}
-
-// Terminate the bundled daemon, clean up the temp file, and restart the
-// system bluetoothd so the host is left in a clean state.
-void stop_bundled_bluetoothd(bool verbose) {
-    if (g_bundled_bt_pid > 0) {
-        if (verbose) std::println("[bt] stopping bundled bluetoothd...");
-        kill(g_bundled_bt_pid, SIGTERM);
-        // Wait up to 2s for a clean exit before giving up.
-        for (int i = 0; i < 20; ++i) {
-            int status = 0;
-            if (waitpid(g_bundled_bt_pid, &status, WNOHANG) == g_bundled_bt_pid) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        g_bundled_bt_pid = -1;
-    }
-    if (!g_bundled_bt_path.empty()) {
-        unlink(g_bundled_bt_path.c_str());
-        g_bundled_bt_path.clear();
-    }
-    if (verbose) std::println("[bt] restoring system bluetoothd...");
-    int start_rc = std::system("systemctl start bluetooth.service >/dev/null 2>&1 "
-                               "|| service bluetooth start >/dev/null 2>&1 || true");
-    (void)start_rc;
-}
-
-} // namespace
-#endif // NS_BUNDLE_BLUETOOTHD
-
-// ===========================================================================
 // Runtime setup
 // ===========================================================================
 
@@ -347,18 +216,8 @@ void runtime_setup_impl(bool verbose) {
         }
     }
 
-#ifdef NS_BUNDLE_BLUETOOTHD
-    // Replace the system bluetoothd with the embedded one.
-    if (!start_bundled_bluetoothd(verbose)) {
-        std::println(stderr, "[bt] warning: bundled bluetoothd failed to start; "
-                             "falling back to system bluetoothd");
-        if      (command_exists("systemctl")) (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
-        else if (command_exists("service"))   (void)run_cmd("service bluetooth start >/dev/null 2>&1",           verbose);
-    }
-#else
     if      (command_exists("systemctl")) (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
     else if (command_exists("service"))   (void)run_cmd("service bluetooth start >/dev/null 2>&1",           verbose);
-#endif
 
     configure_bluez_reconnect_policy(verbose);
 }
@@ -1050,9 +909,6 @@ void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {
 void bluetooth_manager_stop() {
     g_manager_running.store(false, std::memory_order_relaxed);
     if (g_manager_thread.joinable()) g_manager_thread.join();
-#ifdef NS_BUNDLE_BLUETOOTHD
-    stop_bundled_bluetoothd(g_ctx.verbose);
-#endif
 }
 
 void bluetooth_manager_disconnect_connected_gamepads() {
