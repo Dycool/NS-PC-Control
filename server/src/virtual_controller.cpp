@@ -144,6 +144,14 @@ uint8_t pro_conn_info_from_hid(const HIDReport& src) {
     return bat_con;
 }
 
+// The console drives a flashing/cycling player-LED pattern (upper nibble = flash bits) while
+// the "Change Grip/Order" / controller-pairing screen is open; a steady player assignment uses
+// only the lower (solid) nibble. Our emulated pad always reports full battery, so the console
+// never flashes for low power — a flash pattern reliably means a controller-management screen.
+bool player_leds_indicate_pairing(uint8_t player_leds) {
+    return (player_leds & 0xF0) != 0;
+}
+
 void fill_neutral_controls(ProInputReport30& r) {
     r.conn_info = PRO_BAT_CON; r.buttons[0] = 0x00; r.buttons[1] = 0x80; r.buttons[2] = 0x00;
     r.left_stick[0] = r.right_stick[0] = 0x00; r.left_stick[1] = r.right_stick[1] = 0x08; r.left_stick[2] = r.right_stick[2] = 0x80;

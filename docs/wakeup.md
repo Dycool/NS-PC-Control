@@ -50,10 +50,10 @@ The wizard captures the Joy-Con 2 HOME wake advertisement and saves it. It does 
 
 1. Put the Switch 2 to sleep.
 2. Keep the Joy-Con 2 close to the Pi.
-3. Press HOME on the Joy-Con 2 until the setup captures the HOME advert.
+3. Press HOME on the Joy-Con 2. The wizard scans continuously and captures the advert the instant it broadcasts — a single press is usually enough.
 4. The setup saves the Joy-Con 2 MAC, ADV payload, and HCI device to the config file.
 
-> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working. During setup, the joycon may only broadcast the HOME advert after several sleep/wake cycles. If capture does not happen immediately, suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
+> Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working. The wizard listens continuously for ~3 minutes, so if the first HOME press isn't picked up you can briefly wake the Switch 2 and press HOME again within the same window — no need to restart the wizard.
 
 Use `-no-bt` only if you want to disable local SDL Bluetooth controller input. Switch 2 wake can still run if configured.
 

@@ -104,6 +104,7 @@ void build_get_device_info_response(uint8_t* out, int ctrl);
 void fill_neutral_controls(ProInputReport30& r);
 void fill_neutral_controls(ProInputReport21& r);
 uint8_t pro_conn_info_from_hid(const ns::HIDReport& src);
+bool player_leds_indicate_pairing(uint8_t player_leds);
 uint16_t axis8_to_12(uint8_t v);
 uint8_t invert_axis8_centered(uint8_t v);
 void pack_stick_12(uint8_t out[3], uint8_t x8, uint8_t y8);

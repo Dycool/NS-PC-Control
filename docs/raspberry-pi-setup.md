@@ -39,7 +39,7 @@ sudo ./ns-backend --pair
 
 `--pair` opens a 2-minute pairing window for new controllers. Already paired/trusted controllers reconnect anytime while Bluetooth input is enabled. When a trusted controller reconnects, the backend also opens a fresh 2-minute pairing window so another new controller can be added without restarting with `--pair`.
 
-Xbox Bluetooth controllers can still require extra kernel/input support on some Raspberry Pi OS builds. If BlueZ says the Xbox controller is connected but no SDL controller appears, update the controller firmware first and consider xpadneo as an optional compatibility driver.
+
 
 ## Running the Server
 
@@ -67,7 +67,7 @@ To setup wake for the Switch 2, put the console to sleep and press HOME on the J
 ```bash
 sudo ./ns-backend -wake
 ```
-During wake setup, the joycon may only broadcast the HOME advert after several sleep/wake cycles. Suspend the Switch 2, press HOME to wake it, and repeat about 4-6 times until the advert is captured.
+The wizard scans continuously and captures the HOME advert the instant the Joy-Con 2 broadcasts it, so a single HOME press is usually enough. If the first press isn't picked up, briefly wake the Switch 2 and press HOME again within the same listening window.
 
 If you want to debug a specific issue:
 ```bash

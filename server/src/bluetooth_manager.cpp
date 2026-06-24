@@ -17,6 +17,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <print>
 #include <set>
@@ -38,6 +39,7 @@ using Clock = std::chrono::steady_clock;
 
 std::atomic<bool> g_manager_running{false};
 std::atomic<bool> g_proactive_reconnect_enabled{true};
+std::atomic<bool> g_pair_window_requested{false};
 std::thread       g_manager_thread;
 
 constexpr const char* BT_RECONNECT_PAUSE_FILE = "/tmp/ns-pc-control-bt-reconnect-paused";
@@ -215,9 +217,25 @@ void runtime_setup_impl(bool verbose) {
                                  "some BLE controllers may not expose input devices");
         }
     }
+    // Best-effort: pre-load the in-kernel HID drivers that controllers bind to once BlueZ
+    // hands the link to uhid (PlayStation, Sony, Switch, Xbox/Microsoft). These normally
+    // autoload on connect; loading them up front avoids first-connect races on minimal
+    // images and gives PS controllers their gyro/rumble path. Missing modules are ignored.
+    (void)run_cmd("modprobe -a hidp joydev hid_playstation hid_sony hid_nintendo "
+                  "hid_microsoft >/dev/null 2>&1", verbose);
 
     if      (command_exists("systemctl")) (void)run_cmd("systemctl start bluetooth.service >/dev/null 2>&1", verbose);
     else if (command_exists("service"))   (void)run_cmd("service bluetooth start >/dev/null 2>&1",           verbose);
+
+    // PlayStation controllers (DualShock 3/4) and many clones negotiate L2CAP *without* ERTM;
+    // when BlueZ insists on ERTM the controller connects for ~1s and is then dropped. Disabling
+    // ERTM is the standard fix; it only affects connections made after this point, so set it
+    // before any controller pairs/connects (the bluetooth module is loaded by now).
+    if (run_cmd("test -e /sys/module/bluetooth/parameters/disable_ertm "
+                "&& echo 1 > /sys/module/bluetooth/parameters/disable_ertm 2>/dev/null", verbose) == 0
+            && verbose) {
+        std::println("[bt] disabled L2CAP ERTM (PlayStation controller connect-then-drop fix)");
+    }
 
     configure_bluez_reconnect_policy(verbose);
 }
@@ -284,10 +302,12 @@ struct DeviceInfo {
         if (appearance >= 960 && appearance <= 968) return true;
         if ((klass & 0x1f00u) == 0x0500u)           return true;
         std::string s = lower_copy(display_name() + " " + icon);
-        static constexpr std::array<std::string_view, 11> keywords = {
-            "gamepad", "joystick", "controller",
+        static constexpr std::array<std::string_view, 20> keywords = {
+            "gamepad", "joystick", "controller", "wireless controller",
             "xbox", "dualsense", "dualshock", "playstation",
-            "8bitdo", "gulikit", "gamesir", "joy-con",
+            "8bitdo", "gulikit", "gamesir", "joy-con", "joycon",
+            "nintendo", "pro controller", "horipad", "nacon",
+            "flydigi", "powera", "stadia",
         };
         return std::ranges::any_of(keywords, [&](std::string_view kw) {
             return s.find(kw) != std::string::npos;
@@ -323,7 +343,6 @@ public:
 private:
     bool pair_window_open    = false;
     bool discovery_active    = false;
-    bool logged_ready        = false;
     bool first_snapshot_done = false;
     std::atomic<bool> dbus_activity{false};
     Clock::time_point pair_window_end{};
@@ -665,12 +684,15 @@ void BluezManager::tick() {
 
     if (!g_proactive_reconnect_enabled.load(std::memory_order_relaxed)) {
         close_pair_window();
-    if (g_ctx.verbose && !logged_ready) {
-        std::println("[bt] Bluetooth controller manager ready");
-        logged_ready = true;
-    }
-    first_snapshot_done = true;
+        first_snapshot_done = true;
         return;
+    }
+
+    // The USB side detected the console's controller-pairing screen and asked us to be
+    // pairable. Open a window, or just extend it if one is already running (no log spam).
+    if (g_pair_window_requested.exchange(false, std::memory_order_relaxed)) {
+        if (pair_window_open) pair_window_end = now + std::chrono::minutes(2);
+        else                  open_pair_window("Switch controller-pairing screen detected");
     }
 
     if (pair_window_open && now >= pair_window_end) close_pair_window();
@@ -721,6 +743,7 @@ void BluezManager::run() {
 
     (void)adapter_set_bool("Pairable",    false);
     (void)adapter_set_bool("Discoverable", false);
+    if (g_ctx.verbose) std::println("[bt] Bluetooth controller manager ready");
 
     while (g_manager_running.load(std::memory_order_relaxed)) {
         tick();
@@ -889,6 +912,10 @@ void bluetooth_manager_start() {
         g_manager_running.store(false, std::memory_order_relaxed);
         if (g_ctx.verbose) std::println("[bt] Bluetooth controller manager stopped");
     });
+}
+
+void bluetooth_manager_request_pairing_window() {
+    g_pair_window_requested.store(true, std::memory_order_relaxed);
 }
 
 void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {

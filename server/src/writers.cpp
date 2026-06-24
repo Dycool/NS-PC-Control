@@ -2,6 +2,7 @@
 #include "app_state.hpp"
 #include "gadget_wakeup.hpp"
 #include "virtual_controller.hpp"
+#include "bluetooth_manager.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -80,6 +81,7 @@ void writer_thread(std::stop_token stoken, int hz) {
         bool timeout_printed[MAX_CLIENTS] = {};
         HoriHIDReport prev[HID_PORT_COUNT];
         for (int i = 0; i < HID_PORT_COUNT; ++i) prev[i].buttons = 0xFFFF;
+        bool pairing_screen_open[HID_PORT_COUNT] = {}; // edge-trigger for grip/order auto-pair
         uint64_t last_switch_sleep_poll_us = 0;
 
         while (!stoken.stop_requested()) {
@@ -271,6 +273,17 @@ void writer_thread(std::stop_token stoken, int hz) {
                             if ((subcmd == CMD_SET_PLAYER_LIGHTS || subcmd == 0x33) && !cmd_data.empty()) {
                                 const uint8_t player_leds = cmd_data[0];
                                 g_ctx.console_player_leds[h].store(player_leds, std::memory_order_relaxed);
+                                // The console flashes the player LEDs on its controller-pairing
+                                // (Change Grip/Order) screen. Edge-trigger a BT pairing window so a
+                                // real controller can be added exactly when the user expects it.
+                                const bool pairing_screen = player_leds_indicate_pairing(player_leds);
+                                if (!g_ctx.bluetooth_input_disabled
+                                        && pairing_screen && !pairing_screen_open[h]) {
+                                    if (g_ctx.verbose)
+                                        std::println("[bt] Switch controller-pairing screen detected (LED {:#04x}); opening pairing window", static_cast<unsigned>(player_leds));
+                                    bluetooth_manager_request_pairing_window();
+                                }
+                                pairing_screen_open[h] = pairing_screen;
                                 if (hw_slots[h].client_idx != -1) {
                                     publish_controller_status_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, player_leds, VIRTUAL_BODY_RGB[h]);
                                 }

@@ -437,11 +437,9 @@ void server_macro_stop_all_for_client(int client_idx) {
     for (int s = 0; s < 4; ++s) g_ctx.server_macros[client_idx][s].running = false;
 }
 
-void reset_client_session_locked(ClientSession& c) {
-    c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
-    c.report.reset(); c.has_new_report = false;
-    clear_all_motion(c);
-    c.uses_pad_presence = c.udp_rumble_enabled = false;
+// Reset the per-pad rumble/controller-status/presence state for all 4 sub-pads.
+// Shared by session reset and allocation; callers must already hold g_ctx.mtx[idx].
+static void reset_client_slot_streams_locked(ClientSession& c) {
     for (int s = 0; s < 4; ++s) {
         c.rumble[s] = RumblePacket{}; c.precision_rumble[s] = PrecisionRumblePacket{};
         c.rumble_active[s] = false; c.rumble_seq[s]++;
@@ -451,6 +449,14 @@ void reset_client_session_locked(ClientSession& c) {
         c.udp_last_controller_status_seq[s] = c.controller_status_seq[s];
         c.pad_present[s] = false; c.pad_last_present_us[s] = 0;
     }
+}
+
+void reset_client_session_locked(ClientSession& c) {
+    c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
+    c.report.reset(); c.has_new_report = false;
+    clear_all_motion(c);
+    c.uses_pad_presence = c.udp_rumble_enabled = false;
+    reset_client_slot_streams_locked(c);
 }
 
 void reset_client_session(int client_idx) {
@@ -504,18 +510,7 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         clear_all_motion(g_ctx.clients[i]);
         g_ctx.clients[i].uses_pad_presence = uses_pad_presence;
         g_ctx.clients[i].udp_rumble_enabled = false;
-        for (int s = 0; s < 4; ++s) {
-            g_ctx.clients[i].rumble[s] = RumblePacket{};
-            g_ctx.clients[i].precision_rumble[s] = PrecisionRumblePacket{};
-            g_ctx.clients[i].rumble_active[s] = false;
-            g_ctx.clients[i].rumble_seq[s]++;
-            g_ctx.clients[i].controller_status[s] = ControllerStatusState{};
-            g_ctx.clients[i].controller_status_seq[s]++;
-            g_ctx.clients[i].udp_last_rumble_seq[s] = g_ctx.clients[i].rumble_seq[s];
-            g_ctx.clients[i].udp_last_controller_status_seq[s] = g_ctx.clients[i].controller_status_seq[s];
-            g_ctx.clients[i].pad_present[s] = false;
-            g_ctx.clients[i].pad_last_present_us[s] = 0;
-        }
+        reset_client_slot_streams_locked(g_ctx.clients[i]);
         return true;
     };
 

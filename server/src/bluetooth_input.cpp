@@ -26,9 +26,6 @@ using namespace ns;
 #ifdef NS_ENABLE_SDL_BT
 bool bluetooth_input_available() { return true; }
 
-
-constexpr uint32_t BT_RUMBLE_MAX_PULSE_MS = 50;
-
 static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState& pad, uint64_t now) {
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
@@ -148,6 +145,22 @@ void bluetooth_input_thread(std::stop_token stoken) {
     bool proactive_reconnect_paused_by_sleep = false;
     if (g_ctx.verbose) std::println("[bt] Bluetooth/local controller input enabled");
 
+    // Release a physical SDL slot: stop its rumble/LEDs and clear all per-slot tracking.
+    // reset_session also frees the matching server session (skip it when the session is
+    // already gone, e.g. it timed out or publish reported it inactive).
+    auto release_slot = [&](int i, bool reset_session) {
+        if (reset_session && client_for_sdl[i] >= 0)
+            reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
+        input.set_rumble(i, 0, 0, 0);
+        input.clear_player_status(i);
+        client_for_sdl[i] = -1;
+        last_rumble_seq[i] = last_status_seq[i] = 0;
+        last_status_apply_us[i] = rumble_until_us[i] = 0;
+        last_rumble_low[i] = last_rumble_high[i] = last_rumble_set_us[i] = 0;
+        last_live_input_or_motion_us[i] = 0;
+        motion_seen[i] = false;
+    };
+
     while (!stoken.stop_requested()) {
         input.poll();
         auto pads = input.snapshot();
@@ -159,20 +172,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
         if (new_sleep_transition) {
             seen_sleep_seq = sleep_seq;
             input.stop_all_rumble();
-            for (int i = 0; i < 4; ++i) {
-                if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
-                client_for_sdl[i] = -1;
-                last_rumble_seq[i] = 0;
-                last_status_seq[i] = 0;
-                last_status_apply_us[i] = 0;
-                rumble_until_us[i] = 0;
-                last_rumble_low[i] = 0;
-                last_rumble_high[i] = 0;
-                last_rumble_set_us[i] = 0;
-                last_live_input_or_motion_us[i] = 0;
-                motion_seen[i] = false;
-                input.clear_player_status(i);
-            }
+            for (int i = 0; i < 4; ++i) release_slot(i, true);
             dormant_until_input.fill(true);
 
             bluetooth_manager_set_proactive_reconnect_enabled(false);
@@ -197,19 +197,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
             if (!pads[i].connected) {
                 if (client_for_sdl[i] >= 0) {
                     std::println("Bluetooth client released from Slot {}", client_for_sdl[i] + 1);
-                    input.set_rumble(i, 0, 0, 0);
-                    reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
-                    client_for_sdl[i] = -1;
-                    last_rumble_seq[i] = 0;
-                    last_status_seq[i] = 0;
-                    last_status_apply_us[i] = 0;
-                    rumble_until_us[i] = 0;
-                    last_rumble_low[i] = 0;
-                    last_rumble_high[i] = 0;
-                    last_rumble_set_us[i] = 0;
-                    last_live_input_or_motion_us[i] = 0;
-                    motion_seen[i] = false;
-                    input.clear_player_status(i);
+                    release_slot(i, true);
                 }
                 if (!switch_sleeping) dormant_until_input[i] = false;
                 last_live_input_or_motion_us[i] = 0;
@@ -225,17 +213,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 }
                 if (!still_active) {
                     std::println("Bluetooth client released from Slot {}", client_for_sdl[i] + 1);
-                    client_for_sdl[i] = -1;
-                    last_rumble_seq[i] = 0;
-                    last_status_seq[i] = 0;
-                    last_status_apply_us[i] = 0;
-                    rumble_until_us[i] = 0;
-                    last_rumble_low[i] = 0;
-                    last_rumble_high[i] = 0;
-                    last_rumble_set_us[i] = 0;
-                    last_live_input_or_motion_us[i] = 0;
-                    motion_seen[i] = false;
-                    input.clear_player_status(i);
+                    release_slot(i, false);
                 }
             }
 
@@ -281,17 +259,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
             }
 
             if (!publish_bluetooth_state_to_client(client_for_sdl[i], pads[i], now)) {
-                client_for_sdl[i] = -1;
-                last_rumble_seq[i] = 0;
-                last_status_seq[i] = 0;
-                last_status_apply_us[i] = 0;
-                rumble_until_us[i] = 0;
-                last_rumble_low[i] = 0;
-                last_rumble_high[i] = 0;
-                last_rumble_set_us[i] = 0;
-                last_live_input_or_motion_us[i] = 0;
-                motion_seen[i] = false;
-                input.clear_player_status(i);
+                release_slot(i, false);
                 continue;
             }
             apply_bluetooth_rumble(input, i, client_for_sdl[i], last_rumble_seq[i], rumble_until_us[i],
@@ -309,10 +277,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     }
 
 
-    for (int i = 0; i < 4; ++i) {
-        input.set_rumble(i, 0, 0, 0);
-        if (client_for_sdl[i] >= 0) reset_client_session_if_source(client_for_sdl[i], InputSource::Bluetooth);
-    }
+    for (int i = 0; i < 4; ++i) release_slot(i, true);
     // Ctrl+C/service stop should be decisive: stop publishing, stop rumble,
     // and prevent the manager from racing shutdown by starting another proactive Connect().
     input.stop_all_rumble();

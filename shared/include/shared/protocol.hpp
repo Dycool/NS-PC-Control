@@ -30,13 +30,10 @@ static constexpr uint8_t  PROTO_VERSION = 4;           // Legacy 4-player UDP pa
 static constexpr uint8_t  WEB_PROTO_VERSION = 5;       // Extended input + optional motion
 static constexpr uint8_t  WEB_PROTO_VERSION_3 = 6;     // Extended input + 3 motion samples per pad
 static constexpr uint16_t DEFAULT_PORT  = 7331;
-static constexpr int      WATCHDOG_MS   = 1200;
 static constexpr int      LEGACY_UDP_HZ = 250;
 static constexpr int      PRO_UDP_HZ    = 250;
 static constexpr int      LEGACY_UDP_INTERVAL_MS = 4;
 static constexpr int      PRO_UDP_INTERVAL_MS  = 4;
-static constexpr int      WRITER_HZ     = LEGACY_UDP_HZ;
-static constexpr int      AUTOFIRE_HZ   = 12;
 
 static constexpr const char* DEFAULT_SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY";
 static constexpr std::size_t HMAC_TAG_SIZE = 16;
@@ -245,10 +242,6 @@ inline uint64_t now_us() noexcept {
     return static_cast<uint64_t>(
         duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count()
     );
-}
-
-inline bool packet_ok(const Packet& p) noexcept {
-    return p.magic == PROTO_MAGIC && p.version == PROTO_VERSION;
 }
 
 } // namespace ns
