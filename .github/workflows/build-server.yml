@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14 cmake ninja-build git wget xxd \
             libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev pkg-config \
-            libglib2.0-dev libdbus-1-dev libudev-dev libreadline-dev \
+            libglib2.0-dev libdbus-1-dev libudev-dev libreadline-dev libsbc-dev \
             python3-docutils
 
       - name: Cache SDL3 aarch64 static
@@ -100,11 +100,16 @@ jobs:
             --disable-monitor \
             --disable-tools \
             --disable-health \
-            --disable-hid \
-            --disable-hog \
+            --disable-network \
             --disable-a2dp \
             --disable-avrcp \
-            --disable-network
+            --disable-bap \
+            --disable-bass \
+            --disable-mcp \
+            --disable-vcp \
+            --disable-micp \
+            --disable-csip \
+            --disable-manpages
 
           make -j"$(nproc)"
           mkdir -p "$HOME/.local/bluez-${BLUEZ_VERSION}/libexec/bluetooth"
