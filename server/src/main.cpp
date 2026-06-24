@@ -2,36 +2,40 @@
 #include "shared/macros.hpp"
 #include "shared/sha256.h"
 
-#include <print>
+// Standard library
+#include <algorithm>
 #include <atomic>
-#include <thread>
-#include <mutex>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <csignal>
-#include <string>
-#include <algorithm>
-#include <vector>
-#include <cstdint>
-#include <sstream>
 #include <fstream>
 #include <iostream>
-#include <CLI/CLI.hpp>
+#include <mutex>
+#include <print>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
+// POSIX / Linux
 #include <arpa/inet.h>
+#include <csignal>
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
-#include <dirent.h>
-#include <ctype.h>
+#include <unistd.h>
+
+// Third-party
+#include <CLI/CLI.hpp>
 
 #ifdef USE_UPNP
 #include <miniupnpc/miniupnpc.h>
@@ -44,12 +48,17 @@ using namespace ns;
 #include "app_state.hpp"
 
 static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxed); }
+
 #include "virtual_controller.hpp"
 #include "gadget_wakeup.hpp"
 #include "writers.hpp"
 #include "web_server.hpp"
 #include "bluetooth_input.hpp"
 #include "bluetooth_manager.hpp"
+
+// ===========================================================================
+// UPnP port mapping (optional)
+// ===========================================================================
 
 #ifdef USE_UPNP
 static bool     g_upnp_active = false;
@@ -62,22 +71,35 @@ bool upnp_add_mapping(uint16_t port) {
     if (g_upnp_active) return false;
     struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, nullptr);
     if (!devlist) return false;
+
 #if MINIUPNPC_API_VERSION >= 18
-    int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data, g_upnp_lan_addr, sizeof(g_upnp_lan_addr), nullptr, 0);
+    int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data,
+                               g_upnp_lan_addr, sizeof(g_upnp_lan_addr), nullptr, 0);
 #else
-    int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data, g_upnp_lan_addr, sizeof(g_upnp_lan_addr));
+    int igd = UPNP_GetValidIGD(devlist, &g_upnp_urls, &g_upnp_data,
+                               g_upnp_lan_addr, sizeof(g_upnp_lan_addr));
 #endif
     freeUPNPDevlist(devlist);
     if (igd != 1 && igd != 2) { FreeUPNPUrls(&g_upnp_urls); return false; }
 
     std::string port_str = std::to_string(port);
-    if (UPNP_AddPortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, port_str.c_str(), port_str.c_str(), g_upnp_lan_addr, "ns-backend", "UDP", nullptr, "0") != 0) {
-        FreeUPNPUrls(&g_upnp_urls); return false;
+    if (UPNP_AddPortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype,
+                            port_str.c_str(), port_str.c_str(), g_upnp_lan_addr,
+                            "ns-backend", "UDP", nullptr, "0") != 0) {
+        FreeUPNPUrls(&g_upnp_urls);
+        return false;
     }
-    g_upnp_active = true; g_upnp_port = port;
+
+    g_upnp_active = true;
+    g_upnp_port   = port;
+
     char external_ip[40];
-    if (UPNP_GetExternalIPAddress(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, external_ip) == 0) {
-        std::println("UPnP: UDP port {} successfully forwarded!\nUPnP: Tell your clients to connect to -> {}:{}", port, external_ip, port);
+    if (UPNP_GetExternalIPAddress(g_upnp_urls.controlURL,
+                                  g_upnp_data.first.servicetype,
+                                  external_ip) == 0) {
+        std::println("UPnP: UDP port {} successfully forwarded!\n"
+                     "UPnP: Tell your clients to connect to -> {}:{}",
+                     port, external_ip, port);
     }
     return true;
 }
@@ -85,87 +107,128 @@ bool upnp_add_mapping(uint16_t port) {
 void upnp_remove_mapping(uint16_t) {
     if (!g_upnp_active) return;
     std::string port_str = std::to_string(g_upnp_port);
-    UPNP_DeletePortMapping(g_upnp_urls.controlURL, g_upnp_data.first.servicetype, port_str.c_str(), "UDP", nullptr);
+    UPNP_DeletePortMapping(g_upnp_urls.controlURL,
+                           g_upnp_data.first.servicetype,
+                           port_str.c_str(), "UDP", nullptr);
     std::println("UPnP: port mapping removed cleanly");
-    FreeUPNPUrls(&g_upnp_urls); g_upnp_active = false; g_upnp_port = 0;
+    FreeUPNPUrls(&g_upnp_urls);
+    g_upnp_active = false;
+    g_upnp_port   = 0;
 }
 #else
-bool upnp_add_mapping(uint16_t) { return false; }
+bool upnp_add_mapping(uint16_t)  { return false; }
 void upnp_remove_mapping(uint16_t) {}
-#endif
+#endif // USE_UPNP
+
+// ===========================================================================
+// Bind address parsing  (-b ADDR, -b PORT, -b ADDR:PORT)
+// ===========================================================================
 
 static bool parse_bind_arg(const std::string& raw, std::string& bind_addr, uint16_t& port) {
     if (raw.empty()) return false;
+
     uint32_t numeric_port = 0;
     if (ns::macro::parse_uint32_strict(raw, numeric_port)) {
         if (numeric_port > 65535) return false;
-        bind_addr = "0.0.0.0"; port = (uint16_t)numeric_port; return true;
+        bind_addr = "0.0.0.0";
+        port      = static_cast<uint16_t>(numeric_port);
+        return true;
     }
+
     std::string addr = raw;
     size_t sep = raw.rfind(':');
     if (sep != std::string::npos) {
         uint32_t parsed_port = 0;
-        if (!ns::macro::parse_uint32_strict(raw.substr(sep + 1), parsed_port) || parsed_port > 65535) return false;
-        addr = raw.substr(0, sep); port = (uint16_t)parsed_port;
+        if (!ns::macro::parse_uint32_strict(raw.substr(sep + 1), parsed_port)
+                || parsed_port > 65535) {
+            return false;
+        }
+        addr = raw.substr(0, sep);
+        port = static_cast<uint16_t>(parsed_port);
     }
+
     bind_addr = addr.empty() ? "0.0.0.0" : addr;
     return true;
 }
 
+// ===========================================================================
+// main()
+// ===========================================================================
+
 int main(int argc, char** argv) {
+    // Normalise legacy single-dash flags to double-dash for CLI11.
     std::vector<std::string> cli_args;
-    cli_args.reserve((size_t)argc);
+    cli_args.reserve(static_cast<size_t>(argc));
     for (int i = 0; i < argc; ++i) {
         std::string s = argv[i] ? argv[i] : "";
-        if (s == "-wake") s = "--wake";
-        else if (s == "-hori") s = "--hori";
+        if      (s == "-wake")                  s = "--wake";
+        else if (s == "-hori")                  s = "--hori";
         else if (s == "-bt" || s == "--bt") {
-            std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled by default. Use -no-bt to disable it.");
+            std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled "
+                                 "by default. Use -no-bt to disable it.");
             return 1;
         }
-        else if (s == "-pair") s = "--pair";
-        else if (s == "-no-bt") s = "--no-bt";
-        else if (s == "-revert") s = "--revert";
+        else if (s == "-pair")                  s = "--pair";
+        else if (s == "-no-bt")                 s = "--no-bt";
+        else if (s == "-revert")                s = "--revert";
         cli_args.push_back(s);
     }
 
-    uint16_t port = DEFAULT_PORT;
-    std::string bind_addr = "0.0.0.0";
-    bool do_upnp = false, serve_http_webapp = false, bluetooth_enabled = false, pair_explicit = false, no_bt = false, legacy_p = false, do_revert = false;
-    int web_port = 8080;
+    // -----------------------------------------------------------------------
+    // CLI definition
+    // -----------------------------------------------------------------------
+    uint16_t    port              = DEFAULT_PORT;
+    std::string bind_addr         = "0.0.0.0";
+    bool        do_upnp           = false;
+    bool        serve_http_webapp = false;
+    bool        bluetooth_enabled = false;
+    bool        pair_explicit     = false;
+    bool        no_bt             = false;
+    bool        legacy_p          = false;
+    bool        do_revert         = false;
+    int         web_port          = 8080;
 
-    CLI::App app{"ns-backend - Switch Input Server\n\n  By default, UDP, WebSocket, Bluetooth controller input, and Switch 2 wake are enabled when available/configured."};
+    CLI::App app{"ns-backend - Switch Input Server\n\n"
+                 "  By default, UDP, WebSocket, Bluetooth controller input, "
+                 "and Switch 2 wake are enabled when available/configured."};
     std::string bind_arg;
-    app.add_option("-b", bind_arg, "Bind UDP to ADDR[:PORT] or PORT");
-    app.add_flag("-v", g_ctx.verbose, "Enable verbose output");
-    app.add_flag("--wake", g_ctx.switch2_wakeup_setup_requested, "Run interactive Joy-Con 2 wake setup and exit");
-    app.add_flag("--hori", g_ctx.legacy_mode, "Expose the legacy 8-byte HORI controller gadget");
-    app.add_flag("--pair", pair_explicit, "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
-    app.add_flag("--no-bt", no_bt, "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
-    app.add_flag("--revert", do_revert, "Revert host USB gadget boot configurations and reboot");
-    app.add_flag("--upnp", do_upnp, "Forward UDP port via UPnP");
+    app.add_option("-b",       bind_arg,                   "Bind UDP to ADDR[:PORT] or PORT");
+    app.add_flag  ("-v",       g_ctx.verbose,              "Enable verbose output");
+    app.add_flag  ("--wake",   g_ctx.switch2_wakeup_setup_requested,
+                                                           "Run interactive Joy-Con 2 wake setup and exit");
+    app.add_flag  ("--hori",   g_ctx.legacy_mode,          "Expose the legacy 8-byte HORI controller gadget");
+    app.add_flag  ("--pair",   pair_explicit,              "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
+    app.add_flag  ("--no-bt",  no_bt,                      "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
+    app.add_flag  ("--revert", do_revert,                  "Revert host USB gadget boot configurations and reboot");
+    app.add_flag  ("--upnp",   do_upnp,                   "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
-    app.add_flag("-p", legacy_p, "")->group("");
+    app.add_flag  ("-p",       legacy_p,                   "")->group("");
 
     try {
         std::vector<char*> cli_argv;
         for (std::string& arg : cli_args) cli_argv.push_back(arg.data());
-        app.parse((int)cli_argv.size(), cli_argv.data());
-    } catch (const CLI::ParseError &e) { return app.exit(e); }
+        app.parse(static_cast<int>(cli_argv.size()), cli_argv.data());
+    } catch (const CLI::ParseError& e) { return app.exit(e); }
 
+    // -----------------------------------------------------------------------
+    // Post-parse validation
+    // -----------------------------------------------------------------------
     g_ctx.bluetooth_input_disabled = no_bt;
 
     if (no_bt && pair_explicit) {
-        std::println(stderr, "error: cannot request Bluetooth pairing (-pair) while local Bluetooth controller input is disabled (-no-bt)");
+        std::println(stderr, "error: cannot request Bluetooth pairing (-pair) while local "
+                             "Bluetooth controller input is disabled (-no-bt)");
+        return 1;
+    }
+    if (legacy_p) {
+        std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead");
+        return 1;
+    }
+    if (!bind_arg.empty() && !parse_bind_arg(bind_arg, bind_addr, port)) {
+        std::println(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT");
         return 1;
     }
 
-    if (legacy_p) {
-        std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead"); return 1;
-    }
-    if (!bind_arg.empty() && !parse_bind_arg(bind_arg, bind_addr, port)) {
-        std::println(stderr, "error: invalid bind value; use -b ADDR, -b PORT, or -b ADDR:PORT"); return 1;
-    }
     serve_http_webapp = opt_w->count() > 0;
     if (serve_http_webapp) {
         if (!opt_w->results().empty() && !opt_w->results()[0].empty()) {
@@ -180,13 +243,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (do_revert) return run_revert_gadget_host() ? 0 : 1;
+    // -----------------------------------------------------------------------
+    // Early-exit sub-commands
+    // -----------------------------------------------------------------------
+    if (do_revert)                             return run_revert_gadget_host() ? 0 : 1;
     if (g_ctx.switch2_wakeup_setup_requested) return run_switch2_wakeup_setup();
     if (pair_explicit) {
         bluetooth_manager_runtime_setup(true);
         return run_bluetooth_pairing_wizard() ? 0 : 1;
     }
 
+    // -----------------------------------------------------------------------
+    // Runtime initialisation
+    // -----------------------------------------------------------------------
     g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
     bluetooth_enabled = !no_bt && bluetooth_input_available();
     if (bluetooth_enabled) {
@@ -197,11 +266,11 @@ int main(int argc, char** argv) {
         enter_bluetooth_runtime_mode();
         if (g_ctx.verbose) {
             std::println("[bt] Bluetooth controller mode active");
-            if (g_ctx.switch2_wake_adv_enabled) std::println("[wake] Switch 2 wake is armed and will coexist with Bluetooth controller mode");
+            if (g_ctx.switch2_wake_adv_enabled)
+                std::println("[wake] Switch 2 wake is armed and will coexist with Bluetooth controller mode");
         }
     } else if (g_ctx.switch2_wake_adv_enabled) {
-        // No local Bluetooth controller input is running. Wake remains armed and will
-        // prepare/restore the adapter on demand when UDP/WebSocket input arrives.
+        // Wake remains armed without local BT controller input.
         if (g_ctx.verbose) std::println("[wake] Switch 2 wake armed without local Bluetooth controller input");
     } else if (g_ctx.verbose && no_bt) {
         std::println("[bt] Local Bluetooth controller input disabled by -no-bt");
@@ -214,11 +283,14 @@ int main(int argc, char** argv) {
     }
     derive_key(DEFAULT_SECRET, g_ctx.hmac_key);
 
+    // -----------------------------------------------------------------------
+    // Signal handling
+    // -----------------------------------------------------------------------
     struct sigaction sa{};
     sa.sa_handler = on_signal;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0; // Clear SA_RESTART to ensure blocking operations are interrupted
-    sigaction(SIGINT, &sa, nullptr);
+    sa.sa_flags = 0; // Clear SA_RESTART so blocking ops are interrupted cleanly.
+    sigaction(SIGINT,  &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
     struct sigaction sa_pipe{};
@@ -227,41 +299,61 @@ int main(int argc, char** argv) {
     sa_pipe.sa_flags = 0;
     sigaction(SIGPIPE, &sa_pipe, nullptr);
 
+    // -----------------------------------------------------------------------
+    // UDP socket setup
+    // -----------------------------------------------------------------------
     if (do_upnp) upnp_add_mapping(port);
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) { perror("socket"); return 1; }
+
     int flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) { perror("fcntl"); close(sock); return 1; }
-
-    int yes = 1; setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    int rbuf = 2 * 1024 * 1024; setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf));
-
-    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
-        std::println(stderr, "error: invalid IPv4: {}", bind_addr); close(sock); return 1;
+    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("fcntl"); close(sock); return 1;
     }
-    if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); close(sock); return 1; }
 
+    int yes  = 1;                 setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes,  sizeof(yes));
+    int rbuf = 2 * 1024 * 1024;  setsockopt(sock, SOL_SOCKET, SO_RCVBUF,    &rbuf, sizeof(rbuf));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+        std::println(stderr, "error: invalid IPv4: {}", bind_addr);
+        close(sock); return 1;
+    }
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        perror("bind"); close(sock); return 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // Worker threads
+    // -----------------------------------------------------------------------
     std::jthread web_thread(web_server_thread, web_port, port, serve_http_webapp);
     std::jthread bluetooth_thread;
     if (bluetooth_enabled) bluetooth_thread = std::jthread(bluetooth_input_thread);
 
+    // -----------------------------------------------------------------------
+    // Startup message
+    // -----------------------------------------------------------------------
     if (g_ctx.verbose) {
-        std::println("UDP {}:{} writer={} Hz mode={}", bind_addr, port, PRO_WRITER_HZ, g_ctx.legacy_mode ? "hori" : "modern");
+        std::println("UDP {}:{} writer={} Hz mode={}",
+                     bind_addr, port, PRO_WRITER_HZ,
+                     g_ctx.legacy_mode ? "hori" : "modern");
     }
 
     std::string start_msg = std::format("Started ns-backend server on {}:{}", bind_addr, port);
-    if (serve_http_webapp) {
+    if (serve_http_webapp)
         start_msg += std::format(" with webapp on {}:{}", bind_addr, web_port);
-    }
+
     std::vector<std::string> extras;
-    if (pair_explicit) extras.push_back("pairing enabled");
-    if (no_bt) extras.push_back("Bluetooth disabled");
-    if (g_ctx.legacy_mode) extras.push_back("HORI mode");
-    if (do_upnp) extras.push_back("UPnP mapping");
-    if (g_ctx.switch2_wake_adv_enabled) extras.push_back("Switch 2 wake armed");
-    if (g_ctx.verbose) extras.push_back("verbose");
+    if (pair_explicit)                    extras.push_back("pairing enabled");
+    if (no_bt)                            extras.push_back("Bluetooth disabled");
+    if (g_ctx.legacy_mode)                extras.push_back("HORI mode");
+    if (do_upnp)                          extras.push_back("UPnP mapping");
+    if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
+    if (g_ctx.verbose)                    extras.push_back("verbose");
+
     if (!extras.empty()) {
         start_msg += " (";
         for (size_t i = 0; i < extras.size(); ++i) {
@@ -272,9 +364,16 @@ int main(int argc, char** argv) {
     }
     std::println("{}", start_msg);
 
-    std::jthread wt(writer_thread, PRO_WRITER_HZ), st(stats_thread);
+    std::jthread wt(writer_thread, PRO_WRITER_HZ);
+    std::jthread st(stats_thread);
 
-    std::vector<uint8_t> udp_rx(std::max(UDP_RX_MAX_PACKET_SIZE, ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
+    // -----------------------------------------------------------------------
+    // Main UDP receive loop
+    // -----------------------------------------------------------------------
+    std::vector<uint8_t> udp_rx(
+        std::max(UDP_RX_MAX_PACKET_SIZE,
+                 ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
+
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
     while (g_ctx.running.load(std::memory_order_relaxed)) {
@@ -282,54 +381,75 @@ int main(int argc, char** argv) {
         int n = poll(&udp_poll, 1, 200);
         if (n < 0) {
             if (errno == EINTR) continue;
-            std::println(stderr, "[udp] poll error: {}", std::strerror(errno)); break;
+            std::println(stderr, "[udp] poll error: {}", std::strerror(errno));
+            break;
         }
         if (n == 0) continue;
         if (udp_poll.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            std::println(stderr, "[udp] socket error in poll"); break;
+            std::println(stderr, "[udp] socket error in poll");
+            break;
         }
         if ((udp_poll.revents & POLLIN) == 0) continue;
 
         sockaddr_in sender{};
-        socklen_t slen;
-        ssize_t bytes;
+        socklen_t   slen;
+        ssize_t     bytes;
 
         while (g_ctx.running.load(std::memory_order_relaxed)) {
-            slen = sizeof(sender);
-            bytes = recvfrom(sock, udp_rx.data(), udp_rx.size(), 0, (sockaddr*)&sender, &slen);
+            slen  = sizeof(sender);
+            bytes = recvfrom(sock, udp_rx.data(), udp_rx.size(), 0,
+                             reinterpret_cast<sockaddr*>(&sender), &slen);
             if (bytes <= 0) break;
 
-            if (bytes == (ssize_t)sizeof(ServerInfoProbe)) {
-                ServerInfoProbe probe{}; memcpy(&probe, udp_rx.data(), sizeof(probe));
+            // --- Server info probe ---
+            if (bytes == static_cast<ssize_t>(sizeof(ServerInfoProbe))) {
+                ServerInfoProbe probe{};
+                memcpy(&probe, udp_rx.data(), sizeof(probe));
                 if (probe.magic == SERVER_INFO_MAGIC && probe.version == SERVER_INFO_VERSION) {
                     ServerInfoReply reply{
-                        .backend = (uint8_t)(g_ctx.legacy_mode ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO),
-                        .udp_interval_ms = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
-                        .udp_hz = (uint16_t)(g_ctx.legacy_mode ? LEGACY_UDP_HZ : PRO_UDP_HZ)
+                        .backend        = static_cast<uint8_t>(g_ctx.legacy_mode
+                                              ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO),
+                        .udp_interval_ms = static_cast<uint16_t>(g_ctx.legacy_mode
+                                              ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
+                        .udp_hz         = static_cast<uint16_t>(g_ctx.legacy_mode
+                                              ? LEGACY_UDP_HZ : PRO_UDP_HZ),
                     };
                     const uint64_t reply_now = now_us();
-                    if (switch2_sleep_confirmed(reply_now) && switch2_dormant_udp_endpoint_matches(sender)) {
+                    if (switch2_sleep_confirmed(reply_now)
+                            && switch2_dormant_udp_endpoint_matches(sender)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     }
-                    sendto(sock, &reply, sizeof(reply), 0, (sockaddr*)&sender, slen); continue;
+                    sendto(sock, &reply, sizeof(reply), 0,
+                           reinterpret_cast<const sockaddr*>(&sender), slen);
+                    continue;
                 }
             }
 
+            // --- Macro chunk ---
             if (bytes >= 4) {
-                uint32_t mmagic = 0; memcpy(&mmagic, udp_rx.data(), 4);
+                uint32_t mmagic = 0;
+                memcpy(&mmagic, udp_rx.data(), 4);
                 if (mmagic == ns::macro::UDP_CHUNK_MAGIC) {
-                    server_macro_handle_chunk_packet({udp_rx.data(), (size_t)bytes}, sender); continue;
+                    server_macro_handle_chunk_packet({udp_rx.data(), static_cast<size_t>(bytes)}, sender);
+                    continue;
                 }
             }
 
-            if (bytes >= (ssize_t)(ns::macro::UDP_HEADER_SIZE + HMAC_TAG_SIZE)) {
-                uint32_t mmagic = 0; memcpy(&mmagic, udp_rx.data(), 4);
+            // --- Macro text packet ---
+            if (bytes >= static_cast<ssize_t>(ns::macro::UDP_HEADER_SIZE + HMAC_TAG_SIZE)) {
+                uint32_t mmagic = 0;
+                memcpy(&mmagic, udp_rx.data(), 4);
                 if (mmagic == ns::macro::UDP_MAGIC) {
-                    ns::macro::MacroUdpHeaderWire mh{}; memcpy(&mh, udp_rx.data(), sizeof(mh));
+                    ns::macro::MacroUdpHeaderWire mh{};
+                    memcpy(&mh, udp_rx.data(), sizeof(mh));
                     uint32_t text_len = mh.text_len;
-                    if (text_len <= ns::macro::UDP_TEXT_MAX && bytes == (ssize_t)(ns::macro::UDP_HEADER_SIZE + text_len + HMAC_TAG_SIZE)) {
+                    if (text_len <= ns::macro::UDP_TEXT_MAX
+                            && bytes == static_cast<ssize_t>(
+                                ns::macro::UDP_HEADER_SIZE + text_len + HMAC_TAG_SIZE)) {
                         const uint8_t* r_hmac = udp_rx.data() + ns::macro::UDP_HEADER_SIZE + text_len;
-                        if (hmac_verify({g_ctx.hmac_key, 32}, {udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len}, {r_hmac, HMAC_TAG_SIZE}) == 0) {
+                        if (hmac_verify({g_ctx.hmac_key, 32},
+                                        {udp_rx.data(), ns::macro::UDP_HEADER_SIZE + text_len},
+                                        {r_hmac, HMAC_TAG_SIZE}) == 0) {
                             if (!rate_allow(sender.sin_addr.s_addr)) continue;
                             int cidx = server_macro_client_for_sender(sender);
                             if (cidx >= 0) {
@@ -337,60 +457,79 @@ int main(int argc, char** argv) {
                                     std::lock_guard<std::mutex> lk(g_ctx.mtx[cidx]);
                                     g_ctx.clients[cidx].uses_pad_presence = true;
                                     int sp = mh.subpad < 4 ? mh.subpad : 0;
-                                    g_ctx.clients[cidx].pad_present[sp] = true;
+                                    g_ctx.clients[cidx].pad_present[sp]         = true;
                                     g_ctx.clients[cidx].pad_last_present_us[sp] = now_us();
                                 }
-                                std::string text((char*)udp_rx.data() + ns::macro::UDP_HEADER_SIZE, text_len);
+                                std::string text(reinterpret_cast<char*>(udp_rx.data())
+                                                     + ns::macro::UDP_HEADER_SIZE,
+                                                 text_len);
                                 server_macro_start(cidx, mh.subpad < 4 ? mh.subpad : 0, text);
                             }
-                        } else if (g_ctx.verbose) std::println("bad macro HMAC, dropped");
+                        } else if (g_ctx.verbose) {
+                            std::println("bad macro HMAC, dropped");
+                        }
                     }
                     continue;
                 }
             }
 
+            // --- Normal controller packet ---
             uint32_t src_ip = sender.sin_addr.s_addr;
             if (!rate_allow(src_ip)) continue;
 
-            if (bytes < (ssize_t)(20 + HMAC_TAG_SIZE)) {
-                if (g_ctx.verbose) { std::println("[udp] short packet, dropped"); }
+            if (bytes < static_cast<ssize_t>(20 + HMAC_TAG_SIZE)) {
+                if (g_ctx.verbose) std::println("[udp] short packet, dropped");
                 continue;
             }
 
-            size_t auth_len = bytes - HMAC_TAG_SIZE;
-            if (hmac_verify({g_ctx.hmac_key, 32}, {udp_rx.data(), auth_len}, {udp_rx.data() + auth_len, HMAC_TAG_SIZE}) != 0) {
-                if (g_ctx.verbose) { std::println("bad HMAC, dropped"); }
+            size_t auth_len = static_cast<size_t>(bytes) - HMAC_TAG_SIZE;
+            if (hmac_verify({g_ctx.hmac_key, 32},
+                            {udp_rx.data(), auth_len},
+                            {udp_rx.data() + auth_len, HMAC_TAG_SIZE}) != 0) {
+                if (g_ctx.verbose) std::println("bad HMAC, dropped");
                 continue;
             }
 
-                    uint8_t flags = 0; uint32_t seq = 0;
+            uint8_t     flags = 0;
+            uint32_t    seq   = 0;
             MultiReport report;
-            bool pad_present[4] = {};
+            bool        pad_present[4] = {};
             if (!parse_client_packet(udp_rx.data(), bytes, flags, seq, report, pad_present)) continue;
 
+            // --- Disconnect ---
             if (flags & FLAG_DISCONNECT) {
                 int cidx = -1;
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
                     std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                    if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                    if (g_ctx.clients[i].active
+                            && g_ctx.clients[i].source == InputSource::Udp
+                            && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip
+                            && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
                         cidx = i; break;
                     }
                 }
                 forget_switch2_dormant_udp_endpoint(sender);
                 if (cidx >= 0) {
-                    reset_client_session(cidx); rearm_switch2_wake_after_client_disconnect();
+                    reset_client_session(cidx);
+                    rearm_switch2_wake_after_client_disconnect();
                     std::println("UDP client released from Slot {}", cidx + 1);
                 }
-                ++g_ctx.pkts_rx; continue;
+                ++g_ctx.pkts_rx;
+                continue;
             }
 
-            int cidx = -1;
-            uint64_t now = now_us();
-            bool wake_on_new_client = false;
-            const bool sleeping = switch2_sleep_confirmed(now);
+            // --- Find or allocate client slot ---
+            int      cidx            = -1;
+            uint64_t now             = now_us();
+            bool     wake_on_new_client = false;
+            const bool sleeping      = switch2_sleep_confirmed(now);
+
             for (int i = 0; i < MAX_CLIENTS; ++i) {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
-                if (g_ctx.clients[i].active && g_ctx.clients[i].source == InputSource::Udp && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                if (g_ctx.clients[i].active
+                        && g_ctx.clients[i].source == InputSource::Udp
+                        && g_ctx.clients[i].addr.sin_addr.s_addr == src_ip
+                        && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
                     cidx = i; break;
                 }
             }
@@ -398,11 +537,9 @@ int main(int argc, char** argv) {
             const bool dormant_endpoint = sleeping && switch2_dormant_udp_endpoint_matches(sender);
             if (cidx == -1) {
                 if (dormant_endpoint) {
-                    // This UDP endpoint belonged to a client that was connected
-                    // before the Switch suspended. Keep dropping it until the
-                    // desktop client observes the ServerInfo sleep flag, performs
-                    // its own disconnect, and then reconnects as a fresh wake
-                    // attempt.
+                    // This endpoint belonged to a pre-sleep client. Keep dropping
+                    // until the desktop client observes the sleep flag, disconnects,
+                    // and reconnects as a fresh wake attempt.
                     ++g_ctx.pkts_rx;
                     continue;
                 }
@@ -415,41 +552,51 @@ int main(int argc, char** argv) {
             }
 
             if (cidx == -1) {
-                if (g_ctx.verbose) { std::println("server is full, dropped"); }
+                if (g_ctx.verbose) std::println("server is full, dropped");
                 continue;
             }
 
+            // --- Apply packet ---
             bool accepted = false;
             {
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[cidx]);
                 ClientSession& c = g_ctx.clients[cidx];
                 if (c.active) {
-                    bool is_reset = (flags & FLAG_RESET);
-                    bool sequence_jump = (c.expected_seq > seq) && ((c.expected_seq - seq) > 100);
-                    if (!c.first_pkt && seq < c.expected_seq && !is_reset && !sequence_jump) continue;
+                    bool is_reset      = (flags & FLAG_RESET);
+                    bool sequence_jump = (c.expected_seq > seq)
+                                      && ((c.expected_seq - seq) > 100);
+                    if (!c.first_pkt && seq < c.expected_seq && !is_reset && !sequence_jump)
+                        continue;
 
-                    c.first_pkt = false; c.expected_seq = seq + 1;
+                    c.first_pkt    = false;
+                    c.expected_seq = seq + 1;
+
                     if (is_reset) {
                         reset_client_session_locked(c);
-                        c.active = true; c.source = InputSource::Udp; c.addr = sender; c.last_rx_us = now;
-                    } else {
+                        c.active     = true;
+                        c.source     = InputSource::Udp;
+                        c.addr       = sender;
                         c.last_rx_us = now;
-                        c.uses_pad_presence = c.udp_rumble_enabled = true;
-                        c.report = report; c.has_new_report = true;
+                    } else {
+                        c.last_rx_us         = now;
+                        c.uses_pad_presence  = true;
+                        c.udp_rumble_enabled = true;
+                        c.report             = report;
+                        c.has_new_report     = true;
 
-                        HIDReport* dst_pads[4] = { &c.report.p1, &c.report.p2, &c.report.p3, &c.report.p4 };
                         const HIDReport* src_pads[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
+                        HIDReport*       dst_pads[4] = { &c.report.p1, &c.report.p2, &c.report.p3, &c.report.p4 };
 
                         for (int s = 0; s < 4; ++s) {
                             if (pad_present[s]) {
-                                c.pad_present[s] = true; c.pad_last_present_us[s] = now;
-                                *dst_pads[s] = *src_pads[s];
+                                c.pad_present[s]         = true;
+                                c.pad_last_present_us[s] = now;
+                                *dst_pads[s]             = *src_pads[s];
                             } else {
                                 c.pad_present[s] = false;
                                 uint64_t last_seen = c.pad_last_present_us[s];
-                                if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US) {
+                                if (last_seen == 0 || now - last_seen >= WEB_PAD_ABSENT_RELEASE_US)
                                     dst_pads[s]->reset();
-                                }
                             }
                         }
                     }
@@ -466,6 +613,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Shutdown
+    // -----------------------------------------------------------------------
     std::cout << "Shutting down" << std::flush;
 
     g_ctx.running.store(false, std::memory_order_relaxed);
@@ -477,16 +627,16 @@ int main(int argc, char** argv) {
     st.request_stop();
     if (web_thread.joinable()) web_thread.request_stop();
     if (bluetooth_thread.joinable()) {
-        // Stop BlueZ first so Ctrl+C is not held up by an in-flight reconnect/pair tick.
+        // Stop BlueZ first so Ctrl+C isn't held up by an in-flight reconnect/pair tick.
         bluetooth_manager_stop();
         bluetooth_thread.request_stop();
     }
     std::cout << "." << std::flush;
 
-    if (wt.joinable()) { wt.join(); std::cout << "." << std::flush; }
-    if (st.joinable()) { st.join(); std::cout << "." << std::flush; }
+    if (wt.joinable())               { wt.join();               std::cout << "." << std::flush; }
+    if (st.joinable())               { st.join();               std::cout << "." << std::flush; }
     if (bluetooth_thread.joinable()) { bluetooth_thread.join(); std::cout << "." << std::flush; }
-    if (web_thread.joinable()) { web_thread.join(); std::cout << "." << std::flush; }
+    if (web_thread.joinable())       { web_thread.join();       std::cout << "." << std::flush; }
 
     teardown_gadget();
     std::cout << ".\n";
