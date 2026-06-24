@@ -286,7 +286,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
     bluetooth_manager_disconnect_connected_gamepads();
     bluetooth_manager_stop();
     input.stop();
-    std::println("[bt] Bluetooth/local SDL controller input stopped");
+    if (g_ctx.verbose) std::println("[bt] Bluetooth/local SDL controller input stopped");
 }
 #else
 bool bluetooth_input_available() { return false; }

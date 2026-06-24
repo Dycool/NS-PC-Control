@@ -854,7 +854,7 @@ static bool capture_switch2_wake_advert(int seconds, const std::string& preferre
 
         // Show progress on same line using carriage return
         std::fflush(stdout);
-        std::fprintf(stdout, "\r[wake] scanning for HOME... (%d/%d)", attempt, seconds);
+        std::fprintf(stdout, "\r[wake] Scanning for HOME... (%d/%d)", attempt, seconds);
         std::fflush(stdout);
     }
 

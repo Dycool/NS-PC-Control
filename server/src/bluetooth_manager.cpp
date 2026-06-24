@@ -231,9 +231,8 @@ void runtime_setup_impl(bool verbose) {
     // when BlueZ insists on ERTM the controller connects for ~1s and is then dropped. Disabling
     // ERTM is the standard fix; it only affects connections made after this point, so set it
     // before any controller pairs/connects (the bluetooth module is loaded by now).
-    if (run_cmd("test -e /sys/module/bluetooth/parameters/disable_ertm "
-                "&& echo 1 > /sys/module/bluetooth/parameters/disable_ertm 2>/dev/null", verbose) == 0
-            && verbose) {
+    if (verbose && run_cmd("test -e /sys/module/bluetooth/parameters/disable_ertm "
+                            "&& echo 1 > /sys/module/bluetooth/parameters/disable_ertm 2>/dev/null", verbose) == 0) {
         std::println("[bt] disabled L2CAP ERTM (PlayStation controller connect-then-drop fix)");
     }
 
@@ -770,8 +769,8 @@ void BluezManager::disconnect_gamepads() {
                          | std::views::filter([](const auto& d) {
                                return d.connected && d.is_controller_like();
                            })) {
-        std::println("[bt] disconnecting {} ({}) because Switch suspended",
-                     dev.display_name(), dev.address);
+        if (g_ctx.verbose) std::println("[bt] disconnecting {} ({}) because Switch suspended",
+                                        dev.display_name(), dev.address);
         (void)mgr.disconnect_device(dev);
     }
     mgr.close_bus();
@@ -789,11 +788,11 @@ void BluezManager::run_pairing_wizard() {
     (void)adapter_set_bool("Pairable",    false);
     (void)adapter_set_bool("Discoverable", false);
 
-    std::println("[bt] --pair specified; clearing all previously paired gamepads...");
+    if (g_ctx.verbose) std::println("[bt] --pair specified; clearing all previously paired gamepads...");
     for (const auto& dev : list_devices()
                          | std::views::filter([](const auto& d) { return d.paired || d.trusted; })) {
         try {
-            std::println("[bt] removing paired device {} ({})", dev.display_name(), dev.address);
+            if (g_ctx.verbose) std::println("[bt] removing paired device {} ({})", dev.display_name(), dev.address);
             proxy(adapter_path)->callMethod("RemoveDevice")
                                 .onInterface(ADAPTER_IFACE)
                                 .withTimeout(DBUS_FAST_TIMEOUT)
@@ -837,8 +836,8 @@ void BluezManager::run_pairing_wizard() {
                 if (!dev.trusted) (void)set_trusted(dev, true);
                 if (successfully_paired.insert(dev.path).second) {
                     ++paired_count;
-                    std::println("[bt] Successfully paired and trusted controller: {} ({}) [{}/4]",
-                                 dev.display_name(), dev.address, paired_count);
+                    if (g_ctx.verbose) std::println("[bt] Successfully paired and trusted controller: {} ({}) [{}/4]",
+                                                    dev.display_name(), dev.address, paired_count);
                 }
                 continue;
             }
@@ -846,8 +845,8 @@ void BluezManager::run_pairing_wizard() {
                     && pairing_attempted.insert(dev.path).second) {
                 if (try_pair_one(dev) && successfully_paired.insert(dev.path).second) {
                     ++paired_count;
-                    std::println("[bt] Successfully paired and trusted controller: {} ({}) [{}/4]",
-                                 dev.display_name(), dev.address, paired_count);
+                    if (g_ctx.verbose) std::println("[bt] Successfully paired and trusted controller: {} ({}) [{}/4]",
+                                                    dev.display_name(), dev.address, paired_count);
                 }
             }
         }
@@ -859,7 +858,7 @@ void BluezManager::run_pairing_wizard() {
                          | std::views::filter([](const auto& d) {
                                return d.connected && d.is_controller_like();
                            })) {
-        std::println("[bt] disconnecting {} ({})", dev.display_name(), dev.address);
+        if (g_ctx.verbose) std::println("[bt] disconnecting {} ({})", dev.display_name(), dev.address);
         (void)disconnect_device(dev);
     }
 
