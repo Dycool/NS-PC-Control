@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <print>
@@ -13,6 +14,8 @@ namespace {
 constexpr int SDL_RUMBLE_DEFAULT_GAIN_PERCENT = 60;
 constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 60;
 constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 20;
+
+constexpr auto SDL_INPUT_POLL_INTERVAL = std::chrono::milliseconds(4);
 
 uint8_t scale_sdl_rumble_motor(uint8_t v, int gain_percent) {
     int scaled = ((int)v * gain_percent) / 100;
@@ -101,9 +104,172 @@ int16_t gyro_deadzone_i16(int16_t v) {
     return std::abs((int)v) <= GYRO_DEADZONE ? 0 : v;
 }
 
+SDLInputManager::~SDLInputManager() {
+        stop();
+    }
+
 bool SDLInputManager::start() {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (initialized) return true;
+        std::lock_guard<std::mutex> lk(life_mtx);
+        if (active.load(std::memory_order_relaxed)) return true;
+        thread_should_run.store(true, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> il(init_mtx);
+            init_done = false;
+            init_ok = false;
+        }
+        input_thread = std::thread([this] { thread_main(); });
+        {
+            std::unique_lock<std::mutex> il(init_mtx);
+            init_cv.wait(il, [this] { return init_done; });
+        }
+        if (!init_ok) {
+            thread_should_run.store(false, std::memory_order_relaxed);
+            if (input_thread.joinable()) input_thread.join();
+            return false;
+        }
+        active.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+void SDLInputManager::stop() {
+        std::lock_guard<std::mutex> lk(life_mtx);
+        if (!input_thread.joinable()) return;
+        thread_should_run.store(false, std::memory_order_relaxed);
+        input_thread.join();
+        active.store(false, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> cl(cmd_mtx);
+            cmd_queue.clear();
+            cmd_processed_seq = cmd_enqueue_seq;
+        }
+        cmd_drained_cv.notify_all();
+    }
+
+void SDLInputManager::poll() {}
+
+std::array<SdlPadState, 4> SDLInputManager::snapshot() {
+        std::lock_guard<std::mutex> lk(pub_mtx);
+        return published_states;
+    }
+
+std::string SDLInputManager::error() const {
+        std::lock_guard<std::mutex> lk(pub_mtx);
+        return last_error;
+    }
+
+void SDLInputManager::request_rescan() {
+        force_scan.store(true, std::memory_order_relaxed);
+    }
+
+void SDLInputManager::set_connection_callback(std::function<void(int slot, bool connected)> cb) {
+        std::lock_guard<std::mutex> lk(cb_mtx);
+        connection_callback = std::move(cb);
+    }
+
+void SDLInputManager::set_gyro_enabled(bool enabled) { set_motion_enabled(enabled); }
+
+void SDLInputManager::set_motion_enabled(bool enabled) {
+        motion_enabled.store(enabled, std::memory_order_relaxed);
+        if (!active.load(std::memory_order_relaxed)) return;
+        Command c{.type = Command::Type::ReapplyMotion};
+        c.flag = enabled;
+        enqueue_command(c);
+    }
+
+void SDLInputManager::set_home_shortcut_enabled(bool enabled) {
+        home_shortcut_enabled.store(enabled, std::memory_order_relaxed);
+    }
+
+void SDLInputManager::set_capture_shortcut_enabled(bool enabled) {
+        capture_shortcut_enabled.store(enabled, std::memory_order_relaxed);
+    }
+
+void SDLInputManager::set_controller_leds_enabled(bool enabled) {
+        controller_leds_enabled.store(enabled, std::memory_order_relaxed);
+    }
+
+void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble) {
+        if (!active.load(std::memory_order_relaxed) || sdl_slot < 0 || sdl_slot >= 4) return;
+        Command c{.type = Command::Type::Rumble};
+        c.slot = sdl_slot;
+        c.low = low;
+        c.high = high;
+        c.duration_ms = duration_ms;
+        c.allow_trigger_rumble = allow_trigger_rumble;
+        enqueue_command(c);
+    }
+
+void SDLInputManager::set_player_status(int sdl_slot, int player_index, uint8_t player_leds, const uint8_t* body_rgb) {
+        if (!active.load(std::memory_order_relaxed) || sdl_slot < 0 || sdl_slot >= 4) return;
+        Command c{.type = Command::Type::PlayerStatus};
+        c.slot = sdl_slot;
+        c.player_index = player_index;
+        c.player_leds = player_leds;
+        if (body_rgb) {
+            c.body_rgb[0] = body_rgb[0];
+            c.body_rgb[1] = body_rgb[1];
+            c.body_rgb[2] = body_rgb[2];
+            c.body_rgb_valid = true;
+        }
+        enqueue_command(c);
+    }
+
+void SDLInputManager::clear_player_status(int sdl_slot) {
+        set_player_status(sdl_slot, -1, 0);
+    }
+
+void SDLInputManager::clear_all_player_status() {
+        if (!active.load(std::memory_order_relaxed)) return;
+        enqueue_command(Command{.type = Command::Type::ClearAllPlayerStatus});
+    }
+
+void SDLInputManager::stop_all_rumble() {
+        if (!active.load(std::memory_order_relaxed)) return;
+        enqueue_command(Command{.type = Command::Type::StopAllRumble});
+    }
+
+void SDLInputManager::disconnect_all() {
+        if (!active.load(std::memory_order_relaxed)) return;
+        uint64_t seq = enqueue_command(Command{.type = Command::Type::DisconnectAll});
+        wait_drained(seq);
+    }
+
+void SDLInputManager::thread_main() {
+        bool ok = init_sdl();
+        {
+            std::lock_guard<std::mutex> il(init_mtx);
+            init_ok = ok;
+            init_done = true;
+        }
+        init_cv.notify_one();
+        if (!ok) return;
+
+        while (thread_should_run.load(std::memory_order_relaxed)) {
+            std::deque<Command> batch;
+            uint64_t drained_up_to;
+            {
+                std::lock_guard<std::mutex> cl(cmd_mtx);
+                batch.swap(cmd_queue);
+                drained_up_to = cmd_enqueue_seq;
+            }
+            for (const auto& c : batch) process_command(c);
+
+            poll_once();
+            publish_states();
+
+            {
+                std::lock_guard<std::mutex> cl(cmd_mtx);
+                cmd_processed_seq = drained_up_to;
+            }
+            cmd_drained_cv.notify_all();
+
+            std::this_thread::sleep_for(SDL_INPUT_POLL_INTERVAL);
+        }
+
+        shutdown_sdl();
+    }
+
+bool SDLInputManager::init_sdl() {
         SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
@@ -121,19 +287,20 @@ bool SDLInputManager::start() {
 #endif
         if (!SDL_Init(flags)) {
             const char* e = SDL_GetError();
-            last_error = (e && *e) ? e : "SDL_Init failed";
+            set_error((e && *e) ? e : "SDL_Init failed");
             return false;
         }
         initialized = true;
         scan_locked(true);
+        publish_states();
         return true;
     }
 
-void SDLInputManager::stop() {
-        std::lock_guard<std::mutex> lk(mtx);
+void SDLInputManager::shutdown_sdl() {
         if (!initialized) return;
         close_all_locked();
         clear_states_locked();
+        publish_states();
         Uint32 flags = SDL_INIT_GAMEPAD | SDL_INIT_EVENTS;
 #ifdef SDL_INIT_SENSOR
         flags |= SDL_INIT_SENSOR;
@@ -145,47 +312,119 @@ void SDLInputManager::stop() {
         initialized = false;
     }
 
-void SDLInputManager::poll() {
-        std::lock_guard<std::mutex> lk(mtx);
+void SDLInputManager::poll_once() {
         if (!initialized) return;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_EVENT_GAMEPAD_ADDED || ev.type == SDL_EVENT_GAMEPAD_REMOVED) force_scan = true;
+            if (ev.type == SDL_EVENT_GAMEPAD_ADDED || ev.type == SDL_EVENT_GAMEPAD_REMOVED)
+                force_scan.store(true, std::memory_order_relaxed);
         }
         SDL_UpdateGamepads();
         if (motion_enabled.load(std::memory_order_relaxed))
             SDL_UpdateSensors();
         uint64_t now = ns::now_us();
-        if (force_scan || last_scan_us == 0 || now - last_scan_us > 500000ULL) scan_locked(false);
+        if (force_scan.load(std::memory_order_relaxed) || last_scan_us == 0 || now - last_scan_us > 500000ULL)
+            scan_locked(false);
         refresh_states_locked(now);
     }
 
-std::array<SdlPadState, 4> SDLInputManager::snapshot() {
-        std::lock_guard<std::mutex> lk(mtx);
-        return states;
+void SDLInputManager::publish_states() {
+        std::lock_guard<std::mutex> lk(pub_mtx);
+        published_states = states;
     }
 
-std::string SDLInputManager::error() const {
-        std::lock_guard<std::mutex> lk(mtx);
-        return last_error;
+void SDLInputManager::set_error(std::string e) {
+        std::lock_guard<std::mutex> lk(pub_mtx);
+        last_error = std::move(e);
     }
 
-void SDLInputManager::request_rescan() {
-        std::lock_guard<std::mutex> lk(mtx);
-        force_scan = true;
+void SDLInputManager::notify_connection(int slot, bool connected) {
+        std::function<void(int, bool)> cb;
+        {
+            std::lock_guard<std::mutex> lk(cb_mtx);
+            cb = connection_callback;
+        }
+        if (cb) cb(slot, connected);
     }
 
-void SDLInputManager::set_connection_callback(std::function<void(int slot, bool connected)> cb) {
-        std::lock_guard<std::mutex> lk(mtx);
-        connection_callback = std::move(cb);
+uint64_t SDLInputManager::enqueue_command(const Command& c) {
+        std::lock_guard<std::mutex> lk(cmd_mtx);
+        uint64_t seq = ++cmd_enqueue_seq;
+        cmd_queue.push_back(c);
+        return seq;
     }
 
-void SDLInputManager::set_gyro_enabled(bool enabled) { set_motion_enabled(enabled); }
+void SDLInputManager::wait_drained(uint64_t seq) {
+        std::unique_lock<std::mutex> lk(cmd_mtx);
+        cmd_drained_cv.wait(lk, [&] {
+            return cmd_processed_seq >= seq || !active.load(std::memory_order_relaxed);
+        });
+    }
 
-void SDLInputManager::set_motion_enabled(bool enabled) {
-        std::lock_guard<std::mutex> lk(mtx);
-        motion_enabled.store(enabled, std::memory_order_relaxed);
+void SDLInputManager::process_command(const Command& c) {
         if (!initialized) return;
+        switch (c.type) {
+            case Command::Type::Rumble:
+                apply_rumble_locked(c.slot, c.low, c.high, c.duration_ms, c.allow_trigger_rumble);
+                break;
+            case Command::Type::PlayerStatus: {
+                if (c.slot < 0 || c.slot >= 4) break;
+                Device* d = device_for_slot_locked(c.slot);
+                if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) break;
+                apply_player_status_locked(*d, c.player_index, c.player_leds,
+                                           c.body_rgb_valid ? c.body_rgb : nullptr);
+                break;
+            }
+            case Command::Type::ClearAllPlayerStatus:
+                for (auto& d : devices) {
+                    if (d.pad && SDL_GamepadConnected(d.pad)) apply_player_status_locked(d, -1, 0, nullptr);
+                }
+                break;
+            case Command::Type::StopAllRumble:
+                stop_all_rumble_locked();
+                break;
+            case Command::Type::DisconnectAll:
+                stop_all_rumble_locked();
+                close_all_locked();
+                clear_states_locked();
+                force_scan.store(true, std::memory_order_relaxed);
+                break;
+            case Command::Type::ReapplyMotion:
+                apply_motion_enabled_locked(c.flag);
+                break;
+        }
+    }
+
+void SDLInputManager::apply_rumble_locked(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble) {
+        if (sdl_slot < 0 || sdl_slot >= 4) return;
+        Device* d = device_for_slot_locked(sdl_slot);
+        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
+        int gain_percent = SDL_RUMBLE_DEFAULT_GAIN_PERCENT;
+        if (is_playstation_controller(d->name, d->vid)) {
+            gain_percent = SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT;
+        } else if (is_xbox_controller(d->name, d->vid)) {
+            gain_percent = SDL_RUMBLE_XBOX_GAIN_PERCENT;
+            allow_trigger_rumble = false;
+        }
+        low = scale_sdl_rumble_motor(low, gain_percent);
+        high = scale_sdl_rumble_motor(high, gain_percent);
+        const Uint16 low_word = motor_word(low);
+        const Uint16 high_word = motor_word(high);
+        const bool stop = (low_word == 0 && high_word == 0) || duration_ms == 0;
+        bool ok_main = SDL_RumbleGamepad(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
+        bool ok_trigger = true;
+        SDL_PropertiesID props = SDL_GetGamepadProperties(d->pad);
+        bool trigger_capable = props && SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
+        if (stop || (allow_trigger_rumble && (trigger_capable || !ok_main))) {
+            ok_trigger = SDL_RumbleGamepadTriggers(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
+        }
+        if (!stop && !ok_main && !ok_trigger) {
+            const char* e = SDL_GetError();
+            set_error((e && *e) ? e : "SDL rumble failed");
+        }
+    }
+
+void SDLInputManager::apply_motion_enabled_locked(bool enabled) {
         for (auto& d : devices) {
             if (!d.pad || !SDL_GamepadConnected(d.pad)) continue;
             if (SDL_GamepadHasSensor(d.pad, SDL_SENSOR_ACCEL)) {
@@ -210,82 +449,6 @@ void SDLInputManager::set_motion_enabled(bool enabled) {
                 st.has_motion = false;
             }
         }
-    }
-
-void SDLInputManager::set_home_shortcut_enabled(bool enabled) {
-        home_shortcut_enabled.store(enabled, std::memory_order_relaxed);
-    }
-
-void SDLInputManager::set_capture_shortcut_enabled(bool enabled) {
-        capture_shortcut_enabled.store(enabled, std::memory_order_relaxed);
-    }
-
-void SDLInputManager::set_controller_leds_enabled(bool enabled) {
-        controller_leds_enabled.store(enabled, std::memory_order_relaxed);
-    }
-
-void SDLInputManager::set_rumble(int sdl_slot, uint8_t low, uint8_t high, uint32_t duration_ms, bool allow_trigger_rumble) {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return;
-        Device* d = device_for_slot_locked(sdl_slot);
-        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
-        int gain_percent = SDL_RUMBLE_DEFAULT_GAIN_PERCENT;
-        if (is_playstation_controller(d->name, d->vid)) {
-            gain_percent = SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT;
-        } else if (is_xbox_controller(d->name, d->vid)) {
-            gain_percent = SDL_RUMBLE_XBOX_GAIN_PERCENT;
-            allow_trigger_rumble = false;
-        }
-        low = scale_sdl_rumble_motor(low, gain_percent);
-        high = scale_sdl_rumble_motor(high, gain_percent);
-        const Uint16 low_word = motor_word(low);
-        const Uint16 high_word = motor_word(high);
-        const bool stop = (low_word == 0 && high_word == 0) || duration_ms == 0;
-        bool ok_main = SDL_RumbleGamepad(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
-        bool ok_trigger = true;
-        SDL_PropertiesID props = SDL_GetGamepadProperties(d->pad);
-        bool trigger_capable = props && SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
-        if (stop || (allow_trigger_rumble && (trigger_capable || !ok_main))) {
-            ok_trigger = SDL_RumbleGamepadTriggers(d->pad, stop ? 0 : low_word, stop ? 0 : high_word, duration_ms);
-        }
-        if (!stop && !ok_main && !ok_trigger) {
-            const char* e = SDL_GetError();
-            last_error = (e && *e) ? e : "SDL rumble failed";
-        }
-    }
-
-void SDLInputManager::set_player_status(int sdl_slot, int player_index, uint8_t player_leds, const uint8_t* body_rgb) {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized || sdl_slot < 0 || sdl_slot >= 4) return;
-        Device* d = device_for_slot_locked(sdl_slot);
-        if (!d || !d->pad || !SDL_GamepadConnected(d->pad)) return;
-        apply_player_status_locked(*d, player_index, player_leds, body_rgb);
-    }
-
-void SDLInputManager::clear_player_status(int sdl_slot) {
-        set_player_status(sdl_slot, -1, 0);
-    }
-
-void SDLInputManager::clear_all_player_status() {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized) return;
-        for (auto& d : devices) {
-            if (d.pad && SDL_GamepadConnected(d.pad)) apply_player_status_locked(d, -1, 0, nullptr);
-        }
-    }
-
-void SDLInputManager::stop_all_rumble() {
-        std::lock_guard<std::mutex> lk(mtx);
-        stop_all_rumble_locked();
-    }
-
-void SDLInputManager::disconnect_all() {
-        std::lock_guard<std::mutex> lk(mtx);
-        if (!initialized) return;
-        stop_all_rumble_locked();
-        close_all_locked();
-        clear_states_locked();
-        force_scan = true;
     }
 
 
@@ -485,7 +648,7 @@ void SDLInputManager::scan_locked(bool initial) {
             if (!d.pad || !SDL_GamepadConnected(d.pad)) {
                 if (d.slot >= 0 && d.slot < 4) {
                     states[d.slot] = SdlPadState{};
-                    if (connection_callback) connection_callback(d.slot, false);
+                    notify_connection(d.slot, false);
                 }
                 close_device_locked(d);
                 return true;
@@ -518,7 +681,7 @@ void SDLInputManager::scan_locked(bool initial) {
                 d.rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
-            if (connection_callback) connection_callback(d.slot, true);
+            notify_connection(d.slot, true);
             std::println("[sdl] controller slot={} name=\"{}\" vid={:04x} pid={:04x} rumble={} trigger_rumble={} profile={}",
                          d.slot + 1, d.name, d.vid, d.pid,
                          d.rumble_capable ? "yes" : "no",

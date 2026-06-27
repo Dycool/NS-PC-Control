@@ -36,13 +36,23 @@ QString key_name_from_qkey(QKeyEvent* event) {
 }
 
 QIcon app_icon() {
-    static QIcon cached = []() {
+    static QIcon cached = []() -> QIcon {
+#ifdef __APPLE__
+        {
+            QDir md(QCoreApplication::applicationDirPath());
+            const QString mac_paths[] = {
+                md.filePath("../Resources/icon.icns"),
+                md.filePath("../Resources/icon.png"),
+                QDir(NS_CLIENT_SOURCE_DIR).filePath("icon-macos.png"),
+            };
+            for (const auto& p : mac_paths) {
+                if (QIcon icon(p); !icon.isNull()) return icon;
+            }
+        }
+#endif
         if (QIcon embedded(":/icon.png"); !embedded.isNull()) return embedded;
         QDir d(QCoreApplication::applicationDirPath());
         std::vector<QString> paths = {
-#ifdef __APPLE__
-            d.filePath("../Resources/icon.icns"), d.filePath("../Resources/icon.png"),
-#endif
 #ifndef _WIN32
             d.filePath("../share/icons/hicolor/256x256/apps/ns-client.png"), d.filePath("../share/pixmaps/ns-client.png"),
 #endif

@@ -332,7 +332,7 @@ jobs:
               /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string icon" "$APP/Contents/Info.plist"
           fi
 
-          cp client/icon.png "$APP/Contents/Resources/icon.png"
+          cp client/icon-macos.png "$APP/Contents/Resources/icon.png"
           cd "$APP/Contents/Resources"
           rm -rf icon.iconset
           mkdir -p icon.iconset
