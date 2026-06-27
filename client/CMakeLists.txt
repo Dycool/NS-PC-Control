@@ -159,6 +159,7 @@ if(WIN32)
     target_link_libraries(ns-client PRIVATE
         ws2_32
         winmm
+        shell32
     )
 endif()
 

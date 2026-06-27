@@ -50,6 +50,9 @@ QIcon app_icon() {
             }
         }
 #endif
+#ifdef _WIN32
+        if (QIcon ico(":/icon.ico"); !ico.isNull()) return ico;
+#endif
         if (QIcon embedded(":/icon.png"); !embedded.isNull()) return embedded;
         QDir d(QCoreApplication::applicationDirPath());
         std::vector<QString> paths = {

@@ -270,7 +270,12 @@ void SDLInputManager::thread_main() {
     }
 
 bool SDLInputManager::init_sdl() {
+#ifdef _WIN32
+        SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");
+        SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
+#endif
         SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+        SDL_SetHint("SDL_JOYSTICK_THREAD", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "JOY" "_CONS", "1");
@@ -291,8 +296,9 @@ bool SDLInputManager::init_sdl() {
             return false;
         }
         initialized = true;
-        scan_locked(true);
-        publish_states();
+        // The initial device scan/open is deferred to the first poll loop iteration (last_scan_us == 0
+        // forces a scan there) so start() returns as soon as SDL is initialized. Opening controllers
+        // — especially slow or virtual ones — must never block application startup.
         return true;
     }
 
