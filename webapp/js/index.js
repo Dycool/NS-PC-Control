@@ -264,7 +264,8 @@ function sampleMacroRecording(p1) {
 function sendServerMacroChunks(payload, subpad=0) {
     const enc = new TextEncoder(); const bytes = enc.encode(payload);
     if (bytes.length > MACRO_JSON_MAX_BYTES) throw new Error('macro JSON exceeds 50MB limit');
-    const chunkSize = 32000, count = Math.ceil(bytes.length / chunkSize), uploadId = (Date.now() ^ Math.floor(Math.random()*0xFFFFFFFF)) >>> 0;
+    // Must not exceed the server's UDP_CHUNK_MAX (1200); larger chunks are silently dropped.
+    const chunkSize = 1200, count = Math.ceil(bytes.length / chunkSize), uploadId = (Date.now() ^ Math.floor(Math.random()*0xFFFFFFFF)) >>> 0;
     for (let i=0; i<count; i++) {
         const start=i*chunkSize, chunk=bytes.slice(start, Math.min(bytes.length, start+chunkSize));
         const buf = new ArrayBuffer(30 + chunk.length), v = new DataView(buf);

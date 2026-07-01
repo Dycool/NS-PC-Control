@@ -11,6 +11,9 @@ void RumbleManager::apply_precision_packet(const ns::PrecisionRumblePacket& rp, 
     ns::RumblePacket fallback{.magic = ns::RUMBLE_MAGIC, .subpad = rp.subpad,
                               .low_freq = rp.low_freq, .high_freq = rp.high_freq,
                               .duration_10ms = rp.duration_10ms};
+    // Precision packets must not be blocked by the suppression window a previous
+    // precision packet opened; that window only exists to mute duplicate classic packets.
+    states[rp.subpad].suppress_classic_until_us = 0;
     apply_packet(fallback, controller_for_slot);
     states[rp.subpad].suppress_classic_until_us = ns::now_us() + 20000ULL;
 }

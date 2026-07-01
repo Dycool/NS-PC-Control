@@ -102,7 +102,7 @@ int cli_main(const std::vector<std::string>& original_args) {
         }
         bool sent = send_macro_udp_packet(sock, dest, hmac_key, raw, 0);
         std::println("{}", sent ? "Uploaded macro." : "Upload failed.");
-        cli_sleep_while_running(std::chrono::milliseconds(std::min<int>(ns::macro::total_ms(steps), 600000) + 180));
+        cli_sleep_while_running(std::chrono::milliseconds(std::min<uint64_t>(ns::macro::total_ms(steps), 600000) + 180));
         closesocket(sock);
         return sent && g_cliRunning.load(std::memory_order_relaxed) ? 0 : 1;
     }

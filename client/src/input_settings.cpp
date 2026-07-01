@@ -73,7 +73,7 @@ bool is_valid_key_code(const std::string& s) {
     };
     for (const char* n : named) if (c == n) return true;
     if (c.size() == 1 && std::isalnum((unsigned char)c[0])) return true;
-    if (c.size() >= 2 && c[0] == 'F' && std::all_of(c.begin() + 1, c.end(), ::isdigit)) {
+    if (c.size() >= 2 && c.size() <= 3 && c[0] == 'F' && std::all_of(c.begin() + 1, c.end(), ::isdigit)) {
         int val = std::stoi(c.substr(1));
         return val >= 1 && val <= 24;
     }

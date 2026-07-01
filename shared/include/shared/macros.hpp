@@ -29,6 +29,10 @@ inline constexpr std::uint32_t UDP_MAGIC       = 0x4E534D43u; // 'NSMC' legacy o
 inline constexpr std::uint32_t UDP_CHUNK_MAGIC = 0x4E534D4Bu; // 'NSMK' chunked upload
 inline constexpr std::size_t   UDP_TEXT_MAX    = JSON_MAX_BYTES;
 inline constexpr std::size_t   UDP_CHUNK_MAX   = 1200;
+// Upper bound on chunk_count for a maximal upload split into UDP_CHUNK_MAX-sized
+// chunks; caps reassembly buffers so a hostile header can't force a huge allocation.
+inline constexpr std::uint32_t UDP_CHUNK_COUNT_MAX =
+    static_cast<std::uint32_t>((UDP_TEXT_MAX + UDP_CHUNK_MAX - 1) / UDP_CHUNK_MAX);
 inline constexpr std::uint8_t  CHUNK_FLAG_LAST = 0x01;
 
 struct Step {

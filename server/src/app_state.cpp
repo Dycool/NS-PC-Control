@@ -327,6 +327,10 @@ bool rate_allow(uint32_t ip);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);
 
 static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpad, uint32_t total_len, uint32_t chunk_count, uint32_t chunk_index, std::span<const uint8_t> payload) {
+    if (chunk_count == 0 || chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX
+            || chunk_index >= chunk_count || total_len > ns::macro::UDP_TEXT_MAX) {
+        return true;
+    }
     uint64_t now = now_us();
     std::string completed;
     {
@@ -377,7 +381,7 @@ bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const socka
     ns::macro::MacroUdpChunkHeaderWire h{};
     std::ranges::copy(data.subspan(0, sizeof(h)), (uint8_t*)&h);
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
-    if (h.version != PROTO_VERSION || h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len + HMAC_TAG_SIZE) return true;
+    if (h.version != PROTO_VERSION || h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len + HMAC_TAG_SIZE) return true;
     if (hmac_verify({g_ctx.hmac_key, 32}, data.subspan(0, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len), data.subspan(ns::macro::CHUNK_HEADER_SIZE + h.chunk_len, HMAC_TAG_SIZE)) != 0 || !rate_allow(sender.sin_addr.s_addr)) return true;
     int cidx = server_macro_client_for_sender(sender);
     if (cidx >= 0) handle_macro_chunk(cidx, h.upload_id, h.subpad, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
@@ -390,7 +394,7 @@ bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t
     std::ranges::copy(data.subspan(0, sizeof(h)), (uint8_t*)&h);
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION && h.version != WEB_PROTO_VERSION) return true;
-    if (h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len) return true;
+    if (h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len) return true;
     return handle_macro_chunk(client_idx, h.upload_id, h.subpad, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
 }
 
