@@ -247,11 +247,28 @@ jobs:
           cmake --build /tmp/SDL3-build --parallel
           cmake --install /tmp/SDL3-build
 
+      - name: Create AGL link shim
+        run: |
+          set -euo pipefail
+          # Qt 6.8.x's FindWrapOpenGL.cmake links `-framework AGL`, but Apple
+          # removed the AGL linking stub from the macOS 26 SDK (Xcode 26.x). The
+          # AGL runtime dylib still ships in the dyld shared cache, so we only
+          # need to satisfy the linker: build a stub framework whose recorded
+          # install name points at the real system path, so the shipped .app
+          # depends on the genuine AGL dylib and still loads on any macOS.
+          AGL_SHIM="$HOME/.local/agl-shim"
+          mkdir -p "$AGL_SHIM/AGL.framework"
+          echo 'static int ns_agl_shim __attribute__((unused));' > /tmp/agl_shim.c
+          clang -dynamiclib -o "$AGL_SHIM/AGL.framework/AGL" /tmp/agl_shim.c \
+            -install_name /System/Library/Frameworks/AGL.framework/Versions/A/AGL
+          echo "AGL_SHIM=$AGL_SHIM" >> "$GITHUB_ENV"
+
       - name: Build client
         run: |
           cmake -S client -B client/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static;$Qt6_DIR"
+            -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static;$Qt6_DIR" \
+            -DCMAKE_EXE_LINKER_FLAGS="-F$AGL_SHIM"
           cmake --build client/build --parallel
 
       - name: Create and deploy .app bundle
