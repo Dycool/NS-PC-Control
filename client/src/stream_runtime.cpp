@@ -12,6 +12,7 @@
 #include <iostream>
 #include <utility>
 #include <functional>
+#include <vector>
 
 std::atomic<bool> g_connected{false};
 std::thread g_senderThread;
@@ -178,14 +179,15 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
 
     while (running.load(std::memory_order_relaxed)) {
         const uint64_t loop_start_us = ns::now_us();
+        std::string upload;
+        std::vector<uint8_t> amiibo_upload;
         if (cfg.gui_features && (loop_start_us - last_kb_poll_us >= 10000ULL)) {
             update_keyboard_state_cache();
-            std::string upload;
             {
                 std::lock_guard<std::mutex> lk(g_macro_mtx);
                 upload.swap(g_macro_upload_pending);
+                amiibo_upload.swap(g_amiibo_upload_pending);
             }
-            if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
             poll_macro_entry_hotkeys();
             last_kb_poll_us = loop_start_us;
         }
@@ -202,6 +204,20 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         }
 
         send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
+        // Typed uploads are sent after the live input frame so the server has
+        // already seen the current controller type (important for Joy-Con R NFC).
+        if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
+        if (!amiibo_upload.empty()) {
+            const bool ok = send_amiibo_udp_packet(sock, dest, cfg.hmac_key, amiibo_upload, 0);
+            set_status_message(ok ? "Amiibo uploaded" : "Amiibo upload failed");
+        }
+        std::string amiibo_save_path;
+        uint8_t amiibo_save_subpad = 0;
+        uint32_t amiibo_save_version = 0;
+        if (take_amiibo_save_request(amiibo_save_path, amiibo_save_subpad, amiibo_save_version)) {
+            const bool ok = send_amiibo_pull_request(sock, dest, cfg.hmac_key, amiibo_save_subpad, amiibo_save_version);
+            set_status_message(ok ? "Pulling updated amiibo dump" : "Amiibo save request failed");
+        }
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
             set_status_message("Disconnected");

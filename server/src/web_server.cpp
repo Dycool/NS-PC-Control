@@ -28,6 +28,8 @@ void flush_rumble_to_udp(int sock, int client_idx) {
     bool has[4]{};
     ns::ControllerStatusPacket pending_status[4]{};
     bool has_status[4]{};
+    ns::AmiiboStatusPacket pending_amiibo[4]{};
+    bool has_amiibo[4]{};
 
     {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -56,6 +58,16 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 c.udp_last_controller_status_seq[s] = status_seq;
                 has_status[s] = true;
             }
+            ns::AmiiboStatusPacket as{};
+            if (server_amiibo_get_status(client_idx, s, as)) {
+                const bool dirty = (as.flags & ns::AMIIBO_STATUS_FLAG_DIRTY) != 0;
+                if (as.amiibo_version != c.udp_last_amiibo_version[s] || dirty != c.udp_last_amiibo_dirty[s]) {
+                    pending_amiibo[s] = as;
+                    c.udp_last_amiibo_version[s] = as.amiibo_version;
+                    c.udp_last_amiibo_dirty[s] = dirty;
+                    has_amiibo[s] = true;
+                }
+            }
         }
     }
 
@@ -65,6 +77,12 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                                   reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
             if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::ControllerStatusPacket)))
                 std::println(stderr, "[udp] failed to send controller status packet: {}", std::strerror(errno));
+        }
+        if (has_amiibo[s]) {
+            ssize_t sent = sendto(sock, &pending_amiibo[s], sizeof(ns::AmiiboStatusPacket), 0,
+                                  reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+            if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::AmiiboStatusPacket)))
+                std::println(stderr, "[udp] failed to send amiibo status packet: {}", std::strerror(errno));
         }
         if (!has[s]) continue;
         ssize_t sent = sendto(sock, &pending[s], sizeof(ns::RumblePacket), 0,

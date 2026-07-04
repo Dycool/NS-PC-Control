@@ -1,11 +1,13 @@
 #include "macro_client.hpp"
 #include "input_settings.hpp"
+#include "stream_runtime.hpp"
 #include "shared/sha256.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <fstream>
 #include <thread>
+#include <cstdio>
 
 uint32_t g_macro_udp_seq = 0;
 
@@ -15,10 +17,11 @@ uint32_t next_macro_upload_id() {
     return v;
 }
 
-bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
-                                  const std::string& json_or_commands, uint8_t subpad) {
-    if (json_or_commands.size() > ns::macro::UDP_TEXT_MAX) return false;
-    auto sign_and_send = [&](const void* hdr_ptr, size_t hdr_size, const char* data_ptr, size_t data_size) {
+bool send_udp_upload_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                            std::span<const uint8_t> payload, uint8_t subpad,
+                            ns::macro::UploadKind kind, bool force_chunked) {
+    if (payload.empty() || payload.size() > ns::macro::UDP_TEXT_MAX) return false;
+    auto sign_and_send = [&](const void* hdr_ptr, size_t hdr_size, const uint8_t* data_ptr, size_t data_size) {
         std::vector<uint8_t> buf(hdr_size + data_size + ns::HMAC_TAG_SIZE);
         std::memcpy(buf.data(), hdr_ptr, hdr_size);
         if (data_size) std::memcpy(buf.data() + hdr_size, data_ptr, data_size);
@@ -28,30 +31,48 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
         return send_all_udp(sock, dest, buf) != SOCKET_ERROR;
     };
 
-    if (json_or_commands.size() + ns::macro::UDP_HEADER_SIZE + ns::HMAC_TAG_SIZE <= 1400) {
+    // Keep the old NSMC single-datagram path strictly macro-only. Typed uploads
+    // such as amiibo must use NSMK chunks so the server can read header.reserved.
+    if (!force_chunked && kind == ns::macro::UploadKind::Macro &&
+            payload.size() + ns::macro::UDP_HEADER_SIZE + ns::HMAC_TAG_SIZE <= 1400) {
         ns::macro::MacroUdpHeaderWire hdr{.magic = ns::macro::UDP_MAGIC, .version = ns::PROTO_VERSION,
-                                          .subpad = subpad, .text_len = (uint32_t)json_or_commands.size(),
+                                          .subpad = subpad, .text_len = (uint32_t)payload.size(),
                                           .seq = next_macro_upload_id()};
-        return sign_and_send(&hdr, sizeof(hdr), json_or_commands.data(), json_or_commands.size());
+        return sign_and_send(&hdr, sizeof(hdr), payload.data(), payload.size());
     }
 
     const uint32_t upload_id = next_macro_upload_id();
-    const uint32_t chunk_count = (uint32_t)((json_or_commands.size() + ns::macro::UDP_CHUNK_MAX - 1) / ns::macro::UDP_CHUNK_MAX);
+    const uint32_t chunk_count = (uint32_t)((payload.size() + ns::macro::UDP_CHUNK_MAX - 1) / ns::macro::UDP_CHUNK_MAX);
     for (uint32_t i = 0; i < chunk_count; ++i) {
         size_t off = (size_t)i * ns::macro::UDP_CHUNK_MAX;
-        size_t n = std::min(ns::macro::UDP_CHUNK_MAX, json_or_commands.size() - off);
+        size_t n = std::min(ns::macro::UDP_CHUNK_MAX, payload.size() - off);
         ns::macro::MacroUdpChunkHeaderWire hdr{
             .magic = ns::macro::UDP_CHUNK_MAGIC, .version = ns::PROTO_VERSION, .subpad = subpad,
-            .flags = (uint8_t)((i + 1 == chunk_count) ? 0x01 : 0x00), .reserved = 0,
+            .flags = (uint8_t)((i + 1 == chunk_count) ? ns::macro::CHUNK_FLAG_LAST : 0x00),
+            .reserved = static_cast<uint8_t>(kind),
             .upload_id = upload_id, .chunk_index = i, .chunk_count = chunk_count,
-            .total_len = (uint32_t)json_or_commands.size(), .chunk_len = (uint16_t)n,
+            .total_len = (uint32_t)payload.size(), .chunk_len = (uint16_t)n,
             .seq = next_macro_upload_id()
         };
-        if (!sign_and_send(&hdr, sizeof(hdr), json_or_commands.data() + off, n)) return false;
+        if (!sign_and_send(&hdr, sizeof(hdr), payload.data() + off, n)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return true;
 }
+
+bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                                  const std::string& json_or_commands, uint8_t subpad) {
+    return send_udp_upload_packet(sock, dest, hmac_key,
+                                  std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(json_or_commands.data()), json_or_commands.size()),
+                                  subpad, ns::macro::UploadKind::Macro, false);
+}
+
+bool send_amiibo_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                            std::span<const uint8_t> dump, uint8_t subpad) {
+    if (dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
+    return send_udp_upload_packet(sock, dest, hmac_key, dump, subpad, ns::macro::UploadKind::Amiibo, true);
+}
+
 
 std::mutex g_macro_mtx;
 std::vector<ns::macro::Step> g_macro_steps;
@@ -59,8 +80,196 @@ std::atomic<bool> g_macro_running{false};
 std::atomic<bool> g_macro_recording{false};
 uint64_t g_macro_start_us = 0;
 std::string g_macro_upload_pending;
+std::vector<uint8_t> g_amiibo_upload_pending;
+std::atomic<bool> g_amiibo_dirty_available{false};
+std::atomic<uint8_t> g_amiibo_dirty_subpad{0};
+std::atomic<uint32_t> g_amiibo_dirty_version{0};
+static std::mutex g_amiibo_save_mtx;
+static bool g_amiibo_save_requested = false;
+static std::string g_amiibo_save_path;
+static uint8_t g_amiibo_save_subpad = 0;
+static uint32_t g_amiibo_save_version = 0;
+struct AmiiboDownloadState {
+    bool active = false;
+    uint8_t subpad = 0;
+    uint32_t version = 0;
+    uint32_t chunk_count = 0;
+    uint32_t total_len = 0;
+    uint32_t crc32 = 0;
+    std::vector<std::vector<uint8_t>> chunks;
+    std::vector<uint8_t> got;
+    uint32_t received_count = 0;
+    std::string save_path;
+};
+static AmiiboDownloadState g_amiibo_download;
 std::vector<ns::macro::Entry> g_macro_entries;
 std::unordered_map<std::string, bool> g_macro_hotkey_down;
+
+
+
+static uint32_t client_crc32(std::span<const uint8_t> data) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint8_t b : data) {
+        crc ^= b;
+        for (int i = 0; i < 8; ++i) crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+bool queue_amiibo_save_to_file(const std::string& path, std::string& err) {
+    err.clear();
+    if (path.empty()) { err = "Missing save path."; return false; }
+    if (!g_amiibo_dirty_available.load(std::memory_order_relaxed)) {
+        err = "No updated amiibo dump is available yet.";
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    g_amiibo_save_path = path;
+    g_amiibo_save_subpad = g_amiibo_dirty_subpad.load(std::memory_order_relaxed);
+    g_amiibo_save_version = g_amiibo_dirty_version.load(std::memory_order_relaxed);
+    g_amiibo_save_requested = true;
+    return true;
+}
+
+bool take_amiibo_save_request(std::string& path, uint8_t& subpad, uint32_t& version) {
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    if (!g_amiibo_save_requested) return false;
+    path = g_amiibo_save_path;
+    subpad = g_amiibo_save_subpad;
+    version = g_amiibo_save_version;
+    g_amiibo_save_requested = false;
+    g_amiibo_download = AmiiboDownloadState{};
+    g_amiibo_download.active = true;
+    g_amiibo_download.subpad = subpad;
+    g_amiibo_download.version = version;
+    g_amiibo_download.save_path = path;
+    return true;
+}
+
+bool send_amiibo_pull_request(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint8_t subpad, uint32_t version) {
+    ns::AmiiboPullRequest req{};
+    req.subpad = subpad;
+    req.amiibo_version = version;
+    req.seq = next_macro_upload_id();
+    uint8_t hmac[32];
+    hmac_sha256(std::span(hmac_key, 32),
+                std::span(reinterpret_cast<const uint8_t*>(&req), ns::AMIIBO_PULL_AUTH_SIZE),
+                std::span<uint8_t, 32>(hmac));
+    std::memcpy(req.hmac, hmac, ns::HMAC_TAG_SIZE);
+    return send_all_udp(sock, dest, std::span(reinterpret_cast<const uint8_t*>(&req), sizeof(req))) != SOCKET_ERROR;
+}
+
+void handle_amiibo_status_packet(const ns::AmiiboStatusPacket& packet) {
+    if (packet.magic != ns::AMIIBO_STATUS_MAGIC || packet.version != ns::SERVER_INFO_VERSION || packet.subpad >= 4) return;
+    const bool has_dump = (packet.flags & ns::AMIIBO_STATUS_FLAG_HAS_DUMP) != 0;
+    const bool dirty = (packet.flags & ns::AMIIBO_STATUS_FLAG_DIRTY) != 0;
+    if (!has_dump || packet.total_len != ns::AMIIBO_DUMP_BYTES) return;
+
+    if (dirty) {
+        g_amiibo_dirty_subpad.store(packet.subpad, std::memory_order_relaxed);
+        g_amiibo_dirty_version.store(packet.amiibo_version, std::memory_order_relaxed);
+        g_amiibo_dirty_available.store(true, std::memory_order_relaxed);
+        set_status_message("Updated amiibo dump available");
+        return;
+    }
+
+    // A clean status for the same subpad means a new clean dump was uploaded or
+    // the server no longer has unsaved write-back data for that virtual tag.
+    if (g_amiibo_dirty_subpad.load(std::memory_order_relaxed) == packet.subpad) {
+        g_amiibo_dirty_version.store(packet.amiibo_version, std::memory_order_relaxed);
+        g_amiibo_dirty_available.store(false, std::memory_order_relaxed);
+    }
+}
+
+void handle_amiibo_chunk_packet(std::span<const uint8_t> data) {
+    if (data.size() < sizeof(ns::AmiiboChunkHeader)) return;
+    ns::AmiiboChunkHeader h{};
+    std::memcpy(&h, data.data(), sizeof(h));
+    if (h.magic != ns::AMIIBO_CHUNK_MAGIC || h.version != ns::SERVER_INFO_VERSION || h.subpad >= 4) return;
+    if (h.total_len != ns::AMIIBO_DUMP_BYTES || h.chunk_len > ns::AMIIBO_UDP_CHUNK_MAX ||
+            h.chunk_count == 0 || h.chunk_index >= h.chunk_count ||
+            data.size() != sizeof(ns::AmiiboChunkHeader) + h.chunk_len) return;
+
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    if (!g_amiibo_download.active || g_amiibo_download.subpad != h.subpad ||
+            (g_amiibo_download.version != 0 && g_amiibo_download.version != h.amiibo_version)) {
+        return;
+    }
+    if (g_amiibo_download.chunks.empty()) {
+        g_amiibo_download.version = h.amiibo_version;
+        g_amiibo_download.chunk_count = h.chunk_count;
+        g_amiibo_download.total_len = h.total_len;
+        g_amiibo_download.crc32 = h.crc32;
+        g_amiibo_download.chunks.assign(h.chunk_count, {});
+        g_amiibo_download.got.assign(h.chunk_count, 0);
+    }
+    if (g_amiibo_download.chunk_count != h.chunk_count || g_amiibo_download.total_len != h.total_len ||
+            g_amiibo_download.crc32 != h.crc32) return;
+
+    if (!g_amiibo_download.got[h.chunk_index]) {
+        const uint8_t* payload = data.data() + sizeof(ns::AmiiboChunkHeader);
+        g_amiibo_download.chunks[h.chunk_index].assign(payload, payload + h.chunk_len);
+        g_amiibo_download.got[h.chunk_index] = 1;
+        ++g_amiibo_download.received_count;
+    }
+    if (g_amiibo_download.received_count != g_amiibo_download.chunk_count) return;
+
+    std::vector<uint8_t> dump;
+    dump.reserve(g_amiibo_download.total_len);
+    for (const auto& c : g_amiibo_download.chunks) dump.insert(dump.end(), c.begin(), c.end());
+    if (dump.size() != g_amiibo_download.total_len || client_crc32(dump) != g_amiibo_download.crc32) {
+        set_status_message("Amiibo save failed: CRC mismatch");
+        g_amiibo_download = AmiiboDownloadState{};
+        return;
+    }
+    const std::string final_path = g_amiibo_download.save_path;
+    const std::string tmp_path = final_path + ".tmp";
+    {
+        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            set_status_message("Amiibo save failed");
+            g_amiibo_download = AmiiboDownloadState{};
+            return;
+        }
+        f.write(reinterpret_cast<const char*>(dump.data()), static_cast<std::streamsize>(dump.size()));
+        if (!f) {
+            set_status_message("Amiibo save failed");
+            g_amiibo_download = AmiiboDownloadState{};
+            return;
+        }
+    }
+    std::remove(final_path.c_str());
+    if (std::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+        set_status_message("Amiibo save failed");
+        g_amiibo_download = AmiiboDownloadState{};
+        return;
+    }
+    g_amiibo_dirty_available.store(false, std::memory_order_relaxed);
+    set_status_message("Updated amiibo dump saved");
+    g_amiibo_download = AmiiboDownloadState{};
+}
+
+bool queue_amiibo_upload_from_file(const std::string& path, std::string& err) {
+    err.clear();
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) { err = "Could not open amiibo dump."; return false; }
+    const std::streamoff size = f.tellg();
+    if (size != static_cast<std::streamoff>(ns::AMIIBO_DUMP_BYTES)) {
+        err = "Amiibo dump must be exactly 540 bytes (.bin NTAG215 dump).";
+        return false;
+    }
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    if (!f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()))) {
+        err = "Could not read amiibo dump.";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_macro_mtx);
+        g_amiibo_upload_pending = std::move(data);
+    }
+    return true;
+}
 
 int find_macro_entry_by_name(const std::string& name) {
     std::string wanted = ns::macro::upper(ns::macro::trim(name));

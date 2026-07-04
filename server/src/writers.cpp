@@ -51,7 +51,9 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (fds[i] >= 0) {
                     rt[i].fd = fds[i];
                     rt[i].timer = 0;
+                    rt[i].input_report_mode = RID_INPUT_STANDARD;
                     rt[i].full_report_enabled = false;
+                    reset_nfc_runtime(rt[i], true);
                     rt[i].usb_seen_mac = false;
                     rt[i].usb_handshake_done = false;
                     rt[i].usb_baudrate_set = false;
@@ -215,7 +217,8 @@ void writer_thread(std::stop_token stoken, int hz) {
             } else {
                 for (int h = 0; h < nports; ++h) {
                     const bool port_needed = (hw_slots[h].client_idx != -1);
-                    uint8_t write_buf[PRO_REPORT_SIZE] = {};
+                    uint8_t write_buf[HIDG_MAX_REPORT_SIZE] = {};
+                    size_t write_len = PRO_REPORT_SIZE;
                     bool have_report_to_write = false, wrote_subcmd_reply = false;
 
                     if (rt[h].pending_subcmd_reply) {
@@ -224,6 +227,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         if (port_needed) apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);
                         else fill_neutral_controls(rt[h].pending_reply);
                         memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
+                        write_len = sizeof(ProInputReport21);
                         have_report_to_write = wrote_subcmd_reply = true;
                     } else if (rt[h].full_report_enabled) {
                         bool release_burst = rt[h].neutral_burst_until_us != 0 && now_stamp < rt[h].neutral_burst_until_us;
@@ -242,9 +246,17 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 motion_for_port = get_hid_report(snap[cidx], sidx).motion;
                                 has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
                             }
-                            ProInputReport30 std_in{};
-                            build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in);
-                            memcpy(write_buf, &std_in, sizeof(ProInputReport30));
+                            if (rt[h].input_report_mode == RID_INPUT_NFC_IR) {
+                                ProInputReport31 nfc_in{};
+                                build_nfc_ir_report(rt[h], report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), nfc_in);
+                                memcpy(write_buf, &nfc_in, sizeof(ProInputReport31));
+                                write_len = sizeof(ProInputReport31);
+                            } else {
+                                ProInputReport30 std_in{};
+                                build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in);
+                                memcpy(write_buf, &std_in, sizeof(ProInputReport30));
+                                write_len = sizeof(ProInputReport30);
+                            }
                             have_report_to_write = true;
 
                             if (port_needed || release_burst) rt[h].last_standard_report_us = now_stamp;
@@ -254,10 +266,10 @@ void writer_thread(std::stop_token stoken, int hz) {
 
                     if (have_report_to_write) {
                         apply_controller_type_report(controller_type_for_port(h), write_buf);
-                        ssize_t w = write(fds[h], write_buf, PRO_REPORT_SIZE);
+                        ssize_t w = write(fds[h], write_buf, write_len);
                         if (w < 0) {
                             if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
-                        } else if (w == (ssize_t)PRO_REPORT_SIZE) {
+                        } else if (w == (ssize_t)write_len) {
                             if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                             ++g_ctx.hid_writes;
                             // A report/subcommand-reply write alone is not reliable host-presence evidence.
@@ -269,9 +281,9 @@ void writer_thread(std::stop_token stoken, int hz) {
                 for (int h = 0; h < nports; ++h) {
                     for (int output_reads = 0; output_reads < 8; ++output_reads) {
                         struct pollfd pfd = {fds[h], POLLIN, 0};
-                        uint8_t read_buf[PRO_REPORT_SIZE];
+                        uint8_t read_buf[HIDG_MAX_REPORT_SIZE];
                         if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) break;
-                        ssize_t r = read(fds[h], read_buf, PRO_REPORT_SIZE);
+                        ssize_t r = read(fds[h], read_buf, HIDG_MAX_REPORT_SIZE);
                         if (r <= 0 || r < 2 || (r == 2 && read_buf[0] == 0 && read_buf[1] == 0)) continue;
 
                         mark_switch2_usb_activity(now_stamp);
@@ -303,6 +315,16 @@ void writer_thread(std::stop_token stoken, int hz) {
                             rt[h].pending_subcmd_reply = (reply_len >= 0);
                         } else if (id == RID_OUTPUT_RUMBLE) {
                             if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
+                        } else if (id == RID_OUTPUT_NFC_IR) {
+                            int cidx = hw_slots[h].client_idx;
+                            int sidx = hw_slots[h].sub_idx;
+                            uint32_t amiibo_version = 0;
+                            const bool amiibo_armed = (cidx >= 0 && sidx >= 0)
+                                ? server_amiibo_is_armed(cidx, sidx, now_stamp, &amiibo_version)
+                                : false;
+                            if (cidx != -1) publish_rumble_event(cidx, sidx, read_buf, r, false);
+                            handle_nfc_ir_output_report(rt[h], std::span<const uint8_t>(read_buf, static_cast<size_t>(r)),
+                                                        cidx, sidx, amiibo_armed, amiibo_version);
                         } else if (id == 0x80) {
                             uint8_t resp_81[PRO_REPORT_SIZE] = {};
                             build_usb_81_response(resp_81, read_buf[1], h);

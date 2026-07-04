@@ -9,6 +9,8 @@
 #include <utility>
 #include <span>
 #include <algorithm>
+#include <cerrno>
+#include <sys/socket.h>
 
 using namespace ns;
 
@@ -284,12 +286,242 @@ void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
     if (c.active && (c.last_rx_us == 0 || c.last_rx_us > now)) c.last_rx_us = now;
 }
 
+
+uint32_t server_amiibo_crc32(std::span<const uint8_t> data) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint8_t b : data) {
+        crc ^= b;
+        for (int i = 0; i < 8; ++i) {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
 static HIDReport* get_pad_report(ClientSession& c, int subpad) {
     if (subpad == 0) return &c.report.p1;
     if (subpad == 1) return &c.report.p2;
     if (subpad == 2) return &c.report.p3;
     if (subpad == 3) return &c.report.p4;
     return nullptr;
+}
+
+
+bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
+    if (subpad < 0 || subpad >= 4) subpad = 0;
+    if (dump.size() != ns::AMIIBO_DUMP_BYTES) {
+        if (g_ctx.verbose) std::println("[amiibo] rejected: dump must be {} bytes, got {}", ns::AMIIBO_DUMP_BYTES, dump.size());
+        return false;
+    }
+
+    uint8_t controller_type = ns::CONTROLLER_TYPE_DEFAULT;
+    {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+        HIDReport* pad = get_pad_report(g_ctx.clients[client_idx], subpad);
+        if (pad) controller_type = pad->reserved[2];
+    }
+    if (controller_type != ns::CONTROLLER_TYPE_JOYCON_R) {
+        if (g_ctx.verbose) std::println("[amiibo] rejected: slot={} pad={} is not Joy-Con (R) (type={})", client_idx + 1, subpad + 1, controller_type);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+        ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+        st.dump.assign(dump.begin(), dump.end());
+        st.armed = true;
+        st.present = false;
+        st.dirty = false;
+        st.version++;
+        st.crc32 = server_amiibo_crc32(st.dump);
+        st.armed_until_us = now_us() + ns::macro::AMIIBO_ARM_WINDOW_US;
+    }
+    if (g_ctx.verbose) std::println("[amiibo] armed virtual tag slot={} pad={} bytes={} window={}ms",
+                                    client_idx + 1, subpad + 1, dump.size(), ns::macro::AMIIBO_ARM_WINDOW_US / 1000ULL);
+    return true;
+}
+
+bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now, uint32_t* version) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
+    if (now == 0) now = now_us();
+
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
+    if (st.armed_until_us != 0 && now > st.armed_until_us) {
+        st.armed = false;
+        st.present = false;
+        return false;
+    }
+    if (version) *version = st.version;
+    return true;
+}
+
+bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vector<uint8_t>& out, uint32_t* version) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
+    if (now == 0) now = now_us();
+
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
+    if (st.armed_until_us != 0 && now > st.armed_until_us) {
+        st.armed = false;
+        st.present = false;
+        return false;
+    }
+    out = st.dump;
+    st.present = true;
+    if (version) *version = st.version;
+    return true;
+}
+
+
+bool server_amiibo_get_status(int client_idx, int subpad, ns::AmiiboStatusPacket& out) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
+    out = ns::AmiiboStatusPacket{};
+    out.subpad = static_cast<uint8_t>(subpad);
+    out.flags = ns::AMIIBO_STATUS_FLAG_HAS_DUMP | (st.dirty ? ns::AMIIBO_STATUS_FLAG_DIRTY : 0);
+    out.amiibo_version = st.version;
+    out.total_len = static_cast<uint32_t>(st.dump.size());
+    out.crc32 = st.crc32 ? st.crc32 : server_amiibo_crc32(st.dump);
+    return true;
+}
+
+bool server_amiibo_apply_write_command(int client_idx, int subpad, std::span<const uint8_t> command, uint32_t* version) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
+    if (command.size() < 22) {
+        if (g_ctx.verbose) std::println("[amiibo] write command too short: {} bytes", command.size());
+        return false;
+    }
+    if (command[1] != 0x07) {
+        if (g_ctx.verbose) std::println("[amiibo] write rejected: UID length is {}, expected 7", command[1]);
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
+
+    const auto uid = std::span<const uint8_t>(command.data() + 2, 7);
+    const bool uid_matches = st.dump.size() >= 8
+        && uid[0] == st.dump[0] && uid[1] == st.dump[1] && uid[2] == st.dump[2]
+        && uid[3] == st.dump[4] && uid[4] == st.dump[5] && uid[5] == st.dump[6] && uid[6] == st.dump[7];
+    if (!uid_matches && g_ctx.verbose) {
+        std::println("[amiibo] warning: write UID does not match armed dump; applying anyway for Switch registration flow");
+    }
+
+    bool changed = false;
+    // JoyControl-compatible write transaction: temporary write lock bytes,
+    // then (page,length,data...) records, then restored write lock bytes.
+    std::copy(command.begin() + 13, command.begin() + 17, st.dump.begin() + 16);
+    changed = true;
+
+    size_t i = 22;
+    uint32_t records = 0;
+    while (i + 1 < command.size()) {
+        const uint8_t page = command[i];
+        const uint8_t len = command[i + 1];
+        if (page == 0 || len == 0) break;
+        const size_t addr = static_cast<size_t>(page) * 4u;
+        if (i + 2u + len > command.size()) {
+            if (g_ctx.verbose) std::println("[amiibo] truncated write record page={} len={}", page, len);
+            break;
+        }
+        if (addr < st.dump.size()) {
+            const size_t n = std::min<size_t>(len, st.dump.size() - addr);
+            std::copy(command.begin() + static_cast<std::ptrdiff_t>(i + 2),
+                      command.begin() + static_cast<std::ptrdiff_t>(i + 2 + n),
+                      st.dump.begin() + static_cast<std::ptrdiff_t>(addr));
+            changed = true;
+            ++records;
+        }
+        i += 2u + len;
+    }
+
+    std::copy(command.begin() + 17, command.begin() + 21, st.dump.begin() + 16);
+    st.dirty = changed;
+    if (changed) {
+        st.version++;
+        st.crc32 = server_amiibo_crc32(st.dump);
+        st.armed_until_us = 0; // keep written tag available until replaced/disconnected.
+    }
+    if (version) *version = st.version;
+    if (g_ctx.verbose) {
+        std::println("[amiibo] applied virtual write slot={} pad={} records={} v{} crc={:08x}",
+                     client_idx + 1, subpad + 1, records, st.version, st.crc32);
+    }
+    return changed;
+}
+
+bool server_amiibo_handle_pull_request(int sock, std::span<const uint8_t> data, const sockaddr_in& sender) {
+    if (data.size() != sizeof(ns::AmiiboPullRequest)) return false;
+    ns::AmiiboPullRequest req{};
+    std::memcpy(&req, data.data(), sizeof(req));
+    if (req.magic != ns::AMIIBO_PULL_MAGIC) return false;
+    if (req.version != ns::SERVER_INFO_VERSION || req.subpad >= 4) return true;
+    if (hmac_verify({g_ctx.hmac_key, 32}, data.subspan(0, ns::AMIIBO_PULL_AUTH_SIZE), data.subspan(ns::AMIIBO_PULL_AUTH_SIZE, ns::HMAC_TAG_SIZE)) != 0) {
+        if (g_ctx.verbose) std::println("[amiibo] bad pull HMAC, dropped");
+        return true;
+    }
+    if (!rate_allow(sender.sin_addr.s_addr)) return true;
+    int cidx = server_macro_client_for_sender(sender);
+    if (cidx < 0) return true;
+
+    std::vector<uint8_t> dump;
+    uint32_t version = 0, crc = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+        ServerAmiiboState& st = g_ctx.server_amiibos[cidx][req.subpad];
+        if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return true;
+        const uint32_t requested_version = req.amiibo_version;
+        if (requested_version != 0 && requested_version != st.version) {
+            if (g_ctx.verbose) std::println("[amiibo] pull requested stale v{}, sending current v{}", requested_version, st.version);
+        }
+        dump = st.dump;
+        version = st.version;
+        crc = st.crc32 ? st.crc32 : server_amiibo_crc32(st.dump);
+    }
+
+    const uint32_t chunk_count = static_cast<uint32_t>((dump.size() + ns::AMIIBO_UDP_CHUNK_MAX - 1) / ns::AMIIBO_UDP_CHUNK_MAX);
+    for (uint32_t i = 0; i < chunk_count; ++i) {
+        const size_t off = static_cast<size_t>(i) * ns::AMIIBO_UDP_CHUNK_MAX;
+        const size_t n = std::min(ns::AMIIBO_UDP_CHUNK_MAX, dump.size() - off);
+        ns::AmiiboChunkHeader hdr{};
+        hdr.subpad = req.subpad;
+        hdr.flags = (i + 1 == chunk_count) ? 0x01 : 0x00;
+        hdr.amiibo_version = version;
+        hdr.chunk_index = i;
+        hdr.chunk_count = chunk_count;
+        hdr.total_len = static_cast<uint32_t>(dump.size());
+        hdr.chunk_len = static_cast<uint16_t>(n);
+        hdr.crc32 = crc;
+        std::vector<uint8_t> out(sizeof(hdr) + n);
+        std::memcpy(out.data(), &hdr, sizeof(hdr));
+        std::memcpy(out.data() + sizeof(hdr), dump.data() + off, n);
+        ssize_t sent = sendto(sock, out.data(), out.size(), 0, reinterpret_cast<const sockaddr*>(&sender), sizeof(sender));
+        if (g_ctx.verbose && sent != static_cast<ssize_t>(out.size())) {
+            std::println(stderr, "[amiibo] failed sending dump chunk {}/{}: {}", i + 1, chunk_count, std::strerror(errno));
+        }
+    }
+    if (g_ctx.verbose) std::println("[amiibo] sent updated dump slot={} pad={} v{} crc={:08x}", cidx + 1, req.subpad + 1, version, crc);
+    return true;
+}
+
+void server_amiibo_mark_present(int client_idx, int subpad, bool present) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return;
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    if (st.armed) st.present = present;
+}
+
+void server_amiibo_clear_all_for_client(int client_idx) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return;
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    for (int s = 0; s < 4; ++s) g_ctx.server_amiibos[client_idx][s] = ServerAmiiboState{};
 }
 
 void clear_motion(ClientSession& c, int subpad) {
@@ -326,7 +558,7 @@ void set_motion_samples(ClientSession& c, int subpad, const MotionReport samples
 bool rate_allow(uint32_t ip);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);
 
-static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpad, uint32_t total_len, uint32_t chunk_count, uint32_t chunk_index, std::span<const uint8_t> payload) {
+static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpad, ns::macro::UploadKind kind, uint32_t total_len, uint32_t chunk_count, uint32_t chunk_index, std::span<const uint8_t> payload) {
     if (chunk_count == 0 || chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX
             || chunk_index >= chunk_count || total_len > ns::macro::UDP_TEXT_MAX) {
         return true;
@@ -336,11 +568,12 @@ static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpa
     {
         std::lock_guard<std::mutex> lk(g_ctx.server_macro_upload_mtx);
         ServerMacroUploadRuntime& up = g_ctx.server_macro_uploads[client_idx];
-        if (!up.active || up.upload_id != upload_id) {
+        if (!up.active || up.upload_id != upload_id || up.kind != kind) {
             up = ServerMacroUploadRuntime{};
             up.active = true;
             up.upload_id = upload_id;
             up.subpad = (uint8_t)(subpad < 4 ? subpad : 0);
+            up.kind = kind;
             up.total_len = total_len;
             up.chunk_count = chunk_count;
             up.chunks.assign(chunk_count, {}); up.got.assign(chunk_count, 0);
@@ -359,8 +592,13 @@ static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpa
         }
     }
     if (!completed.empty()) {
-        if (g_ctx.verbose) std::println("[macro] received chunked macro {} bytes", completed.size());
-        server_macro_start(client_idx, subpad, completed);
+        if (kind == ns::macro::UploadKind::Macro) {
+            if (g_ctx.verbose) std::println("[macro] received chunked macro {} bytes", completed.size());
+            server_macro_start(client_idx, subpad, completed);
+        } else if (kind == ns::macro::UploadKind::Amiibo) {
+            if (g_ctx.verbose) std::println("[amiibo] received chunked amiibo {} bytes", completed.size());
+            server_amiibo_arm(client_idx, subpad, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(completed.data()), completed.size()));
+        }
     }
     return true;
 }
@@ -382,9 +620,12 @@ bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const socka
     std::ranges::copy(data.subspan(0, sizeof(h)), (uint8_t*)&h);
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION || h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len + HMAC_TAG_SIZE) return true;
+    if (h.reserved != static_cast<uint8_t>(ns::macro::UploadKind::Macro) &&
+            h.reserved != static_cast<uint8_t>(ns::macro::UploadKind::Amiibo)) return true;
+    const auto kind = static_cast<ns::macro::UploadKind>(h.reserved);
     if (hmac_verify({g_ctx.hmac_key, 32}, data.subspan(0, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len), data.subspan(ns::macro::CHUNK_HEADER_SIZE + h.chunk_len, HMAC_TAG_SIZE)) != 0 || !rate_allow(sender.sin_addr.s_addr)) return true;
     int cidx = server_macro_client_for_sender(sender);
-    if (cidx >= 0) handle_macro_chunk(cidx, h.upload_id, h.subpad, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
+    if (cidx >= 0) handle_macro_chunk(cidx, h.upload_id, h.subpad, kind, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
     return true;
 }
 
@@ -394,8 +635,10 @@ bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t
     std::ranges::copy(data.subspan(0, sizeof(h)), (uint8_t*)&h);
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION && h.version != WEB_PROTO_VERSION) return true;
+    // NFC/amiibo is intentionally UDP-only for now; WebSocket chunks stay macro-only.
+    if (h.reserved != static_cast<uint8_t>(ns::macro::UploadKind::Macro)) return true;
     if (h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len) return true;
-    return handle_macro_chunk(client_idx, h.upload_id, h.subpad, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
+    return handle_macro_chunk(client_idx, h.upload_id, h.subpad, ns::macro::UploadKind::Macro, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
 }
 
 bool server_macro_running(int client_idx, int subpad) {
@@ -470,6 +713,7 @@ void reset_client_session(int client_idx) {
         reset_client_session_locked(g_ctx.clients[client_idx]);
     }
     server_macro_stop_all_for_client(client_idx);
+    server_amiibo_clear_all_for_client(client_idx);
 }
 
 bool reset_client_session_if_source(int client_idx, InputSource source) {
@@ -483,7 +727,10 @@ bool reset_client_session_if_source(int client_idx, InputSource source) {
             reset = true;
         }
     }
-    if (reset) server_macro_stop_all_for_client(client_idx);
+    if (reset) {
+        server_macro_stop_all_for_client(client_idx);
+        server_amiibo_clear_all_for_client(client_idx);
+    }
     return reset;
 }
 

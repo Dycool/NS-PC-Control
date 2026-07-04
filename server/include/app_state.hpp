@@ -84,6 +84,8 @@ struct ClientSession {
     ControllerStatusState controller_status[4]{};
     uint32_t controller_status_seq[4]{};
     uint32_t udp_last_controller_status_seq[4]{};
+    uint32_t udp_last_amiibo_version[4]{};
+    bool udp_last_amiibo_dirty[4]{};
     bool udp_rumble_enabled = false;
     uint32_t udp_last_rumble_seq[4]{};
     bool pad_present[4]{};
@@ -98,11 +100,22 @@ struct ServerMacroRuntime {
     uint64_t start_us = 0;
 };
 
+struct ServerAmiiboState {
+    bool armed = false;
+    bool present = false;
+    bool dirty = false;
+    uint32_t version = 0;
+    uint64_t armed_until_us = 0;
+    uint32_t crc32 = 0;
+    std::vector<uint8_t> dump;
+};
+
 struct ServerMacroUploadRuntime {
     bool active = false;
     sockaddr_in sender{};
     uint32_t upload_id = 0;
     uint8_t subpad = 0;
+    ns::macro::UploadKind kind = ns::macro::UploadKind::Macro;
     uint32_t total_len = 0;
     uint32_t chunk_count = 0;
     uint32_t received_count = 0;
@@ -153,6 +166,8 @@ struct ServerContext {
     ServerMacroRuntime server_macros[MAX_CLIENTS][4]{};
     std::mutex server_macro_upload_mtx;
     ServerMacroUploadRuntime server_macro_uploads[MAX_CLIENTS]{};
+    std::mutex server_amiibo_mtx;
+    ServerAmiiboState server_amiibos[MAX_CLIENTS][4]{};
     struct lws_context* lws_context = nullptr;
 };
 extern ServerContext g_ctx;
@@ -202,6 +217,15 @@ bool rate_allow(uint32_t ip);
 int server_macro_client_for_sender(const sockaddr_in& sender);
 bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const sockaddr_in& sender);
 bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t> data);
+bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump);
+bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now = 0, uint32_t* version = nullptr);
+bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vector<uint8_t>& out, uint32_t* version = nullptr);
+bool server_amiibo_get_status(int client_idx, int subpad, ns::AmiiboStatusPacket& out);
+bool server_amiibo_apply_write_command(int client_idx, int subpad, std::span<const uint8_t> command, uint32_t* version = nullptr);
+bool server_amiibo_handle_pull_request(int sock, std::span<const uint8_t> data, const sockaddr_in& sender);
+uint32_t server_amiibo_crc32(std::span<const uint8_t> data);
+void server_amiibo_mark_present(int client_idx, int subpad, bool present);
+void server_amiibo_clear_all_for_client(int client_idx);
 bool server_macro_running(int client_idx, int subpad);
 void server_macro_apply(int client_idx, int subpad, ns::HoriHIDReport& live);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);

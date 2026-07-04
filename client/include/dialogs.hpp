@@ -54,7 +54,13 @@ private:
     QCheckBox* homeShortcutBox = nullptr;
     QCheckBox* captureShortcutBox = nullptr;
     QComboBox* controllerTypeBox = nullptr;
+    QPushButton* scanAmiiboButton = nullptr;
+    QPushButton* saveAmiiboButton = nullptr;
+    QTimer* amiiboTimer = nullptr;
 
+    void updateAmiiboButton();
+    void scanAmiibo();
+    void saveUpdatedAmiibo();
     void saveSettings();
 };
 

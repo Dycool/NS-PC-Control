@@ -10,12 +10,14 @@
 #include <format>
 #include <span>
 #include <cstring>
+#include <sstream>
+#include <string_view>
 
 using namespace ns;
 
 uint8_t pro_timer_from_us(uint64_t t_us) { return (uint8_t)((t_us / 5000ULL) & 0xFF); }
 
-extern const uint8_t VIRTUAL_CONTROLLER_REPORT_DESC[203] = {
+extern const uint8_t VIRTUAL_CONTROLLER_REPORT_DESC[] = {
     0x05, 0x01, 0x15, 0x00, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x30, 0x05, 0x01, 0x05, 0x09, 0x19, 0x01,
     0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0A, 0x55, 0x00, 0x65, 0x00, 0x81, 0x02,
     0x05, 0x09, 0x19, 0x0B, 0x29, 0x0E, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02,
@@ -28,8 +30,14 @@ extern const uint8_t VIRTUAL_CONTROLLER_REPORT_DESC[203] = {
     0x09, 0x01, 0x75, 0x08, 0x95, 0x3F, 0x81, 0x03, 0x85, 0x81, 0x09, 0x02, 0x75, 0x08, 0x95, 0x3F,
     0x81, 0x03, 0x85, 0x01, 0x09, 0x03, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0x85, 0x10, 0x09, 0x04,
     0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0x85, 0x80, 0x09, 0x05, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83,
-    0x85, 0x82, 0x09, 0x06, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83, 0xC0
+    0x85, 0x82, 0x09, 0x06, 0x75, 0x08, 0x95, 0x3F, 0x91, 0x83,
+    // Report 0x31: NFC/IR MCU input. Same standard 49-byte prefix as 0x30,
+    // followed by 313 bytes of MCU data. Linux HID gadget report_length must
+    // be large enough for this report even though normal reports stay 64 B.
+    0x06, 0x00, 0xFF, 0x85, 0x31, 0x09, 0x07, 0x75, 0x08, 0x96, 0x69, 0x01, 0x81, 0x03,
+    0xC0
 };
+extern const size_t VIRTUAL_CONTROLLER_REPORT_DESC_SIZE = sizeof(VIRTUAL_CONTROLLER_REPORT_DESC);
 
 extern const uint8_t LEGACY_REPORT_DESC[85] = {
     0x05,0x01,0x09,0x05,0xA1,0x01,0x15,0x00,0x25,0x01,0x35,0x00,0x45,0x01,0x75,0x01,
@@ -39,6 +47,273 @@ extern const uint8_t LEGACY_REPORT_DESC[85] = {
     0x31,0x09,0x32,0x09,0x35,0x75,0x08,0x95,0x04,0x81,0x02,0x06,0x00,0xFF,0x09,
     0x20,0x75,0x08,0x95,0x01,0x81,0x02,0xC0
 };
+
+
+static const char* nfc_state_name(NfcRuntimeState state) {
+    switch (state) {
+        case NfcRuntimeState::Off: return "off";
+        case NfcRuntimeState::ReportMode31: return "report-0x31";
+        case NfcRuntimeState::McuConfigured: return "mcu-configured";
+        case NfcRuntimeState::McuStateChanged: return "mcu-state-changed";
+        case NfcRuntimeState::Discovery: return "tag-discovery";
+        case NfcRuntimeState::PollingForTag: return "polling-for-tag";
+        case NfcRuntimeState::TagReadRequested: return "ntag-read-requested";
+        case NfcRuntimeState::TagReadQueued: return "ntag-read-queued";
+        case NfcRuntimeState::TagWriteSetup: return "ntag-write-setup";
+        case NfcRuntimeState::TagWriteReceiving: return "ntag-write-receiving";
+        case NfcRuntimeState::TagWriteApplied: return "ntag-write-applied";
+        case NfcRuntimeState::UnknownMcuCommand: return "unknown-mcu-command";
+    }
+    return "unknown";
+}
+
+static std::string hex_bytes(std::span<const uint8_t> data, size_t max_len = 32) {
+    std::string out;
+    const size_t n = std::min(data.size(), max_len);
+    out.reserve(n * 2 + (data.size() > max_len ? 3 : 0));
+    for (size_t i = 0; i < n; ++i) out += std::format("{:02x}", data[i]);
+    if (data.size() > max_len) out += "...";
+    return out;
+}
+
+static void nfc_transition(ControllerRuntime& rt, NfcRuntimeState next, std::string_view reason) {
+    if (rt.nfc_state == next) return;
+    if (g_ctx.verbose) {
+        std::println("[nfc] port={} {} -> {} ({})", rt.ctrl + 1, nfc_state_name(rt.nfc_state), nfc_state_name(next), reason);
+    }
+    rt.nfc_state = next;
+}
+
+static const char* mcu_cmd_name(uint8_t cmd, uint8_t subcmd) {
+    if (cmd == 0x01) return "status/keepalive";
+    if (cmd == 0x02 && subcmd == 0x04) return "start tag discovery";
+    if (cmd == 0x02 && subcmd == 0x01) return "tag polling";
+    if (cmd == 0x02 && subcmd == 0x06) return "ntag read/write setup";
+    if (cmd == 0x02 && subcmd == 0x08) return "ntag write chunk";
+    if (cmd == 0x02) return "nfc command";
+    return "unknown";
+}
+
+namespace {
+constexpr uint8_t MCU_POWER_SUSPENDED = 0x00;
+constexpr uint8_t MCU_POWER_READY = 0x01;
+constexpr uint8_t MCU_POWER_CONFIGURED_NFC = 0x04;
+
+uint8_t nfc_crc8(std::span<const uint8_t> data) {
+    uint8_t crc = 0;
+    for (uint8_t b : data) {
+        crc ^= b;
+        for (int i = 0; i < 8; ++i) {
+            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x07) : static_cast<uint8_t>(crc << 1);
+        }
+    }
+    return crc;
+}
+
+using NfcMcuFrame = std::array<uint8_t, NFC_MCU_DATA_SIZE>;
+
+void nfc_append_part(NfcMcuFrame& out, size_t& pos, std::span<const uint8_t> part) {
+    const size_t n = std::min(part.size(), out.size() > pos ? out.size() - pos : 0);
+    if (n) std::memcpy(out.data() + pos, part.data(), n);
+    pos += n;
+}
+
+void nfc_append_hex(NfcMcuFrame& out, size_t& pos, std::string_view hex) {
+    for (size_t i = 0; i + 1 < hex.size() && pos < out.size(); i += 2) {
+        auto nibble = [](char c) -> uint8_t {
+            if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+            if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(10 + c - 'a');
+            if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(10 + c - 'A');
+            return 0;
+        };
+        out[pos++] = static_cast<uint8_t>((nibble(hex[i]) << 4) | nibble(hex[i + 1]));
+    }
+}
+
+template <typename... Parts>
+NfcMcuFrame nfc_pack(uint8_t background, Parts&&... parts) {
+    NfcMcuFrame out{};
+    out.fill(background);
+    size_t pos = 0;
+    (nfc_append_part(out, pos, std::span<const uint8_t>(std::forward<Parts>(parts))), ...);
+    out.back() = nfc_crc8(std::span<const uint8_t>(out.data(), out.size() - 1));
+    return out;
+}
+
+NfcMcuFrame nfc_pack_hex_only(std::string_view hex, uint8_t background = 0) {
+    NfcMcuFrame out{};
+    out.fill(background);
+    size_t pos = 0;
+    nfc_append_hex(out, pos, hex);
+    out.back() = nfc_crc8(std::span<const uint8_t>(out.data(), out.size() - 1));
+    return out;
+}
+
+template <typename... Parts>
+NfcMcuFrame nfc_pack_hex(std::string_view first_hex, Parts&&... parts) {
+    NfcMcuFrame out{};
+    out.fill(0);
+    size_t pos = 0;
+    nfc_append_hex(out, pos, first_hex);
+    (nfc_append_part(out, pos, std::span<const uint8_t>(std::forward<Parts>(parts))), ...);
+    out.back() = nfc_crc8(std::span<const uint8_t>(out.data(), out.size() - 1));
+    return out;
+}
+
+void nfc_queue_clear(ControllerRuntime& rt) {
+    rt.nfc_queue_head = 0;
+    rt.nfc_queue_count = 0;
+}
+
+void nfc_queue_push(ControllerRuntime& rt, const NfcMcuFrame& frame, bool force = false) {
+    if (rt.nfc_queue_count >= NFC_MCU_QUEUE_CAP) {
+        if (!force) {
+            if (g_ctx.verbose) std::println("[nfc] port={} dropping MCU response; queue full", rt.ctrl + 1);
+            return;
+        }
+        // Keep the newest forced response by overwriting the oldest one.
+        rt.nfc_queue_head = static_cast<uint8_t>((rt.nfc_queue_head + 1) % NFC_MCU_QUEUE_CAP);
+        rt.nfc_queue_count = static_cast<uint8_t>(NFC_MCU_QUEUE_CAP - 1);
+    }
+    const uint8_t tail = static_cast<uint8_t>((rt.nfc_queue_head + rt.nfc_queue_count) % NFC_MCU_QUEUE_CAP);
+    rt.nfc_queue[tail] = frame;
+    ++rt.nfc_queue_count;
+}
+
+NfcMcuFrame nfc_no_response_frame() {
+    return nfc_pack_hex_only("ff");
+}
+
+NfcMcuFrame nfc_status_frame(uint8_t power_state) {
+    const std::array<uint8_t, 1> state{power_state};
+    return nfc_pack_hex("0100000008001b", state);
+}
+
+std::array<uint8_t, 7> amiibo_uid_from_dump(std::span<const uint8_t> dump) {
+    std::array<uint8_t, 7> uid{};
+    if (dump.size() >= 8) {
+        uid[0] = dump[0]; uid[1] = dump[1]; uid[2] = dump[2];
+        uid[3] = dump[4]; uid[4] = dump[5]; uid[5] = dump[6]; uid[6] = dump[7];
+    }
+    return uid;
+}
+
+bool uid_is_zero(std::span<const uint8_t> uid) {
+    for (uint8_t b : uid) if (b != 0) return false;
+    return true;
+}
+
+void nfc_queue_status(ControllerRuntime& rt) {
+    if (rt.nfc_power_state == MCU_POWER_SUSPENDED) nfc_queue_push(rt, nfc_no_response_frame());
+    else nfc_queue_push(rt, nfc_status_frame(rt.nfc_power_state));
+}
+
+NfcMcuFrame nfc_poll_status_frame(ControllerRuntime& rt, const std::vector<uint8_t>* dump) {
+    std::array<uint8_t, 1> seq{rt.nfc_seq_no};
+    std::array<uint8_t, 1> ack{rt.nfc_ack_seq_no};
+    std::array<uint8_t, 1> state{static_cast<uint8_t>(rt.nfc_tag_state)};
+
+    if (rt.nfc_tag_state == NfcTagState::ProcessingWrite && rt.nfc_write_processing_countdown > 0) {
+        --rt.nfc_write_processing_countdown;
+        if (rt.nfc_write_processing_countdown == 0) rt.nfc_tag_state = NfcTagState::None;
+    }
+
+    if (dump && dump->size() >= ns::AMIIBO_DUMP_BYTES && rt.nfc_tag_state != NfcTagState::None) {
+        const auto uid = amiibo_uid_from_dump(*dump);
+        if (rt.nfc_tag_state == NfcTagState::Poll) {
+            if (rt.nfc_last_uid_valid && uid == rt.nfc_last_uid) rt.nfc_tag_state = NfcTagState::PollAgain;
+            else { rt.nfc_last_uid = uid; rt.nfc_last_uid_valid = true; }
+        } else if (rt.nfc_tag_state == NfcTagState::PollAgain) {
+            if (!rt.nfc_last_uid_valid || uid != rt.nfc_last_uid) {
+                rt.nfc_tag_state = NfcTagState::Poll;
+                rt.nfc_last_uid = uid;
+                rt.nfc_last_uid_valid = true;
+            }
+        }
+        state[0] = static_cast<uint8_t>(rt.nfc_tag_state);
+        return nfc_pack_hex("2a0005", seq, ack,
+                            std::span<const uint8_t>(std::array<uint8_t, 2>{0x09, 0x31}), state,
+                            std::span<const uint8_t>(std::array<uint8_t, 8>{0x00,0x00,0x00,0x01,0x01,0x02,0x00,0x07}),
+                            uid);
+    }
+
+    rt.nfc_last_uid_valid = false;
+    return nfc_pack_hex("2a000500000931", state);
+}
+
+NfcMcuFrame nfc_write_setup_frame(std::span<const uint8_t> dump) {
+    NfcMcuFrame frame{};
+    frame.fill(0);
+    size_t pos = 0;
+    const auto uid = amiibo_uid_from_dump(dump);
+    nfc_append_hex(frame, pos, "3a0007010008400200000001020007");
+    nfc_append_part(frame, pos, uid);
+    nfc_append_hex(frame, pos, "00000000fdb0c0a434c9bf31690030aaef56444b0f602627366d5a281adc697fde0d6cbc010303000000000000f110ffee");
+    frame.back() = nfc_crc8(std::span<const uint8_t>(frame.data(), frame.size() - 1));
+    return frame;
+}
+
+void nfc_queue_read_frames(ControllerRuntime& rt, std::span<const uint8_t> dump) {
+    if (dump.size() < ns::AMIIBO_DUMP_BYTES) return;
+    const auto uid = amiibo_uid_from_dump(dump);
+
+    NfcMcuFrame frame1{};
+    frame1.fill(0);
+    size_t pos = 0;
+    nfc_append_hex(frame1, pos, "3a0007010001310200000001020007");
+    nfc_append_part(frame1, pos, uid);
+    nfc_append_hex(frame1, pos, "000000007DFDF0793651ABD7466E39C191BABEB856CEEDF1CE44CC75EAFB27094D087AE803003B3C7778860000");
+    nfc_append_part(frame1, pos, dump.subspan(0, 245));
+    frame1.back() = nfc_crc8(std::span<const uint8_t>(frame1.data(), frame1.size() - 1));
+
+    NfcMcuFrame frame2{};
+    frame2.fill(0);
+    pos = 0;
+    nfc_append_hex(frame2, pos, "3a000702000927");
+    nfc_append_part(frame2, pos, dump.subspan(245, ns::AMIIBO_DUMP_BYTES - 245));
+    frame2.back() = nfc_crc8(std::span<const uint8_t>(frame2.data(), frame2.size() - 1));
+
+    NfcMcuFrame trailer{};
+    trailer.fill(0);
+    pos = 0;
+    nfc_append_hex(trailer, pos, "2a000500000931040000000101020007");
+    nfc_append_part(trailer, pos, uid);
+    trailer.back() = nfc_crc8(std::span<const uint8_t>(trailer.data(), trailer.size() - 1));
+
+    nfc_queue_clear(rt);
+    nfc_queue_push(rt, frame1, true);
+    nfc_queue_push(rt, frame2, true);
+    nfc_queue_push(rt, trailer, true);
+    nfc_transition(rt, NfcRuntimeState::TagReadQueued, "queued read-only amiibo response frames");
+}
+
+void nfc_entered_31_input_mode(ControllerRuntime& rt) {
+    nfc_queue_clear(rt);
+    rt.nfc_power_state = MCU_POWER_READY;
+    nfc_queue_status(rt);
+}
+
+void nfc_set_power_state(ControllerRuntime& rt, uint8_t power_state) {
+    nfc_queue_clear(rt);
+    rt.nfc_power_state = (power_state == MCU_POWER_SUSPENDED) ? MCU_POWER_SUSPENDED : MCU_POWER_READY;
+    nfc_queue_status(rt);
+}
+
+void nfc_set_config(ControllerRuntime& rt, std::span<const uint8_t> config) {
+    if (rt.nfc_power_state == MCU_POWER_READY && config.size() > 2) {
+        if (config[2] == MCU_POWER_READY || config[2] == MCU_POWER_CONFIGURED_NFC) {
+            rt.nfc_power_state = config[2];
+        }
+    }
+    if (rt.nfc_power_state == MCU_POWER_CONFIGURED_NFC) {
+        rt.nfc_tag_state = NfcTagState::None;
+        rt.nfc_seq_no = 0;
+        rt.nfc_ack_seq_no = 0;
+        rt.nfc_last_uid_valid = false;
+        nfc_queue_status(rt);
+    }
+}
+} // namespace
 
 uint8_t CTRL_MAC_BE[4][6] = {
     {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA0}, {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA1},
@@ -273,6 +548,57 @@ void build_standard_report(const HIDReport& src, const MotionReport motion_sampl
     out.gyro_y_2  = imu[2].gx; out.gyro_x_2  = imu[2].gy; out.gyro_z_2  = imu[2].gz;
 }
 
+void build_nfc_ir_report(ControllerRuntime& rt, const HIDReport& src, const MotionReport motion_samples[3],
+                         bool has_motion, bool imu_enabled, uint8_t timer, ProInputReport31& out) {
+    memset(&out, 0, sizeof(out));
+    out.id = RID_INPUT_NFC_IR;
+    out.timer = timer;
+    out.conn_info = pro_conn_info_from_hid(src);
+    out.vibrator = PRO_VIBRATOR_REPORT;
+    map_buttons(src.input.buttons, src.input.hat, out.buttons);
+    pack_stick_12(out.left_stick, src.input.lx, src.input.ly);
+    pack_stick_12(out.right_stick, src.input.rx, src.input.ry);
+
+    MotionReport imu[3]{};
+    if (imu_enabled && has_motion && motion_samples) std::memcpy(imu, motion_samples, sizeof(imu));
+    out.accel_y_0 = imu[0].ax; out.accel_x_0 = imu[0].ay; out.accel_z_0 = imu[0].az;
+    out.gyro_y_0  = imu[0].gx; out.gyro_x_0  = imu[0].gy; out.gyro_z_0  = imu[0].gz;
+    out.accel_y_1 = imu[1].ax; out.accel_x_1 = imu[1].ay; out.accel_z_1 = imu[1].az;
+    out.gyro_y_1  = imu[1].gx; out.gyro_x_1  = imu[1].gy; out.gyro_z_1  = imu[1].gz;
+    out.accel_y_2 = imu[2].ax; out.accel_x_2 = imu[2].ay; out.accel_z_2 = imu[2].az;
+    out.gyro_y_2  = imu[2].gx; out.gyro_x_2  = imu[2].gy; out.gyro_z_2  = imu[2].gz;
+
+    NfcMcuFrame frame = nfc_no_response_frame();
+    if (rt.nfc_queue_count > 0) {
+        frame = rt.nfc_queue[rt.nfc_queue_head];
+        rt.nfc_queue_head = static_cast<uint8_t>((rt.nfc_queue_head + 1) % NFC_MCU_QUEUE_CAP);
+        --rt.nfc_queue_count;
+    }
+    std::memcpy(out.nfc_ir, frame.data(), frame.size());
+}
+
+void reset_nfc_runtime(ControllerRuntime& rt, bool full_reset) {
+    rt.nfc_report_mode = false;
+    rt.nfc_mcu_configured = false;
+    rt.nfc_mcu_resumed = false;
+    rt.nfc_state = NfcRuntimeState::Off;
+    rt.nfc_tag_state = NfcTagState::None;
+    rt.nfc_power_state = MCU_POWER_SUSPENDED;
+    rt.nfc_last_mcu_cmd = 0xFF;
+    rt.nfc_last_mcu_subcmd = 0xFF;
+    rt.nfc_last_poll_log_us = 0;
+    rt.nfc_poll_logged_without_tag = false;
+    rt.nfc_poll_logged_with_tag = false;
+    rt.nfc_last_uid_valid = false;
+    rt.nfc_seq_no = 0;
+    rt.nfc_ack_seq_no = 0;
+    rt.nfc_write_buffer.clear();
+    rt.nfc_remove_polls_remaining = 0;
+    rt.nfc_write_processing_countdown = 0;
+    nfc_queue_clear(rt);
+    if (full_reset) rt.nfc_mcu_packet_count = 0;
+}
+
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply) {
     std::ranges::fill(reply->reply_data, 0); reply->ack = 0x80; reply->subcmd_id = subcmd;
     switch (subcmd) {
@@ -286,13 +612,47 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uin
         return 0;
     case CMD_TRIGGER_BUTTONS: reply->ack = 0x83; reply->reply_data[0] = 0x00; return 1;
     case CMD_SET_SHIP_MODE: return 0;
-    case CMD_SET_NFC_IR_CONFIG: reply->ack = 0xA0; reply->reply_data[0] = 0x01; return 1;
+    case CMD_SET_NFC_IR_CONFIG: {
+        rt.nfc_mcu_configured = true;
+        reply->ack = 0xA0;
+        static constexpr uint8_t mcu_config_reply[] = {
+            0x01, 0x00, 0xFF, 0x00, 0x08, 0x00, 0x1B, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0xC8
+        };
+        std::memcpy(reply->reply_data, mcu_config_reply, sizeof(mcu_config_reply));
+        nfc_set_config(rt, cmd_data);
+        nfc_transition(rt, NfcRuntimeState::McuConfigured, std::format("subcmd 0x21/write MCU data={}", hex_bytes(cmd_data, 24)));
+        return sizeof(mcu_config_reply);
+    }
+    case CMD_SET_MCU_STATE:
+        rt.nfc_mcu_resumed = cmd_data.empty() || cmd_data[0] != 0x00;
+        nfc_set_power_state(rt, cmd_data.empty() ? MCU_POWER_READY : cmd_data[0]);
+        nfc_transition(rt, NfcRuntimeState::McuStateChanged, std::format("subcmd 0x22/set MCU state data={}", hex_bytes(cmd_data, 24)));
+        return 0;
     case CMD_SET_IMU_SENS: return 0;
     case CMD_GET_DEVICE_INFO: {
         uint8_t info[36]; build_get_device_info_response(info, rt.ctrl); reply->ack = 0x82;
         std::ranges::copy(info, reply->reply_data); return 36;
     }
-    case CMD_SET_DATA_FORMAT: rt.full_report_enabled = true; return 0;
+    case CMD_SET_DATA_FORMAT:
+        rt.full_report_enabled = true;
+        if (!cmd_data.empty()) {
+            rt.input_report_mode = cmd_data[0];
+            rt.nfc_report_mode = (cmd_data[0] == RID_INPUT_NFC_IR);
+            if (rt.nfc_report_mode) {
+                nfc_entered_31_input_mode(rt);
+                nfc_transition(rt, NfcRuntimeState::ReportMode31, "input report mode 0x31 requested");
+            } else if (rt.nfc_state != NfcRuntimeState::Off && (cmd_data[0] == RID_INPUT_STANDARD || cmd_data[0] == 0x3F)) {
+                nfc_transition(rt, NfcRuntimeState::Off, std::format("input report mode switched to 0x{:02x}", cmd_data[0]));
+                reset_nfc_runtime(rt);
+            } else if (g_ctx.verbose) {
+                std::println("[nfc] port={} input report mode 0x{:02x}", rt.ctrl + 1, static_cast<unsigned>(cmd_data[0]));
+            }
+        }
+        return 0;
     case CMD_SPI_FLASH_READ: {
         if (cmd_data.size() < 5) { reply->ack = 0x00; return 0; }
         uint32_t addr = cmd_data[0] | (cmd_data[1] << 8) | (cmd_data[2] << 16) | (cmd_data[3] << 24);
@@ -309,6 +669,197 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uin
     case CMD_ENABLE_IMU: rt.imu_enabled = (cmd_data.empty() || cmd_data[0] != 0); return 0;
     case CMD_ENABLE_VIBRATION: rt.vibration_enabled = (cmd_data.empty() || cmd_data[0] != 0); return 0;
     default: return 0;
+    }
+}
+
+
+void handle_nfc_ir_output_report(ControllerRuntime& rt, std::span<const uint8_t> packet,
+                                 int client_idx, int subpad, bool amiibo_armed, uint32_t amiibo_version) {
+    if (packet.empty() || packet[0] != RID_OUTPUT_NFC_IR) return;
+    ++rt.nfc_mcu_packet_count;
+
+    const uint8_t mcu_cmd = packet.size() > 10 ? packet[10] : 0xFF;
+    const uint8_t mcu_subcmd = packet.size() > 11 ? packet[11] : 0xFF;
+    const std::span<const uint8_t> mcu_data(packet.data() + std::min<size_t>(12, packet.size()),
+                                            packet.size() > 12 ? packet.size() - 12 : 0);
+    const bool changed = (mcu_cmd != rt.nfc_last_mcu_cmd || mcu_subcmd != rt.nfc_last_mcu_subcmd);
+    rt.nfc_last_mcu_cmd = mcu_cmd;
+    rt.nfc_last_mcu_subcmd = mcu_subcmd;
+
+    if (mcu_cmd == 0x01) {
+        nfc_queue_status(rt);
+        if (changed && g_ctx.verbose) {
+            std::println("[nfc] port={} MCU status request len={} data={}", rt.ctrl + 1, packet.size(), hex_bytes(packet, 48));
+        }
+        return;
+    }
+
+    if (mcu_cmd != 0x02) {
+        if (changed) {
+            nfc_transition(rt, NfcRuntimeState::UnknownMcuCommand, std::format("0x11 MCU cmd=0x{:02x} sub=0x{:02x}", mcu_cmd, mcu_subcmd));
+            if (g_ctx.verbose) {
+                std::println("[nfc] port={} 0x11 {} cmd=0x{:02x} sub=0x{:02x} len={} data={}",
+                             rt.ctrl + 1, mcu_cmd_name(mcu_cmd, mcu_subcmd), static_cast<unsigned>(mcu_cmd),
+                             static_cast<unsigned>(mcu_subcmd), packet.size(), hex_bytes(packet, 48));
+            }
+        }
+        return;
+    }
+
+    if (rt.nfc_power_state != MCU_POWER_CONFIGURED_NFC && mcu_subcmd != 0x04) {
+        if (g_ctx.verbose && changed) {
+            std::println("[nfc] port={} NFC command outside configured NFC mode cmd=0x{:02x} sub=0x{:02x} power=0x{:02x} data={}",
+                         rt.ctrl + 1, mcu_cmd, mcu_subcmd, rt.nfc_power_state, hex_bytes(packet, 48));
+        }
+        return;
+    }
+
+    if (mcu_subcmd == 0x04) {
+        nfc_transition(rt, NfcRuntimeState::Discovery, "0x11 MCU NFC status/discovery request");
+        std::vector<uint8_t> dump;
+        uint32_t version = 0;
+        bool have_dump = (client_idx >= 0 && subpad >= 0)
+            ? server_amiibo_get_dump(client_idx, subpad, now_us(), dump, &version)
+            : false;
+        if (have_dump && rt.nfc_remove_polls_remaining > 0
+                && (rt.nfc_tag_state == NfcTagState::Poll || rt.nfc_tag_state == NfcTagState::PollAgain)) {
+            dump.assign(ns::AMIIBO_DUMP_BYTES, 0);
+            --rt.nfc_remove_polls_remaining;
+            if (g_ctx.verbose && changed) {
+                std::println("[nfc] port={} temporarily reports removed amiibo after write ({} polls left)",
+                             rt.ctrl + 1, rt.nfc_remove_polls_remaining);
+            }
+        }
+        nfc_queue_push(rt, nfc_poll_status_frame(rt, have_dump ? &dump : nullptr));
+        if (g_ctx.verbose && have_dump && changed) {
+            std::println("[nfc] port={} slot={} pad={} reports virtual tag present v{}", rt.ctrl + 1, client_idx + 1, subpad + 1, version);
+        }
+    } else if (mcu_subcmd == 0x01) {
+        nfc_transition(rt, NfcRuntimeState::PollingForTag, "0x11 MCU start tag polling");
+        rt.nfc_tag_state = NfcTagState::Poll;
+        const uint64_t now = now_us();
+        const bool should_log = changed
+            || (amiibo_armed && !rt.nfc_poll_logged_with_tag)
+            || (!amiibo_armed && !rt.nfc_poll_logged_without_tag)
+            || elapsed_us_saturated(now, rt.nfc_last_poll_log_us) > 2'000'000ULL;
+        if (g_ctx.verbose && should_log) {
+            if (amiibo_armed) {
+                std::println("[nfc] port={} slot={} pad={} expects amiibo; armed dump v{} is ready",
+                             rt.ctrl + 1, client_idx + 1, subpad + 1, amiibo_version);
+                rt.nfc_poll_logged_with_tag = true;
+            } else {
+                std::println("[nfc] port={} expects amiibo; no armed UDP amiibo dump for mapped slot/pad yet", rt.ctrl + 1);
+                rt.nfc_poll_logged_without_tag = true;
+            }
+            rt.nfc_last_poll_log_us = now;
+        }
+    } else if (mcu_subcmd == 0x06) {
+        nfc_transition(rt, NfcRuntimeState::TagReadRequested, "0x11 MCU NTAG read/write request");
+        if (g_ctx.verbose) {
+            std::println("[nfc] port={} NTAG read/write request len={} data={}", rt.ctrl + 1, packet.size(), hex_bytes(packet, 64));
+        }
+
+        std::vector<uint8_t> dump;
+        uint32_t version = 0;
+        const bool have_dump = (client_idx >= 0 && subpad >= 0)
+            ? server_amiibo_get_dump(client_idx, subpad, now_us(), dump, &version)
+            : false;
+        if (!have_dump) {
+            if (g_ctx.verbose) std::println("[nfc] port={} cannot serve read request: no armed amiibo dump", rt.ctrl + 1);
+            return;
+        }
+
+        const std::span<const uint8_t> target_uid = mcu_data.size() >= 13 ? mcu_data.subspan(6, 7) : std::span<const uint8_t>{};
+        if (target_uid.empty() || uid_is_zero(target_uid)) {
+            nfc_queue_read_frames(rt, dump);
+            if (g_ctx.verbose) {
+                std::println("[nfc] port={} queued amiibo read dump slot={} pad={} v{}", rt.ctrl + 1, client_idx + 1, subpad + 1, version);
+            }
+        } else {
+            rt.nfc_tag_state = NfcTagState::AwaitingWrite;
+            rt.nfc_ack_seq_no = 0;
+            rt.nfc_write_buffer.clear();
+            nfc_queue_clear(rt);
+            nfc_queue_push(rt, nfc_write_setup_frame(dump), true);
+            nfc_transition(rt, NfcRuntimeState::TagWriteSetup, "queued amiibo write setup response");
+            if (g_ctx.verbose) {
+                std::println("[nfc] port={} write/setup request for uid={} slot={} pad={} v{}",
+                             rt.ctrl + 1, hex_bytes(target_uid, 7), client_idx + 1, subpad + 1, version);
+            }
+        }
+    } else if (mcu_subcmd == 0x08) {
+        nfc_transition(rt, NfcRuntimeState::TagWriteReceiving, "0x11 MCU NTAG write chunk");
+        std::vector<uint8_t> dump;
+        uint32_t version = 0;
+        const bool have_dump = (client_idx >= 0 && subpad >= 0)
+            ? server_amiibo_get_dump(client_idx, subpad, now_us(), dump, &version)
+            : false;
+        if (!have_dump) {
+            if (g_ctx.verbose) std::println("[nfc] port={} cannot process write chunk: no armed amiibo dump", rt.ctrl + 1);
+            return;
+        }
+        if (mcu_data.size() < 4) {
+            if (g_ctx.verbose) std::println("[nfc] port={} short write chunk data={}", rt.ctrl + 1, hex_bytes(mcu_data, 32));
+            return;
+        }
+
+        const uint8_t seq = mcu_data[0];
+        const uint8_t end_marker = mcu_data[2];
+        const uint8_t payload_len = mcu_data[3];
+        if (mcu_data.size() < static_cast<size_t>(4u + payload_len)) {
+            if (g_ctx.verbose) std::println("[nfc] port={} truncated write chunk seq={} len={} have={}", rt.ctrl + 1, seq, payload_len, mcu_data.size());
+            return;
+        }
+
+        if (seq == 0 && end_marker == 0x08) {
+            // Rare single-packet write transaction: byte 3 is the whole payload length.
+            rt.nfc_write_buffer.assign(mcu_data.begin() + 4, mcu_data.begin() + 4 + payload_len);
+            if (g_ctx.verbose) std::println("[nfc] port={} accepted single-packet write bytes={}", rt.ctrl + 1, rt.nfc_write_buffer.size());
+        } else if (seq <= rt.nfc_ack_seq_no) {
+            if (g_ctx.verbose) std::println("[nfc] port={} repeated write chunk seq={} ack={}", rt.ctrl + 1, seq, rt.nfc_ack_seq_no);
+        } else if (seq == static_cast<uint8_t>(rt.nfc_ack_seq_no + 1)) {
+            rt.nfc_write_buffer.insert(rt.nfc_write_buffer.end(), mcu_data.begin() + 4, mcu_data.begin() + 4 + payload_len);
+            rt.nfc_ack_seq_no = seq;
+            if (g_ctx.verbose) std::println("[nfc] port={} accepted write chunk seq={} bytes={} total={}", rt.ctrl + 1, seq, payload_len, rt.nfc_write_buffer.size());
+        } else {
+            if (g_ctx.verbose) std::println("[nfc] port={} write chunk sequence gap: got={} expected={}", rt.ctrl + 1, seq, rt.nfc_ack_seq_no + 1);
+            rt.nfc_ack_seq_no = 0;
+            rt.nfc_write_buffer.clear();
+        }
+
+        rt.nfc_tag_state = NfcTagState::Writing;
+        nfc_queue_push(rt, nfc_poll_status_frame(rt, &dump), true);
+
+        if (end_marker == 0x08) {
+            uint32_t new_version = 0;
+            const bool changed = server_amiibo_apply_write_command(client_idx, subpad, rt.nfc_write_buffer, &new_version);
+            rt.nfc_ack_seq_no = 0;
+            rt.nfc_tag_state = NfcTagState::ProcessingWrite;
+            rt.nfc_write_processing_countdown = 4;
+            rt.nfc_remove_polls_remaining = 4;
+            std::vector<uint8_t> updated_dump;
+            uint32_t ignored_version = 0;
+            const bool have_updated = server_amiibo_get_dump(client_idx, subpad, now_us(), updated_dump, &ignored_version);
+            nfc_queue_push(rt, nfc_poll_status_frame(rt, have_updated ? &updated_dump : &dump), true);
+            if (changed) nfc_transition(rt, NfcRuntimeState::TagWriteApplied, "applied virtual amiibo write-back");
+            if (g_ctx.verbose) {
+                std::println("[nfc] port={} write transaction complete changed={} v{} buffered={} bytes",
+                             rt.ctrl + 1, changed, new_version, rt.nfc_write_buffer.size());
+            }
+            rt.nfc_write_buffer.clear();
+        }
+    } else if (mcu_subcmd == 0x02) {
+        nfc_transition(rt, NfcRuntimeState::McuConfigured, "0x11 MCU stop tag polling");
+        rt.nfc_tag_state = NfcTagState::None;
+        rt.nfc_last_uid_valid = false;
+        if (client_idx >= 0 && subpad >= 0) server_amiibo_mark_present(client_idx, subpad, false);
+    } else if (changed) {
+        nfc_transition(rt, NfcRuntimeState::UnknownMcuCommand, std::format("0x11 MCU NFC sub=0x{:02x}", mcu_subcmd));
+        if (g_ctx.verbose) {
+            std::println("[nfc] port={} 0x11 {} cmd=0x{:02x} sub=0x{:02x} len={} data={}",
+                         rt.ctrl + 1, mcu_cmd_name(mcu_cmd, mcu_subcmd), static_cast<unsigned>(mcu_cmd),
+                         static_cast<unsigned>(mcu_subcmd), packet.size(), hex_bytes(packet, 64));
+        }
     }
 }
 

@@ -1,10 +1,12 @@
 #include "rumble_client.hpp"
 #include "input_settings.hpp"
 #include "udp_protocol.hpp"
+#include "macro_client.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <span>
 
 void RumbleManager::apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
     if (rp.subpad >= 4) return;
@@ -63,23 +65,28 @@ void RumbleManager::set_output(int slot, uint8_t low, uint8_t high, uint32_t dur
 }
 
 void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_for_slot[4]) {
-    uint8_t buf[64];
+    uint8_t buf[1024];
     for (;;) {
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, nullptr, nullptr);
         if (n < 0) break;
-        if (n == sizeof(ns::ServerInfoReply)) {
+        if (n < (int)sizeof(uint32_t)) continue;
+
+        uint32_t magic = 0;
+        std::memcpy(&magic, buf, sizeof(magic));
+
+        if (magic == ns::SERVER_INFO_MAGIC && n == sizeof(ns::ServerInfoReply)) {
             ns::ServerInfoReply reply{};
             std::memcpy(&reply, buf, sizeof(reply));
-            if (reply.magic == ns::SERVER_INFO_MAGIC && reply.version == ns::SERVER_INFO_VERSION) {
+            if (reply.version == ns::SERVER_INFO_VERSION) {
                 g_serverLastReplyUs.store(ns::now_us());
                 if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
                     g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
                 }
             }
-        } else if (n == sizeof(ns::ControllerStatusPacket)) {
+        } else if (magic == ns::CONTROLLER_STATUS_MAGIC && n == sizeof(ns::ControllerStatusPacket)) {
             ns::ControllerStatusPacket sp{};
             std::memcpy(&sp, buf, sizeof(sp));
-            if (sp.magic == ns::CONTROLLER_STATUS_MAGIC && sp.version == ns::SERVER_INFO_VERSION && sp.subpad < 4) {
+            if (sp.version == ns::SERVER_INFO_VERSION && sp.subpad < 4) {
                 int controller = controller_for_slot[sp.subpad];
                 if (controller >= 0) {
                     int player_index = (sp.player_index < 4) ? static_cast<int>(sp.player_index) : -1;
@@ -87,14 +94,20 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
                     g_sdlInput.set_player_status(controller, player_index, sp.player_leds, body_rgb);
                 }
             }
-        } else if (n == sizeof(ns::PrecisionRumblePacket)) {
+        } else if (magic == ns::AMIIBO_STATUS_MAGIC && n == sizeof(ns::AmiiboStatusPacket)) {
+            ns::AmiiboStatusPacket ap{};
+            std::memcpy(&ap, buf, sizeof(ap));
+            handle_amiibo_status_packet(ap);
+        } else if (magic == ns::AMIIBO_CHUNK_MAGIC && n >= (int)sizeof(ns::AmiiboChunkHeader)) {
+            handle_amiibo_chunk_packet(std::span<const uint8_t>(buf, static_cast<size_t>(n)));
+        } else if (magic == ns::PRECISION_RUMBLE_MAGIC && n == sizeof(ns::PrecisionRumblePacket)) {
             ns::PrecisionRumblePacket rp{};
             std::memcpy(&rp, buf, sizeof(rp));
-            if (rp.magic == ns::PRECISION_RUMBLE_MAGIC) rumble.apply_precision_packet(rp, controller_for_slot);
-        } else if (n == sizeof(ns::RumblePacket)) {
+            rumble.apply_precision_packet(rp, controller_for_slot);
+        } else if (magic == ns::RUMBLE_MAGIC && n == sizeof(ns::RumblePacket)) {
             ns::RumblePacket rp{};
             std::memcpy(&rp, buf, sizeof(rp));
-            if (rp.magic == ns::RUMBLE_MAGIC) rumble.apply_packet(rp, controller_for_slot);
+            rumble.apply_packet(rp, controller_for_slot);
         }
     }
 }

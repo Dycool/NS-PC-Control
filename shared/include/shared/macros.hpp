@@ -35,6 +35,13 @@ inline constexpr std::uint32_t UDP_CHUNK_COUNT_MAX =
     static_cast<std::uint32_t>((UDP_TEXT_MAX + UDP_CHUNK_MAX - 1) / UDP_CHUNK_MAX);
 inline constexpr std::uint8_t  CHUNK_FLAG_LAST = 0x01;
 
+enum class UploadKind : std::uint8_t {
+    Macro  = 0,
+    Amiibo = 1,
+};
+
+inline constexpr std::uint64_t AMIIBO_ARM_WINDOW_US = 10ULL * 1000ULL * 1000ULL;
+
 struct Step {
     std::uint16_t buttons = 0;
     std::uint8_t hat = ns::HAT_NEUTRAL;

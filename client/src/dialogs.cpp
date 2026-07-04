@@ -184,6 +184,18 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerRow->addWidget(controllerTypeBox, 0, 1);
     outer->addLayout(controllerRow);
 
+    auto* amiiboRow = new QGridLayout();
+    amiiboRow->addWidget(new QLabel("Amiibo", this), 0, 0);
+    scanAmiiboButton = new QPushButton("Scan Amiibo...", this);
+    saveAmiiboButton = new QPushButton("Save Updated Dump...", this);
+    amiiboRow->addWidget(scanAmiiboButton, 0, 1);
+    amiiboRow->addWidget(saveAmiiboButton, 0, 2);
+    outer->addLayout(amiiboRow);
+
+    auto* amiiboHint = new QLabel("Experimental UDP NFC: upload a 540-byte .bin dump and save it back if the game writes amiibo data.", this);
+    amiiboHint->setWordWrap(true);
+    outer->addWidget(amiiboHint);
+
     auto* buttons = new QGridLayout();
     QPushButton* save = new QPushButton("Save", this);
     QPushButton* cancel = new QPushButton("Cancel", this);
@@ -191,8 +203,56 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     buttons->addWidget(cancel, 0, 3);
     outer->addLayout(buttons);
 
+    connect(controllerTypeBox, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { updateAmiiboButton(); });
+    connect(scanAmiiboButton, &QPushButton::clicked, this, [this] { scanAmiibo(); });
+    connect(saveAmiiboButton, &QPushButton::clicked, this, [this] { saveUpdatedAmiibo(); });
+    amiiboTimer = new QTimer(this);
+    connect(amiiboTimer, &QTimer::timeout, this, [this] { updateAmiiboButton(); });
+    amiiboTimer->start(500);
     connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+    updateAmiiboButton();
+}
+
+void SettingsDialog::updateAmiiboButton() {
+    if (!scanAmiiboButton || !controllerTypeBox) return;
+    const bool joyconR = controllerTypeBox->currentData().toInt() == ns::CONTROLLER_TYPE_JOYCON_R;
+    scanAmiiboButton->setEnabled(joyconR);
+    if (saveAmiiboButton) saveAmiiboButton->setEnabled(joyconR && g_amiibo_dirty_available.load(std::memory_order_relaxed));
+}
+
+void SettingsDialog::scanAmiibo() {
+    if (!controllerTypeBox || controllerTypeBox->currentData().toInt() != ns::CONTROLLER_TYPE_JOYCON_R) return;
+    QString path = QFileDialog::getOpenFileName(this, "Open Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
+    if (path.isEmpty()) return;
+
+    // Make the active sender advertise Joy-Con (R) immediately even if the user
+    // scans before pressing Save in this dialog. Cancel still only affects the
+    // other settings in the dialog; Scan Amiibo is an explicit action.
+    g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
+
+    std::string err;
+    if (!queue_amiibo_upload_from_file(q_to_std(path), err)) {
+        QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));
+        return;
+    }
+    QMessageBox::information(this, "Scan Amiibo", "Amiibo dump queued for UDP upload.");
+}
+
+void SettingsDialog::saveUpdatedAmiibo() {
+    if (!controllerTypeBox || controllerTypeBox->currentData().toInt() != ns::CONTROLLER_TYPE_JOYCON_R) return;
+    if (!g_amiibo_dirty_available.load(std::memory_order_relaxed)) {
+        QMessageBox::information(this, "Save Amiibo", "No updated amiibo dump is available yet.");
+        return;
+    }
+    QString path = QFileDialog::getSaveFileName(this, "Save Updated Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
+    if (path.isEmpty()) return;
+    std::string err;
+    if (!queue_amiibo_save_to_file(q_to_std(path), err)) {
+        QMessageBox::warning(this, "Save Amiibo", std_to_q(err));
+        return;
+    }
+    QMessageBox::information(this, "Save Amiibo", "Save request queued. Keep the client connected while the updated dump is pulled from the server.");
 }
 
 void SettingsDialog::saveSettings() {

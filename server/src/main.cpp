@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     }
     if (g_ctx.joycon_mode) {
         std::println("[jc] Joy-Con (R) emulation mode: the console sees wired Joy-Cons "
-                     "(vertical orientation; no capture button; NFC not emulated)");
+                     "(vertical orientation; no capture button; UDP amiibo read-only experimental)");
     }
 
     if (no_bt && pair_explicit) {
@@ -431,6 +431,17 @@ int main(int argc, char** argv) {
                     }
                     sendto(sock, &reply, sizeof(reply), 0,
                            reinterpret_cast<const sockaddr*>(&sender), slen);
+                    continue;
+                }
+            }
+
+
+            // --- Amiibo updated-dump pull request ---
+            if (bytes == static_cast<ssize_t>(sizeof(ns::AmiiboPullRequest))) {
+                uint32_t amagic = 0;
+                memcpy(&amagic, udp_rx.data(), 4);
+                if (amagic == ns::AMIIBO_PULL_MAGIC) {
+                    server_amiibo_handle_pull_request(sock, {udp_rx.data(), static_cast<size_t>(bytes)}, sender);
                     continue;
                 }
             }

@@ -167,7 +167,7 @@ static bool create_hid_function(int id) {
     if (!mkdirs(func)
             || !write_file(func / "protocol",      "0")
             || !write_file(func / "subclass",       "0")
-            || !write_file(func / "report_length",  g_ctx.legacy_mode ? "8" : "64"))
+            || !write_file(func / "report_length",  g_ctx.legacy_mode ? "8" : std::to_string(HIDG_MAX_REPORT_SIZE)))
         return false;
 
     fs::path desc_path = func / "report_desc";
@@ -175,7 +175,7 @@ static bool create_hid_function(int id) {
         if (!write_file(desc_path, LEGACY_REPORT_DESC, sizeof(LEGACY_REPORT_DESC))) return false;
     } else {
         if (!write_file(desc_path, VIRTUAL_CONTROLLER_REPORT_DESC,
-                        sizeof(VIRTUAL_CONTROLLER_REPORT_DESC))) return false;
+                        VIRTUAL_CONTROLLER_REPORT_DESC_SIZE)) return false;
     }
 
     fs::path link_path = fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(id));
@@ -1105,7 +1105,7 @@ void restore_wake_bt_state(bool restart_bluez) {
 
 void drain_hid_output_queue(int fd) {
     if (fd < 0) return;
-    uint8_t discard[PRO_REPORT_SIZE];
+    uint8_t discard[HIDG_MAX_REPORT_SIZE];
     for (int i = 0; i < 32; ++i) {
         struct pollfd pfd = {fd, POLLIN, 0};
         if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) break;

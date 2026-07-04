@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,12 +20,27 @@ extern std::atomic<bool> g_macro_running;
 extern std::atomic<bool> g_macro_recording;
 extern uint64_t g_macro_start_us;
 extern std::string g_macro_upload_pending;
+extern std::vector<uint8_t> g_amiibo_upload_pending;
+extern std::atomic<bool> g_amiibo_dirty_available;
+extern std::atomic<uint8_t> g_amiibo_dirty_subpad;
+extern std::atomic<uint32_t> g_amiibo_dirty_version;
 extern std::vector<ns::macro::Entry> g_macro_entries;
 extern std::unordered_map<std::string, bool> g_macro_hotkey_down;
 
 uint32_t next_macro_upload_id();
+bool send_udp_upload_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                            std::span<const uint8_t> payload, uint8_t subpad,
+                            ns::macro::UploadKind kind, bool force_chunked = false);
 bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
                            const std::string& json_or_commands, uint8_t subpad = 0);
+bool send_amiibo_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                            std::span<const uint8_t> dump, uint8_t subpad = 0);
+bool queue_amiibo_upload_from_file(const std::string& path, std::string& err);
+bool queue_amiibo_save_to_file(const std::string& path, std::string& err);
+bool take_amiibo_save_request(std::string& path, uint8_t& subpad, uint32_t& version);
+bool send_amiibo_pull_request(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint8_t subpad, uint32_t version);
+void handle_amiibo_status_packet(const ns::AmiiboStatusPacket& packet);
+void handle_amiibo_chunk_packet(std::span<const uint8_t> data);
 int find_macro_entry_by_name(const std::string& name);
 std::string unique_macro_name(const std::string& base_raw);
 bool macro_hotkey_conflicts(const std::string& hotkey, std::string* conflict_name = nullptr);
