@@ -60,11 +60,18 @@ void flush_rumble_to_udp(int sock, int client_idx) {
             }
             ns::AmiiboStatusPacket as{};
             if (server_amiibo_get_status(client_idx, s, as)) {
-                const bool dirty = (as.flags & ns::AMIIBO_STATUS_FLAG_DIRTY) != 0;
-                if (as.amiibo_version != c.udp_last_amiibo_version[s] || dirty != c.udp_last_amiibo_dirty[s]) {
+                const bool changed = as.amiibo_version != c.udp_last_amiibo_version[s]
+                                     || as.flags != c.udp_last_amiibo_flags[s];
+                // Dirty/write-request statuses need a client action; keep
+                // resending them until the state moves on so one lost datagram
+                // cannot stall the auto-save or write flow.
+                const bool actionable = (as.flags & (ns::AMIIBO_STATUS_FLAG_DIRTY | ns::AMIIBO_STATUS_FLAG_WRITE_REQUEST)) != 0;
+                const uint64_t now = ns::now_us();
+                if (changed || (actionable && now - c.udp_last_amiibo_send_us[s] >= 500'000ULL)) {
                     pending_amiibo[s] = as;
                     c.udp_last_amiibo_version[s] = as.amiibo_version;
-                    c.udp_last_amiibo_dirty[s] = dirty;
+                    c.udp_last_amiibo_flags[s] = as.flags;
+                    c.udp_last_amiibo_send_us[s] = now;
                     has_amiibo[s] = true;
                 }
             }

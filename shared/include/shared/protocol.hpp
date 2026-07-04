@@ -111,6 +111,7 @@ static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;
 static constexpr uint8_t AMIIBO_STATUS_FLAG_DIRTY = 0x01;
 static constexpr uint8_t AMIIBO_STATUS_FLAG_HAS_DUMP = 0x02;
+static constexpr uint8_t AMIIBO_STATUS_FLAG_WRITE_REQUEST = 0x04;
 static constexpr std::size_t AMIIBO_DUMP_BYTES = 540;
 static constexpr std::size_t AMIIBO_UDP_CHUNK_MAX = 900;
 

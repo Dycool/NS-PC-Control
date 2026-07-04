@@ -36,8 +36,12 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
 bool send_amiibo_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
                             std::span<const uint8_t> dump, uint8_t subpad = 0);
 bool queue_amiibo_upload_from_file(const std::string& path, std::string& err);
+bool queue_selected_amiibo_rescan(std::string& err);
+bool has_selected_amiibo_file();
+std::string selected_amiibo_path();
 bool queue_amiibo_save_to_file(const std::string& path, std::string& err);
 bool take_amiibo_save_request(std::string& path, uint8_t& subpad, uint32_t& version);
+bool take_amiibo_pull_retry(uint8_t& subpad, uint32_t& version);
 bool send_amiibo_pull_request(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint8_t subpad, uint32_t version);
 void handle_amiibo_status_packet(const ns::AmiiboStatusPacket& packet);
 void handle_amiibo_chunk_packet(std::span<const uint8_t> data);

@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
     NetworkRuntime net;
     if (!net.good()) return 1;
     raise_process_priority();
+    apply_windows_app_identity();
     QApplication app(argc, argv);
     app.setApplicationName("NS PC Control");
     app.setOrganizationName("NSPCControl");
@@ -39,8 +40,8 @@ int main(int argc, char** argv) {
     if (auto* s = QStyleFactory::create("windowsvista")) QApplication::setStyle(s);
 #endif
     MainWindow window;
-    window.show();
     apply_windows_taskbar_icon(&window);
+    window.show();
     return app.exec();
 }
 

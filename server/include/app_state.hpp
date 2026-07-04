@@ -85,7 +85,8 @@ struct ClientSession {
     uint32_t controller_status_seq[4]{};
     uint32_t udp_last_controller_status_seq[4]{};
     uint32_t udp_last_amiibo_version[4]{};
-    bool udp_last_amiibo_dirty[4]{};
+    uint8_t udp_last_amiibo_flags[4]{};
+    uint64_t udp_last_amiibo_send_us[4]{};
     bool udp_rumble_enabled = false;
     uint32_t udp_last_rumble_seq[4]{};
     bool pad_present[4]{};
@@ -101,10 +102,18 @@ struct ServerMacroRuntime {
 };
 
 struct ServerAmiiboState {
+    // ``armed`` models an amiibo held to the reader: the tag stays available for
+    // the whole NFC session (games read, verify, then possibly write). A clean
+    // dump idles out after AMIIBO_ARM_WINDOW_US, sliding forward while the
+    // console actively engages the NFC MCU. A dirty (written) dump is kept until
+    // the UDP client pulls it for auto-save, then held for AMIIBO_PULL_GRACE_US
+    // so lost chunks can be re-pulled.
     bool armed = false;
     bool present = false;
     bool dirty = false;
+    bool write_requested = false;
     uint32_t version = 0;
+    uint32_t write_request_version = 0;
     uint64_t armed_until_us = 0;
     uint32_t crc32 = 0;
     std::vector<uint8_t> dump;
@@ -221,6 +230,7 @@ bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump
 bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now = 0, uint32_t* version = nullptr);
 bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vector<uint8_t>& out, uint32_t* version = nullptr);
 bool server_amiibo_get_status(int client_idx, int subpad, ns::AmiiboStatusPacket& out);
+bool server_amiibo_request_write_upload(int client_idx, int subpad);
 bool server_amiibo_apply_write_command(int client_idx, int subpad, std::span<const uint8_t> command, uint32_t* version = nullptr);
 bool server_amiibo_handle_pull_request(int sock, std::span<const uint8_t> data, const sockaddr_in& sender);
 uint32_t server_amiibo_crc32(std::span<const uint8_t> data);

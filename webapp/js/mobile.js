@@ -257,10 +257,23 @@ function normalizeSystemShortcuts(buttons) {
     }
     return buttons;
 }
+let publishedControllerType = null;
+function publishControllerType() {
+    if (publishedControllerType === controllerType) return;
+    publishedControllerType = controllerType;
+    // Newer apps expose a dedicated method; older apps just default to Pro.
+    if (window.NSBridge && typeof NSBridge.onTouchControllerType === 'function') {
+        try { NSBridge.onTouchControllerType(controllerType); } catch (_) {}
+    }
+}
 function publishTouchState() {
     const sendButtons = normalizeSystemShortcuts(state.buttons);
     if (window.NSBridge && typeof NSBridge.onTouchState === 'function') {
-        NSBridge.onTouchState(sendButtons, state.hat, state.lx, state.ly, state.rx, state.ry, controllerType);
+        // Keep the historical 6-arg call: the Android JS bridge resolves
+        // methods by argument count, so adding a 7th argument breaks touch
+        // input on APKs that predate controller-type support.
+        publishControllerType();
+        NSBridge.onTouchState(sendButtons, state.hat, state.lx, state.ly, state.rx, state.ry);
         return true;
     }
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge) {

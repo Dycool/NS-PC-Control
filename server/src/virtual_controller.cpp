@@ -284,7 +284,7 @@ void nfc_queue_read_frames(ControllerRuntime& rt, std::span<const uint8_t> dump)
     nfc_queue_push(rt, frame1, true);
     nfc_queue_push(rt, frame2, true);
     nfc_queue_push(rt, trailer, true);
-    nfc_transition(rt, NfcRuntimeState::TagReadQueued, "queued read-only amiibo response frames");
+    nfc_transition(rt, NfcRuntimeState::TagReadQueued, "queued amiibo read response frames");
 }
 
 void nfc_entered_31_input_mode(ControllerRuntime& rt) {
@@ -744,11 +744,11 @@ void handle_nfc_ir_output_report(ControllerRuntime& rt, std::span<const uint8_t>
             || elapsed_us_saturated(now, rt.nfc_last_poll_log_us) > 2'000'000ULL;
         if (g_ctx.verbose && should_log) {
             if (amiibo_armed) {
-                std::println("[nfc] port={} slot={} pad={} expects amiibo; armed dump v{} is ready",
+                std::println("[nfc] port={} slot={} pad={} expects amiibo; uploaded dump v{} is ready",
                              rt.ctrl + 1, client_idx + 1, subpad + 1, amiibo_version);
                 rt.nfc_poll_logged_with_tag = true;
             } else {
-                std::println("[nfc] port={} expects amiibo; no armed UDP amiibo dump for mapped slot/pad yet", rt.ctrl + 1);
+                std::println("[nfc] port={} expects amiibo; no uploaded UDP amiibo dump for mapped slot/pad yet", rt.ctrl + 1);
                 rt.nfc_poll_logged_without_tag = true;
             }
             rt.nfc_last_poll_log_us = now;
@@ -759,21 +759,35 @@ void handle_nfc_ir_output_report(ControllerRuntime& rt, std::span<const uint8_t>
             std::println("[nfc] port={} NTAG read/write request len={} data={}", rt.ctrl + 1, packet.size(), hex_bytes(packet, 64));
         }
 
+        const std::span<const uint8_t> target_uid = mcu_data.size() >= 13 ? mcu_data.subspan(6, 7) : std::span<const uint8_t>{};
+        const bool write_setup_request = !target_uid.empty() && !uid_is_zero(target_uid);
+
         std::vector<uint8_t> dump;
         uint32_t version = 0;
         const bool have_dump = (client_idx >= 0 && subpad >= 0)
             ? server_amiibo_get_dump(client_idx, subpad, now_us(), dump, &version)
             : false;
         if (!have_dump) {
-            if (g_ctx.verbose) std::println("[nfc] port={} cannot serve read request: no armed amiibo dump", rt.ctrl + 1);
+            if (write_setup_request && client_idx >= 0 && subpad >= 0) {
+                server_amiibo_request_write_upload(client_idx, subpad);
+                if (g_ctx.verbose) {
+                    std::println("[nfc] port={} write/setup request for uid={} but no server copy; asking UDP client to resend selected .bin",
+                                 rt.ctrl + 1, hex_bytes(target_uid, 7));
+                }
+            } else if (g_ctx.verbose) {
+                std::println("[nfc] port={} cannot serve read request: no uploaded amiibo dump", rt.ctrl + 1);
+            }
             return;
         }
 
-        const std::span<const uint8_t> target_uid = mcu_data.size() >= 13 ? mcu_data.subspan(6, 7) : std::span<const uint8_t>{};
-        if (target_uid.empty() || uid_is_zero(target_uid)) {
+        if (!write_setup_request) {
+            // Do not consume the dump here: like a real amiibo left on the
+            // reader, the tag must survive re-reads (games read then verify).
+            // It idles out via the sliding arm window instead.
             nfc_queue_read_frames(rt, dump);
             if (g_ctx.verbose) {
-                std::println("[nfc] port={} queued amiibo read dump slot={} pad={} v{}", rt.ctrl + 1, client_idx + 1, subpad + 1, version);
+                std::println("[nfc] port={} queued amiibo read dump slot={} pad={} v{}",
+                             rt.ctrl + 1, client_idx + 1, subpad + 1, version);
             }
         } else {
             rt.nfc_tag_state = NfcTagState::AwaitingWrite;
@@ -787,6 +801,7 @@ void handle_nfc_ir_output_report(ControllerRuntime& rt, std::span<const uint8_t>
                              rt.ctrl + 1, hex_bytes(target_uid, 7), client_idx + 1, subpad + 1, version);
             }
         }
+
     } else if (mcu_subcmd == 0x08) {
         nfc_transition(rt, NfcRuntimeState::TagWriteReceiving, "0x11 MCU NTAG write chunk");
         std::vector<uint8_t> dump;
@@ -795,7 +810,8 @@ void handle_nfc_ir_output_report(ControllerRuntime& rt, std::span<const uint8_t>
             ? server_amiibo_get_dump(client_idx, subpad, now_us(), dump, &version)
             : false;
         if (!have_dump) {
-            if (g_ctx.verbose) std::println("[nfc] port={} cannot process write chunk: no armed amiibo dump", rt.ctrl + 1);
+            if (client_idx >= 0 && subpad >= 0) server_amiibo_request_write_upload(client_idx, subpad);
+            if (g_ctx.verbose) std::println("[nfc] port={} cannot process write chunk: no uploaded amiibo dump; requesting resend", rt.ctrl + 1);
             return;
         }
         if (mcu_data.size() < 4) {
@@ -837,10 +853,9 @@ void handle_nfc_ir_output_report(ControllerRuntime& rt, std::span<const uint8_t>
             rt.nfc_tag_state = NfcTagState::ProcessingWrite;
             rt.nfc_write_processing_countdown = 4;
             rt.nfc_remove_polls_remaining = 4;
-            std::vector<uint8_t> updated_dump;
-            uint32_t ignored_version = 0;
-            const bool have_updated = server_amiibo_get_dump(client_idx, subpad, now_us(), updated_dump, &ignored_version);
-            nfc_queue_push(rt, nfc_poll_status_frame(rt, have_updated ? &updated_dump : &dump), true);
+            // Only the per-chunk ack above goes out now; the console learns
+            // about ProcessingWrite through its own 0x04 status polls, which
+            // also drive the 4-poll countdown (matches real MCU behavior).
             if (changed) nfc_transition(rt, NfcRuntimeState::TagWriteApplied, "applied virtual amiibo write-back");
             if (g_ctx.verbose) {
                 std::println("[nfc] port={} write transaction complete changed={} v{} buffered={} bytes",

@@ -307,6 +307,27 @@ static HIDReport* get_pad_report(ClientSession& c, int subpad) {
 }
 
 
+static void server_amiibo_expire_clean_locked(ServerAmiiboState& st, uint64_t now) {
+    if (!st.armed || st.dirty) return;
+    if (st.armed_until_us != 0 && now > st.armed_until_us) {
+        st.armed = false;
+        st.present = false;
+        st.armed_until_us = 0;
+        st.dump.clear();
+        st.crc32 = 0;
+    }
+}
+
+// A real amiibo stays on the reader for the whole interaction. Slide the idle
+// deadline forward while the console is actively talking to the NFC MCU so the
+// tag never vanishes mid-session (games commonly read, verify, then write).
+// Dirty dumps are not touched: they live until pulled (then get the pull grace).
+static void server_amiibo_touch_locked(ServerAmiiboState& st, uint64_t now) {
+    if (st.armed && !st.dirty && st.armed_until_us != 0) {
+        st.armed_until_us = std::max(st.armed_until_us, now + ns::macro::AMIIBO_ARM_WINDOW_US);
+    }
+}
+
 bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
     if (subpad < 0 || subpad >= 4) subpad = 0;
@@ -333,11 +354,12 @@ bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump
         st.armed = true;
         st.present = false;
         st.dirty = false;
+        st.write_requested = false;
         st.version++;
         st.crc32 = server_amiibo_crc32(st.dump);
         st.armed_until_us = now_us() + ns::macro::AMIIBO_ARM_WINDOW_US;
     }
-    if (g_ctx.verbose) std::println("[amiibo] armed virtual tag slot={} pad={} bytes={} window={}ms",
+    if (g_ctx.verbose) std::println("[amiibo] placed virtual tag on the reader slot={} pad={} bytes={} idle-window={}ms",
                                     client_idx + 1, subpad + 1, dump.size(), ns::macro::AMIIBO_ARM_WINDOW_US / 1000ULL);
     return true;
 }
@@ -348,12 +370,9 @@ bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now, uint32_t* 
 
     std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
     ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    server_amiibo_expire_clean_locked(st, now);
     if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
-    if (st.armed_until_us != 0 && now > st.armed_until_us) {
-        st.armed = false;
-        st.present = false;
-        return false;
-    }
+    server_amiibo_touch_locked(st, now);
     if (version) *version = st.version;
     return true;
 }
@@ -364,26 +383,43 @@ bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vecto
 
     std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
     ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    server_amiibo_expire_clean_locked(st, now);
     if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
-    if (st.armed_until_us != 0 && now > st.armed_until_us) {
-        st.armed = false;
-        st.present = false;
-        return false;
-    }
+    server_amiibo_touch_locked(st, now);
     out = st.dump;
     st.present = true;
     if (version) *version = st.version;
     return true;
 }
 
+bool server_amiibo_request_write_upload(int client_idx, int subpad) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
+    server_amiibo_expire_clean_locked(st, now_us());
+    if (st.armed && st.dump.size() == ns::AMIIBO_DUMP_BYTES) return false;
+    if (!st.write_requested) ++st.write_request_version;
+    st.write_requested = true;
+    if (g_ctx.verbose) {
+        std::println("[amiibo] requested UDP client to resend selected dump for write slot={} pad={} req={}",
+                     client_idx + 1, subpad + 1, st.write_request_version);
+    }
+    return true;
+}
 
 bool server_amiibo_get_status(int client_idx, int subpad, ns::AmiiboStatusPacket& out) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
     std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
     ServerAmiiboState& st = g_ctx.server_amiibos[client_idx][subpad];
-    if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
+    server_amiibo_expire_clean_locked(st, now_us());
     out = ns::AmiiboStatusPacket{};
     out.subpad = static_cast<uint8_t>(subpad);
+    if (st.write_requested) {
+        out.flags = ns::AMIIBO_STATUS_FLAG_WRITE_REQUEST;
+        out.amiibo_version = st.write_request_version;
+        return true;
+    }
+    if (!st.armed || st.dump.size() != ns::AMIIBO_DUMP_BYTES) return false;
     out.flags = ns::AMIIBO_STATUS_FLAG_HAS_DUMP | (st.dirty ? ns::AMIIBO_STATUS_FLAG_DIRTY : 0);
     out.amiibo_version = st.version;
     out.total_len = static_cast<uint32_t>(st.dump.size());
@@ -411,7 +447,7 @@ bool server_amiibo_apply_write_command(int client_idx, int subpad, std::span<con
         && uid[0] == st.dump[0] && uid[1] == st.dump[1] && uid[2] == st.dump[2]
         && uid[3] == st.dump[4] && uid[4] == st.dump[5] && uid[5] == st.dump[6] && uid[6] == st.dump[7];
     if (!uid_matches && g_ctx.verbose) {
-        std::println("[amiibo] warning: write UID does not match armed dump; applying anyway for Switch registration flow");
+        std::println("[amiibo] warning: write UID does not match uploaded dump; applying anyway for Switch registration flow");
     }
 
     bool changed = false;
@@ -444,10 +480,11 @@ bool server_amiibo_apply_write_command(int client_idx, int subpad, std::span<con
 
     std::copy(command.begin() + 17, command.begin() + 21, st.dump.begin() + 16);
     st.dirty = changed;
+    st.write_requested = false;
     if (changed) {
         st.version++;
         st.crc32 = server_amiibo_crc32(st.dump);
-        st.armed_until_us = 0; // keep written tag available until replaced/disconnected.
+        st.armed_until_us = 0; // keep dirty dump only until the UDP client pulls and auto-saves it.
     }
     if (version) *version = st.version;
     if (g_ctx.verbose) {
@@ -507,7 +544,20 @@ bool server_amiibo_handle_pull_request(int sock, std::span<const uint8_t> data, 
             std::println(stderr, "[amiibo] failed sending dump chunk {}/{}: {}", i + 1, chunk_count, std::strerror(errno));
         }
     }
-    if (g_ctx.verbose) std::println("[amiibo] sent updated dump slot={} pad={} v{} crc={:08x}", cidx + 1, req.subpad + 1, version, crc);
+    {
+        // UDP delivery of the chunks is not guaranteed and this dump may be the
+        // only copy of the game's write-back. Mark it clean but keep it armed
+        // for a grace window so the client can re-pull if a chunk was lost;
+        // the regular clean-dump expiry reclaims it afterwards.
+        std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+        ServerAmiiboState& st = g_ctx.server_amiibos[cidx][req.subpad];
+        if (st.version == version) {
+            st.dirty = false;
+            st.write_requested = false;
+            st.armed_until_us = now_us() + ns::macro::AMIIBO_PULL_GRACE_US;
+        }
+    }
+    if (g_ctx.verbose) std::println("[amiibo] sent updated dump slot={} pad={} v{} crc={:08x}; keeping clean copy for re-pulls", cidx + 1, req.subpad + 1, version, crc);
     return true;
 }
 
@@ -694,6 +744,9 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.controller_status_seq[s]++;
         c.udp_last_rumble_seq[s] = c.rumble_seq[s];
         c.udp_last_controller_status_seq[s] = c.controller_status_seq[s];
+        c.udp_last_amiibo_version[s] = 0;
+        c.udp_last_amiibo_flags[s] = 0;
+        c.udp_last_amiibo_send_us[s] = 0;
         c.pad_present[s] = false; c.pad_last_present_us[s] = 0;
     }
 }

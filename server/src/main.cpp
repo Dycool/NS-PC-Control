@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     }
     if (g_ctx.joycon_mode) {
         std::println("[jc] Joy-Con (R) emulation mode: the console sees wired Joy-Cons "
-                     "(vertical orientation; no capture button; UDP amiibo read-only experimental)");
+                     "(vertical orientation; no capture button; UDP amiibo read/write experimental)");
     }
 
     if (no_bt && pair_explicit) {

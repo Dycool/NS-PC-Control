@@ -89,6 +89,10 @@ static bool g_amiibo_save_requested = false;
 static std::string g_amiibo_save_path;
 static uint8_t g_amiibo_save_subpad = 0;
 static uint32_t g_amiibo_save_version = 0;
+static bool g_amiibo_active_file = false;
+static std::string g_amiibo_active_path;
+static uint8_t g_amiibo_active_subpad = 0;
+static uint32_t g_amiibo_last_auto_save_version = 0;
 struct AmiiboDownloadState {
     bool active = false;
     uint8_t subpad = 0;
@@ -100,6 +104,8 @@ struct AmiiboDownloadState {
     std::vector<uint8_t> got;
     uint32_t received_count = 0;
     std::string save_path;
+    uint64_t last_request_us = 0;
+    uint32_t request_attempts = 0;
 };
 static AmiiboDownloadState g_amiibo_download;
 std::vector<ns::macro::Entry> g_macro_entries;
@@ -116,18 +122,50 @@ static uint32_t client_crc32(std::span<const uint8_t> data) {
     return crc ^ 0xFFFFFFFFu;
 }
 
+static bool queue_amiibo_save_request_locked(const std::string& path, uint8_t subpad, uint32_t version, std::string& err) {
+    if (path.empty()) { err = "Missing save path."; return false; }
+    if (subpad >= 4) { err = "Invalid amiibo slot."; return false; }
+    if (version == 0) { err = "Missing updated amiibo version."; return false; }
+    g_amiibo_save_path = path;
+    g_amiibo_save_subpad = subpad;
+    g_amiibo_save_version = version;
+    g_amiibo_save_requested = true;
+    return true;
+}
+
 bool queue_amiibo_save_to_file(const std::string& path, std::string& err) {
     err.clear();
-    if (path.empty()) { err = "Missing save path."; return false; }
     if (!g_amiibo_dirty_available.load(std::memory_order_relaxed)) {
         err = "No updated amiibo dump is available yet.";
         return false;
     }
     std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
-    g_amiibo_save_path = path;
-    g_amiibo_save_subpad = g_amiibo_dirty_subpad.load(std::memory_order_relaxed);
-    g_amiibo_save_version = g_amiibo_dirty_version.load(std::memory_order_relaxed);
-    g_amiibo_save_requested = true;
+    return queue_amiibo_save_request_locked(path,
+        g_amiibo_dirty_subpad.load(std::memory_order_relaxed),
+        g_amiibo_dirty_version.load(std::memory_order_relaxed),
+        err);
+}
+
+static bool queue_amiibo_auto_save(uint8_t subpad, uint32_t version, bool& newly_queued, std::string& err) {
+    err.clear();
+    newly_queued = false;
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    if (!g_amiibo_active_file || g_amiibo_active_path.empty()) {
+        err = "No selected amiibo file to auto-save.";
+        return false;
+    }
+    if (g_amiibo_active_subpad != subpad) {
+        err = "Updated amiibo slot does not match selected file.";
+        return false;
+    }
+    if (g_amiibo_last_auto_save_version == version) {
+        return true;
+    }
+    if (!queue_amiibo_save_request_locked(g_amiibo_active_path, subpad, version, err)) {
+        return false;
+    }
+    g_amiibo_last_auto_save_version = version;
+    newly_queued = true;
     return true;
 }
 
@@ -143,6 +181,30 @@ bool take_amiibo_save_request(std::string& path, uint8_t& subpad, uint32_t& vers
     g_amiibo_download.subpad = subpad;
     g_amiibo_download.version = version;
     g_amiibo_download.save_path = path;
+    g_amiibo_download.last_request_us = ns::now_us();
+    g_amiibo_download.request_attempts = 1;
+    return true;
+}
+
+bool take_amiibo_pull_retry(uint8_t& subpad, uint32_t& version) {
+    constexpr uint64_t RETRY_INTERVAL_US = 1'000'000ULL;
+    constexpr uint32_t MAX_ATTEMPTS = 10;
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    if (!g_amiibo_download.active) return false;
+    const uint64_t now = ns::now_us();
+    if (now - g_amiibo_download.last_request_us < RETRY_INTERVAL_US) return false;
+    if (g_amiibo_download.request_attempts >= MAX_ATTEMPTS) {
+        // Give up on this transfer, but let the server's periodic dirty status
+        // restart the auto-save from scratch if the updated dump still exists.
+        g_amiibo_download = AmiiboDownloadState{};
+        g_amiibo_last_auto_save_version = 0;
+        set_status_message("Amiibo save timed out; waiting for the server to re-report changes");
+        return false;
+    }
+    g_amiibo_download.last_request_us = now;
+    ++g_amiibo_download.request_attempts;
+    subpad = g_amiibo_download.subpad;
+    version = g_amiibo_download.version;
     return true;
 }
 
@@ -163,18 +225,43 @@ void handle_amiibo_status_packet(const ns::AmiiboStatusPacket& packet) {
     if (packet.magic != ns::AMIIBO_STATUS_MAGIC || packet.version != ns::SERVER_INFO_VERSION || packet.subpad >= 4) return;
     const bool has_dump = (packet.flags & ns::AMIIBO_STATUS_FLAG_HAS_DUMP) != 0;
     const bool dirty = (packet.flags & ns::AMIIBO_STATUS_FLAG_DIRTY) != 0;
+    const bool write_request = (packet.flags & ns::AMIIBO_STATUS_FLAG_WRITE_REQUEST) != 0;
+
+    if (write_request) {
+        // This client only ever uploads amiibo dumps for subpad 0, and the
+        // server resends the request until it is answered — dedupe both.
+        if (packet.subpad != 0) return;
+        static uint64_t last_rescan_us = 0;
+        const uint64_t now = ns::now_us();
+        if (now - last_rescan_us < 700'000ULL) return;
+        last_rescan_us = now;
+        std::string err;
+        if (queue_selected_amiibo_rescan(err)) {
+            set_status_message("Game requested amiibo write; sending selected .bin");
+        } else {
+            set_status_message("Amiibo write requested, but no selected .bin: " + err);
+        }
+        return;
+    }
+
     if (!has_dump || packet.total_len != ns::AMIIBO_DUMP_BYTES) return;
 
     if (dirty) {
         g_amiibo_dirty_subpad.store(packet.subpad, std::memory_order_relaxed);
         g_amiibo_dirty_version.store(packet.amiibo_version, std::memory_order_relaxed);
         g_amiibo_dirty_available.store(true, std::memory_order_relaxed);
-        set_status_message("Updated amiibo dump available");
+        bool newly_queued = false;
+        std::string err;
+        if (!queue_amiibo_auto_save(packet.subpad, packet.amiibo_version, newly_queued, err)) {
+            set_status_message("Updated amiibo dump available; auto-save failed: " + err);
+        } else if (newly_queued) {
+            set_status_message("Amiibo changed; auto-saving to selected .bin");
+        }
         return;
     }
 
-    // A clean status for the same subpad means a new clean dump was uploaded or
-    // the server no longer has unsaved write-back data for that virtual tag.
+    // A clean status for the same subpad means the server no longer has
+    // unsaved write-back data for that virtual tag.
     if (g_amiibo_dirty_subpad.load(std::memory_order_relaxed) == packet.subpad) {
         g_amiibo_dirty_version.store(packet.amiibo_version, std::memory_order_relaxed);
         g_amiibo_dirty_available.store(false, std::memory_order_relaxed);
@@ -217,9 +304,15 @@ void handle_amiibo_chunk_packet(std::span<const uint8_t> data) {
     std::vector<uint8_t> dump;
     dump.reserve(g_amiibo_download.total_len);
     for (const auto& c : g_amiibo_download.chunks) dump.insert(dump.end(), c.begin(), c.end());
-    if (dump.size() != g_amiibo_download.total_len || client_crc32(dump) != g_amiibo_download.crc32) {
-        set_status_message("Amiibo save failed: CRC mismatch");
+    // On any failure, also reset the auto-save dedup version so the server's
+    // periodic dirty status can restart this save instead of being ignored.
+    auto fail_save = [&](const char* msg) {
+        set_status_message(msg);
         g_amiibo_download = AmiiboDownloadState{};
+        g_amiibo_last_auto_save_version = 0;
+    };
+    if (dump.size() != g_amiibo_download.total_len || client_crc32(dump) != g_amiibo_download.crc32) {
+        fail_save("Amiibo save failed: CRC mismatch");
         return;
     }
     const std::string final_path = g_amiibo_download.save_path;
@@ -227,29 +320,27 @@ void handle_amiibo_chunk_packet(std::span<const uint8_t> data) {
     {
         std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
         if (!f) {
-            set_status_message("Amiibo save failed");
-            g_amiibo_download = AmiiboDownloadState{};
+            fail_save("Amiibo save failed");
             return;
         }
         f.write(reinterpret_cast<const char*>(dump.data()), static_cast<std::streamsize>(dump.size()));
         if (!f) {
-            set_status_message("Amiibo save failed");
-            g_amiibo_download = AmiiboDownloadState{};
+            fail_save("Amiibo save failed");
             return;
         }
     }
     std::remove(final_path.c_str());
     if (std::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
-        set_status_message("Amiibo save failed");
-        g_amiibo_download = AmiiboDownloadState{};
+        fail_save("Amiibo save failed");
         return;
     }
+    g_amiibo_dirty_version.store(g_amiibo_download.version, std::memory_order_relaxed);
     g_amiibo_dirty_available.store(false, std::memory_order_relaxed);
-    set_status_message("Updated amiibo dump saved");
+    set_status_message("Amiibo changes saved to selected .bin");
     g_amiibo_download = AmiiboDownloadState{};
 }
 
-bool queue_amiibo_upload_from_file(const std::string& path, std::string& err) {
+static bool read_amiibo_dump_file(const std::string& path, std::vector<uint8_t>& data, std::string& err) {
     err.clear();
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) { err = "Could not open amiibo dump."; return false; }
@@ -259,16 +350,70 @@ bool queue_amiibo_upload_from_file(const std::string& path, std::string& err) {
         return false;
     }
     f.seekg(0, std::ios::beg);
-    std::vector<uint8_t> data(static_cast<size_t>(size));
+    data.assign(static_cast<size_t>(size), 0);
     if (!f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()))) {
         err = "Could not read amiibo dump.";
         return false;
     }
+    return true;
+}
+
+static bool queue_amiibo_upload_file_impl(const std::string& path, bool new_selection, std::string& err) {
+    std::vector<uint8_t> data;
+    if (!read_amiibo_dump_file(path, data, err)) return false;
+
     {
         std::lock_guard<std::mutex> lk(g_macro_mtx);
         g_amiibo_upload_pending = std::move(data);
     }
+
+    {
+        std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+        const bool same_file = g_amiibo_active_file && g_amiibo_active_path == path;
+        g_amiibo_active_file = true;
+        g_amiibo_active_path = path;
+        g_amiibo_active_subpad = 0;
+
+        // First selection / changed file starts a fresh auto-save identity.
+        // A re-scan of the same file intentionally preserves the last saved
+        // version so stale dirty status packets cannot trigger another save.
+        if (new_selection || !same_file) g_amiibo_last_auto_save_version = 0;
+
+        g_amiibo_save_requested = false;
+        g_amiibo_download = AmiiboDownloadState{};
+    }
+
+    g_amiibo_dirty_available.store(false, std::memory_order_relaxed);
+    g_amiibo_dirty_subpad.store(0, std::memory_order_relaxed);
+    g_amiibo_dirty_version.store(0, std::memory_order_relaxed);
     return true;
+}
+
+bool queue_amiibo_upload_from_file(const std::string& path, std::string& err) {
+    return queue_amiibo_upload_file_impl(path, true, err);
+}
+
+bool queue_selected_amiibo_rescan(std::string& err) {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+        if (!g_amiibo_active_file || g_amiibo_active_path.empty()) {
+            err = "No amiibo file selected yet.";
+            return false;
+        }
+        path = g_amiibo_active_path;
+    }
+    return queue_amiibo_upload_file_impl(path, false, err);
+}
+
+bool has_selected_amiibo_file() {
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    return g_amiibo_active_file && !g_amiibo_active_path.empty();
+}
+
+std::string selected_amiibo_path() {
+    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+    return g_amiibo_active_file ? g_amiibo_active_path : std::string{};
 }
 
 int find_macro_entry_by_name(const std::string& name) {

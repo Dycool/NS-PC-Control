@@ -753,8 +753,12 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Throwable) {}
         }
 
+        // Keep the 6-arg signature the webapp has always called: the WebView JS
+        // bridge matches methods by argument count, so changing the arity breaks
+        // touch input whenever the APK and the served webapp are out of sync.
+        // The controller type travels through its own optional method instead.
         @JavascriptInterface
-        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int) {
+        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
             if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
             touchHid = Protocol.hid(
                 NativeProtocol.nativeNormalizeShortcuts(buttons),
@@ -766,7 +770,19 @@ class MainActivity : AppCompatActivity() {
                 present = true
             )
             lastTouchFrameMs = SystemClock.uptimeMillis()
-            touchControllerType = controllerType.coerceIn(1, 3)
+        }
+
+        // Arity overload for webapps that still pass the controller type inline.
+        @JavascriptInterface
+        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int) {
+            onTouchControllerType(controllerType)
+            onTouchState(buttons, hat, lx, ly, rx, ry)
+        }
+
+        @JavascriptInterface
+        fun onTouchControllerType(controllerType: Int) {
+            // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
+            touchControllerType = if (controllerType in 1..3) controllerType else 3
         }
 
         @JavascriptInterface

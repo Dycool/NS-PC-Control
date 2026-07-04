@@ -209,7 +209,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
         if (!amiibo_upload.empty()) {
             const bool ok = send_amiibo_udp_packet(sock, dest, cfg.hmac_key, amiibo_upload, 0);
-            set_status_message(ok ? "Amiibo uploaded" : "Amiibo upload failed");
+            set_status_message(ok ? "Amiibo sent" : "Amiibo send failed");
         }
         std::string amiibo_save_path;
         uint8_t amiibo_save_subpad = 0;
@@ -217,6 +217,10 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         if (take_amiibo_save_request(amiibo_save_path, amiibo_save_subpad, amiibo_save_version)) {
             const bool ok = send_amiibo_pull_request(sock, dest, cfg.hmac_key, amiibo_save_subpad, amiibo_save_version);
             set_status_message(ok ? "Pulling updated amiibo dump" : "Amiibo save request failed");
+        } else if (take_amiibo_pull_retry(amiibo_save_subpad, amiibo_save_version)) {
+            // A pull request or its reply chunks were lost; ask again while the
+            // server still holds the updated dump.
+            send_amiibo_pull_request(sock, dest, cfg.hmac_key, amiibo_save_subpad, amiibo_save_version);
         }
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {

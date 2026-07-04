@@ -453,7 +453,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
           window.NSBridge = {
             onOpen:function(){post('onOpen');},
             onBinary:function(json){post('onBinary',[json]);},
-            onTouchState:function(buttons,hat,lx,ly,rx,ry,controllerType){post('onTouchState',[buttons,hat,lx,ly,rx,ry,controllerType]);},
+            onTouchState:function(buttons,hat,lx,ly,rx,ry){post('onTouchState',[buttons,hat,lx,ly,rx,ry]);},
+            onTouchControllerType:function(controllerType){post('onTouchControllerType',[controllerType]);},
             onClose:function(){post('onClose');},
             onPhysicalStart:function(){post('onPhysicalStart');},
             onPhysicalStop:function(){post('onPhysicalStop');},
@@ -731,7 +732,12 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             if let json = args.first as? String { onBinary(json: json) }
         case "onTouchState":
             if args.count >= 6 {
-                onTouchState(buttons: intArg(args[0]), hat: intArg(args[1]), lx: intArg(args[2]), ly: intArg(args[3]), rx: intArg(args[4]), ry: intArg(args[5]), controllerType: args.count > 6 ? intArg(args[6]) : 3)
+                onTouchState(buttons: intArg(args[0]), hat: intArg(args[1]), lx: intArg(args[2]), ly: intArg(args[3]), rx: intArg(args[4]), ry: intArg(args[5]),
+                             controllerType: args.count > 6 ? intArg(args[6]) : nil)
+            }
+        case "onTouchControllerType":
+            if let first = args.first {
+                touchControllerType = ViewController.normalizedControllerType(intArg(first))
             }
         case "onClose":
             deactivateControlClient()
@@ -773,7 +779,12 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         lastTouchFrameMs = now
     }
 
-    private func onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int) {
+    // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
+    private static func normalizedControllerType(_ value: Int) -> Int {
+        return (1...3).contains(value) ? value : 3
+    }
+
+    private func onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int?) {
         guard currentPage == .touchControls && controlClientActive else { return }
         touchHid = ProtocolWire.hid(buttons: ProtocolWire.normalizeShortcuts(buttons),
                                     hat: min(max(hat, 0), 8),
@@ -783,7 +794,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                                     ry: min(max(ry, 0), 255),
                                     present: true)
         lastTouchFrameMs = uptimeMs()
-        touchControllerType = min(max(controllerType, 1), 3)
+        // Only trust an inline controller type (legacy webapps); the current
+        // webapp sends it once via onTouchControllerType instead.
+        if let type = controllerType {
+            touchControllerType = ViewController.normalizedControllerType(type)
+        }
     }
 
     private func togglePhysicalControllers() {

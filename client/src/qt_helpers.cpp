@@ -1,6 +1,9 @@
 #include "qt_helpers.hpp"
 #include "input_settings.hpp"
 #include "platform.hpp"
+#ifdef _WIN32
+#include <shobjidl.h>
+#endif
 #include <QIcon>
 #include <QKeyEvent>
 #include <QCoreApplication>
@@ -71,19 +74,37 @@ QIcon app_icon() {
     return cached;
 }
 
+void apply_windows_app_identity() {
+#ifdef _WIN32
+    // Give the process its own taskbar identity before any window exists so
+    // the shell never associates this app with a stale cached icon entry.
+    SetCurrentProcessExplicitAppUserModelID(L"NSPCControl.NSClient");
+#endif
+}
+
 void apply_windows_taskbar_icon(QWidget* window) {
 #ifdef _WIN32
     if (!window) return;
-    // Qt's QIcon is enough for title bars, but explicitly set both native
-    // window icons so Explorer gets them even when SDL owns its own event thread.
+    // The taskbar resolves the button icon from the window icons (WM_SETICON),
+    // then the window-class icons, then the .exe file icon. Set the first two
+    // explicitly from icon resource 1 (ns-gui.rc) so no shell surface falls
+    // back to the generic default, even when SDL owns its own event thread.
     HWND hwnd = reinterpret_cast<HWND>(window->winId());
     HINSTANCE instance = GetModuleHandleW(nullptr);
-    HICON large = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
-                                                GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
-    HICON small = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
-                                                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
-    if (large) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large));
-    if (small) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+    HICON big_icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                                   GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+                                                   LR_DEFAULTCOLOR | LR_SHARED));
+    HICON small_icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                                     GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                                     LR_DEFAULTCOLOR | LR_SHARED));
+    if (big_icon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon));
+        SetClassLongPtrW(hwnd, GCLP_HICON, reinterpret_cast<LONG_PTR>(big_icon));
+    }
+    if (small_icon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+        SetClassLongPtrW(hwnd, GCLP_HICONSM, reinterpret_cast<LONG_PTR>(small_icon));
+    }
 #else
     (void)window;
 #endif

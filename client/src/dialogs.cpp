@@ -3,6 +3,7 @@
 #include "macro_client.hpp"
 #include "qt_helpers.hpp"
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QInputDialog>
@@ -186,13 +187,16 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     auto* amiiboRow = new QGridLayout();
     amiiboRow->addWidget(new QLabel("Amiibo", this), 0, 0);
-    scanAmiiboButton = new QPushButton("Scan Amiibo...", this);
-    saveAmiiboButton = new QPushButton("Save Updated Dump...", this);
+    scanAmiiboButton = new QPushButton("Scan Amiibo", this);
     amiiboRow->addWidget(scanAmiiboButton, 0, 1);
-    amiiboRow->addWidget(saveAmiiboButton, 0, 2);
+    changeAmiiboButton = new QPushButton("Change Amiibo...", this);
+    amiiboRow->addWidget(changeAmiiboButton, 0, 2);
+    selectedAmiiboLabel = new QLabel("Selected: none", this);
+    selectedAmiiboLabel->setWordWrap(true);
+    amiiboRow->addWidget(selectedAmiiboLabel, 1, 1, 1, 2);
     outer->addLayout(amiiboRow);
 
-    auto* amiiboHint = new QLabel("Experimental UDP NFC: upload a 540-byte .bin dump and save it back if the game writes amiibo data.", this);
+    auto* amiiboHint = new QLabel("Experimental UDP NFC: Scan Amiibo places the selected 540-byte .bin on the virtual reader. The tag behaves like a real amiibo: it stays available while the game reads or writes it (and for about a minute when idle), and any game writes are auto-saved back into the same file.", this);
     amiiboHint->setWordWrap(true);
     outer->addWidget(amiiboHint);
 
@@ -205,10 +209,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     connect(controllerTypeBox, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { updateAmiiboButton(); });
     connect(scanAmiiboButton, &QPushButton::clicked, this, [this] { scanAmiibo(); });
-    connect(saveAmiiboButton, &QPushButton::clicked, this, [this] { saveUpdatedAmiibo(); });
-    amiiboTimer = new QTimer(this);
-    connect(amiiboTimer, &QTimer::timeout, this, [this] { updateAmiiboButton(); });
-    amiiboTimer->start(500);
+    connect(changeAmiiboButton, &QPushButton::clicked, this, [this] { changeAmiibo(); });
     connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     updateAmiiboButton();
@@ -217,14 +218,22 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 void SettingsDialog::updateAmiiboButton() {
     if (!scanAmiiboButton || !controllerTypeBox) return;
     const bool joyconR = controllerTypeBox->currentData().toInt() == ns::CONTROLLER_TYPE_JOYCON_R;
+    const bool hasAmiibo = has_selected_amiibo_file();
     scanAmiiboButton->setEnabled(joyconR);
-    if (saveAmiiboButton) saveAmiiboButton->setEnabled(joyconR && g_amiibo_dirty_available.load(std::memory_order_relaxed));
+    scanAmiiboButton->setText("Scan Amiibo");
+    if (changeAmiiboButton) changeAmiiboButton->setEnabled(joyconR && hasAmiibo);
+    if (selectedAmiiboLabel) {
+        const std::string path = selected_amiibo_path();
+        if (path.empty()) {
+            selectedAmiiboLabel->setText("Selected: none");
+        } else {
+            selectedAmiiboLabel->setText(QString("Selected: ") + QFileInfo(std_to_q(path)).fileName());
+        }
+    }
 }
 
 void SettingsDialog::scanAmiibo() {
     if (!controllerTypeBox || controllerTypeBox->currentData().toInt() != ns::CONTROLLER_TYPE_JOYCON_R) return;
-    QString path = QFileDialog::getOpenFileName(this, "Open Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
-    if (path.isEmpty()) return;
 
     // Make the active sender advertise Joy-Con (R) immediately even if the user
     // scans before pressing Save in this dialog. Cancel still only affects the
@@ -232,27 +241,35 @@ void SettingsDialog::scanAmiibo() {
     g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
 
     std::string err;
-    if (!queue_amiibo_upload_from_file(q_to_std(path), err)) {
-        QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));
+    if (has_selected_amiibo_file()) {
+        if (!queue_selected_amiibo_rescan(err)) {
+            QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));
+            updateAmiiboButton();
+            return;
+        }
+        QMessageBox::information(this, "Scan Amiibo", "Selected amiibo queued for UDP scan. If the game later asks to write/save, the client will resend this same .bin automatically.");
+        updateAmiiboButton();
         return;
     }
-    QMessageBox::information(this, "Scan Amiibo", "Amiibo dump queued for UDP upload.");
+
+    changeAmiibo();
 }
 
-void SettingsDialog::saveUpdatedAmiibo() {
+void SettingsDialog::changeAmiibo() {
     if (!controllerTypeBox || controllerTypeBox->currentData().toInt() != ns::CONTROLLER_TYPE_JOYCON_R) return;
-    if (!g_amiibo_dirty_available.load(std::memory_order_relaxed)) {
-        QMessageBox::information(this, "Save Amiibo", "No updated amiibo dump is available yet.");
-        return;
-    }
-    QString path = QFileDialog::getSaveFileName(this, "Save Updated Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
+    QString path = QFileDialog::getOpenFileName(this, "Open Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
     if (path.isEmpty()) return;
+
+    g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
+
     std::string err;
-    if (!queue_amiibo_save_to_file(q_to_std(path), err)) {
-        QMessageBox::warning(this, "Save Amiibo", std_to_q(err));
+    if (!queue_amiibo_upload_from_file(q_to_std(path), err)) {
+        QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));
+        updateAmiiboButton();
         return;
     }
-    QMessageBox::information(this, "Save Amiibo", "Save request queued. Keep the client connected while the updated dump is pulled from the server.");
+    QMessageBox::information(this, "Scan Amiibo", "Amiibo selected and queued for UDP scan. If the game later asks to write/save, the client will resend this same .bin automatically and auto-save changes back into it.");
+    updateAmiiboButton();
 }
 
 void SettingsDialog::saveSettings() {
