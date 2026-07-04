@@ -19,6 +19,7 @@ extern std::atomic<bool> g_gyroEnabled;
 extern std::atomic<bool> g_rumbleEnabled;
 extern std::atomic<bool> g_homeShortcutEnabled;
 extern std::atomic<bool> g_captureShortcutEnabled;
+extern std::atomic<int> g_controllerType;
 extern std::unordered_map<std::string, std::string> g_keyBindings;
 extern std::mutex g_keyBindingsMutex;
 extern std::mutex g_pressedKeysMutex;

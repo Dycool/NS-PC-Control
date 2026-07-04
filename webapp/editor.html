@@ -18,6 +18,12 @@
             </div>
             <div style="padding: 15px; display: flex; flex-direction: column; gap: 10px;">
                 <div style="color:#fff; text-align:center; font-size:14px; margin-bottom:5px;">Drag to Move, Pinch to Resize</div>
+                <label for="controllerType" style="color:#fff;font-size:13px;">Emulated controller</label>
+                <select id="controllerType" onchange="changeControllerType()">
+                    <option value="3">Pro Controller</option>
+                    <option value="1">Joy-Con (L)</option>
+                    <option value="2">Joy-Con (R)</option>
+                </select>
                 <button onclick="saveLayout()" style="background:#0a0; color:#fff;">Save</button>
                 <select id="addSel" onchange="addBtn()"><option value="">+ Add Button</option></select>
                 <button id="toggleDel" onclick="toggleDel()">🗑️ Delete Mode: OFF</button>

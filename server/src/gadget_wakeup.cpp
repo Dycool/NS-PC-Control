@@ -131,7 +131,7 @@ static bool command_exists(const char* cmd) {
 // ===========================================================================
 
 bool hidg_nodes_ready() {
-    for (int i = 0; i < active_hid_ports(); ++i) {
+    for (int i = 0; i < HID_PORT_COUNT; ++i) {
         if (access(("/dev/hidg" + std::to_string(i)).c_str(), R_OK | W_OK) != 0)
             return false;
     }
@@ -1136,7 +1136,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     if (g_ctx.verbose) {
         std::println("[gadget] {}; creating built-in {}-interface {} gadget",
                      reason ? reason : "HID gadget not ready",
-                     active_hid_ports(),
+                     HID_PORT_COUNT,
                      g_ctx.legacy_mode ? "legacy 8-byte" : "64-byte motion");
     }
 
@@ -1163,31 +1163,22 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             || !mkdirs(gd / "functions"))
         return false;
 
-    const char* modern_pid     = "0x2009";
-    const char* modern_product = "Motion USB Gamepad";
-    const char* modern_manuf   = "NS Bridge";
-    switch (g_ctx.joycon_test) {
-        case 2: modern_pid = "0x2007"; modern_product = "Joy-Con (R)";           modern_manuf = "Nintendo Co., Ltd."; break;
-        case 3:
-        case 4: modern_pid = "0x200e"; modern_product = "Joy-Con Charging Grip"; modern_manuf = "Nintendo Co., Ltd."; break;
-    }
-
     bool ok = write_file(gd / "bcdDevice",                  g_ctx.legacy_mode ? "0x0200" : "0x0210")
            && write_file(gd / "bcdUSB",                     "0x0200")
            && write_file(gd / "idVendor",                   g_ctx.legacy_mode ? "0x0F0D" : "0x057e")
-           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : modern_pid)
+           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : "0x2009")
            && write_file(gd / "bDeviceClass",               g_ctx.legacy_mode ? "0xFF"   : "0x00")
            && write_file(gd / "bDeviceSubClass",            g_ctx.legacy_mode ? "0xFF"   : "0x00")
            && write_file(gd / "bDeviceProtocol",            g_ctx.legacy_mode ? "0xFF"   : "0x00")
            && write_file(gd / "strings/0x409/serialnumber", g_ctx.legacy_mode ? "000000000001" : g_ctx.usb_serial)
-           && write_file(gd / "strings/0x409/manufacturer", g_ctx.legacy_mode ? "NS Bridge" : modern_manuf)
-           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : modern_product)
+           && write_file(gd / "strings/0x409/manufacturer", "NS Bridge")
+           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : "Motion USB Gamepad")
            && write_file(cd / "MaxPower",                   "500")
            && write_file(cd / "bmAttributes",               g_ctx.legacy_mode ? "0x80" : "0xA0");
     if (g_ctx.legacy_mode) ok = ok && write_file(cd / "strings/0x409/configuration", "USB 4-Player Hub Config");
     if (!ok) return false;
 
-    for (int i = 0; i < active_hid_ports(); ++i) {
+    for (int i = 0; i < HID_PORT_COUNT; ++i) {
         if (!create_hid_function(i)) return false;
     }
 
@@ -1201,7 +1192,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     for (int tries = 0; tries < 20; ++tries) {
         bool all_seen = true;
-        for (int i = 0; i < active_hid_ports(); ++i) {
+        for (int i = 0; i < HID_PORT_COUNT; ++i) {
             char path[32];
             std::snprintf(path, sizeof(path), "/dev/hidg%d", i);
             if (access(path, F_OK) != 0) all_seen = false;
@@ -1210,7 +1201,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         if (all_seen && hidg_nodes_ready()) {
             if (g_ctx.verbose)
                 std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})",
-                             active_hid_ports(), active_hid_ports() - 1);
+                             HID_PORT_COUNT, HID_PORT_COUNT - 1);
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -119,6 +119,12 @@ object Protocol {
         frame[base + 46] = flags.toByte()
     }
 
+    fun setFrameControllerType(frame: ByteArray, padIndex: Int, controllerType: Int) {
+        if (padIndex !in 0 until PAD_COUNT || controllerType !in 1..3) return
+        val base = 20 + padIndex * EXT_PAD_SIZE
+        if (frame.size >= base + EXT_PAD_SIZE) frame[base + 47] = controllerType.toByte()
+    }
+
     fun extractPad0HidFromWebFrame(src: ByteArray): ByteArray? =
         NativeProtocol.nativeExtractPadHid(src)
 

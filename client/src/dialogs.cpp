@@ -173,6 +173,17 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     homeShortcutBox = add_box("Home shortcut (LStick + RStick)", g_homeShortcutEnabled.load());
     captureShortcutBox = add_box("Capture shortcut (Minus + Plus)", g_captureShortcutEnabled.load());
 
+    auto* controllerRow = new QGridLayout();
+    controllerRow->addWidget(new QLabel("Emulated controller", this), 0, 0);
+    controllerTypeBox = new QComboBox(this);
+    controllerTypeBox->addItem("Pro Controller", ns::CONTROLLER_TYPE_PRO);
+    controllerTypeBox->addItem("Joy-Con (L)", ns::CONTROLLER_TYPE_JOYCON_L);
+    controllerTypeBox->addItem("Joy-Con (R)", ns::CONTROLLER_TYPE_JOYCON_R);
+    const int selectedType = controllerTypeBox->findData(g_controllerType.load());
+    controllerTypeBox->setCurrentIndex(selectedType < 0 ? 0 : selectedType);
+    controllerRow->addWidget(controllerTypeBox, 0, 1);
+    outer->addLayout(controllerRow);
+
     auto* buttons = new QGridLayout();
     QPushButton* save = new QPushButton("Save", this);
     QPushButton* cancel = new QPushButton("Cancel", this);
@@ -191,6 +202,7 @@ void SettingsDialog::saveSettings() {
     g_rumbleEnabled.store(rumble);
     g_homeShortcutEnabled.store(homeShortcutBox->isChecked());
     g_captureShortcutEnabled.store(captureShortcutBox->isChecked());
+    g_controllerType.store(controllerTypeBox->currentData().toInt());
     save_feature_toggles();
     sync_sdl_input_options();
     g_sdlInput.set_gyro_enabled(gyro);

@@ -55,71 +55,62 @@ const uint8_t VIRTUAL_BODY_RGB[4][3] = {
 };
 
 // ===========================================================================
-// Joy-Con USB experiments (--test1..--test4)
+// Joy-Con (R) mode (--joycon)
 //
-// Every place the emulated pad states its controller type goes through
-// experiment_type_for_port() so one flag flips the whole identity:
-//   - USB 0x81-0x01 status reply, byte 3
-//   - subcommand 0x02 (device info) reply, byte 2
-//   - SPI flash 0x6012
-// plus the per-report conn_info nibble ((conn_info >> 1) & 3 == 3 marks a
-// Joy-Con, 0 marks Pro/grip) handled in experiment_postprocess_report().
+// The console accepts wired Joy-Con input when the USB session is typed Pro
+// Controller in the 0x80-01 status reply while device info (subcmd 0x02),
+// SPI 0x6012 and the per-report conn_info nibble claim Joy-Con (R). Found by
+// the identity experiments on 2026-07-04; keeping 0x80-01 = Pro is what stops
+// the console from downgrading the session to a pairing-only channel.
 // ===========================================================================
 
-uint8_t experiment_type_for_port(int ctrl) {
-    switch (g_ctx.joycon_test) {
-        case 1:              // Pro USB identity, Joy-Con (R) protocol identity
-        case 2:  return NS_TYPE_JOYCON_R; // bare Joy-Con (R) USB identity
-        case 3:  return ctrl == 0 ? NS_TYPE_JOYCON_L : NS_TYPE_JOYCON_R; // grip: L in slot 0, R in slot 1
-        case 4:  return ctrl == 0 ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L; // grip, slots swapped
-        default: return NS_TYPE_PRO;
+static uint8_t g_port_controller_type[HID_PORT_COUNT] = {
+    NS_TYPE_PRO, NS_TYPE_PRO, NS_TYPE_PRO, NS_TYPE_PRO
+};
+constexpr size_t SPI_FLASH_SIZE = 0x10000;
+uint8_t g_spi_flash[4][SPI_FLASH_SIZE];
+bool g_spi_initialized[4] = {};
+
+uint8_t controller_type_for_port(int ctrl) {
+    return ctrl >= 0 && ctrl < HID_PORT_COUNT ? g_port_controller_type[ctrl] : NS_TYPE_PRO;
+}
+
+void set_controller_type_for_port(int ctrl, uint8_t type) {
+    if (ctrl < 0 || ctrl >= HID_PORT_COUNT) return;
+    if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R) type = NS_TYPE_PRO;
+    if (g_port_controller_type[ctrl] == type) return;
+    g_port_controller_type[ctrl] = type;
+    g_spi_initialized[ctrl] = false;
+    init_spi_flash(ctrl);
+}
+
+void apply_controller_type_input(uint8_t type, HIDReport& r) {
+    if (type == NS_TYPE_JOYCON_R) {
+        // Single-stick clients normally drive the left stick; a right Joy-Con
+        // exposes that physical stick in the right-stick report field.
+        if (r.input.rx == 128 && r.input.ry == 128) {
+            r.input.rx = r.input.lx; r.input.ry = r.input.ly;
+        }
+        r.input.buttons &= BTN_Y | BTN_B | BTN_A | BTN_X | BTN_R | BTN_ZR |
+                           BTN_PLUS | BTN_RSTICK | BTN_HOME;
+        r.input.hat = HAT_NEUTRAL;
+        r.input.lx = r.input.ly = 128;
+    } else if (type == NS_TYPE_JOYCON_L) {
+        r.input.buttons &= BTN_L | BTN_ZL | BTN_MINUS | BTN_LSTICK | BTN_CAPTURE;
+        r.input.rx = r.input.ry = 128;
     }
 }
 
-bool experiment_port_is_joycon(int ctrl) {
-    uint8_t t = experiment_type_for_port(ctrl);
-    return t == NS_TYPE_JOYCON_L || t == NS_TYPE_JOYCON_R;
-}
-
-void apply_experiment_joycon_input(int ctrl, HIDReport& r) {
-    // A Joy-Con (R) is read from the right-stick field; clients driving a single
-    // physical pad populate the left stick. Mirror when the matching field is idle.
-    if (experiment_type_for_port(ctrl) == NS_TYPE_JOYCON_R
-            && r.input.rx == 128 && r.input.ry == 128
-            && (r.input.lx != 128 || r.input.ly != 128)) {
-        r.input.rx = r.input.lx; r.input.ry = r.input.ly;
-    }
-}
-
-void experiment_postprocess_report(int ctrl, uint8_t* buf) {
-    if (!g_ctx.joycon_test || !experiment_port_is_joycon(ctrl)) return;
+void apply_controller_type_report(uint8_t type, uint8_t* buf) {
+    if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R) return;
     // buf is a 0x30/0x21 report: conn_info at [2], buttons at [3..5].
-    // Low nibble 0xF = Joy-Con ((0xF >> 1) & 3 == 3) + USB/Switch-powered bit.
+    // conn_info low nibble 0xF = Joy-Con ((v >> 1) & 3 == 3) + USB-powered bit.
     buf[2] = (buf[2] & 0xF0) | 0x0F;
-    const bool l = buf[5] & 0x40, r = buf[3] & 0x40;
-    if (experiment_type_for_port(ctrl) == NS_TYPE_JOYCON_R) {
-        // Right Joy-Con SL/SR live in the right-button byte: SR 0x10, SL 0x20.
-        if (r) buf[3] |= 0x10;
-        if (l) buf[3] |= 0x20;
-    } else {
-        // Left Joy-Con SL/SR live in the left-button byte: SR 0x10, SL 0x20.
-        if (r) buf[5] |= 0x10;
-        if (l) buf[5] |= 0x20;
-    }
-}
-
-const char* experiment_description(int test) {
-    switch (test) {
-        case 1: return "Pro Controller USB identity (057e:2009), but all protocol type bytes claim Joy-Con (R). "
-                       "Probes whether the console derives the pad style from the protocol or the USB PID.";
-        case 2: return "Full bare Joy-Con (R) USB identity (057e:2007, 1 HID interface). "
-                       "Probes whether the console's USB stack binds a Joy-Con PID at all.";
-        case 3: return "Joy-Con Charging Grip identity (057e:200e, 2 HID interfaces: L in slot 0, R in slot 1). "
-                       "Probes whether the console has a working grip-over-USB input driver.";
-        case 4: return "Charging Grip identity with slots swapped (R in slot 0, L in slot 1). "
-                       "Ordering probe in case the grip driver hardcodes slot sides.";
-        default: return "off";
-    }
+    // Map the side's shoulder/trigger pair onto SR/SL so the normal
+    // single-Joy-Con "press SL+SR" registration gesture remains available.
+    uint8_t& side = type == NS_TYPE_JOYCON_R ? buf[3] : buf[5];
+    if (side & 0x40) side |= 0x10;
+    if (side & 0x80) side |= 0x20;
 }
 
 bool read_random_bytes(uint8_t* dst, size_t len) {
@@ -148,14 +139,10 @@ void randomize_controller_identity() {
     g_ctx.usb_serial = std::format("{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}", rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5]);
 }
 
-constexpr size_t SPI_FLASH_SIZE = 0x10000;
-uint8_t g_spi_flash[4][SPI_FLASH_SIZE];
-bool g_spi_initialized[4] = {};
-
 void init_spi_flash(int ctrl) {
     if (ctrl < 0 || ctrl >= 4 || g_spi_initialized[ctrl]) return;
     uint8_t* flash = g_spi_flash[ctrl]; std::memset(flash, 0xFF, SPI_FLASH_SIZE);
-    flash[0x6012] = experiment_type_for_port(ctrl); flash[0x6013] = 0xA0; flash[0x601B] = 0x02;
+    flash[0x6012] = controller_type_for_port(ctrl); flash[0x6013] = 0xA0; flash[0x601B] = 0x02;
 
     auto put16 = [&](uint16_t a, int16_t v) { flash[a] = v; flash[a+1] = v >> 8; };
     auto pack12 = [](uint8_t* d, uint16_t x, uint16_t y) { d[0] = x; d[1] = (x >> 8) | (y << 4); d[2] = y >> 4; };
@@ -169,17 +156,9 @@ void init_spi_flash(int ctrl) {
     put16(0x6080, 0); put16(0x6082, 0); put16(0x6084, 0); pack12(flash + 0x6089, 0x0A0, 0x100);
     for (size_t i = 6; i < 0x24; ++i) flash[0x6086 + i] = (i & 1) ? 0x30 : 0x0F;
 
-    if (experiment_port_is_joycon(ctrl)) {
-        // Official neon colors so the console UI shows a plausible Joy-Con.
-        static const uint8_t neon_l[2][3] = {{0x0A, 0xB9, 0xE6}, {0x00, 0x1E, 0x1E}}; // body, buttons
-        static const uint8_t neon_r[2][3] = {{0xFF, 0x3C, 0x28}, {0x1E, 0x0A, 0x0A}};
-        const auto& c = (experiment_type_for_port(ctrl) == NS_TYPE_JOYCON_L) ? neon_l : neon_r;
-        std::memcpy(flash + 0x6050, c[0], 3); std::memcpy(flash + 0x6053, c[1], 3);
-        std::memcpy(flash + 0x6056, c[0], 3); std::memcpy(flash + 0x6059, c[1], 3);
-    } else {
-        std::memcpy(flash + 0x6050, VIRTUAL_BODY_RGB[ctrl], 3); std::memset(flash + 0x6053, 0xFF, 3);
-        std::memcpy(flash + 0x6056, VIRTUAL_BODY_RGB[ctrl], 3); std::memset(flash + 0x6059, 0xFF, 3);
-    }
+    // Joy-Cons deliberately share the same per-player palette as Pro Controllers.
+    std::memcpy(flash + 0x6050, VIRTUAL_BODY_RGB[ctrl], 3); std::memset(flash + 0x6053, 0xFF, 3);
+    std::memcpy(flash + 0x6056, VIRTUAL_BODY_RGB[ctrl], 3); std::memset(flash + 0x6059, 0xFF, 3);
     flash[0x605C] = 0x00; g_spi_initialized[ctrl] = true;
 }
 
@@ -190,12 +169,16 @@ void set_identity_in_0x81(uint8_t* r81, int ctrl) {
 
 size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
     memset(out, 0, PRO_REPORT_SIZE); out[0] = 0x81; out[1] = subtype;
-    if (subtype == 0x01) { out[3] = experiment_type_for_port(ctrl); set_identity_in_0x81(out, ctrl); }
+    if (subtype == 0x01) {
+        // The wired session must stay typed Pro; device info/SPI identify Joy-Cons.
+        out[3] = NS_TYPE_PRO;
+        set_identity_in_0x81(out, ctrl);
+    }
     return PRO_REPORT_SIZE;
 }
 
 void build_get_device_info_response(uint8_t* out, int ctrl) {
-    memset(out, 0, 36); out[0] = 0x03; out[1] = 0x49; out[2] = experiment_type_for_port(ctrl); out[3] = 0x02;
+    memset(out, 0, 36); out[0] = 0x03; out[1] = 0x49; out[2] = controller_type_for_port(ctrl); out[3] = 0x02;
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
     out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3]; out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
     out[10] = 0x01; out[11] = 0x02;
@@ -295,6 +278,10 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uin
     switch (subcmd) {
     case CMD_BT_MANUAL_PAIRING:
         reply->ack = 0x81;
+        if (controller_type_for_port(rt.ctrl) != NS_TYPE_PRO) {
+            reply->reply_data[0] = 0x03; reply->reply_data[1] = 0x01;
+            return 2;
+        }
         if (!cmd_data.empty() && (cmd_data[0] == 0x02 || cmd_data[0] == 0x03)) { std::ranges::fill_n(reply->reply_data, 16, 0x00); return 16; }
         return 0;
     case CMD_TRIGGER_BUTTONS: reply->ack = 0x83; reply->reply_data[0] = 0x00; return 1;

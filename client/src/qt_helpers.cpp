@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <vector>
+#include <QWidget>
 
 std::string q_to_std(const QString& s) { return s.toUtf8().constData(); }
 QString std_to_q(const std::string& s) { return QString::fromUtf8(s.c_str()); }
@@ -68,5 +69,23 @@ QIcon app_icon() {
         return QIcon();
     }();
     return cached;
+}
+
+void apply_windows_taskbar_icon(QWidget* window) {
+#ifdef _WIN32
+    if (!window) return;
+    // Qt's QIcon is enough for title bars, but explicitly set both native
+    // window icons so Explorer gets them even when SDL owns its own event thread.
+    HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    HICON large = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                                GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    HICON small = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (large) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large));
+    if (small) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+#else
+    (void)window;
+#endif
 }
 

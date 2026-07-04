@@ -50,11 +50,12 @@ int cli_main(const std::vector<std::string>& original_args) {
         return 1;
     }
 
-    std::string host_arg, macro_path, k_val = "single";
+    std::string host_arg, macro_path, k_val = "single", controller_type = "pro";
     CLI::App app{"ns-client --cli"};
     app.add_option("host", host_arg, "Target IP[:PORT]")->required();
     auto* opt_m = app.add_option("-m,--macro", macro_path);
     auto* opt_k = app.add_option("-k,--keyboard", k_val)->expected(0, 1);
+    app.add_option("-c,--controller", controller_type, "Emulated controller: pro, joycon-l, or joycon-r");
 
     std::vector<const char*> argv_ptrs;
     for (const auto& a : args) argv_ptrs.push_back(a.c_str());
@@ -74,6 +75,10 @@ int cli_main(const std::vector<std::string>& original_args) {
 
     load_saved_bindings();
     load_saved_feature_toggles();
+    if (controller_type == "pro") g_controllerType.store(ns::CONTROLLER_TYPE_PRO);
+    else if (controller_type == "joycon-l") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_L);
+    else if (controller_type == "joycon-r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
+    else return std::println(stderr, "Unknown controller type: {}", controller_type), 1;
     g_keyboardMode.store(cli_kb);
     if (cli_kb != KB_OFF) {
         std::println("Keyboard mode enabled ({}) - {} Player 1",

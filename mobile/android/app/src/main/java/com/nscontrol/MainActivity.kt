@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var touchHid: ByteArray? = null
     @Volatile private var touchFrame: ByteArray? = null
     @Volatile private var lastTouchFrameMs: Long = 0
+    @Volatile private var touchControllerType: Int = 3
     @Volatile private var lastBridgeFrameParseMs: Long = 0
 
     private enum class Page { MAIN_MENU, TOUCH_CONTROLS, EDITOR }
@@ -480,6 +481,7 @@ class MainActivity : AppCompatActivity() {
                         Protocol.neutralHid()
                     }
                     Protocol.setFrameHid(frame, 0, hid)
+                    Protocol.setFrameControllerType(frame, 0, touchControllerType)
                     phoneMotionSamples()?.let { Protocol.setFrameMotionSamples(frame, 0, it) }
                     phoneBatteryStatus()?.let { (percent, charging) -> Protocol.setFrameBatteryPercent(frame, 0, percent, charging) }
                 }
@@ -752,7 +754,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
+        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int) {
             if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
             touchHid = Protocol.hid(
                 NativeProtocol.nativeNormalizeShortcuts(buttons),
@@ -764,6 +766,7 @@ class MainActivity : AppCompatActivity() {
                 present = true
             )
             lastTouchFrameMs = SystemClock.uptimeMillis()
+            touchControllerType = controllerType.coerceIn(1, 3)
         }
 
         @JavascriptInterface

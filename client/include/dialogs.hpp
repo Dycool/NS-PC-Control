@@ -3,6 +3,7 @@
 #include "shared/macros.hpp"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCloseEvent>
 #include <QDialog>
 #include <QGridLayout>
@@ -52,6 +53,7 @@ private:
     QCheckBox* rumbleBox = nullptr;
     QCheckBox* homeShortcutBox = nullptr;
     QCheckBox* captureShortcutBox = nullptr;
+    QComboBox* controllerTypeBox = nullptr;
 
     void saveSettings();
 };

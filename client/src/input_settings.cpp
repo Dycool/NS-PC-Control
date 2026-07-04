@@ -14,6 +14,7 @@ std::atomic<bool> g_gyroEnabled{true};
 std::atomic<bool> g_rumbleEnabled{true};
 std::atomic<bool> g_homeShortcutEnabled{true};
 std::atomic<bool> g_captureShortcutEnabled{true};
+std::atomic<int> g_controllerType{ns::CONTROLLER_TYPE_PRO};
 std::unordered_map<std::string, std::string> g_keyBindings;
 std::mutex g_keyBindingsMutex;
 std::mutex g_pressedKeysMutex;
@@ -137,6 +138,10 @@ void load_saved_feature_toggles() {
     g_rumbleEnabled.store(settings.value("RumbleEnabled", true).toBool());
     g_homeShortcutEnabled.store(settings.value("HomeShortcutEnabled", true).toBool());
     g_captureShortcutEnabled.store(settings.value("CaptureShortcutEnabled", true).toBool());
+    int controllerType = settings.value("ControllerType", ns::CONTROLLER_TYPE_PRO).toInt();
+    if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_PRO)
+        controllerType = ns::CONTROLLER_TYPE_PRO;
+    g_controllerType.store(controllerType);
     sync_sdl_input_options();
 }
 
@@ -146,6 +151,7 @@ void save_feature_toggles() {
     settings.setValue("RumbleEnabled", g_rumbleEnabled.load());
     settings.setValue("HomeShortcutEnabled", g_homeShortcutEnabled.load());
     settings.setValue("CaptureShortcutEnabled", g_captureShortcutEnabled.load());
+    settings.setValue("ControllerType", g_controllerType.load());
 }
 
 void set_key_pressed(const std::string& key, bool down) {

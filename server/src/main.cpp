@@ -170,10 +170,7 @@ int main(int argc, char** argv) {
         }
         else if (s == "-pair")                  s = "--pair";
         else if (s == "-no-bt")                 s = "--no-bt";
-        else if (s == "-test1")                 s = "--test1";
-        else if (s == "-test2")                 s = "--test2";
-        else if (s == "-test3")                 s = "--test3";
-        else if (s == "-test4")                 s = "--test4";
+        else if (s == "-joycon")                s = "--joycon";
         cli_args.push_back(s);
     }
 
@@ -205,11 +202,8 @@ int main(int argc, char** argv) {
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag  ("-p",       legacy_p,                   "")->group("");
 
-    bool jc_test[4] = {false, false, false, false};
-    app.add_flag  ("--test1",  jc_test[0], "EXPERIMENT: Pro USB identity, Joy-Con (R) protocol type bytes");
-    app.add_flag  ("--test2",  jc_test[1], "EXPERIMENT: bare Joy-Con (R) USB identity (057e:2007, 1 interface)");
-    app.add_flag  ("--test3",  jc_test[2], "EXPERIMENT: Joy-Con Charging Grip identity (057e:200e, L+R interfaces)");
-    app.add_flag  ("--test4",  jc_test[3], "EXPERIMENT: Charging Grip identity with L/R slots swapped");
+    app.add_flag  ("--joycon", g_ctx.joycon_mode,          "Emulate Joy-Con (R) controllers instead of Pro Controllers "
+                                                           "(enables Joy-Con-only games; vertical orientation)");
 
     try {
         std::vector<char*> cli_argv;
@@ -222,28 +216,13 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     g_ctx.bluetooth_input_disabled = no_bt;
 
-    for (int t = 0; t < 4; ++t) {
-        if (!jc_test[t]) continue;
-        if (g_ctx.joycon_test != 0) {
-            std::println(stderr, "error: pick a single Joy-Con experiment (--test1..--test4)");
-            return 1;
-        }
-        g_ctx.joycon_test = t + 1;
-    }
-    if (g_ctx.joycon_test != 0 && g_ctx.legacy_mode) {
-        std::println(stderr, "error: the Joy-Con experiments replace the modern gadget and cannot run with --hori");
+    if (g_ctx.joycon_mode && g_ctx.legacy_mode) {
+        std::println(stderr, "error: Joy-Con mode (--joycon) requires the modern gadget and cannot run with --hori");
         return 1;
     }
-    if (g_ctx.joycon_test != 0) {
-        std::println("[test] ============================================================");
-        std::println("[test] Joy-Con-over-USB experiment {} active", g_ctx.joycon_test);
-        std::println("[test] {}", experiment_description(g_ctx.joycon_test));
-        std::println("[test] Reading results:");
-        std::println("[test]   - no [test] lines within ~10s of (re)plugging the console:");
-        std::println("[test]     the console never opened this USB identity -> experiment failed");
-        std::println("[test]   - 0x80 handshake + device info + SPI reads, then input format 0x30:");
-        std::println("[test]     console accepted the identity -> check the Controllers applet icon");
-        std::println("[test] ============================================================");
+    if (g_ctx.joycon_mode) {
+        std::println("[jc] Joy-Con (R) emulation mode: the console sees wired Joy-Cons "
+                     "(vertical orientation; no capture button; NFC not emulated)");
     }
 
     if (no_bt && pair_explicit) {
@@ -370,7 +349,7 @@ int main(int argc, char** argv) {
     if (g_ctx.verbose) {
         std::println("UDP {}:{} writer={} Hz mode={}",
                      bind_addr, port, PRO_WRITER_HZ,
-                     g_ctx.legacy_mode ? "hori" : "modern");
+                     g_ctx.legacy_mode ? "hori" : (g_ctx.joycon_mode ? "joycon" : "modern"));
     }
 
     std::string start_msg = std::format("Started ns-backend server on {}:{}", bind_addr, port);

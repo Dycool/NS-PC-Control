@@ -25,7 +25,18 @@ function applyLayout() {
     }
 }
 applyLayout();
-const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 5;
+const CONTROLLER_JOYCON_L = 1, CONTROLLER_JOYCON_R = 2, CONTROLLER_PRO = 3;
+let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || String(CONTROLLER_PRO));
+if (![CONTROLLER_JOYCON_L, CONTROLLER_JOYCON_R, CONTROLLER_PRO].includes(controllerType)) controllerType = CONTROLLER_PRO;
+const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad']);
+const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy']);
+if (controllerType !== CONTROLLER_PRO) {
+    const allowed = controllerType === CONTROLLER_JOYCON_L ? joyconLeftOnly : joyconRightOnly;
+    for (const id of Object.keys(defLayout)) {
+        if (!allowed.has(id)) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
+    }
+}
+const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
 const PAD_PRESENT = 1;
 const FLAG_SINGLE_PAD = 0x04;
 const EXT_STATUS_BATTERY_VALID = 0x01;
@@ -36,6 +47,39 @@ const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
 let touchBatteryPercent = null;
 let touchBatteryCharging = false;
+let motionSamples = [];
+let motionEnabled = false;
+const clampI16 = v => Math.max(-32768, Math.min(32767, Math.round(v || 0)));
+function screenRemap(x, y, z) {
+    const angle = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) % 360;
+    if (angle === 90 || angle === -270) return [-y, x, z];
+    if (angle === 180 || angle === -180) return [-x, -y, z];
+    if (angle === 270 || angle === -90) return [y, -x, z];
+    return [x, y, z];
+}
+function onDeviceMotion(e) {
+    const a0 = e.accelerationIncludingGravity || e.acceleration;
+    const r0 = e.rotationRate;
+    if (!a0 || !r0) return;
+    const a = screenRemap(a0.x || 0, a0.y || 0, a0.z || 0);
+    // DeviceMotion rotationRate is degrees/sec; native mobile gyro APIs use radians/sec.
+    const g = screenRemap(r0.beta || 0, r0.gamma || 0, r0.alpha || 0);
+    const accelScale = 4096 / 9.80665, gyroScale = 16.384;
+    const sample = [
+        clampI16(-a[2] * accelScale), clampI16(-a[0] * accelScale), clampI16(a[1] * accelScale),
+        clampI16(-g[2] * gyroScale), clampI16(-g[0] * gyroScale), clampI16(g[1] * gyroScale)
+    ];
+    for (let i=3; i<6; i++) if (Math.abs(sample[i]) <= 32) sample[i] = 0;
+    motionSamples.push(sample); if (motionSamples.length > 3) motionSamples.shift();
+}
+async function enableMotion() {
+    if (motionEnabled || typeof DeviceMotionEvent === 'undefined') return;
+    try {
+        if (typeof DeviceMotionEvent.requestPermission === 'function' && await DeviceMotionEvent.requestPermission() !== 'granted') return;
+        window.addEventListener('devicemotion', onDeviceMotion);
+        motionEnabled = true;
+    } catch (_) {}
+}
 if (navigator.getBattery) {
     navigator.getBattery().then(b => {
         const update = () => {
@@ -216,11 +260,11 @@ function normalizeSystemShortcuts(buttons) {
 function publishTouchState() {
     const sendButtons = normalizeSystemShortcuts(state.buttons);
     if (window.NSBridge && typeof NSBridge.onTouchState === 'function') {
-        NSBridge.onTouchState(sendButtons, state.hat, state.lx, state.ly, state.rx, state.ry);
+        NSBridge.onTouchState(sendButtons, state.hat, state.lx, state.ly, state.rx, state.ry, controllerType);
         return true;
     }
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge) {
-        window.webkit.messageHandlers.nsBridge.postMessage({type:'touchState', buttons:sendButtons, hat:state.hat, lx:state.lx, ly:state.ly, rx:state.rx, ry:state.ry});
+        window.webkit.messageHandlers.nsBridge.postMessage({type:'touchState', buttons:sendButtons, hat:state.hat, lx:state.lx, ly:state.ly, rx:state.rx, ry:state.ry, controllerType});
         return true;
     }
     return false;
@@ -236,12 +280,17 @@ function sendPacket() {
     view.setUint16(off, sendButtons, true); view.setUint8(off+2, state.hat);
     view.setUint8(off+3, state.lx); view.setUint8(off+4, state.ly); view.setUint8(off+5, state.rx); view.setUint8(off+6, state.ry); view.setUint8(off+7, PAD_PRESENT);
     for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(off + k, 0);
+    if (motionSamples.length === 3) {
+        for (let s=0; s<3; s++) for (let v=0; v<6; v++) view.setInt16(off + 8 + s*12 + v*2, motionSamples[s][v], true);
+        view.setUint8(off + 44, 1);
+    }
     if (touchBatteryPercent !== null) {
         view.setUint8(off + 45, touchBatteryPercent);
         let batteryFlags = view.getUint8(off + 46) | EXT_STATUS_BATTERY_VALID;
         if (touchBatteryCharging) batteryFlags |= EXT_STATUS_BATTERY_CHARGING;
         view.setUint8(off + 46, batteryFlags);
     }
+    view.setUint8(off + 47, controllerType);
     for(let p=1; p<4; p++) {
         off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);
         view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);
@@ -255,6 +304,7 @@ document.getElementById('btnConnect').onclick = async () => {
         resetTouchConnectionUi('Disconnected');
         return;
     }
+    await enableMotion();
     if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen().catch(()=>{}); }
     const wsUrl = makeWsUrl();
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";

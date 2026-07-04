@@ -116,7 +116,10 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     bool legacy_mode = false;
-    int joycon_test = 0;
+    // Emulate Joy-Con (R) pads: the wired USB session stays typed Pro Controller
+    // (0x80-01) while device info and SPI report Joy-Con (R), which the console
+    // accepts as wired Joy-Con input (Joy-Con-only games work).
+    bool joycon_mode = false;
     bool bluetooth_input_disabled = false;
     bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
     std::atomic<bool> gadget_setup_attempted{false};
@@ -153,7 +156,6 @@ struct ServerContext {
     struct lws_context* lws_context = nullptr;
 };
 extern ServerContext g_ctx;
-int active_hid_ports();
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then);
 bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit);
 void mark_switch2_usb_activity(uint64_t now = 0);

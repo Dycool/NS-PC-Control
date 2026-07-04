@@ -40,6 +40,7 @@ int main(int argc, char** argv) {
 #endif
     MainWindow window;
     window.show();
+    apply_windows_taskbar_icon(&window);
     return app.exec();
 }
 

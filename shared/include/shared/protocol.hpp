@@ -97,6 +97,13 @@ static constexpr uint8_t EXT_PAD_PRESENT = 0x01;
 static constexpr uint8_t EXT_STATUS_BATTERY_VALID = 0x01;
 static constexpr uint8_t EXT_STATUS_BATTERY_CHARGING = 0x02;
 static constexpr uint8_t EXT_STATUS_BATTERY_PERCENT_UNKNOWN = 0xFF;
+// HIDReport::reserved[2]. Zero is treated as Pro for older clients.
+enum ControllerType : uint8_t {
+    CONTROLLER_TYPE_DEFAULT  = 0,
+    CONTROLLER_TYPE_JOYCON_L = 1,
+    CONTROLLER_TYPE_JOYCON_R = 2,
+    CONTROLLER_TYPE_PRO      = 3,
+};
 static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;
 

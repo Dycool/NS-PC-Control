@@ -125,8 +125,7 @@ void build_standard_report(const ns::HIDReport& src,
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
 
-uint8_t experiment_type_for_port(int ctrl);
-bool experiment_port_is_joycon(int ctrl);
-void apply_experiment_joycon_input(int ctrl, ns::HIDReport& r);
-void experiment_postprocess_report(int ctrl, uint8_t* buf);
-const char* experiment_description(int test);
+uint8_t controller_type_for_port(int ctrl);
+void set_controller_type_for_port(int ctrl, uint8_t type);
+void apply_controller_type_input(uint8_t type, ns::HIDReport& r);
+void apply_controller_type_report(uint8_t type, uint8_t* buf);

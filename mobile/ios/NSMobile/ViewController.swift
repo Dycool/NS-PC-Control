@@ -180,6 +180,13 @@ private enum ProtocolWire {
         if charging { frame[base + 46] |= UInt8(extStatusBatteryCharging) }
     }
 
+    static func setFrameControllerType(_ frame: inout [UInt8], pad: Int, controllerType: Int) {
+        guard pad >= 0 && pad < padCount && controllerType >= 1 && controllerType <= 3 else { return }
+        let base = 20 + pad * 48
+        guard frame.count >= base + 48 else { return }
+        frame[base + 47] = UInt8(controllerType)
+    }
+
     static func extractPad0Hid(from frame: [UInt8]) -> [UInt8]? {
         guard frame.count >= 20 + hidSize else { return nil }
         var out = [UInt8](repeating: 0, count: hidSize)
@@ -318,6 +325,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private var touchHid: [UInt8]?
     private var touchFrame: [UInt8]?
     private var lastTouchFrameMs: UInt64 = 0
+    private var touchControllerType = 3
     private var lastBridgeFrameParseMs: UInt64 = 0
 
     private let physicalPads = Locked((0..<ProtocolWire.padCount).map { _ in PhysicalPad() })
@@ -445,7 +453,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
           window.NSBridge = {
             onOpen:function(){post('onOpen');},
             onBinary:function(json){post('onBinary',[json]);},
-            onTouchState:function(buttons,hat,lx,ly,rx,ry){post('onTouchState',[buttons,hat,lx,ly,rx,ry]);},
+            onTouchState:function(buttons,hat,lx,ly,rx,ry,controllerType){post('onTouchState',[buttons,hat,lx,ly,rx,ry,controllerType]);},
             onClose:function(){post('onClose');},
             onPhysicalStart:function(){post('onPhysicalStart');},
             onPhysicalStop:function(){post('onPhysicalStop');},
@@ -723,7 +731,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             if let json = args.first as? String { onBinary(json: json) }
         case "onTouchState":
             if args.count >= 6 {
-                onTouchState(buttons: intArg(args[0]), hat: intArg(args[1]), lx: intArg(args[2]), ly: intArg(args[3]), rx: intArg(args[4]), ry: intArg(args[5]))
+                onTouchState(buttons: intArg(args[0]), hat: intArg(args[1]), lx: intArg(args[2]), ly: intArg(args[3]), rx: intArg(args[4]), ry: intArg(args[5]), controllerType: args.count > 6 ? intArg(args[6]) : 3)
             }
         case "onClose":
             deactivateControlClient()
@@ -765,7 +773,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         lastTouchFrameMs = now
     }
 
-    private func onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
+    private func onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int) {
         guard currentPage == .touchControls && controlClientActive else { return }
         touchHid = ProtocolWire.hid(buttons: ProtocolWire.normalizeShortcuts(buttons),
                                     hat: min(max(hat, 0), 8),
@@ -775,6 +783,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                                     ry: min(max(ry, 0), 255),
                                     present: true)
         lastTouchFrameMs = uptimeMs()
+        touchControllerType = min(max(controllerType, 1), 3)
     }
 
     private func togglePhysicalControllers() {
@@ -1016,6 +1025,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 hid = ProtocolWire.neutralHid()
             }
             ProtocolWire.setFrameHid(&frame, pad: 0, hid: hid)
+            ProtocolWire.setFrameControllerType(&frame, pad: 0, controllerType: touchControllerType)
             if let samples = phoneMotionSamples() {
                 ProtocolWire.setFrameMotionSamples(&frame, pad: 0, samples: samples)
             }

@@ -149,6 +149,7 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
         ns::HIDReport* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
         fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr,
                           frame.battery_percent[i], frame.battery_charging[i]);
+        dst->reserved[2] = static_cast<uint8_t>(g_controllerType.load(std::memory_order_relaxed));
     }
     sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
