@@ -25,6 +25,9 @@ constexpr uint8_t RID_INPUT_STANDARD = 0x30;
 constexpr uint8_t RID_INPUT_SUBCMD = 0x21;
 constexpr uint8_t RID_OUTPUT_RUMBLE = 0x10;
 constexpr uint8_t RID_OUTPUT_CMD = 0x01;
+constexpr uint8_t NS_TYPE_JOYCON_L = 0x01;
+constexpr uint8_t NS_TYPE_JOYCON_R = 0x02;
+constexpr uint8_t NS_TYPE_PRO      = 0x03;
 
 constexpr uint8_t CMD_BT_MANUAL_PAIRING = 0x01;
 constexpr uint8_t CMD_GET_DEVICE_INFO = 0x02;
@@ -121,3 +124,9 @@ void build_standard_report(const ns::HIDReport& src,
                            ProInputReport30& out);
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
+
+uint8_t experiment_type_for_port(int ctrl);
+bool experiment_port_is_joycon(int ctrl);
+void apply_experiment_joycon_input(int ctrl, ns::HIDReport& r);
+void experiment_postprocess_report(int ctrl, uint8_t* buf);
+const char* experiment_description(int test);

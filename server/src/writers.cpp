@@ -18,6 +18,25 @@
 
 using namespace ns;
 
+// Human-readable subcommand names for the Joy-Con experiment protocol trace.
+static const char* subcmd_name(uint8_t s) {
+    switch (s) {
+        case CMD_BT_MANUAL_PAIRING:  return "BT manual pairing";
+        case CMD_GET_DEVICE_INFO:    return "get device info";
+        case CMD_SET_DATA_FORMAT:    return "set input report format";
+        case CMD_TRIGGER_BUTTONS:    return "trigger buttons elapsed";
+        case CMD_SET_SHIP_MODE:      return "set ship mode";
+        case CMD_SPI_FLASH_READ:     return "SPI flash read";
+        case CMD_SET_NFC_IR_CONFIG:  return "NFC/IR MCU config";
+        case CMD_SET_PLAYER_LIGHTS:  return "set player lights";
+        case 0x33:                   return "get player lights";
+        case CMD_ENABLE_IMU:         return "enable IMU";
+        case CMD_SET_IMU_SENS:       return "IMU sensitivity";
+        case CMD_ENABLE_VIBRATION:   return "enable vibration";
+        default:                     return "unknown";
+    }
+}
+
 static const HIDReport& get_hid_report(const ClientSession& c, int s) {
     if (s == 0) return c.report.p1;
     if (s == 1) return c.report.p2;
@@ -26,8 +45,11 @@ static const HIDReport& get_hid_report(const ClientSession& c, int s) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
+    // Experiments expose fewer gadget interfaces; arrays stay HID_PORT_COUNT-sized
+    // and every port loop runs over the active count only.
+    const int nports = active_hid_ports();
     if (!g_ctx.legacy_mode) {
-        for (int i = 0; i < HID_PORT_COUNT; ++i) init_spi_flash(i);
+        for (int i = 0; i < nports; ++i) init_spi_flash(i);
     }
 
     const auto tick = us(1'000'000 / hz);
@@ -41,7 +63,7 @@ void writer_thread(std::stop_token stoken, int hz) {
 
     while (!stoken.stop_requested()) {
         bool all_open = true;
-        for (int i = 0; i < HID_PORT_COUNT; ++i) {
+        for (int i = 0; i < nports; ++i) {
             if (fds[i] < 0) {
                 fds[i] = open(devs[i].c_str(), (g_ctx.legacy_mode ? O_WRONLY : O_RDWR) | O_NONBLOCK);
                 if (fds[i] >= 0) {
@@ -74,7 +96,11 @@ void writer_thread(std::stop_token stoken, int hz) {
         }
 
         if (g_ctx.verbose) {
-            std::println("{}x {} /dev/hidg* opened", HID_PORT_COUNT, g_ctx.legacy_mode ? "legacy" : "Pro");
+            std::println("{}x {} /dev/hidg* opened", nports, g_ctx.legacy_mode ? "legacy" : "Pro");
+        }
+        if (g_ctx.joycon_test) {
+            std::println("[test] experiment {} live on {} HID port(s); waiting for console traffic...",
+                         g_ctx.joycon_test, nports);
         }
         auto next = Clock::now() + tick;
         bool error_shown = false;
@@ -126,7 +152,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
-            for (int h = 0; h < HID_PORT_COUNT; ++h) {
+            for (int h = 0; h < nports; ++h) {
                 if (hw_slots[h].client_idx == -1) continue;
                 int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                 bool absent_too_long = false;
@@ -147,7 +173,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (!snap[c].active) continue;
                 for (int s = 0; s < 4; ++s) {
                     bool mapped = false;
-                    for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                    for (int h = 0; h < nports; ++h) {
                         if (hw_slots[h].client_idx == c && hw_slots[h].sub_idx == s) { mapped = true; break; }
                     }
                     if (mapped) continue;
@@ -161,10 +187,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
 
                     int chosen = -1;
-                    if (s >= 0 && s < HID_PORT_COUNT && hw_slots[s].client_idx == -1) {
+                    if (s >= 0 && s < nports && hw_slots[s].client_idx == -1) {
                         chosen = s;
                     } else {
-                        for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                        for (int h = 0; h < nports; ++h) {
                             if (hw_slots[h].client_idx == -1) { chosen = h; break; }
                         }
                     }
@@ -178,16 +204,17 @@ void writer_thread(std::stop_token stoken, int hz) {
             }
 
             HIDReport out_reports[HID_PORT_COUNT];
-            for (int h = 0; h < HID_PORT_COUNT; ++h) {
+            for (int h = 0; h < nports; ++h) {
                 if (hw_slots[h].client_idx != -1) {
                     out_reports[h] = get_hid_report(snap[hw_slots[h].client_idx], hw_slots[h].sub_idx);
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
+                    if (g_ctx.joycon_test) apply_experiment_joycon_input(h, out_reports[h]);
                 }
             }
 
             bool ok = true;
             if (g_ctx.legacy_mode) {
-                for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                for (int h = 0; h < nports; ++h) {
                     HoriHIDReport r = out_reports[h].input;
                     r.vendor = 0;
                     if (r == prev[h]) continue;
@@ -204,7 +231,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     } else if (w > 0) ok = false;
                 }
             } else {
-                for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                for (int h = 0; h < nports; ++h) {
                     const bool port_needed = (hw_slots[h].client_idx != -1);
                     uint8_t write_buf[PRO_REPORT_SIZE] = {};
                     bool have_report_to_write = false, wrote_subcmd_reply = false;
@@ -244,6 +271,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
 
                     if (have_report_to_write) {
+                        if (g_ctx.joycon_test) experiment_postprocess_report(h, write_buf);
                         ssize_t w = write(fds[h], write_buf, PRO_REPORT_SIZE);
                         if (w < 0) {
                             if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
@@ -256,7 +284,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
                 }
 
-                for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                for (int h = 0; h < nports; ++h) {
                     for (int output_reads = 0; output_reads < 8; ++output_reads) {
                         struct pollfd pfd = {fds[h], POLLIN, 0};
                         uint8_t read_buf[PRO_REPORT_SIZE];
@@ -270,6 +298,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                             if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, false);
                             const uint8_t subcmd = read_buf[10];
                             std::span<const uint8_t> cmd_data(read_buf + 11, r > 11 ? std::min<size_t>(53, r - 11) : 0);
+                            if (g_ctx.joycon_test) {
+                                if (subcmd == CMD_SPI_FLASH_READ && cmd_data.size() >= 5)
+                                    std::println("[test] port{}: subcmd 0x10 SPI read addr=0x{:04X} len={}",
+                                                 h, cmd_data[0] | (cmd_data[1] << 8), cmd_data[4]);
+                                else
+                                    std::println("[test] port{}: subcmd 0x{:02X} ({}) data0=0x{:02X}",
+                                                 h, subcmd, subcmd_name(subcmd), cmd_data.empty() ? 0 : cmd_data[0]);
+                            }
                             if ((subcmd == CMD_SET_PLAYER_LIGHTS || subcmd == 0x33) && !cmd_data.empty()) {
                                 const uint8_t player_leds = cmd_data[0];
                                 g_ctx.console_player_leds[h].store(player_leds, std::memory_order_relaxed);
@@ -294,6 +330,13 @@ void writer_thread(std::stop_token stoken, int hz) {
                         } else if (id == RID_OUTPUT_RUMBLE) {
                             if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
                         } else if (id == 0x80) {
+                            if (g_ctx.joycon_test) {
+                                if (read_buf[1] == 0x01)
+                                    std::println("[test] port{}: USB handshake 0x80-01 -> replying controller type 0x{:02X}",
+                                                 h, experiment_type_for_port(h));
+                                else
+                                    std::println("[test] port{}: USB handshake 0x80-{:02X}", h, read_buf[1]);
+                            }
                             uint8_t resp_81[PRO_REPORT_SIZE] = {};
                             build_usb_81_response(resp_81, read_buf[1], h);
                             switch (read_buf[1]) {

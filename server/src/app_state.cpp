@@ -26,6 +26,15 @@ ServerContext g_ctx{
 #endif
 
 
+int active_hid_ports() {
+    switch (g_ctx.joycon_test) {
+        case 2:  return 1; // bare Joy-Con (R): a single HID interface
+        case 3:
+        case 4:  return 2; // charging grip: one interface per Joy-Con slot
+        default: return HID_PORT_COUNT;
+    }
+}
+
 const char* input_source_name(InputSource source) {
     switch (source) {
         case InputSource::Udp: return "UDP";
