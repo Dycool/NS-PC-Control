@@ -56,12 +56,6 @@ static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxe
 #include "bluetooth_input.hpp"
 #include "bluetooth_manager.hpp"
 
-// Abnormal exits (SIGSEGV/SIGABRT/SIGBUS/...) skip the normal teardown at the
-// end of main(), which with the FunctionFS transport would strand the gadget
-// bound to the UDC with nothing servicing it — the console then sees a
-// controller that endlessly re-enumerates. Drop the UDC binding here (an
-// async-signal-safe write), then restore the default handler and re-raise so
-// the crash is still reported (core dump / correct exit status).
 static void on_fatal_signal(int sig) {
     static const char msg[] = "[gadget] fatal signal; unbinding USB gadget\n";
     ssize_t n = write(STDERR_FILENO, msg, sizeof(msg) - 1); (void)n;
@@ -310,10 +304,6 @@ int main(int argc, char** argv) {
     sa_pipe.sa_flags = 0;
     sigaction(SIGPIPE, &sa_pipe, nullptr);
 
-    // Best-effort USB cleanup on a crash so a FunctionFS gadget is never left
-    // bound without a servicing process. SA_RESETHAND restores the default
-    // disposition after the first hit, so the re-raise in the handler still
-    // produces a normal crash.
     struct sigaction sa_fatal{};
     sa_fatal.sa_handler = on_fatal_signal;
     sigemptyset(&sa_fatal.sa_mask);

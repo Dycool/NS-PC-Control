@@ -34,8 +34,6 @@ using namespace ns;
 
 constexpr const char* GADGET_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl";
 constexpr const char* CONFIG_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1";
-// Must stay equal to GADGET_DIR "/UDC". Kept as a standalone literal so the
-// crash handler can reference it without any string building at signal time.
 constexpr const char* GADGET_UDC_PATH = "/sys/kernel/config/usb_gadget/ns_ctrl/UDC";
 constexpr const char* FFS_BASE_DIR = "/run/ns-pc-control/functionfs";
 constexpr const char* FFS_INSTANCE_PREFIX = "ns_ctrl";
@@ -1748,12 +1746,6 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 }
 
 void emergency_unbind_udc() {
-    // Async-signal-safe: only open/write/close on a fixed path, so this is safe
-    // to call from a crash signal handler. Unlike f_hid (a kernel driver that
-    // keeps answering the host on its own), a FunctionFS gadget left bound to
-    // the UDC with no process servicing ep0 makes the console see a controller
-    // that endlessly re-enumerates. Dropping the UDC binding stops that, and the
-    // leftover configfs nodes are reclaimed on the next startup (force rebuild).
     int fd = open(GADGET_UDC_PATH, O_WRONLY | O_CLOEXEC);
     if (fd < 0) return;
     ssize_t n = write(fd, "\n", 1);
