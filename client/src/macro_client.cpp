@@ -406,16 +406,6 @@ bool queue_selected_amiibo_rescan(std::string& err) {
     return queue_amiibo_upload_file_impl(path, false, err);
 }
 
-bool has_selected_amiibo_file() {
-    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
-    return g_amiibo_active_file && !g_amiibo_active_path.empty();
-}
-
-std::string selected_amiibo_path() {
-    std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
-    return g_amiibo_active_file ? g_amiibo_active_path : std::string{};
-}
-
 int find_macro_entry_by_name(const std::string& name) {
     std::string wanted = ns::macro::upper(ns::macro::trim(name));
     if (wanted.empty()) return -1;
