@@ -377,6 +377,19 @@ bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now, uint32_t* 
     return true;
 }
 
+bool server_amiibo_any_armed(uint64_t now) {
+    if (now == 0) now = now_us();
+    std::lock_guard<std::mutex> lk(g_ctx.server_amiibo_mtx);
+    for (int c = 0; c < MAX_CLIENTS; ++c) {
+        for (int s = 0; s < 4; ++s) {
+            ServerAmiiboState& st = g_ctx.server_amiibos[c][s];
+            server_amiibo_expire_clean_locked(st, now);
+            if (st.armed && st.dump.size() == ns::AMIIBO_DUMP_BYTES) return true;
+        }
+    }
+    return false;
+}
+
 bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vector<uint8_t>& out, uint32_t* version) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return false;
     if (now == 0) now = now_us();

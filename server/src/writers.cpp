@@ -15,6 +15,7 @@
 #include <cstring>
 #include <thread>
 #include <mutex>
+#include <vector>
 
 using namespace ns;
 
@@ -29,27 +30,61 @@ void writer_thread(std::stop_token stoken, int hz) {
     const int nports = HID_PORT_COUNT;
     if (!g_ctx.legacy_mode) {
         for (int i = 0; i < nports; ++i) {
-            set_controller_type_for_port(i, g_ctx.joycon_mode ? NS_TYPE_JOYCON_R : NS_TYPE_PRO);
+            // Default to Pro Controller; the client picks each pad's type per port
+            // via HIDReport::reserved[2].
+            set_controller_type_for_port(i, NS_TYPE_PRO);
             init_spi_flash(i);
         }
     }
 
     const auto tick = us(1'000'000 / hz);
-    int fds[HID_PORT_COUNT] = {-1, -1, -1, -1};
-    std::string devs[HID_PORT_COUNT] = {"/dev/hidg0", "/dev/hidg1", "/dev/hidg2", "/dev/hidg3"};
+    int write_fds[HID_PORT_COUNT] = {-1, -1, -1, -1};
+    int read_fds[HID_PORT_COUNT]  = {-1, -1, -1, -1};
+    // The controller type (Pro / Joy-Con L/R) the console last read at enumeration.
+    // The console only re-reads device info on a fresh USB handshake, so a client
+    // changing a pad's type has to re-enumerate the gadget to take effect.
+    uint8_t enumerated_type[HID_PORT_COUNT];
+    for (int i = 0; i < HID_PORT_COUNT; ++i) enumerated_type[i] = controller_type_for_port(i);
 
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[HID_PORT_COUNT];
     ControllerRuntime rt[HID_PORT_COUNT];
     for (int i = 0; i < HID_PORT_COUNT; ++i) rt[i].ctrl = i;
 
+    auto close_port_fds = [&](int i) {
+        const int old_write_fd = write_fds[i];
+        if (write_fds[i] >= 0) close(write_fds[i]);
+        if (read_fds[i] >= 0 && read_fds[i] != old_write_fd) close(read_fds[i]);
+        write_fds[i] = read_fds[i] = -1;
+        rt[i].fd = -1;
+    };
+    auto close_all_fds = [&]() {
+        for (int i = 0; i < HID_PORT_COUNT; ++i) close_port_fds(i);
+    };
+
     while (!stoken.stop_requested()) {
         bool all_open = true;
         for (int i = 0; i < nports; ++i) {
-            if (fds[i] < 0) {
-                fds[i] = open(devs[i].c_str(), (g_ctx.legacy_mode ? O_WRONLY : O_RDWR) | O_NONBLOCK);
-                if (fds[i] >= 0) {
-                    rt[i].fd = fds[i];
+            if (write_fds[i] < 0 || read_fds[i] < 0) {
+                const int old_write_fd = write_fds[i];
+                if (write_fds[i] >= 0) close(write_fds[i]);
+                if (read_fds[i] >= 0 && read_fds[i] != old_write_fd) close(read_fds[i]);
+                write_fds[i] = read_fds[i] = -1;
+
+                if (g_ctx.legacy_mode) {
+                    const std::string dev = "/dev/hidg" + std::to_string(i);
+                    write_fds[i] = open(dev.c_str(), O_WRONLY | O_NONBLOCK);
+                    read_fds[i] = write_fds[i];
+                } else {
+                    write_fds[i] = open(functionfs_ep_in_path(i).c_str(), O_WRONLY | O_NONBLOCK);
+                    read_fds[i]  = open(functionfs_ep_out_path(i).c_str(), O_RDONLY | O_NONBLOCK);
+                }
+
+                const bool opened = g_ctx.legacy_mode
+                    ? (write_fds[i] >= 0)
+                    : (write_fds[i] >= 0 && read_fds[i] >= 0);
+                if (opened) {
+                    rt[i].fd = write_fds[i];
                     rt[i].timer = 0;
                     rt[i].input_report_mode = RID_INPUT_STANDARD;
                     rt[i].full_report_enabled = false;
@@ -71,16 +106,17 @@ void writer_thread(std::stop_token stoken, int hz) {
 
         if (!all_open) {
             clear_switch2_usb_activity();
-            for (int i = 0; i < HID_PORT_COUNT; ++i) {
-                if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
-            }
-            run_gadget_setup_if_needed(false, "requested /dev/hidg* nodes could not all be opened");
+            close_all_fds();
+            run_gadget_setup_if_needed(false, g_ctx.legacy_mode
+                ? "requested /dev/hidg* nodes could not all be opened"
+                : "requested FunctionFS endpoints could not all be opened");
             for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
 
         if (g_ctx.verbose) {
-            std::println("{}x {} /dev/hidg* opened", nports, g_ctx.legacy_mode ? "legacy" : "Pro");
+            if (g_ctx.legacy_mode) std::println("{}x legacy /dev/hidg* opened", nports);
+            else std::println("{}x Pro FunctionFS endpoints opened", nports);
         }
         auto next = Clock::now() + tick;
         bool error_shown = false;
@@ -99,6 +135,34 @@ void writer_thread(std::stop_token stoken, int hz) {
             if (last_switch_sleep_poll_us == 0 || elapsed_us_saturated(now_stamp, last_switch_sleep_poll_us) >= 100'000ULL) {
                 poll_switch2_sleep_state(now_stamp);
                 last_switch_sleep_poll_us = now_stamp;
+            }
+
+            // FunctionFS advertises the NFC-capable report descriptor from boot,
+            // so staging/removing an amiibo no longer rebuilds the gadget. The
+            // only remaining modern re-enumeration edge is controller type, which
+            // the console reads once during the USB handshake.
+            if (!g_ctx.legacy_mode) {
+                const bool want_nfc = server_amiibo_any_armed(now_stamp);
+                const bool nfc_edge = (want_nfc != g_ctx.nfc_gadget_active.load(std::memory_order_relaxed));
+                if (nfc_edge) {
+                    g_ctx.nfc_gadget_active.store(want_nfc, std::memory_order_relaxed);
+                    if (g_ctx.verbose)
+                        std::println("[amiibo] {} NFC session; FunctionFS keeps USB enumerated",
+                                     want_nfc ? "arming" : "idling");
+                }
+
+                bool type_edge = false;
+                for (int h = 0; h < nports; ++h)
+                    if (controller_type_for_port(h) != enumerated_type[h]) type_edge = true;
+
+                if (type_edge) {
+                    if (g_ctx.verbose)
+                        std::println("[gadget] controller type changed; re-enumerating USB gadget");
+                    close_all_fds();
+                    run_gadget_setup_if_needed(true, "controller type changed");
+                    for (int h = 0; h < HID_PORT_COUNT; ++h) enumerated_type[h] = controller_type_for_port(h);
+                    break; // reopen the freshly re-enumerated USB endpoints
+                }
             }
             ClientSession snap[MAX_CLIENTS];
             bool stale[MAX_CLIENTS] = {};
@@ -144,7 +208,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     hw_slots[h].client_idx = hw_slots[h].sub_idx = -1;
                     if (!g_ctx.legacy_mode) {
                         rt[h].neutral_burst_until_us = now_stamp + PRO_RELEASE_NEUTRAL_US;
-                        drain_hid_output_queue(fds[h]);
+                        drain_hid_output_queue(read_fds[h]);
                     }
                 }
             }
@@ -190,7 +254,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     uint8_t type = out_reports[h].reserved[2];
                     if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R && type != NS_TYPE_PRO)
-                        type = g_ctx.joycon_mode ? NS_TYPE_JOYCON_R : NS_TYPE_PRO;
+                        type = NS_TYPE_PRO; // default / older clients
                     set_controller_type_for_port(h, type);
                     apply_controller_type_input(type, out_reports[h]);
                 }
@@ -202,7 +266,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     HoriHIDReport r = out_reports[h].input;
                     r.vendor = 0;
                     if (r == prev[h]) continue;
-                    ssize_t w = write(fds[h], &r, sizeof(HoriHIDReport));
+                    ssize_t w = write(write_fds[h], &r, sizeof(HoriHIDReport));
                     if (w < 0) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                     } else if (w == (ssize_t)sizeof(HoriHIDReport)) {
@@ -246,7 +310,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 motion_for_port = get_hid_report(snap[cidx], sidx).motion;
                                 has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
                             }
-                            if (rt[h].input_report_mode == RID_INPUT_NFC_IR) {
+                            if (rt[h].input_report_mode == RID_INPUT_NFC_IR
+                                    && usb_transport_supports_nfc_reports()) {
                                 ProInputReport31 nfc_in{};
                                 build_nfc_ir_report(rt[h], report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), nfc_in);
                                 memcpy(write_buf, &nfc_in, sizeof(ProInputReport31));
@@ -266,7 +331,7 @@ void writer_thread(std::stop_token stoken, int hz) {
 
                     if (have_report_to_write) {
                         apply_controller_type_report(controller_type_for_port(h), write_buf);
-                        ssize_t w = write(fds[h], write_buf, write_len);
+                        ssize_t w = write(write_fds[h], write_buf, write_len);
                         if (w < 0) {
                             if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
                         } else if (w == (ssize_t)write_len) {
@@ -278,66 +343,80 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
                 }
 
+                auto process_host_output_report = [&](int h, const uint8_t* read_buf, size_t r) {
+                    if (r < 2 || (r == 2 && read_buf[0] == 0 && read_buf[1] == 0)) return;
+
+                    mark_switch2_usb_activity(now_stamp);
+                    uint8_t id = read_buf[0];
+                    if (id == RID_OUTPUT_CMD) {
+                        if (r <= 10) return;
+                        if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, false);
+                        const uint8_t subcmd = read_buf[10];
+                        std::span<const uint8_t> cmd_data(read_buf + 11, r > 11 ? std::min<size_t>(53, r - 11) : 0);
+                        if ((subcmd == CMD_SET_PLAYER_LIGHTS || subcmd == 0x33) && !cmd_data.empty()) {
+                            const uint8_t player_leds = cmd_data[0];
+                            g_ctx.console_player_leds[h].store(player_leds, std::memory_order_relaxed);
+                            // The console flashes the player LEDs on its controller-pairing
+                            // (Change Grip/Order) screen. Edge-trigger a BT pairing window so a
+                            // real controller can be added exactly when the user expects it.
+                            const bool pairing_screen = player_leds_indicate_pairing(player_leds);
+                            if (!g_ctx.bluetooth_input_disabled
+                                    && pairing_screen && !pairing_screen_open[h]) {
+                                if (g_ctx.verbose)
+                                    std::println("[bt] Switch controller-pairing screen detected (LED {:#04x}); opening pairing window", static_cast<unsigned>(player_leds));
+                                bluetooth_manager_request_pairing_window();
+                            }
+                            pairing_screen_open[h] = pairing_screen;
+                            if (hw_slots[h].client_idx != -1) {
+                                publish_controller_status_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, player_leds, VIRTUAL_BODY_RGB[h]);
+                            }
+                        }
+                        memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
+                        int reply_len = handle_subcommand(rt[h], subcmd, cmd_data, &rt[h].pending_reply);
+                        rt[h].pending_subcmd_reply = (reply_len >= 0);
+                    } else if (id == RID_OUTPUT_RUMBLE) {
+                        if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
+                    } else if (id == RID_OUTPUT_NFC_IR) {
+                        int cidx = hw_slots[h].client_idx;
+                        int sidx = hw_slots[h].sub_idx;
+                        uint32_t amiibo_version = 0;
+                        const bool amiibo_armed = (cidx >= 0 && sidx >= 0)
+                            ? server_amiibo_is_armed(cidx, sidx, now_stamp, &amiibo_version)
+                            : false;
+                        if (cidx != -1) publish_rumble_event(cidx, sidx, read_buf, r, false);
+                        handle_nfc_ir_output_report(rt[h], std::span<const uint8_t>(read_buf, r),
+                                                    cidx, sidx, amiibo_armed, amiibo_version);
+                    } else if (id == 0x80) {
+                        uint8_t resp_81[PRO_REPORT_SIZE] = {};
+                        build_usb_81_response(resp_81, read_buf[1], h);
+                        switch (read_buf[1]) {
+                            case 0x01: rt[h].usb_seen_mac = true; break;
+                            case 0x02: rt[h].usb_handshake_done = true; break;
+                            case 0x03: rt[h].usb_baudrate_set = true; break;
+                            case 0x04: rt[h].usb_timeout_disabled = true; break;
+                            case 0x05: rt[h].usb_timeout_disabled = false; break;
+                        }
+                        if (write(write_fds[h], resp_81, PRO_REPORT_SIZE) == (ssize_t)PRO_REPORT_SIZE) mark_switch2_usb_activity(now_stamp);
+                        else ok = false;
+                    }
+                };
+
                 for (int h = 0; h < nports; ++h) {
+                    // FunctionFS can deliver HID SET_REPORT on ep0 rather than
+                    // the interrupt OUT endpoint. Feed those reports into the
+                    // exact same Pro Controller command path.
+                    std::vector<unsigned char> ctrl_report;
+                    for (int control_reads = 0; control_reads < 8 && functionfs_poll_control_report(h, ctrl_report); ++control_reads) {
+                        process_host_output_report(h, ctrl_report.data(), ctrl_report.size());
+                    }
+
                     for (int output_reads = 0; output_reads < 8; ++output_reads) {
-                        struct pollfd pfd = {fds[h], POLLIN, 0};
+                        struct pollfd pfd = {read_fds[h], POLLIN, 0};
                         uint8_t read_buf[HIDG_MAX_REPORT_SIZE];
                         if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) break;
-                        ssize_t r = read(fds[h], read_buf, HIDG_MAX_REPORT_SIZE);
-                        if (r <= 0 || r < 2 || (r == 2 && read_buf[0] == 0 && read_buf[1] == 0)) continue;
-
-                        mark_switch2_usb_activity(now_stamp);
-                        uint8_t id = read_buf[0];
-                        if (id == RID_OUTPUT_CMD) {
-                            if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, false);
-                            const uint8_t subcmd = read_buf[10];
-                            std::span<const uint8_t> cmd_data(read_buf + 11, r > 11 ? std::min<size_t>(53, r - 11) : 0);
-                            if ((subcmd == CMD_SET_PLAYER_LIGHTS || subcmd == 0x33) && !cmd_data.empty()) {
-                                const uint8_t player_leds = cmd_data[0];
-                                g_ctx.console_player_leds[h].store(player_leds, std::memory_order_relaxed);
-                                // The console flashes the player LEDs on its controller-pairing
-                                // (Change Grip/Order) screen. Edge-trigger a BT pairing window so a
-                                // real controller can be added exactly when the user expects it.
-                                const bool pairing_screen = player_leds_indicate_pairing(player_leds);
-                                if (!g_ctx.bluetooth_input_disabled
-                                        && pairing_screen && !pairing_screen_open[h]) {
-                                    if (g_ctx.verbose)
-                                        std::println("[bt] Switch controller-pairing screen detected (LED {:#04x}); opening pairing window", static_cast<unsigned>(player_leds));
-                                    bluetooth_manager_request_pairing_window();
-                                }
-                                pairing_screen_open[h] = pairing_screen;
-                                if (hw_slots[h].client_idx != -1) {
-                                    publish_controller_status_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, player_leds, VIRTUAL_BODY_RGB[h]);
-                                }
-                            }
-                            memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
-                            int reply_len = handle_subcommand(rt[h], subcmd, cmd_data, &rt[h].pending_reply);
-                            rt[h].pending_subcmd_reply = (reply_len >= 0);
-                        } else if (id == RID_OUTPUT_RUMBLE) {
-                            if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
-                        } else if (id == RID_OUTPUT_NFC_IR) {
-                            int cidx = hw_slots[h].client_idx;
-                            int sidx = hw_slots[h].sub_idx;
-                            uint32_t amiibo_version = 0;
-                            const bool amiibo_armed = (cidx >= 0 && sidx >= 0)
-                                ? server_amiibo_is_armed(cidx, sidx, now_stamp, &amiibo_version)
-                                : false;
-                            if (cidx != -1) publish_rumble_event(cidx, sidx, read_buf, r, false);
-                            handle_nfc_ir_output_report(rt[h], std::span<const uint8_t>(read_buf, static_cast<size_t>(r)),
-                                                        cidx, sidx, amiibo_armed, amiibo_version);
-                        } else if (id == 0x80) {
-                            uint8_t resp_81[PRO_REPORT_SIZE] = {};
-                            build_usb_81_response(resp_81, read_buf[1], h);
-                            switch (read_buf[1]) {
-                                case 0x01: rt[h].usb_seen_mac = true; break;
-                                case 0x02: rt[h].usb_handshake_done = true; break;
-                                case 0x03: rt[h].usb_baudrate_set = true; break;
-                                case 0x04: rt[h].usb_timeout_disabled = true; break;
-                                case 0x05: rt[h].usb_timeout_disabled = false; break;
-                            }
-                            if (write(fds[h], resp_81, PRO_REPORT_SIZE) == (ssize_t)PRO_REPORT_SIZE) mark_switch2_usb_activity(now_stamp);
-                            else ok = false;
-                        }
+                        ssize_t r = read(read_fds[h], read_buf, HIDG_MAX_REPORT_SIZE);
+                        if (r <= 0) continue;
+                        process_host_output_report(h, read_buf, static_cast<size_t>(r));
                     }
                 }
             }
@@ -345,7 +424,7 @@ void writer_thread(std::stop_token stoken, int hz) {
             if (!ok) {
                 if (!error_shown && g_ctx.verbose) { std::println("Host USB transport disconnected; waiting for reconnect..."); error_shown = true; }
                 mark_switch2_usb_host_disconnected();
-                for (int i = 0; i < HID_PORT_COUNT; ++i) { close(fds[i]); fds[i] = -1; rt[i].fd = -1; }
+                close_all_fds();
                 for (int wait_i = 0; wait_i < 100 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
                 break;
             }
@@ -355,14 +434,12 @@ void writer_thread(std::stop_token stoken, int hz) {
     if (g_ctx.legacy_mode) {
         HoriHIDReport neutral{}; neutral.reset();
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
-            if (fds[i] >= 0) {
-                ssize_t unused = write(fds[i], &neutral, sizeof(HoriHIDReport)); (void)unused;
-                close(fds[i]);
+            if (write_fds[i] >= 0) {
+                ssize_t unused = write(write_fds[i], &neutral, sizeof(HoriHIDReport)); (void)unused;
             }
         }
-    } else {
-        for (int i = 0; i < HID_PORT_COUNT; ++i) { if (fds[i] >= 0) close(fds[i]); }
     }
+    close_all_fds();
 }
 
 std::mutex g_rate_mtx;

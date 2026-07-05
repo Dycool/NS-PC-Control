@@ -138,10 +138,15 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     bool legacy_mode = false;
-    // Emulate Joy-Con (R) pads: the wired USB session stays typed Pro Controller
-    // (0x80-01) while device info and SPI report Joy-Con (R), which the console
-    // accepts as wired Joy-Con input (Joy-Con-only games work).
-    bool joycon_mode = false;
+    // True while a client has an amiibo staged/dirty. With the FunctionFS modern
+    // transport this no longer changes the USB report length or forces a
+    // re-enumeration; it is kept as NFC runtime/state telemetry. Legacy/f_hid
+    // still uses it to choose the larger report_length if that path is used.
+    std::atomic<bool> nfc_gadget_active{false};
+    // Modern USB transport uses FunctionFS instead of /dev/hidg*. FunctionFS lets
+    // us expose the NFC/IR 0x31 report descriptor from boot and write 362-byte
+    // NFC reports only when needed, without rebuilding the gadget for amiibo.
+    std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;
     bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
     std::atomic<bool> gadget_setup_attempted{false};
@@ -228,6 +233,9 @@ bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const socka
 bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t> data);
 bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump);
 bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now = 0, uint32_t* version = nullptr);
+// True if any client/pad has a staged (or dirty, pending-pull) amiibo. Does not
+// slide the idle window, so it is safe to poll for the gadget report-size decision.
+bool server_amiibo_any_armed(uint64_t now = 0);
 bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vector<uint8_t>& out, uint32_t* version = nullptr);
 bool server_amiibo_get_status(int client_idx, int subpad, ns::AmiiboStatusPacket& out);
 bool server_amiibo_request_write_upload(int client_idx, int subpad);

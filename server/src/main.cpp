@@ -170,7 +170,6 @@ int main(int argc, char** argv) {
         }
         else if (s == "-pair")                  s = "--pair";
         else if (s == "-no-bt")                 s = "--no-bt";
-        else if (s == "-joycon")                s = "--joycon";
         cli_args.push_back(s);
     }
 
@@ -202,9 +201,6 @@ int main(int argc, char** argv) {
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag  ("-p",       legacy_p,                   "")->group("");
 
-    app.add_flag  ("--joycon", g_ctx.joycon_mode,          "Emulate Joy-Con (R) controllers instead of Pro Controllers "
-                                                           "(enables Joy-Con-only games; vertical orientation)");
-
     try {
         std::vector<char*> cli_argv;
         for (std::string& arg : cli_args) cli_argv.push_back(arg.data());
@@ -215,15 +211,6 @@ int main(int argc, char** argv) {
     // Post-parse validation
     // -----------------------------------------------------------------------
     g_ctx.bluetooth_input_disabled = no_bt;
-
-    if (g_ctx.joycon_mode && g_ctx.legacy_mode) {
-        std::println(stderr, "error: Joy-Con mode (--joycon) requires the modern gadget and cannot run with --hori");
-        return 1;
-    }
-    if (g_ctx.joycon_mode) {
-        std::println("[jc] Joy-Con (R) emulation mode: the console sees wired Joy-Cons "
-                     "(vertical orientation; no capture button; UDP amiibo read/write experimental)");
-    }
 
     if (no_bt && pair_explicit) {
         std::println(stderr, "error: cannot request Bluetooth pairing (-pair) while local "
@@ -349,7 +336,7 @@ int main(int argc, char** argv) {
     if (g_ctx.verbose) {
         std::println("UDP {}:{} writer={} Hz mode={}",
                      bind_addr, port, PRO_WRITER_HZ,
-                     g_ctx.legacy_mode ? "hori" : (g_ctx.joycon_mode ? "joycon" : "modern"));
+                     g_ctx.legacy_mode ? "hori" : "modern");
     }
 
     std::string start_msg = std::format("Started ns-backend server on {}:{}", bind_addr, port);

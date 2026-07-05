@@ -49,9 +49,19 @@ constexpr uint8_t CMD_ENABLE_IMU = 0x40;
 constexpr uint8_t CMD_SET_IMU_SENS = 0x41;
 constexpr uint8_t CMD_ENABLE_VIBRATION = 0x48;
 
+// Two modern report descriptors: the plain 64-byte one and the NFC-capable one
+// that also declares the 362-byte 0x31 input report. FunctionFS uses the NFC
+// descriptor from boot; legacy f_hid can still pick dynamically by report_length.
 extern const uint8_t VIRTUAL_CONTROLLER_REPORT_DESC[];
 extern const size_t VIRTUAL_CONTROLLER_REPORT_DESC_SIZE;
+extern const uint8_t VIRTUAL_CONTROLLER_REPORT_DESC_NFC[];
+extern const size_t VIRTUAL_CONTROLLER_REPORT_DESC_NFC_SIZE;
 extern const uint8_t LEGACY_REPORT_DESC[85];
+
+// Legacy/f_hid descriptor + report_length helpers. Modern FunctionFS serves the
+// NFC descriptor directly on ep0 and does not need to resize the gadget.
+const uint8_t* active_report_descriptor(size_t& len);
+size_t active_hidg_report_length();
 
 #define NS_LOCAL_PACKED __attribute__((packed))
 
