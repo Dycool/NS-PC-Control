@@ -33,6 +33,7 @@ private:
 
     static int platformWidth();
     static int platformHeight();
+    static int platformPairHeight();
     void toggleConnection();
     void updateUi();
 };

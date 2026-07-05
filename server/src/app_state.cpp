@@ -10,6 +10,7 @@
 #include <span>
 #include <algorithm>
 #include <cerrno>
+#include <bit>
 #include <sys/socket.h>
 
 using namespace ns;
@@ -220,6 +221,93 @@ int active_client_count(uint64_t now) {
     return count;
 }
 
+static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
+    switch (report.reserved[2]) {
+        case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_R:
+        case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+            return report.reserved[2];
+        case ns::CONTROLLER_TYPE_DEFAULT:
+        default:
+            return ns::CONTROLLER_TYPE_PRO;
+    }
+}
+
+int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool legacy_mode, bool reserve_when_idle) {
+    const ns::HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    int needed = 0;
+    for (int s = 0; s < 4; ++s) {
+        if (pad_present && !pad_present[s]) continue;
+        if (legacy_mode) {
+            needed += 1;
+            continue;
+        }
+        const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
+        needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 2 : 1;
+    }
+    if (needed == 0 && reserve_when_idle) {
+        const uint8_t profile = requested_profile_from_wire_report(report.p1);
+        needed = (!legacy_mode && profile == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 2 : 1;
+    }
+    return std::min(needed, HID_PORT_COUNT);
+}
+
+int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
+    if (now == 0) now = now_us();
+    int used = 0;
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        if (i == ignore_client_idx) continue;
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        ClientSession& c = g_ctx.clients[i];
+        repair_future_client_timestamp(c, now);
+        if (!c.active || c.last_rx_us == 0 || elapsed_us_saturated(now, c.last_rx_us) > CLIENT_TIMEOUT_US) continue;
+        bool any_assignment = false;
+        uint8_t assigned_mask = 0;
+        for (int s = 0; s < 4; ++s) {
+            assigned_mask = static_cast<uint8_t>(assigned_mask | c.client_assignment[s].console_port_mask);
+            if (c.client_assignment[s].console_port_mask != 0) any_assignment = true;
+        }
+        if (any_assignment) {
+            used += std::popcount(static_cast<unsigned>(assigned_mask));
+        } else {
+            used += requested_virtual_slots_for_report(c.report, c.pad_present, g_ctx.legacy_mode, true);
+        }
+    }
+    return std::min(used, HID_PORT_COUNT);
+}
+
+int free_virtual_slot_count(uint64_t now, int ignore_client_idx) {
+    const int used = active_requested_virtual_slots(now, ignore_client_idx);
+    return std::max(0, HID_PORT_COUNT - used);
+}
+
+uint32_t pack_server_state(uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep) {
+    return static_cast<uint32_t>(active_clients)
+        | (static_cast<uint32_t>(free_virtual_slots) << 8)
+        | (switch_asleep ? (1u << 16) : 0u);
+}
+
+uint64_t refresh_server_state_seq(uint64_t now, bool force) {
+    if (now == 0) now = now_us();
+    const uint64_t last_refresh = g_ctx.server_state_last_refresh_us.load(std::memory_order_relaxed);
+    if (!force && last_refresh != 0 && elapsed_us_saturated(now, last_refresh) < SERVER_STATE_REFRESH_MIN_US) {
+        return g_ctx.server_state_seq.load(std::memory_order_relaxed);
+    }
+    g_ctx.server_state_last_refresh_us.store(now, std::memory_order_relaxed);
+    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(now), 0, MAX_CLIENTS));
+    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, HID_PORT_COUNT));
+    const bool asleep = switch2_sleep_confirmed(now);
+    const uint32_t packed = pack_server_state(active_clients, free_slots, asleep);
+    uint32_t old = g_ctx.server_state_packed.load(std::memory_order_relaxed);
+    while (old != packed) {
+        if (g_ctx.server_state_packed.compare_exchange_weak(old, packed, std::memory_order_relaxed)) {
+            return g_ctx.server_state_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
+    }
+    return g_ctx.server_state_seq.load(std::memory_order_relaxed);
+}
+
 uint8_t switch_player_index_from_leds(uint8_t player_leds) {
     const uint8_t solid = static_cast<uint8_t>(player_leds & 0x0F);
     const uint8_t flashing = static_cast<uint8_t>((player_leds >> 4) & 0x0F);
@@ -253,6 +341,27 @@ void publish_controller_status_event(int client_idx, int sub_idx, uint8_t player
     if (changed) c.controller_status_seq[sub_idx]++;
 }
 
+void publish_client_assignment_event(int client_idx, int sub_idx, uint8_t console_port_mask,
+                                     uint8_t primary_console_port, uint8_t requested_type,
+                                     uint8_t virtual_type) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return;
+    ClientAssignmentState& st = c.client_assignment[sub_idx];
+    if (primary_console_port >= HID_PORT_COUNT) primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    console_port_mask = static_cast<uint8_t>(console_port_mask & ((1u << HID_PORT_COUNT) - 1u));
+    const bool changed = st.console_port_mask != console_port_mask
+        || st.primary_console_port != primary_console_port
+        || st.requested_type != requested_type
+        || st.virtual_type != virtual_type;
+    st.console_port_mask = console_port_mask;
+    st.primary_console_port = primary_console_port;
+    st.requested_type = requested_type;
+    st.virtual_type = virtual_type;
+    if (changed) c.client_assignment_seq[sub_idx]++;
+}
+
 bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns::ControllerStatusPacket& packet) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return false;
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -270,6 +379,47 @@ bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns
         packet.reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
     }
     return true;
+}
+
+bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_clients,
+                                  uint8_t free_virtual_slots, uint32_t& seq,
+                                  ns::ClientAssignmentPacket& packet) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return false;
+    const bool switch_asleep = switch2_sleep_confirmed();
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    const ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return false;
+    seq = c.client_assignment_seq[sub_idx];
+    packet = ns::ClientAssignmentPacket{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+    packet.server_slot = static_cast<uint8_t>(client_idx);
+    packet.subpad = static_cast<uint8_t>(sub_idx);
+    packet.console_port_mask = c.client_assignment[sub_idx].console_port_mask;
+    packet.primary_console_port = c.client_assignment[sub_idx].primary_console_port;
+    packet.requested_type = c.client_assignment[sub_idx].requested_type;
+    packet.virtual_type = c.client_assignment[sub_idx].virtual_type;
+    if (packet.console_port_mask != 0) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.active_clients = active_clients;
+    packet.max_clients = MAX_CLIENTS;
+    packet.free_virtual_slots = free_virtual_slots;
+    return true;
+}
+
+ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_clients,
+                                                              uint8_t free_virtual_slots,
+                                                              bool switch_asleep) {
+    ns::ClientAssignmentPacket packet{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_SERVER_FULL;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    packet.subpad = 0;
+    packet.console_port_mask = 0;
+    packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    packet.active_clients = active_clients;
+    packet.max_clients = MAX_CLIENTS;
+    packet.free_virtual_slots = free_virtual_slots;
+    return packet;
 }
 
 bool any_client_source_active(InputSource source, uint64_t now) {
@@ -342,8 +492,9 @@ bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump
         HIDReport* pad = get_pad_report(g_ctx.clients[client_idx], subpad);
         if (pad) controller_type = pad->reserved[2];
     }
-    if (controller_type != ns::CONTROLLER_TYPE_JOYCON_R) {
-        if (g_ctx.verbose) std::println("[amiibo] rejected: slot={} pad={} is not Joy-Con (R) (type={})", client_idx + 1, subpad + 1, controller_type);
+    if (controller_type != ns::CONTROLLER_TYPE_JOYCON_R
+            && controller_type != ns::CONTROLLER_TYPE_JOYCON_PAIR) {
+        if (g_ctx.verbose) std::println("[amiibo] rejected: slot={} pad={} is not NFC-capable Joy-Con R/pair source (type={})", client_idx + 1, subpad + 1, controller_type);
         return false;
     }
 
@@ -755,13 +906,17 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.rumble_active[s] = false; c.rumble_seq[s]++;
         c.controller_status[s] = ControllerStatusState{};
         c.controller_status_seq[s]++;
+        c.client_assignment[s] = ClientAssignmentState{};
+        c.client_assignment_seq[s]++;
         c.udp_last_rumble_seq[s] = c.rumble_seq[s];
         c.udp_last_controller_status_seq[s] = c.controller_status_seq[s];
+        c.udp_last_client_assignment_seq[s] = 0;
         c.udp_last_amiibo_version[s] = 0;
         c.udp_last_amiibo_flags[s] = 0;
         c.udp_last_amiibo_send_us[s] = 0;
         c.pad_present[s] = false; c.pad_last_present_us[s] = 0;
     }
+    c.udp_last_server_state_seq = 0;
 }
 
 void reset_client_session_locked(ClientSession& c) {

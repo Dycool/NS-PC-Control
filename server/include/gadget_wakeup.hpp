@@ -10,6 +10,10 @@ void maybe_send_switch2_wake_advert(const char* reason);
 int run_switch2_wakeup_setup();
 bool wake_bt_state_was_modified();
 void teardown_gadget();
+// Async-signal-safe: drop only the gadget's UDC binding (open/write/close on a
+// fixed path). Safe to call from a crash signal handler so an abnormal exit
+// never leaves a FunctionFS controller bound with nothing servicing ep0.
+void emergency_unbind_udc();
 void restore_wake_bt_state(bool restart_bluez = true);
 bool run_gadget_setup_if_needed(bool force, const char* reason);
 bool run_revert_gadget_host();

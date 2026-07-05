@@ -26,17 +26,43 @@ void flush_rumble_to_udp(int sock, int client_idx) {
     sockaddr_in dest{};
     ns::RumblePacket pending[4]{};
     bool has[4]{};
+    ns::ClientAssignmentPacket pending_assignment[4]{};
+    bool has_assignment[4]{};
     ns::ControllerStatusPacket pending_status[4]{};
     bool has_status[4]{};
     ns::AmiiboStatusPacket pending_amiibo[4]{};
     bool has_amiibo[4]{};
+    const uint64_t state_seq = refresh_server_state_seq();
+    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
+    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
+    const bool switch_asleep = switch2_sleep_confirmed();
 
     {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
         ClientSession& c = g_ctx.clients[client_idx];
         if (!c.active || !c.udp_rumble_enabled) return;
         dest = c.addr;
+        bool any_assignment_packet = false;
         for (int s = 0; s < 4; ++s) {
+            uint32_t assignment_seq = c.client_assignment_seq[s];
+            if (assignment_seq != c.udp_last_client_assignment_seq[s]) {
+                pending_assignment[s] = ns::ClientAssignmentPacket{};
+                pending_assignment[s].flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+                pending_assignment[s].server_slot = static_cast<uint8_t>(client_idx);
+                pending_assignment[s].subpad = static_cast<uint8_t>(s);
+                pending_assignment[s].console_port_mask = c.client_assignment[s].console_port_mask;
+                pending_assignment[s].primary_console_port = c.client_assignment[s].primary_console_port;
+                pending_assignment[s].requested_type = c.client_assignment[s].requested_type;
+                pending_assignment[s].virtual_type = c.client_assignment[s].virtual_type;
+                if (pending_assignment[s].console_port_mask != 0) pending_assignment[s].flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+                if (switch_asleep) pending_assignment[s].flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+                pending_assignment[s].active_clients = active_clients;
+                pending_assignment[s].max_clients = MAX_CLIENTS;
+                pending_assignment[s].free_virtual_slots = free_slots;
+                c.udp_last_client_assignment_seq[s] = assignment_seq;
+                has_assignment[s] = true;
+                any_assignment_packet = true;
+            }
             uint32_t seq = c.rumble_seq[s];
             if (seq != c.udp_last_rumble_seq[s]) {
                 pending[s] = c.rumble[s];
@@ -76,9 +102,43 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 }
             }
         }
+        if (state_seq != c.udp_last_server_state_seq) {
+            c.udp_last_server_state_seq = state_seq;
+            if (!any_assignment_packet) {
+                pending_assignment[0] = ns::ClientAssignmentPacket{};
+                pending_assignment[0].flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+                pending_assignment[0].server_slot = static_cast<uint8_t>(client_idx);
+                pending_assignment[0].subpad = 0;
+                pending_assignment[0].console_port_mask = c.client_assignment[0].console_port_mask;
+                pending_assignment[0].primary_console_port = c.client_assignment[0].primary_console_port;
+                pending_assignment[0].requested_type = c.client_assignment[0].requested_type;
+                pending_assignment[0].virtual_type = c.client_assignment[0].virtual_type;
+                if (pending_assignment[0].console_port_mask != 0) pending_assignment[0].flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+                if (switch_asleep) pending_assignment[0].flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+                pending_assignment[0].active_clients = active_clients;
+                pending_assignment[0].max_clients = MAX_CLIENTS;
+                pending_assignment[0].free_virtual_slots = free_slots;
+                has_assignment[0] = true;
+            }
+        }
     }
 
+    // Gameplay feedback first; UI/server-state packets are event-driven and
+    // should never delay rumble when both are pending in the same tick.
     for (int s = 0; s < 4; ++s) {
+        if (!has[s]) continue;
+        ssize_t sent = sendto(sock, &pending[s], sizeof(ns::RumblePacket), 0,
+                              reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+        if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::RumblePacket)))
+            std::println(stderr, "[udp] failed to send rumble packet: {}", std::strerror(errno));
+    }
+    for (int s = 0; s < 4; ++s) {
+        if (has_assignment[s]) {
+            ssize_t sent = sendto(sock, &pending_assignment[s], sizeof(ns::ClientAssignmentPacket), 0,
+                                  reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+            if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::ClientAssignmentPacket)))
+                std::println(stderr, "[udp] failed to send assignment packet: {}", std::strerror(errno));
+        }
         if (has_status[s]) {
             ssize_t sent = sendto(sock, &pending_status[s], sizeof(ns::ControllerStatusPacket), 0,
                                   reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
@@ -91,11 +151,6 @@ void flush_rumble_to_udp(int sock, int client_idx) {
             if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::AmiiboStatusPacket)))
                 std::println(stderr, "[udp] failed to send amiibo status packet: {}", std::strerror(errno));
         }
-        if (!has[s]) continue;
-        ssize_t sent = sendto(sock, &pending[s], sizeof(ns::RumblePacket), 0,
-                              reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-        if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::RumblePacket)))
-            std::println(stderr, "[udp] failed to send rumble packet: {}", std::strerror(errno));
     }
 }
 
@@ -105,11 +160,16 @@ struct SessionData {
     bool ws_first = true;
     uint32_t last_rumble_seq[4] = {};
     uint32_t last_status_seq[4] = {};
+    uint32_t last_assignment_seq[4] = {};
+    uint64_t last_server_state_seq = 0;
     uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
     uint8_t pending_status[4][sizeof(ControllerStatusPacket)];
+    uint8_t pending_assignment[4][sizeof(ClientAssignmentPacket)];
     bool has_pending_rumble[4] = {};
     bool has_pending_status[4] = {};
+    bool has_pending_assignment[4] = {};
+    bool close_after_write = false;
     uint64_t assigned_sleep_seq = 0;
     bool had_slot = false;
 };
@@ -170,9 +230,13 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->had_slot = false;
             std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
             std::fill(sd->last_status_seq, sd->last_status_seq + 4, 0);
+            std::fill(sd->last_assignment_seq, sd->last_assignment_seq + 4, 0);
+            sd->last_server_state_seq = 0;
             std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
             std::fill(sd->has_pending_status, sd->has_pending_status + 4, false);
+            std::fill(sd->has_pending_assignment, sd->has_pending_assignment + 4, false);
+            sd->close_after_write = false;
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
             break;
@@ -246,6 +310,20 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) sd->ws_slot = -1;
             }
             if (sd->ws_slot < 0) {
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, g_ctx.legacy_mode, true);
+                const int free_slots_now = free_virtual_slot_count(now);
+                if (required_slots > free_slots_now) {
+                    ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_client_count(now), 0, MAX_CLIENTS)),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, HID_PORT_COUNT)),
+                        switch2_sleep_confirmed(now));
+                    std::memcpy(sd->pending_assignment[0], &full, sizeof(full));
+                    sd->has_pending_assignment[0] = true;
+                    sd->close_after_write = true;
+                    if (g_ctx.verbose) std::println("[ws] server virtual controller slots full, refusing client");
+                    lws_callback_on_writable(wsi);
+                    break;
+                }
                 sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                 if (sd->ws_slot >= 0) {
                     sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
@@ -255,7 +333,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     for (int s = 0; s < 4; ++s) {
                         sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                         sd->last_status_seq[s] = g_ctx.clients[sd->ws_slot].controller_status_seq[s];
+                        sd->last_assignment_seq[s] = 0;
                     }
+                    sd->last_server_state_seq = 0;
                 }
             }
 
@@ -287,15 +367,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
-            if (sd->ws_slot < 0) break;
+            if (sd->ws_slot < 0 &&
+                    !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; })) break;
             for (int s = 0; s < 4; ++s) {
-                if (sd->has_pending_status[s]) {
-                    uint8_t buffer[LWS_PRE + sizeof(ControllerStatusPacket)];
-                    memcpy(buffer + LWS_PRE, sd->pending_status[s], sizeof(ControllerStatusPacket));
-                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ControllerStatusPacket), LWS_WRITE_BINARY) != sizeof(ControllerStatusPacket)) return -1;
-                    sd->has_pending_status[s] = false;
-                    break;
-                }
                 if (sd->has_pending_rumble[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(RumblePacket)];
                     memcpy(buffer + LWS_PRE, sd->pending_rumble[s], sizeof(RumblePacket));
@@ -304,8 +378,30 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     sd->last_rumble_seq[s] = sd->pending_rumble_seq[s];
                     break;
                 }
+                if (sd->has_pending_status[s]) {
+                    uint8_t buffer[LWS_PRE + sizeof(ControllerStatusPacket)];
+                    memcpy(buffer + LWS_PRE, sd->pending_status[s], sizeof(ControllerStatusPacket));
+                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ControllerStatusPacket), LWS_WRITE_BINARY) != sizeof(ControllerStatusPacket)) return -1;
+                    sd->has_pending_status[s] = false;
+                    break;
+                }
+                if (sd->has_pending_assignment[s]) {
+                    uint8_t buffer[LWS_PRE + sizeof(ClientAssignmentPacket)];
+                    memcpy(buffer + LWS_PRE, sd->pending_assignment[s], sizeof(ClientAssignmentPacket));
+                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ClientAssignmentPacket), LWS_WRITE_BINARY) != sizeof(ClientAssignmentPacket)) return -1;
+                    sd->has_pending_assignment[s] = false;
+                    break;
+                }
             }
-            if (std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) ||
+            if (sd->close_after_write &&
+                    !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) &&
+                    !std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) &&
+                    !std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) {
+                lws_close_reason(wsi, LWS_CLOSE_STATUS_TRY_AGAIN_LATER, (unsigned char*)"server full", 11);
+                return -1;
+            }
+            if (std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) ||
+                std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) ||
                 std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) lws_callback_on_writable(wsi);
             break;
         }
@@ -324,12 +420,37 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
                 bool new_status = false;
+                bool new_assignment = false;
+                const uint64_t state_seq = refresh_server_state_seq();
+                const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
+                const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
+                const bool switch_asleep = switch2_sleep_confirmed();
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) {
                     sd->ws_slot = -1;
                     break;
                 }
                 for (int s = 0; s < 4; ++s) {
+                    uint32_t assignment_seq = g_ctx.clients[sd->ws_slot].client_assignment_seq[s];
+                    if (assignment_seq != sd->last_assignment_seq[s]) {
+                        ClientAssignmentPacket ap{};
+                        ap.flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+                        ap.server_slot = static_cast<uint8_t>(sd->ws_slot);
+                        ap.subpad = static_cast<uint8_t>(s);
+                        ap.console_port_mask = g_ctx.clients[sd->ws_slot].client_assignment[s].console_port_mask;
+                        ap.primary_console_port = g_ctx.clients[sd->ws_slot].client_assignment[s].primary_console_port;
+                        ap.requested_type = g_ctx.clients[sd->ws_slot].client_assignment[s].requested_type;
+                        ap.virtual_type = g_ctx.clients[sd->ws_slot].client_assignment[s].virtual_type;
+                        if (ap.console_port_mask != 0) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+                        if (switch_asleep) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+                        ap.active_clients = active_clients;
+                        ap.max_clients = MAX_CLIENTS;
+                        ap.free_virtual_slots = free_slots;
+                        memcpy(sd->pending_assignment[s], &ap, sizeof(ap));
+                        sd->last_assignment_seq[s] = assignment_seq;
+                        sd->has_pending_assignment[s] = true;
+                        new_assignment = true;
+                    }
                     uint32_t seq = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                     if (seq != sd->last_rumble_seq[s]) {
                         memcpy(sd->pending_rumble[s], &g_ctx.clients[sd->ws_slot].rumble[s], sizeof(RumblePacket));
@@ -355,7 +476,28 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         new_status = true;
                     }
                 }
-                if (new_rumble || new_status) lws_callback_on_writable(wsi);
+                if (state_seq != sd->last_server_state_seq) {
+                    sd->last_server_state_seq = state_seq;
+                    if (!std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; })) {
+                        ClientAssignmentPacket ap{};
+                        ap.flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+                        ap.server_slot = static_cast<uint8_t>(sd->ws_slot);
+                        ap.subpad = 0;
+                        ap.console_port_mask = g_ctx.clients[sd->ws_slot].client_assignment[0].console_port_mask;
+                        ap.primary_console_port = g_ctx.clients[sd->ws_slot].client_assignment[0].primary_console_port;
+                        ap.requested_type = g_ctx.clients[sd->ws_slot].client_assignment[0].requested_type;
+                        ap.virtual_type = g_ctx.clients[sd->ws_slot].client_assignment[0].virtual_type;
+                        if (ap.console_port_mask != 0) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+                        if (switch_asleep) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+                        ap.active_clients = active_clients;
+                        ap.max_clients = MAX_CLIENTS;
+                        ap.free_virtual_slots = free_slots;
+                        memcpy(sd->pending_assignment[0], &ap, sizeof(ap));
+                        sd->has_pending_assignment[0] = true;
+                        new_assignment = true;
+                    }
+                }
+                if (new_assignment || new_rumble || new_status) lws_callback_on_writable(wsi);
             }
             lws_set_timer_usecs(wsi, 10 * 1000);
             break;

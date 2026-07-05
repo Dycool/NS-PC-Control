@@ -37,6 +37,8 @@ if (controllerType !== CONTROLLER_PRO) {
     }
 }
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
+const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341, CLIENT_ASSIGNMENT_SIZE = 16;
+const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
 const PAD_PRESENT = 1;
 const FLAG_SINGLE_PAD = 0x04;
 const EXT_STATUS_BATTERY_VALID = 0x01;
@@ -45,6 +47,32 @@ const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
 const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
+let serverSlot = 255, serverFull = false;
+function handleTouchWsBinaryMessage(ev) {
+    if (!(ev.data instanceof ArrayBuffer)) return;
+    const view = new DataView(ev.data);
+    if (view.byteLength !== CLIENT_ASSIGNMENT_SIZE || view.getUint32(0, true) !== CLIENT_ASSIGNMENT_MAGIC) return;
+    const flags = view.getUint8(5);
+    if (flags & CLIENT_ASSIGNMENT_FLAG_SERVER_FULL) {
+        serverFull = true;
+        resetTouchConnectionUi('Server full');
+        try { if (ws) ws.close(); } catch (_) {}
+        alert('Server full: all virtual controller slots are in use.');
+        return;
+    }
+    if (flags & CLIENT_ASSIGNMENT_FLAG_ACCEPTED) {
+        serverSlot = view.getUint8(6);
+        const subpad = view.getUint8(7);
+        const mask = view.getUint8(8);
+        const btn = document.getElementById('btnConnect');
+        if (btn && btn.style.display !== 'none' && subpad === 0) {
+            const ports = [];
+            for (let h=0; h<4; h++) if (mask & (1 << h)) ports.push(`P${h+1}`);
+            btn.innerText = ports.length ? `Connected ${ports.join('+')}` : 'Connected';
+        }
+    }
+}
+
 let touchBatteryPercent = null;
 let touchBatteryCharging = false;
 let motionSamples = [];
@@ -103,7 +131,7 @@ function resetTouchConnectionUi(text) {
     }
     const dot = document.getElementById('statusDot');
     if (dot) dot.style.display = 'none';
-    if (text) window._connectionFailed = (text === 'Connection failed');
+    if (text) window._connectionFailed = (text === 'Connection failed' || text === 'Server full');
 }
 window.__nsTouchDisconnected = resetTouchConnectionUi;
 let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };
@@ -321,8 +349,9 @@ document.getElementById('btnConnect').onclick = async () => {
     if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen().catch(()=>{}); }
     const wsUrl = makeWsUrl();
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
+    ws.onmessage = handleTouchWsBinaryMessage;
     ws.onopen = () => {
-        isConnected = true; const btn = document.getElementById('btnConnect');
+        isConnected = true; serverFull = false; serverSlot = 255; const btn = document.getElementById('btnConnect');
         btn.innerText = "Connected"; btn.classList.add('connected');
         connectTimeout = setTimeout(() => {
             if (window._connectionFailed) { window._connectionFailed = false; return; }
@@ -332,6 +361,6 @@ document.getElementById('btnConnect').onclick = async () => {
         loopId = setInterval(sendPacket, 16);
     };
     ws.onerror = () => { resetTouchConnectionUi('Connection failed'); alert("Connection failed"); };
-    ws.onclose = () => { resetTouchConnectionUi('Disconnected'); };
+    ws.onclose = () => { resetTouchConnectionUi(serverFull ? 'Server full' : 'Disconnected'); };
 };
 document.getElementById('statusDot').onclick = () => { if(ws) ws.close(); };

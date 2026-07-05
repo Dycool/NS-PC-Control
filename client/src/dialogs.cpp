@@ -235,7 +235,16 @@ void SettingsDialog::scanAmiibo() {
     // only affects the other settings in the dialog; Scan Amiibo is explicit.
     g_controllerType.store(mode);
 
-    const uint8_t amiiboSubpad = mode == ns::CONTROLLER_TYPE_JOYCON_PAIR ? 1 : 0;
+    // In Joy-Con L+R mode the server expands one source subpad into virtual
+    // Joy-Con L/R ports and attaches NFC to that source's virtual R side.
+    // Upload to the source subpad, not a client-side fake P2.
+    uint8_t amiiboSubpad = 0;
+    if (mode == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
+        auto sdl = g_sdlInput.snapshot();
+        for (int i = 0; i < 4; ++i) {
+            if (sdl[i].connected) { amiiboSubpad = static_cast<uint8_t>(i); break; }
+        }
+    }
     std::string err;
     if (!queue_amiibo_upload_from_file(q_to_std(path), amiiboSubpad, err)) {
         QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));

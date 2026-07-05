@@ -44,6 +44,9 @@ constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 // and immediately disconnect during the wake window.
 constexpr uint64_t SWITCH2_WAKE_CLIENT_GRACE_US = 30'000'000ULL;
 constexpr int SWITCH2_WAKE_ADV_BURST_MS = 8000;
+// Server/UI state is not gameplay-critical. Refresh at most 20 Hz so
+// high-rate UDP input and USB HID writes stay the priority.
+constexpr uint64_t SERVER_STATE_REFRESH_MIN_US = 50'000ULL;
 
 
 struct RateSlot {
@@ -68,6 +71,13 @@ struct ControllerStatusState {
     bool body_rgb_valid = false;
 };
 
+struct ClientAssignmentState {
+    uint8_t console_port_mask = 0;
+    uint8_t primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    uint8_t requested_type = ns::CONTROLLER_TYPE_DEFAULT;
+    uint8_t virtual_type = ns::CONTROLLER_TYPE_DEFAULT;
+};
+
 struct ClientSession {
     bool active = false;
     InputSource source = InputSource::None;
@@ -83,7 +93,11 @@ struct ClientSession {
     bool rumble_active[4]{};
     ControllerStatusState controller_status[4]{};
     uint32_t controller_status_seq[4]{};
+    ClientAssignmentState client_assignment[4]{};
+    uint32_t client_assignment_seq[4]{};
     uint32_t udp_last_controller_status_seq[4]{};
+    uint32_t udp_last_client_assignment_seq[4]{};
+    uint64_t udp_last_server_state_seq = 0;
     uint32_t udp_last_amiibo_version[4]{};
     uint8_t udp_last_amiibo_flags[4]{};
     uint64_t udp_last_amiibo_send_us[4]{};
@@ -176,6 +190,9 @@ struct ServerContext {
     ClientSession clients[MAX_CLIENTS]{};
     std::atomic<uint64_t> pkts_rx{0};
     std::atomic<uint64_t> hid_writes{0};
+    std::atomic<uint32_t> server_state_packed{UINT32_MAX};
+    std::atomic<uint64_t> server_state_seq{1};
+    std::atomic<uint64_t> server_state_last_refresh_us{0};
     std::mutex server_macro_mtx;
     ServerMacroRuntime server_macros[MAX_CLIENTS][4]{};
     std::mutex server_macro_upload_mtx;
@@ -199,10 +216,24 @@ void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 int active_client_count(uint64_t now = 0);
+int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool legacy_mode, bool reserve_when_idle = true);
+int active_requested_virtual_slots(uint64_t now = 0, int ignore_client_idx = -1);
+int free_virtual_slot_count(uint64_t now = 0, int ignore_client_idx = -1);
+uint32_t pack_server_state(uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep);
+uint64_t refresh_server_state_seq(uint64_t now = 0, bool force = false);
 uint8_t switch_player_index_from_leds(uint8_t player_leds);
 void publish_controller_status_event(int client_idx, int sub_idx, uint8_t player_leds,
                                      const uint8_t* body_rgb = nullptr);
+void publish_client_assignment_event(int client_idx, int sub_idx, uint8_t console_port_mask,
+                                     uint8_t primary_console_port, uint8_t requested_type,
+                                     uint8_t virtual_type);
 bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns::ControllerStatusPacket& packet);
+bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_clients,
+                                  uint8_t free_virtual_slots, uint32_t& seq,
+                                  ns::ClientAssignmentPacket& packet);
+ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_clients,
+                                                              uint8_t free_virtual_slots,
+                                                              bool switch_asleep = false);
 bool any_client_source_active(InputSource source, uint64_t now = 0);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);
 void clear_motion(ClientSession& c, int subpad);

@@ -56,6 +56,20 @@ static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxe
 #include "bluetooth_input.hpp"
 #include "bluetooth_manager.hpp"
 
+// Abnormal exits (SIGSEGV/SIGABRT/SIGBUS/...) skip the normal teardown at the
+// end of main(), which with the FunctionFS transport would strand the gadget
+// bound to the UDC with nothing servicing it — the console then sees a
+// controller that endlessly re-enumerates. Drop the UDC binding here (an
+// async-signal-safe write), then restore the default handler and re-raise so
+// the crash is still reported (core dump / correct exit status).
+static void on_fatal_signal(int sig) {
+    static const char msg[] = "[gadget] fatal signal; unbinding USB gadget\n";
+    ssize_t n = write(STDERR_FILENO, msg, sizeof(msg) - 1); (void)n;
+    emergency_unbind_udc();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 // ===========================================================================
 // UPnP port mapping (optional)
 // ===========================================================================
@@ -296,6 +310,20 @@ int main(int argc, char** argv) {
     sa_pipe.sa_flags = 0;
     sigaction(SIGPIPE, &sa_pipe, nullptr);
 
+    // Best-effort USB cleanup on a crash so a FunctionFS gadget is never left
+    // bound without a servicing process. SA_RESETHAND restores the default
+    // disposition after the first hit, so the re-raise in the handler still
+    // produces a normal crash.
+    struct sigaction sa_fatal{};
+    sa_fatal.sa_handler = on_fatal_signal;
+    sigemptyset(&sa_fatal.sa_mask);
+    sa_fatal.sa_flags = SA_RESETHAND;
+    sigaction(SIGSEGV, &sa_fatal, nullptr);
+    sigaction(SIGABRT, &sa_fatal, nullptr);
+    sigaction(SIGBUS,  &sa_fatal, nullptr);
+    sigaction(SIGFPE,  &sa_fatal, nullptr);
+    sigaction(SIGILL,  &sa_fatal, nullptr);
+
     // -----------------------------------------------------------------------
     // UDP socket setup
     // -----------------------------------------------------------------------
@@ -412,10 +440,18 @@ int main(int argc, char** argv) {
                                               ? LEGACY_UDP_HZ : PRO_UDP_HZ),
                     };
                     const uint64_t reply_now = now_us();
+                    const int free_slots_now = free_virtual_slot_count(reply_now);
+                    const int active_now = active_client_count(reply_now);
                     if (switch2_sleep_confirmed(reply_now)
                             && switch2_dormant_udp_endpoint_matches(sender)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     }
+                    if (free_slots_now <= 0 || active_now >= MAX_CLIENTS) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_SERVER_FULL;
+                    }
+                    reply.reserved[1] = static_cast<uint8_t>(std::clamp(active_now, 0, MAX_CLIENTS));
+                    reply.reserved[2] = static_cast<uint8_t>(MAX_CLIENTS);
+                    reply.reserved[3] = static_cast<uint8_t>(std::clamp(free_slots_now, 0, HID_PORT_COUNT));
                     sendto(sock, &reply, sizeof(reply), 0,
                            reinterpret_cast<const sockaddr*>(&sender), slen);
                     continue;
@@ -551,6 +587,20 @@ int main(int argc, char** argv) {
                     ++g_ctx.pkts_rx;
                     continue;
                 }
+
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, g_ctx.legacy_mode, true);
+                const int free_slots_now = free_virtual_slot_count(now);
+                const int active_now = active_client_count(now);
+                if (required_slots > free_slots_now || active_now >= MAX_CLIENTS) {
+                    ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_now, 0, MAX_CLIENTS)),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, HID_PORT_COUNT)),
+                        sleeping);
+                    sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                    if (g_ctx.verbose) std::println("server is full, refused UDP client (required_slots={}, free_slots={})", required_slots, free_slots_now);
+                    continue;
+                }
+
                 cidx = allocate_client_session(now, &sender, true, InputSource::Udp);
                 if (cidx >= 0) {
                     wake_on_new_client = true;
@@ -560,6 +610,11 @@ int main(int argc, char** argv) {
             }
 
             if (cidx == -1) {
+                ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, MAX_CLIENTS)),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, HID_PORT_COUNT)),
+                    sleeping);
+                sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
                 if (g_ctx.verbose) std::println("server is full, dropped");
                 continue;
             }

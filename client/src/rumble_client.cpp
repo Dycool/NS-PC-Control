@@ -2,6 +2,7 @@
 #include "input_settings.hpp"
 #include "udp_protocol.hpp"
 #include "macro_client.hpp"
+#include "stream_runtime.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -82,7 +83,14 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
                 if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
                     g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
                 }
+                if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
+                    g_serverProbeFull.store(true, std::memory_order_relaxed);
+                }
             }
+        } else if (magic == ns::CLIENT_ASSIGNMENT_MAGIC && n == sizeof(ns::ClientAssignmentPacket)) {
+            ns::ClientAssignmentPacket ap{};
+            std::memcpy(&ap, buf, sizeof(ap));
+            handle_client_assignment_packet(ap);
         } else if (magic == ns::CONTROLLER_STATUS_MAGIC && n == sizeof(ns::ControllerStatusPacket)) {
             ns::ControllerStatusPacket sp{};
             std::memcpy(&sp, buf, sizeof(sp));
@@ -121,6 +129,9 @@ bool detect_server_is_legacy(SOCKET sock, const sockaddr_in& dest) {
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(&reply), sizeof(reply), 0, nullptr, nullptr);
         if (n == sizeof(reply) && reply.magic == ns::SERVER_INFO_MAGIC && reply.version == ns::SERVER_INFO_VERSION) {
             g_serverLastReplyUs.store(ns::now_us());
+            if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
+                g_serverProbeFull.store(true, std::memory_order_relaxed);
+            }
             return reply.backend == ns::SERVER_BACKEND_LEGACY;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -143,6 +154,11 @@ bool probe_server_sync(const std::string& host, int port) {
         ns::ServerInfoReply reply{};
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(&reply), sizeof(reply), 0, nullptr, nullptr);
         if (n == sizeof(reply) && reply.magic == ns::SERVER_INFO_MAGIC && reply.version == ns::SERVER_INFO_VERSION) {
+            if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
+                g_serverProbeFull.store(true, std::memory_order_relaxed);
+                closesocket(sock);
+                return true;
+            }
             closesocket(sock);
             return true;
         }

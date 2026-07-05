@@ -41,11 +41,13 @@ static constexpr std::size_t HMAC_TAG_SIZE = 16;
 static constexpr uint32_t RUMBLE_MAGIC = 0x4E535652u; // 'NSVR'
 static constexpr uint32_t PRECISION_RUMBLE_MAGIC = 0x4E535648u; // 'NSVH'
 static constexpr uint32_t CONTROLLER_STATUS_MAGIC = 0x4E534353u; // 'NSCS'
+static constexpr uint32_t CLIENT_ASSIGNMENT_MAGIC = 0x4E534341u; // 'NSCA' server -> client slot/console-port assignment
 static constexpr uint32_t AMIIBO_STATUS_MAGIC = 0x4E534153u; // 'NSAS' server -> UDP client dirty/save status
 static constexpr uint32_t AMIIBO_PULL_MAGIC   = 0x4E534150u; // 'NSAP' UDP client -> server pull updated dump
 static constexpr uint32_t AMIIBO_CHUNK_MAGIC  = 0x4E53414Bu; // 'NSAK' server -> UDP client updated dump chunk
 static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
+static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
 
 enum ServerBackend : uint8_t {
     SERVER_BACKEND_UNKNOWN = 0,
@@ -54,6 +56,7 @@ enum ServerBackend : uint8_t {
 };
 
 static constexpr uint8_t SERVER_INFO_FLAG_SWITCH_ASLEEP = 1u << 0;
+static constexpr uint8_t SERVER_INFO_FLAG_SERVER_FULL   = 1u << 1;
 
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {
@@ -106,13 +109,18 @@ enum ControllerType : uint8_t {
     CONTROLLER_TYPE_JOYCON_L = 1,
     CONTROLLER_TYPE_JOYCON_R    = 2,
     CONTROLLER_TYPE_PRO         = 3,
-    // Client-side convenience mode: split one PC controller into a Joy-Con L/R pair.
-    // This value is never sent to the backend in HIDReport::reserved[2]; clients
-    // expand it into per-pad CONTROLLER_TYPE_JOYCON_L / CONTROLLER_TYPE_JOYCON_R.
+    // Requested profile: one source pad should occupy two server-side virtual
+    // slots, exposed to the Switch as Joy-Con L + Joy-Con R. The client sends
+    // this value for the physical/source pad; the server owns the L/R expansion.
     CONTROLLER_TYPE_JOYCON_PAIR = 4,
 };
 static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
+static constexpr uint8_t CONTROLLER_CONSOLE_PORT_NONE = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;
+static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ACCEPTED         = 0x01;
+static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SERVER_FULL      = 0x02;
+static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP    = 0x04;
+static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
 static constexpr uint8_t AMIIBO_STATUS_FLAG_DIRTY = 0x01;
 static constexpr uint8_t AMIIBO_STATUS_FLAG_HAS_DUMP = 0x02;
 static constexpr uint8_t AMIIBO_STATUS_FLAG_WRITE_REQUEST = 0x04;
@@ -245,6 +253,23 @@ struct ServerInfoReply {
     uint8_t  reserved[6]{};
 } NS_PACKED_ATTR;
 
+
+struct ClientAssignmentPacket {
+    uint32_t magic = CLIENT_ASSIGNMENT_MAGIC;
+    uint8_t  version = CLIENT_ASSIGNMENT_VERSION;
+    uint8_t  flags = 0;
+    uint8_t  server_slot = CONTROLLER_PLAYER_INDEX_UNKNOWN; // 0..3 client session slot, or 0xFF when refused/unknown.
+    uint8_t  subpad = 0;       // 0..3 logical/source pad inside this client.
+    uint8_t  console_port_mask = 0; // bit0..bit3 = Switch USB virtual ports occupied by this source pad.
+    uint8_t  primary_console_port = CONTROLLER_CONSOLE_PORT_NONE; // 0..3, or 0xFF unmapped.
+    uint8_t  requested_type = CONTROLLER_TYPE_DEFAULT;
+    uint8_t  virtual_type = CONTROLLER_TYPE_DEFAULT;
+    uint8_t  active_clients = 0;
+    uint8_t  max_clients = 4;
+    uint8_t  free_virtual_slots = 0;
+    uint8_t  reserved = 0;
+} NS_PACKED_ATTR;
+
 struct ControllerStatusPacket {
     uint32_t magic = CONTROLLER_STATUS_MAGIC;
     uint8_t  version = SERVER_INFO_VERSION;
@@ -288,6 +313,8 @@ static_assert(sizeof(RumblePacket) == 8,
               "RumblePacket wire layout changed");
 static_assert(sizeof(PrecisionRumblePacket) == 20,
               "PrecisionRumblePacket wire layout changed");
+static_assert(sizeof(ClientAssignmentPacket) == 16,
+              "ClientAssignmentPacket wire layout changed");
 static_assert(sizeof(ControllerStatusPacket) == 12,
               "ControllerStatusPacket wire layout changed");
 static_assert(sizeof(AmiiboStatusPacket) == 20,

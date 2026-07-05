@@ -95,6 +95,12 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStartPre=-/usr/sbin/rfkill unblock bluetooth
 ExecStartPre=-/sbin/modprobe uhid
 ExecStart=/usr/bin/chrt -f 99 /home/YOUR_USER/NS-PC-Control/server/ns-backend
+# Belt-and-suspenders USB cleanup: if the backend is ever killed hard (SIGKILL,
+# stop timeout, OOM) the in-process teardown does not run, and a FunctionFS
+# gadget left bound to the UDC makes the console see an endlessly reconnecting
+# controller. This unbinds it regardless of how the process exited. The leading
+# '-' tells systemd to ignore it when the gadget is already gone.
+ExecStopPost=-/bin/sh -c 'echo > /sys/kernel/config/usb_gadget/ns_ctrl/UDC'
 Restart=always
 RestartSec=5
 User=root

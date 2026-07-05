@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <array>
 #include <thread>
 #include <expected>
 
@@ -19,6 +20,27 @@ extern std::atomic<uint32_t> g_packetCount;
 extern std::mutex g_statusMutex;
 extern std::string g_statusMessage;
 extern std::string g_lastError;
+
+struct ServerAssignmentView {
+    bool accepted = false;
+    bool server_full = false;
+    uint8_t server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    uint8_t active_clients = 0;
+    uint8_t max_clients = 4;
+    uint8_t free_virtual_slots = 0;
+    uint8_t console_port_mask[4]{};
+    uint8_t primary_console_port[4]{ns::CONTROLLER_CONSOLE_PORT_NONE, ns::CONTROLLER_CONSOLE_PORT_NONE, ns::CONTROLLER_CONSOLE_PORT_NONE, ns::CONTROLLER_CONSOLE_PORT_NONE};
+    uint8_t requested_type[4]{};
+    uint8_t virtual_type[4]{};
+    uint64_t last_update_us = 0;
+};
+
+extern std::mutex g_assignmentMutex;
+extern ServerAssignmentView g_serverAssignment;
+void reset_server_assignment_state();
+void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet);
+ServerAssignmentView server_assignment_snapshot();
+std::string console_assignment_suffix(const ServerAssignmentView& view, int subpad);
 
 void set_status_message(const std::string& s);
 std::string status_message();

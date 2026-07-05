@@ -22,6 +22,8 @@ std::atomic<uint32_t> g_packetCount{0};
 std::mutex g_statusMutex;
 std::string g_statusMessage = "Ready";
 std::string g_lastError;
+std::mutex g_assignmentMutex;
+ServerAssignmentView g_serverAssignment;
 
 static void sleep_while_running(std::atomic<bool>& running, std::chrono::milliseconds duration) {
     constexpr auto SLICE = std::chrono::milliseconds(20);
@@ -41,6 +43,59 @@ void set_status_message(const std::string& s) {
 std::string status_message() {
     std::lock_guard<std::mutex> lk(g_statusMutex);
     return g_statusMessage;
+}
+
+void reset_server_assignment_state() {
+    std::lock_guard<std::mutex> lk(g_assignmentMutex);
+    g_serverAssignment = ServerAssignmentView{};
+}
+
+void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet) {
+    if (packet.magic != ns::CLIENT_ASSIGNMENT_MAGIC || packet.version != ns::CLIENT_ASSIGNMENT_VERSION) return;
+    {
+        std::lock_guard<std::mutex> lk(g_assignmentMutex);
+        g_serverAssignment.server_full = (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_SERVER_FULL) != 0;
+        if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED) {
+            g_serverAssignment.accepted = true;
+            g_serverAssignment.server_slot = packet.server_slot;
+        }
+        g_serverAssignment.active_clients = packet.active_clients;
+        g_serverAssignment.max_clients = packet.max_clients;
+        g_serverAssignment.free_virtual_slots = packet.free_virtual_slots;
+        g_serverAssignment.last_update_us = ns::now_us();
+        if (packet.subpad < 4) {
+            g_serverAssignment.console_port_mask[packet.subpad] = packet.console_port_mask;
+            g_serverAssignment.primary_console_port[packet.subpad] = packet.primary_console_port;
+            g_serverAssignment.requested_type[packet.subpad] = packet.requested_type;
+            g_serverAssignment.virtual_type[packet.subpad] = packet.virtual_type;
+        }
+    }
+    if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_SERVER_FULL) {
+        g_serverFullDisconnect.store(true, std::memory_order_relaxed);
+        g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
+        set_status_message("Server full");
+    } else if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED) {
+        const std::string msg = "Connected as client slot " + std::to_string(packet.server_slot + 1);
+        set_status_message(msg);
+    }
+}
+
+ServerAssignmentView server_assignment_snapshot() {
+    std::lock_guard<std::mutex> lk(g_assignmentMutex);
+    return g_serverAssignment;
+}
+
+std::string console_assignment_suffix(const ServerAssignmentView& view, int subpad) {
+    if (subpad < 0 || subpad >= 4) return {};
+    const uint8_t mask = view.console_port_mask[subpad];
+    if (mask == 0) return view.accepted ? std::string(" -> waiting for server slot") : std::string{};
+    std::string ports;
+    for (int h = 0; h < 4; ++h) {
+        if (!(mask & (1u << h))) continue;
+        if (!ports.empty()) ports += "+";
+        ports += "P" + std::to_string(h + 1);
+    }
+    return ports.empty() ? std::string{} : (" -> Switch " + ports);
 }
 
 bool parse_host_port(std::string in, std::string& host, int& port) {
@@ -72,46 +127,15 @@ void raise_sender_priority() {
 }
 
 
-static uint8_t controller_type_for_frame_slot(int slot) {
+static uint8_t requested_controller_profile_for_frame() {
     const int mode = g_controllerType.load(std::memory_order_relaxed);
-    if (mode == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
-        return (slot & 1) ? ns::CONTROLLER_TYPE_JOYCON_R : ns::CONTROLLER_TYPE_JOYCON_L;
-    }
     if (mode == ns::CONTROLLER_TYPE_JOYCON_L ||
             mode == ns::CONTROLLER_TYPE_JOYCON_R ||
-            mode == ns::CONTROLLER_TYPE_PRO) {
+            mode == ns::CONTROLLER_TYPE_PRO ||
+            mode == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
         return static_cast<uint8_t>(mode);
     }
     return ns::CONTROLLER_TYPE_PRO;
-}
-
-static void expand_frame_to_joycon_pairs(ClientFrame& frame) {
-    ClientFrame src = frame;
-    frame.reset();
-
-    int out = 0;
-    for (int in = 0; in < 4 && out + 1 < 4; ++in) {
-        if (!src.present[in]) continue;
-
-        for (int side = 0; side < 2; ++side) {
-            const int dst = out + side;
-            const bool is_right_joycon = (side == 1);
-            frame.reports[dst] = src.reports[in];
-            if (is_right_joycon) {
-                for (int j = 0; j < 3; ++j) frame.motion[dst][j] = src.motion[in][j];
-                frame.has_motion[dst] = src.has_motion[in];
-            } else {
-                for (int j = 0; j < 3; ++j) frame.motion[dst][j].reset();
-                frame.has_motion[dst] = false;
-            }
-            frame.present[dst] = true;
-            frame.controller_for_slot[dst] = src.controller_for_slot[in];
-            frame.battery_percent[dst] = src.battery_percent[in];
-            frame.battery_charging[dst] = src.battery_charging[in];
-            ++frame.active_count;
-        }
-        out += 2;
-    }
 }
 
 void ClientFrame::reset() {
@@ -131,9 +155,11 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     frame.reset();
     auto sdl = g_sdlInput.snapshot();
     const uint64_t filter_now = ns::now_us();
+    const bool joycon_pair_mode = g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
+    const int source_slots = joycon_pair_mode ? 2 : 4;
 
     for (int i = 0; i < 4; ++i) {
-        if (!sdl[i].connected) {
+        if (i >= source_slots || !sdl[i].connected) {
             filters[i].reset();
             continue;
         }
@@ -151,7 +177,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     if (keyboard_mode == KB_SINGLE) {
         if (frame.present[0]) {
             int target = -1;
-            for (int s = 1; s < 4 && target < 0; ++s) if (!frame.present[s]) target = s;
+            for (int s = 1; s < source_slots && target < 0; ++s) if (!frame.present[s]) target = s;
             if (target >= 0) {
                 frame.reports[target] = frame.reports[0];
                 std::copy_n(frame.motion[0], 3, frame.motion[target]);
@@ -193,7 +219,10 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
         ns::HIDReport* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
         fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr,
                           frame.battery_percent[i], frame.battery_charging[i]);
-        dst->reserved[2] = controller_type_for_frame_slot(i);
+        // This is a requested controller profile, not necessarily the final
+        // USB identity. In Joy-Con L+R mode the server expands one source pad
+        // into two virtual ports and chooses L/R per port.
+        dst->reserved[2] = requested_controller_profile_for_frame();
     }
     sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
@@ -248,13 +277,9 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             }
         }
 
-        // Keep build_client_frame() as a source-controller frame. Expand to virtual
-        // Joy-Con L/R only after GUI macros/overrides have modified that source
-        // frame, otherwise macros in L+R mode would only drive the virtual L side.
-        if (g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
-            expand_frame_to_joycon_pairs(frame);
-        }
-
+        // Keep the packet as a source-controller frame. For Joy-Con L+R mode
+        // the client sends one physical pad with CONTROLLER_TYPE_JOYCON_PAIR;
+        // the server owns the virtual L/R expansion and USB identities.
         send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
         // Typed uploads are sent after the live input frame so the server has
         // already seen the current controller type (important for Joy-Con R NFC).
@@ -276,7 +301,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         }
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
-            set_status_message("Disconnected");
+            set_status_message(g_serverFullDisconnect.load(std::memory_order_relaxed) ? "Server full" : "Disconnected");
             running.store(false, std::memory_order_relaxed);
             break;
         }
@@ -333,7 +358,12 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     std::string host;
     int port = ns::DEFAULT_PORT;
     if (!parse_host_port(target, host, port)) return std::unexpected("Please enter a Raspberry Pi IP address.");
-    if (!probe_server_sync(host, port)) return std::unexpected("Server not reachable. Check the IP address.");
+    g_serverProbeFull.store(false, std::memory_order_relaxed);
+    if (!probe_server_sync(host, port)) {
+        if (g_serverProbeFull.load(std::memory_order_relaxed)) return std::unexpected("Server is full. All virtual controller slots are in use.");
+        return std::unexpected("Server not reachable. Check the IP address.");
+    }
+    if (g_serverProbeFull.load(std::memory_order_relaxed)) return std::unexpected("Server is full. All virtual controller slots are in use.");
     if (!g_sdlInput.start()) return std::unexpected("SDL3 input failed: " + g_sdlInput.error());
     derive_key(ns::DEFAULT_SECRET, g_hmacKey);
     save_last_ip(target);
@@ -341,6 +371,8 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     g_packetCount.store(0);
     g_serverLastReplyUs.store(0);
     g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
+    g_serverFullDisconnect.store(false, std::memory_order_relaxed);
+    reset_server_assignment_state();
     g_lastError.clear();
     g_connected.store(true);
     if (g_senderThread.joinable()) {
@@ -358,6 +390,7 @@ void stop_connection() {
         g_senderRunning = false;
         g_senderThread.join();
     }
+    reset_server_assignment_state();
     if (was_connected) set_status_message("Disconnected");
 }
 

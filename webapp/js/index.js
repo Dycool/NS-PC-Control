@@ -9,6 +9,11 @@
 // FIX #11 (security model): This webapp sends input over an unauthenticated
 // WebSocket. Ensure the server port is not reachable from untrusted networks.
 const PROTO_MAGIC = 0x4E535743;
+const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341;
+const CLIENT_ASSIGNMENT_SIZE = 16;
+const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01;
+const CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
+const CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
 const PROTO_VERSION = 5;
 const PAD_PRESENT = 1;
 const EXT_REPORT_SIZE = 48;
@@ -24,8 +29,50 @@ let isConnected = false;
 let loopId = null;
 let seqCounter = 0;
 let lastActivePads = [];
+let serverAssignment = { accepted:false, serverFull:false, serverSlot:255, masks:[0,0,0,0], primary:[255,255,255,255], activeClients:0, maxClients:4, freeSlots:0 };
+function resetServerAssignment() { serverAssignment = { accepted:false, serverFull:false, serverSlot:255, masks:[0,0,0,0], primary:[255,255,255,255], activeClients:0, maxClients:4, freeSlots:0 }; }
+function assignmentSuffix(subpad) {
+    const mask = serverAssignment.masks[subpad] || 0;
+    if (!mask) return serverAssignment.accepted ? ' -> waiting for server slot' : '';
+    const parts = [];
+    for (let h=0; h<4; h++) if (mask & (1 << h)) parts.push(`P${h+1}`);
+    return parts.length ? ` -> Switch ${parts.join('+')}` : '';
+}
+function handleAssignmentPacket(view) {
+    const flags = view.getUint8(5);
+    const subpad = view.getUint8(7);
+    serverAssignment.serverFull = !!(flags & CLIENT_ASSIGNMENT_FLAG_SERVER_FULL);
+    if (flags & CLIENT_ASSIGNMENT_FLAG_ACCEPTED) {
+        serverAssignment.accepted = true;
+        serverAssignment.serverSlot = view.getUint8(6);
+    }
+    serverAssignment.activeClients = view.getUint8(12);
+    serverAssignment.maxClients = view.getUint8(13);
+    serverAssignment.freeSlots = view.getUint8(14);
+    if (subpad < 4) {
+        serverAssignment.masks[subpad] = view.getUint8(8);
+        serverAssignment.primary[subpad] = view.getUint8(9);
+    }
+    if (serverAssignment.serverFull) {
+        resetMainConnectionUi('Server full');
+        try { if (ws) ws.close(); } catch (_) {}
+        alert('Server full: all virtual controller slots are in use.');
+    } else if (serverAssignment.accepted) {
+        const status = document.getElementById('statusText');
+        if (status) status.innerText = `Connected as server slot ${serverAssignment.serverSlot + 1}`;
+    }
+}
+function handleWsBinaryMessage(ev) {
+    if (!(ev.data instanceof ArrayBuffer)) return;
+    const view = new DataView(ev.data);
+    if (view.byteLength < 4) return;
+    const magic = view.getUint32(0, true);
+    if (magic === CLIENT_ASSIGNMENT_MAGIC && view.byteLength === CLIENT_ASSIGNMENT_SIZE) handleAssignmentPacket(view);
+}
+
 function resetMainConnectionUi(text) {
     isConnected = false;
+    resetServerAssignment();
     if (loopId) { clearInterval(loopId); loopId = null; }
     const btn = document.getElementById('btnConnect');
     if (btn) btn.innerText = 'Connect';
@@ -359,7 +406,8 @@ function buildAndSendPacket() {
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now() * 1000), true);
     for(let p = 0; p < 4; p++) {
-        document.getElementById(`p${p+1}Text`).innerText = `P${p+1}: ${uiText[p]}`;
+        const suffix = slotPresent[p] ? assignmentSuffix(p) : '';
+        document.getElementById(`p${p+1}Text`).innerText = `P${p+1}: ${uiText[p]}${suffix}`;
         const finalButtons = normalizeSystemShortcuts(slotStates[p].buttons);
         const offset = 20 + (p * EXT_REPORT_SIZE);
         view.setUint16(offset, finalButtons, true);
@@ -379,7 +427,7 @@ document.getElementById('btnConnect').onclick = async () => {
     }
     const wsUrl = makeWsUrl();
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
-    ws.onmessage = null;
+    ws.onmessage = handleWsBinaryMessage;
     ws.onopen = () => {
         isConnected = true;
         document.getElementById('btnConnect').innerText = "Disconnect";
@@ -393,7 +441,7 @@ document.getElementById('btnConnect').onclick = async () => {
     };
     ws.onclose = () => {
         const current = document.getElementById('statusText').innerText;
-        resetMainConnectionUi(current === 'Connection failed' ? 'Connection failed' : 'Disconnected');
+        resetMainConnectionUi((current === 'Connection failed' || current === 'Server full') ? current : 'Disconnected');
     }
 };
 function formatKeyName(code) {
