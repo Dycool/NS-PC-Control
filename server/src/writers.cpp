@@ -29,23 +29,12 @@ static const HIDReport& get_hid_report(const ClientSession& c, int s) {
 void writer_thread(std::stop_token stoken, int hz) {
     const int nports = HID_PORT_COUNT;
     if (!g_ctx.legacy_mode) {
-        for (int i = 0; i < nports; ++i) {
-            // Default to Pro Controller; the client picks each pad's type per port
-            // via HIDReport::reserved[2].
-            set_controller_type_for_port(i, NS_TYPE_PRO);
-            init_spi_flash(i);
-        }
+        for (int i = 0; i < nports; ++i) init_spi_flash(i);
     }
 
     const auto tick = us(1'000'000 / hz);
     int write_fds[HID_PORT_COUNT] = {-1, -1, -1, -1};
     int read_fds[HID_PORT_COUNT]  = {-1, -1, -1, -1};
-    // The controller type (Pro / Joy-Con L/R) the console last read at enumeration.
-    // The console only re-reads device info on a fresh USB handshake, so a client
-    // changing a pad's type has to re-enumerate the gadget to take effect.
-    uint8_t enumerated_type[HID_PORT_COUNT];
-    for (int i = 0; i < HID_PORT_COUNT; ++i) enumerated_type[i] = controller_type_for_port(i);
-
     struct HwSlot { int client_idx = -1; int sub_idx = -1; };
     HwSlot hw_slots[HID_PORT_COUNT];
     ControllerRuntime rt[HID_PORT_COUNT];
@@ -138,9 +127,9 @@ void writer_thread(std::stop_token stoken, int hz) {
             }
 
             // FunctionFS advertises the NFC-capable report descriptor from boot,
-            // so staging/removing an amiibo no longer rebuilds the gadget. The
-            // only remaining modern re-enumeration edge is controller type, which
-            // the console reads once during the USB handshake.
+            // so staging/removing an amiibo no longer rebuilds the gadget. Keep
+            // the normal controller transport stable; the current main branch
+            // does not re-enumerate when a client starts sending input.
             if (!g_ctx.legacy_mode) {
                 const bool want_nfc = server_amiibo_any_armed(now_stamp);
                 const bool nfc_edge = (want_nfc != g_ctx.nfc_gadget_active.load(std::memory_order_relaxed));
@@ -149,19 +138,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                     if (g_ctx.verbose)
                         std::println("[amiibo] {} NFC session; FunctionFS keeps USB enumerated",
                                      want_nfc ? "arming" : "idling");
-                }
-
-                bool type_edge = false;
-                for (int h = 0; h < nports; ++h)
-                    if (controller_type_for_port(h) != enumerated_type[h]) type_edge = true;
-
-                if (type_edge) {
-                    if (g_ctx.verbose)
-                        std::println("[gadget] controller type changed; re-enumerating USB gadget");
-                    close_all_fds();
-                    run_gadget_setup_if_needed(true, "controller type changed");
-                    for (int h = 0; h < HID_PORT_COUNT; ++h) enumerated_type[h] = controller_type_for_port(h);
-                    break; // reopen the freshly re-enumerated USB endpoints
                 }
             }
             ClientSession snap[MAX_CLIENTS];
@@ -252,11 +228,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (hw_slots[h].client_idx != -1) {
                     out_reports[h] = get_hid_report(snap[hw_slots[h].client_idx], hw_slots[h].sub_idx);
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
-                    uint8_t type = out_reports[h].reserved[2];
-                    if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R && type != NS_TYPE_PRO)
-                        type = NS_TYPE_PRO; // default / older clients
-                    set_controller_type_for_port(h, type);
-                    apply_controller_type_input(type, out_reports[h]);
                 }
             }
 
