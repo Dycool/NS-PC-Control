@@ -397,7 +397,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) &&
                     !std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) &&
                     !std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) {
-                lws_close_reason(wsi, LWS_CLOSE_STATUS_TRY_AGAIN_LATER, (unsigned char*)"server full", 11);
+                lws_close_reason(wsi, static_cast<lws_close_status>(1013),
+                                 (unsigned char*)"server full", 11);
                 return -1;
             }
             if (std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) ||
