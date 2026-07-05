@@ -139,7 +139,7 @@ void load_saved_feature_toggles() {
     g_homeShortcutEnabled.store(settings.value("HomeShortcutEnabled", true).toBool());
     g_captureShortcutEnabled.store(settings.value("CaptureShortcutEnabled", true).toBool());
     int controllerType = settings.value("ControllerType", ns::CONTROLLER_TYPE_PRO).toInt();
-    if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_PRO)
+    if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_JOYCON_PAIR)
         controllerType = ns::CONTROLLER_TYPE_PRO;
     g_controllerType.store(controllerType);
     sync_sdl_input_options();

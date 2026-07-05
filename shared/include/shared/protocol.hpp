@@ -104,8 +104,12 @@ static constexpr uint8_t EXT_STATUS_BATTERY_PERCENT_UNKNOWN = 0xFF;
 enum ControllerType : uint8_t {
     CONTROLLER_TYPE_DEFAULT  = 0,
     CONTROLLER_TYPE_JOYCON_L = 1,
-    CONTROLLER_TYPE_JOYCON_R = 2,
-    CONTROLLER_TYPE_PRO      = 3,
+    CONTROLLER_TYPE_JOYCON_R    = 2,
+    CONTROLLER_TYPE_PRO         = 3,
+    // Client-side convenience mode: split one PC controller into a Joy-Con L/R pair.
+    // This value is never sent to the backend in HIDReport::reserved[2]; clients
+    // expand it into per-pad CONTROLLER_TYPE_JOYCON_L / CONTROLLER_TYPE_JOYCON_R.
+    CONTROLLER_TYPE_JOYCON_PAIR = 4,
 };
 static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;

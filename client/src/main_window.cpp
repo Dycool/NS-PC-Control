@@ -143,6 +143,11 @@ void MainWindow::toggleConnection() {
     }
 }
 
+
+static std::string joycon_pair_side_label(int slot) {
+    return (slot & 1) ? "Joy-Con R" : "Joy-Con L";
+}
+
 void MainWindow::updateUi() {
     const bool connected = g_connected.load();
     if (!connected) g_sdlInput.poll();
@@ -154,6 +159,7 @@ void MainWindow::updateUi() {
     auto sdl = g_sdlInput.snapshot();
     std::string sdlErr = g_sdlInput.error();
     int km = g_keyboardMode.load();
+    const bool joyconPairMode = g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
     int shifted_p1_target = -1;
     if (km == KB_SINGLE && sdl[0].connected) {
         for (int s = 1; s < 4; ++s) {
@@ -162,7 +168,26 @@ void MainWindow::updateUi() {
     }
     for (int i = 0; i < 4; ++i) {
         QString text;
-        if (i == 0 && km != KB_OFF) {
+        if (joyconPairMode) {
+            const int src = i / 2;
+            std::string sourceName;
+            bool sourceConnected = false;
+            if (src < 4 && sdl[src].connected) {
+                sourceConnected = true;
+                sourceName = sdl[src].name.empty() ? "SDL3 Gamepad" : sdl[src].name;
+            } else if (src == 0 && km != KB_OFF) {
+                sourceConnected = true;
+                sourceName = km == KB_SINGLE ? "Keyboard" : (sdl[0].connected ? "SDL3 Controller / Keyboard" : "Idle / Keyboard");
+            }
+            if (sourceConnected) {
+                const bool motion_on_virtual_r = (i & 1) != 0;
+                text = std_to_q("P" + std::to_string(i + 1) + ": " + joycon_pair_side_label(i) + " from " + sourceName + ((motion_on_virtual_r && sdl[src].has_motion) ? " + gyro" : ""));
+            } else if (!sdlErr.empty() && i == 0) {
+                text = "P1: SDL3 error";
+            } else {
+                text = std_to_q("P" + std::to_string(i + 1) + ": Not connected");
+            }
+        } else if (i == 0 && km != KB_OFF) {
             text = km == KB_SINGLE ? "P1: Keyboard" : (sdl[0].connected ? "P1: SDL3 Controller / Keyboard" : "P1: Idle / Keyboard");
         } else if (i == shifted_p1_target) {
             text = std_to_q("P" + std::to_string(i + 1) + ": " + (sdl[0].name.empty() ? "SDL3 Gamepad" : sdl[0].name) + " (Shifted)");

@@ -81,6 +81,7 @@ std::atomic<bool> g_macro_recording{false};
 uint64_t g_macro_start_us = 0;
 std::string g_macro_upload_pending;
 std::vector<uint8_t> g_amiibo_upload_pending;
+uint8_t g_amiibo_upload_subpad_pending = 0;
 std::atomic<bool> g_amiibo_dirty_available{false};
 std::atomic<uint8_t> g_amiibo_dirty_subpad{0};
 std::atomic<uint32_t> g_amiibo_dirty_version{0};
@@ -228,9 +229,11 @@ void handle_amiibo_status_packet(const ns::AmiiboStatusPacket& packet) {
     const bool write_request = (packet.flags & ns::AMIIBO_STATUS_FLAG_WRITE_REQUEST) != 0;
 
     if (write_request) {
-        // This client only ever uploads amiibo dumps for subpad 0, and the
-        // server resends the request until it is answered — dedupe both.
-        if (packet.subpad != 0) return;
+        // The server resends the request until it is answered — dedupe both.
+        {
+            std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+            if (!g_amiibo_active_file || packet.subpad != g_amiibo_active_subpad) return;
+        }
         static uint64_t last_rescan_us = 0;
         const uint64_t now = ns::now_us();
         if (now - last_rescan_us < 700'000ULL) return;
@@ -358,13 +361,15 @@ static bool read_amiibo_dump_file(const std::string& path, std::vector<uint8_t>&
     return true;
 }
 
-static bool queue_amiibo_upload_file_impl(const std::string& path, bool new_selection, std::string& err) {
+static bool queue_amiibo_upload_file_impl(const std::string& path, uint8_t subpad, bool new_selection, std::string& err) {
+    if (subpad >= 4) { err = "Invalid amiibo slot."; return false; }
     std::vector<uint8_t> data;
     if (!read_amiibo_dump_file(path, data, err)) return false;
 
     {
         std::lock_guard<std::mutex> lk(g_macro_mtx);
         g_amiibo_upload_pending = std::move(data);
+        g_amiibo_upload_subpad_pending = subpad;
     }
 
     {
@@ -372,7 +377,7 @@ static bool queue_amiibo_upload_file_impl(const std::string& path, bool new_sele
         const bool same_file = g_amiibo_active_file && g_amiibo_active_path == path;
         g_amiibo_active_file = true;
         g_amiibo_active_path = path;
-        g_amiibo_active_subpad = 0;
+        g_amiibo_active_subpad = subpad;
 
         // First selection / changed file starts a fresh auto-save identity.
         // A re-scan of the same file intentionally preserves the last saved
@@ -384,13 +389,17 @@ static bool queue_amiibo_upload_file_impl(const std::string& path, bool new_sele
     }
 
     g_amiibo_dirty_available.store(false, std::memory_order_relaxed);
-    g_amiibo_dirty_subpad.store(0, std::memory_order_relaxed);
+    g_amiibo_dirty_subpad.store(subpad, std::memory_order_relaxed);
     g_amiibo_dirty_version.store(0, std::memory_order_relaxed);
     return true;
 }
 
+bool queue_amiibo_upload_from_file(const std::string& path, uint8_t subpad, std::string& err) {
+    return queue_amiibo_upload_file_impl(path, subpad, true, err);
+}
+
 bool queue_amiibo_upload_from_file(const std::string& path, std::string& err) {
-    return queue_amiibo_upload_file_impl(path, true, err);
+    return queue_amiibo_upload_from_file(path, 0, err);
 }
 
 bool queue_selected_amiibo_rescan(std::string& err) {
@@ -403,7 +412,12 @@ bool queue_selected_amiibo_rescan(std::string& err) {
         }
         path = g_amiibo_active_path;
     }
-    return queue_amiibo_upload_file_impl(path, false, err);
+    uint8_t subpad = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_amiibo_save_mtx);
+        subpad = g_amiibo_active_subpad;
+    }
+    return queue_amiibo_upload_file_impl(path, subpad, false, err);
 }
 
 int find_macro_entry_by_name(const std::string& name) {

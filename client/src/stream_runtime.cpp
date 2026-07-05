@@ -71,6 +71,49 @@ void raise_sender_priority() {
 #endif
 }
 
+
+static uint8_t controller_type_for_frame_slot(int slot) {
+    const int mode = g_controllerType.load(std::memory_order_relaxed);
+    if (mode == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
+        return (slot & 1) ? ns::CONTROLLER_TYPE_JOYCON_R : ns::CONTROLLER_TYPE_JOYCON_L;
+    }
+    if (mode == ns::CONTROLLER_TYPE_JOYCON_L ||
+            mode == ns::CONTROLLER_TYPE_JOYCON_R ||
+            mode == ns::CONTROLLER_TYPE_PRO) {
+        return static_cast<uint8_t>(mode);
+    }
+    return ns::CONTROLLER_TYPE_PRO;
+}
+
+static void expand_frame_to_joycon_pairs(ClientFrame& frame) {
+    ClientFrame src = frame;
+    frame.reset();
+
+    int out = 0;
+    for (int in = 0; in < 4 && out + 1 < 4; ++in) {
+        if (!src.present[in]) continue;
+
+        for (int side = 0; side < 2; ++side) {
+            const int dst = out + side;
+            const bool is_right_joycon = (side == 1);
+            frame.reports[dst] = src.reports[in];
+            if (is_right_joycon) {
+                for (int j = 0; j < 3; ++j) frame.motion[dst][j] = src.motion[in][j];
+                frame.has_motion[dst] = src.has_motion[in];
+            } else {
+                for (int j = 0; j < 3; ++j) frame.motion[dst][j].reset();
+                frame.has_motion[dst] = false;
+            }
+            frame.present[dst] = true;
+            frame.controller_for_slot[dst] = src.controller_for_slot[in];
+            frame.battery_percent[dst] = src.battery_percent[in];
+            frame.battery_charging[dst] = src.battery_charging[in];
+            ++frame.active_count;
+        }
+        out += 2;
+    }
+}
+
 void ClientFrame::reset() {
     active_count = 0;
     for (int i = 0; i < 4; ++i) {
@@ -150,7 +193,7 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
         ns::HIDReport* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
         fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr,
                           frame.battery_percent[i], frame.battery_charging[i]);
-        dst->reserved[2] = static_cast<uint8_t>(g_controllerType.load(std::memory_order_relaxed));
+        dst->reserved[2] = controller_type_for_frame_slot(i);
     }
     sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
@@ -181,12 +224,14 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         const uint64_t loop_start_us = ns::now_us();
         std::string upload;
         std::vector<uint8_t> amiibo_upload;
+        uint8_t amiibo_upload_subpad = 0;
         if (cfg.gui_features && (loop_start_us - last_kb_poll_us >= 10000ULL)) {
             update_keyboard_state_cache();
             {
                 std::lock_guard<std::mutex> lk(g_macro_mtx);
                 upload.swap(g_macro_upload_pending);
                 amiibo_upload.swap(g_amiibo_upload_pending);
+                amiibo_upload_subpad = g_amiibo_upload_subpad_pending;
             }
             poll_macro_entry_hotkeys();
             last_kb_poll_us = loop_start_us;
@@ -203,12 +248,19 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             }
         }
 
+        // Keep build_client_frame() as a source-controller frame. Expand to virtual
+        // Joy-Con L/R only after GUI macros/overrides have modified that source
+        // frame, otherwise macros in L+R mode would only drive the virtual L side.
+        if (g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
+            expand_frame_to_joycon_pairs(frame);
+        }
+
         send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
         // Typed uploads are sent after the live input frame so the server has
         // already seen the current controller type (important for Joy-Con R NFC).
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
         if (!amiibo_upload.empty()) {
-            const bool ok = send_amiibo_udp_packet(sock, dest, cfg.hmac_key, amiibo_upload, 0);
+            const bool ok = send_amiibo_udp_packet(sock, dest, cfg.hmac_key, amiibo_upload, amiibo_upload_subpad);
             set_status_message(ok ? "Amiibo sent" : "Amiibo send failed");
         }
         std::string amiibo_save_path;

@@ -21,6 +21,7 @@ extern std::atomic<bool> g_macro_recording;
 extern uint64_t g_macro_start_us;
 extern std::string g_macro_upload_pending;
 extern std::vector<uint8_t> g_amiibo_upload_pending;
+extern uint8_t g_amiibo_upload_subpad_pending;
 extern std::atomic<bool> g_amiibo_dirty_available;
 extern std::atomic<uint8_t> g_amiibo_dirty_subpad;
 extern std::atomic<uint32_t> g_amiibo_dirty_version;
@@ -35,6 +36,7 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
                            const std::string& json_or_commands, uint8_t subpad = 0);
 bool send_amiibo_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
                             std::span<const uint8_t> dump, uint8_t subpad = 0);
+bool queue_amiibo_upload_from_file(const std::string& path, uint8_t subpad, std::string& err);
 bool queue_amiibo_upload_from_file(const std::string& path, std::string& err);
 bool queue_selected_amiibo_rescan(std::string& err);
 bool queue_amiibo_save_to_file(const std::string& path, std::string& err);

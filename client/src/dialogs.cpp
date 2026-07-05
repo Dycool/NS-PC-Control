@@ -180,6 +180,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerTypeBox->addItem("Pro Controller", ns::CONTROLLER_TYPE_PRO);
     controllerTypeBox->addItem("Joy-Con (L)", ns::CONTROLLER_TYPE_JOYCON_L);
     controllerTypeBox->addItem("Joy-Con (R)", ns::CONTROLLER_TYPE_JOYCON_R);
+    controllerTypeBox->addItem("Joy-Con L + R Pair", ns::CONTROLLER_TYPE_JOYCON_PAIR);
     const int selectedType = controllerTypeBox->findData(g_controllerType.load());
     controllerTypeBox->setCurrentIndex(selectedType < 0 ? 0 : selectedType);
     controllerRow->addWidget(controllerTypeBox, 0, 1);
@@ -212,12 +213,15 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
 void SettingsDialog::updateAmiiboButton() {
     if (!scanAmiiboButton || !controllerTypeBox) return;
-    const bool joyconR = controllerTypeBox->currentData().toInt() == ns::CONTROLLER_TYPE_JOYCON_R;
-    scanAmiiboButton->setEnabled(joyconR && g_connected.load());
+    const int mode = controllerTypeBox->currentData().toInt();
+    const bool hasJoyconR = mode == ns::CONTROLLER_TYPE_JOYCON_R || mode == ns::CONTROLLER_TYPE_JOYCON_PAIR;
+    scanAmiiboButton->setEnabled(hasJoyconR && g_connected.load());
 }
 
 void SettingsDialog::scanAmiibo() {
-    if (!controllerTypeBox || controllerTypeBox->currentData().toInt() != ns::CONTROLLER_TYPE_JOYCON_R) return;
+    if (!controllerTypeBox) return;
+    const int mode = controllerTypeBox->currentData().toInt();
+    if (mode != ns::CONTROLLER_TYPE_JOYCON_R && mode != ns::CONTROLLER_TYPE_JOYCON_PAIR) return;
     if (!g_connected.load()) return;
     QString path = QFileDialog::getOpenFileName(this, "Open Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
     if (path.isEmpty()) return;
@@ -226,13 +230,14 @@ void SettingsDialog::scanAmiibo() {
         return;
     }
 
-    // Make the active sender advertise Joy-Con (R) immediately even if the user
-    // scans before pressing Save in this dialog. Cancel still only affects the
-    // other settings in the dialog; Scan Amiibo is an explicit action.
-    g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
+    // Make the active sender advertise the selected NFC-capable mode immediately
+    // even if the user scans before pressing Save in this dialog. Cancel still
+    // only affects the other settings in the dialog; Scan Amiibo is explicit.
+    g_controllerType.store(mode);
 
+    const uint8_t amiiboSubpad = mode == ns::CONTROLLER_TYPE_JOYCON_PAIR ? 1 : 0;
     std::string err;
-    if (!queue_amiibo_upload_from_file(q_to_std(path), err)) {
+    if (!queue_amiibo_upload_from_file(q_to_std(path), amiiboSubpad, err)) {
         QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));
     }
 }

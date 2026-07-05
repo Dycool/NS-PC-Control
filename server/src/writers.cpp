@@ -19,6 +19,17 @@
 
 using namespace ns;
 
+
+static uint8_t requested_controller_type_from_report(const HIDReport& report) {
+    switch (report.reserved[2]) {
+        case ns::CONTROLLER_TYPE_JOYCON_L: return NS_TYPE_JOYCON_L;
+        case ns::CONTROLLER_TYPE_JOYCON_R: return NS_TYPE_JOYCON_R;
+        case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_DEFAULT:
+        default: return NS_TYPE_PRO;
+    }
+}
+
 static const HIDReport& get_hid_report(const ClientSession& c, int s) {
     if (s == 0) return c.report.p1;
     if (s == 1) return c.report.p2;
@@ -189,6 +200,18 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
+            if (!g_ctx.legacy_mode) {
+                for (int c = 0; c < MAX_CLIENTS; ++c) {
+                    if (!snap[c].active || !snap[c].uses_pad_presence) continue;
+                    for (int s = 0; s < nports; ++s) {
+                        if (!snap[c].pad_present[s]) continue;
+                        if (hw_slots[s].client_idx == -1) {
+                            set_controller_type_for_port(s, requested_controller_type_from_report(get_hid_report(snap[c], s)));
+                        }
+                    }
+                }
+            }
+
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!snap[c].active) continue;
                 for (int s = 0; s < 4; ++s) {
@@ -228,6 +251,11 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (hw_slots[h].client_idx != -1) {
                     out_reports[h] = get_hid_report(snap[hw_slots[h].client_idx], hw_slots[h].sub_idx);
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
+                    if (!g_ctx.legacy_mode) {
+                        const uint8_t requested_type = requested_controller_type_from_report(out_reports[h]);
+                        set_controller_type_for_port(h, requested_type);
+                        apply_controller_type_input(requested_type, out_reports[h]);
+                    }
                 }
             }
 

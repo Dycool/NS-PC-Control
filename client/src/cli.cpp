@@ -46,7 +46,7 @@ int cli_main(const std::vector<std::string>& original_args) {
     for (const auto& a : original_args) if (a != "--cli") args.push_back(a);
     if (args.empty()) args.push_back("ns-client");
     if (args.size() < 2) {
-        std::println(stderr, "Usage: {} --cli <RASPBERRY_PI_IP[:PORT]> [--hori] [-m MACRO] [-k [single|override]]", args[0]);
+        std::println(stderr, "Usage: {} --cli <RASPBERRY_PI_IP[:PORT]> [-m MACRO] [-k [single|override]] [-c pro|joycon-l|joycon-r|joycon-lr]", args[0]);
         return 1;
     }
 
@@ -55,7 +55,7 @@ int cli_main(const std::vector<std::string>& original_args) {
     app.add_option("host", host_arg, "Target IP[:PORT]")->required();
     auto* opt_m = app.add_option("-m,--macro", macro_path);
     auto* opt_k = app.add_option("-k,--keyboard", k_val)->expected(0, 1);
-    app.add_option("-c,--controller", controller_type, "Emulated controller: pro, joycon-l, or joycon-r");
+    app.add_option("-c,--controller", controller_type, "Emulated controller: pro, joycon-l, joycon-r, or joycon-lr");
 
     std::vector<const char*> argv_ptrs;
     for (const auto& a : args) argv_ptrs.push_back(a.c_str());
@@ -78,6 +78,7 @@ int cli_main(const std::vector<std::string>& original_args) {
     if (controller_type == "pro") g_controllerType.store(ns::CONTROLLER_TYPE_PRO);
     else if (controller_type == "joycon-l") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_L);
     else if (controller_type == "joycon-r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
+    else if (controller_type == "joycon-lr" || controller_type == "joycon-pair" || controller_type == "joycon-l+r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_PAIR);
     else return std::println(stderr, "Unknown controller type: {}", controller_type), 1;
     g_keyboardMode.store(cli_kb);
     if (cli_kb != KB_OFF) {
