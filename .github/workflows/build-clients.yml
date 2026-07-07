@@ -34,16 +34,26 @@ jobs:
         with:
           arch: x64
 
+      - name: Capture MSVC toolset version for cache key
+        id: msvc
+        shell: pwsh
+        run: |
+          $ver = $env:VCToolsVersion
+          if (-not $ver) {
+            $out = (& cl.exe 2>&1 | Out-String)
+            if ($out -match 'Version ([\d\.]+)') { $ver = $Matches[1] }
+          }
+          if (-not $ver) { $ver = 'unknown' }
+          Write-Host "MSVC toolset version: $ver"
+          "ver=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Restore vcpkg binary cache
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-v2
+          key: vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-msvc${{ steps.msvc.outputs.ver }}-v3
           restore-keys: |
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-
+            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-msvc${{ steps.msvc.outputs.ver }}-
 
       - name: Bootstrap pinned vcpkg
         shell: pwsh
