@@ -272,7 +272,12 @@ void SettingsDialog::updateAmiiboButton() {
     if (!scanAmiiboButton || !controllerTypeBox) return;
     const int mode = controllerTypeBox->currentData().toInt();
     const bool hasJoyconR = mode == ns::CONTROLLER_TYPE_JOYCON_R || mode == ns::CONTROLLER_TYPE_JOYCON_PAIR;
-    scanAmiiboButton->setEnabled(hasJoyconR && g_connected.load());
+    const bool connected = g_connected.load();
+    scanAmiiboButton->setEnabled(hasJoyconR && connected);
+    controllerTypeBox->setEnabled(!connected);
+    controllerTypeBox->setToolTip(connected
+        ? QStringLiteral("Disconnect to change the emulated controller type.")
+        : QString());
 }
 
 void SettingsDialog::scanAmiibo() {

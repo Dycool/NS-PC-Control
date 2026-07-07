@@ -243,18 +243,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint64_t last_seen = snap[cidx].pad_last_present_us[sidx];
                     absent_too_long = (last_seen == 0) || (now_stamp - last_seen >= WEB_PAD_ABSENT_RELEASE_US);
                 }
-                bool profile_changed = false;
-                if (snap[cidx].active && !absent_too_long) {
-                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[cidx], sidx));
-                    if (profile_is_pair(profile)) {
-                        const uint8_t expected = virtual_type_for_profile(profile, hw_slots[h].pair_right);
-                        profile_changed = !hw_slots[h].pair_member || hw_slots[h].virtual_type != expected;
-                    } else {
-                        const uint8_t expected = virtual_type_for_profile(profile);
-                        profile_changed = hw_slots[h].pair_member || hw_slots[h].virtual_type != expected;
-                    }
-                }
-                if (((!snap[cidx].active || absent_too_long) && !server_macro_running(cidx, sidx)) || profile_changed) {
+                if ((!snap[cidx].active || absent_too_long) && !server_macro_running(cidx, sidx)) {
                     release_hw_slot(h, now_stamp);
                 }
             }
