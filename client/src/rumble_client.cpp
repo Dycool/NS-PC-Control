@@ -102,6 +102,10 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
                     g_sdlInput.set_player_status(controller, player_index, sp.player_leds, body_rgb);
                 }
             }
+        } else if (magic == ns::ROSTER_MAGIC && n == sizeof(ns::RosterPacket)) {
+            ns::RosterPacket rp{};
+            std::memcpy(&rp, buf, sizeof(rp));
+            handle_roster_packet(rp);
         } else if (magic == ns::AMIIBO_STATUS_MAGIC && n == sizeof(ns::AmiiboStatusPacket)) {
             ns::AmiiboStatusPacket ap{};
             std::memcpy(&ap, buf, sizeof(ap));

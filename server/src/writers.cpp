@@ -497,6 +497,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 auto process_host_output_report = [&](int h, const uint8_t* read_buf, size_t r) {
                     if (r < 2 || (r == 2 && read_buf[0] == 0 && read_buf[1] == 0)) return;
 
+                    ++g_ctx.host_out_reports;
                     mark_switch2_usb_activity(now_stamp);
                     uint8_t id = read_buf[0];
                     if (id == RID_OUTPUT_CMD) {
@@ -611,7 +612,7 @@ void stats_thread(std::stop_token stoken) {
         }
         poll_switch2_sleep_state(now);
         if (g_ctx.verbose) {
-            std::println("pkts_rx={:<8}  hid_writes={:<8}", (unsigned long long)g_ctx.pkts_rx.load(), (unsigned long long)g_ctx.hid_writes.load());
+            std::println("pkts_rx={:<8}  hid_writes={:<8}  host_out={:<8}", (unsigned long long)g_ctx.pkts_rx.load(), (unsigned long long)g_ctx.hid_writes.load(), (unsigned long long)g_ctx.host_out_reports.load());
         }
     }
 }

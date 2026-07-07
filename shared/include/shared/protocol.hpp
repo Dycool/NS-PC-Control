@@ -46,6 +46,8 @@ static constexpr uint32_t AMIIBO_STATUS_MAGIC = 0x4E534153u; // 'NSAS' server ->
 static constexpr uint32_t AMIIBO_PULL_MAGIC   = 0x4E534150u; // 'NSAP' UDP client -> server pull updated dump
 static constexpr uint32_t AMIIBO_CHUNK_MAGIC  = 0x4E53414Bu; // 'NSAK' server -> UDP client updated dump chunk
 static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
+static constexpr uint32_t CLIENT_NAMES_MAGIC = 0x4E53434Eu; // 'NSCN'
+static constexpr uint32_t ROSTER_MAGIC = 0x4E53524Fu; // 'NSRO'
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
 
@@ -114,6 +116,8 @@ enum ControllerType : uint8_t {
     // this value for the physical/source pad; the server owns the L/R expansion.
     CONTROLLER_TYPE_JOYCON_PAIR = 4,
 };
+static constexpr std::size_t ROSTER_NAME_CAP = 48;
+
 static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_CONSOLE_PORT_NONE = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;
@@ -280,6 +284,27 @@ struct ControllerStatusPacket {
     // reserved[3]: CONTROLLER_STATUS_FLAG_* bitfield.
     uint8_t  reserved[4]{};
 } NS_PACKED_ATTR;
+
+struct RosterEntry {
+    uint8_t present = 0;
+    uint8_t has_gyro = 0;
+    char    name[ROSTER_NAME_CAP]{};
+} NS_PACKED_ATTR;
+
+struct ClientNamesPacket {
+    uint32_t   magic = CLIENT_NAMES_MAGIC;
+    uint8_t    version = SERVER_INFO_VERSION;
+    uint8_t    reserved[3]{};
+    RosterEntry pads[4];
+    uint8_t    hmac[HMAC_TAG_SIZE]{};
+} NS_PACKED_ATTR;
+
+struct RosterPacket {
+    uint32_t   magic = ROSTER_MAGIC;
+    uint8_t    version = SERVER_INFO_VERSION;
+    uint8_t    reserved[3]{};
+    RosterEntry ports[4];
+} NS_PACKED_ATTR;
 // ── Unified UDP packet ───────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;
@@ -297,6 +322,7 @@ static constexpr std::size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
 
 static constexpr std::size_t REPORT_SIZE   = sizeof(HIDReport);
 static constexpr std::size_t WEB_PACKET_SIZE   = PACKET_AUTH_SIZE;
+static constexpr std::size_t CLIENT_NAMES_AUTH_SIZE = sizeof(ClientNamesPacket) - HMAC_TAG_SIZE;
 
 // ── Hard wire-layout checks ──────────────────────────────────────────────────
 static_assert(sizeof(HoriHIDReport) == 8,
@@ -317,6 +343,12 @@ static_assert(sizeof(ClientAssignmentPacket) == 16,
               "ClientAssignmentPacket wire layout changed");
 static_assert(sizeof(ControllerStatusPacket) == 12,
               "ControllerStatusPacket wire layout changed");
+static_assert(sizeof(RosterEntry) == 50,
+              "RosterEntry wire layout changed");
+static_assert(sizeof(ClientNamesPacket) == 224,
+              "ClientNamesPacket wire layout changed");
+static_assert(sizeof(RosterPacket) == 208,
+              "RosterPacket wire layout changed");
 static_assert(sizeof(AmiiboStatusPacket) == 20,
               "AmiiboStatusPacket wire layout changed");
 static_assert(sizeof(AmiiboPullRequest) == 32,

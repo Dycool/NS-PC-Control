@@ -1,12 +1,14 @@
 #include "stream_runtime.hpp"
 #include "input_settings.hpp"
 #include "macro_client.hpp"
+#include "mouse_input.hpp"
 #include "rumble_client.hpp"
 #include "udp_protocol.hpp"
 #include "shared/macros.hpp"
 #include "shared/sha256.h"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <print>
 #include <iostream>
@@ -24,6 +26,8 @@ std::string g_statusMessage = "Ready";
 std::string g_lastError;
 std::mutex g_assignmentMutex;
 ServerAssignmentView g_serverAssignment;
+std::mutex g_rosterMutex;
+RosterView g_roster;
 
 static void sleep_while_running(std::atomic<bool>& running, std::chrono::milliseconds duration) {
     constexpr auto SLICE = std::chrono::milliseconds(20);
@@ -74,9 +78,6 @@ void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet) {
         g_serverFullDisconnect.store(true, std::memory_order_relaxed);
         g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
         set_status_message("Server full");
-    } else if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED) {
-        const std::string msg = "Connected as client slot " + std::to_string(packet.server_slot + 1);
-        set_status_message(msg);
     }
 }
 
@@ -85,17 +86,25 @@ ServerAssignmentView server_assignment_snapshot() {
     return g_serverAssignment;
 }
 
-std::string console_assignment_suffix(const ServerAssignmentView& view, int subpad) {
-    if (subpad < 0 || subpad >= 4) return {};
-    const uint8_t mask = view.console_port_mask[subpad];
-    if (mask == 0) return view.accepted ? std::string(" -> waiting for server slot") : std::string{};
-    std::string ports;
+void reset_roster_state() {
+    std::lock_guard<std::mutex> lk(g_rosterMutex);
+    g_roster = RosterView{};
+}
+
+void handle_roster_packet(const ns::RosterPacket& packet) {
+    if (packet.magic != ns::ROSTER_MAGIC || packet.version != ns::SERVER_INFO_VERSION) return;
+    std::lock_guard<std::mutex> lk(g_rosterMutex);
+    g_roster.valid = true;
     for (int h = 0; h < 4; ++h) {
-        if (!(mask & (1u << h))) continue;
-        if (!ports.empty()) ports += "+";
-        ports += "P" + std::to_string(h + 1);
+        g_roster.ports[h] = packet.ports[h];
+        g_roster.ports[h].name[ns::ROSTER_NAME_CAP - 1] = '\0';
     }
-    return ports.empty() ? std::string{} : (" -> Switch " + ports);
+    g_roster.last_update_us = ns::now_us();
+}
+
+RosterView roster_snapshot() {
+    std::lock_guard<std::mutex> lk(g_rosterMutex);
+    return g_roster;
 }
 
 bool parse_host_port(std::string in, std::string& host, int& port) {
@@ -227,6 +236,65 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
     sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
 
+static void set_roster_name(ns::RosterEntry& e, const std::string& name) {
+    const size_t n = std::min(name.size(), ns::ROSTER_NAME_CAP - 1);
+    std::memcpy(e.name, name.data(), n);
+    e.name[n] = '\0';
+}
+
+static void build_local_roster_entries(int keyboard_mode, ns::RosterEntry out[4]) {
+    for (int i = 0; i < 4; ++i) out[i] = ns::RosterEntry{};
+    auto sdl = g_sdlInput.snapshot();
+    const bool joycon_pair = g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
+    const int source_slots = joycon_pair ? 2 : 4;
+
+    int shifted_p1_target = -1;
+    if (keyboard_mode == KB_SINGLE && sdl[0].connected) {
+        for (int s = 1; s < source_slots; ++s) {
+            if (!sdl[s].connected) { shifted_p1_target = s; break; }
+        }
+    }
+    auto set_entry = [&](int i, bool has_gyro, const std::string& name) {
+        out[i].present = 1;
+        out[i].has_gyro = has_gyro ? 1 : 0;
+        set_roster_name(out[i], name);
+    };
+    for (int i = 0; i < source_slots; ++i) {
+        if (i == 0 && keyboard_mode != KB_OFF) {
+            if (keyboard_mode == KB_SINGLE) {
+                set_entry(0, false, "Keyboard");
+            } else if (sdl[0].connected) {
+                const std::string base = sdl[0].name.empty() ? std::string("Controller") : sdl[0].name;
+                set_entry(0, sdl[0].has_motion, base + " + Keyboard");
+            } else {
+                set_entry(0, false, "Keyboard");
+            }
+        } else if (i == shifted_p1_target) {
+            set_entry(i, sdl[0].has_motion, sdl[0].name.empty() ? "Controller" : sdl[0].name);
+        } else if (sdl[i].connected) {
+            set_entry(i, sdl[i].has_motion, sdl[i].name.empty() ? "Controller" : sdl[i].name);
+        }
+    }
+}
+
+static void send_client_names_if_changed(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                                         int keyboard_mode, ns::ClientNamesPacket& last_sent, uint64_t& last_send_us) {
+    ns::ClientNamesPacket pkt{};
+    build_local_roster_entries(keyboard_mode, pkt.pads);
+    const uint64_t now = ns::now_us();
+    const bool changed = std::memcmp(pkt.pads, last_sent.pads, sizeof(pkt.pads)) != 0;
+    if (!changed && last_send_us != 0 && now - last_send_us < 2'000'000ULL) return;
+
+    uint8_t full_hmac[32];
+    hmac_sha256(std::span(hmac_key, 32),
+                std::span(reinterpret_cast<const uint8_t*>(&pkt), ns::CLIENT_NAMES_AUTH_SIZE),
+                std::span<uint8_t, 32>(full_hmac));
+    std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+    send_all_udp(sock, dest, std::span(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
+    std::memcpy(last_sent.pads, pkt.pads, sizeof(pkt.pads));
+    last_send_us = now;
+}
+
 int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running, std::string* err_out) {
     if (!cfg.hmac_key) return (err_out ? *err_out = "Missing HMAC key." : ""), 1;
     raise_sender_priority();
@@ -248,6 +316,8 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     DigitalReleaseFilter sdl_filters[4];
     bool no_controllers_printed = false;
     uint64_t last_probe_us = 0, last_kb_poll_us = 0;
+    ns::ClientNamesPacket last_names{};
+    uint64_t last_names_send_us = 0;
 
     while (running.load(std::memory_order_relaxed)) {
         const uint64_t loop_start_us = ns::now_us();
@@ -281,6 +351,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         // the client sends one physical pad with CONTROLLER_TYPE_JOYCON_PAIR;
         // the server owns the virtual L/R expansion and USB identities.
         send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
+        send_client_names_if_changed(sock, dest, cfg.hmac_key, g_keyboardMode.load(), last_names, last_names_send_us);
         // Typed uploads are sent after the live input frame so the server has
         // already seen the current controller type (important for Joy-Con R NFC).
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
@@ -373,6 +444,8 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
     g_serverFullDisconnect.store(false, std::memory_order_relaxed);
     reset_server_assignment_state();
+    reset_roster_state();
+    mouse_input_reset();
     g_lastError.clear();
     g_connected.store(true);
     if (g_senderThread.joinable()) {
@@ -390,7 +463,11 @@ void stop_connection() {
         g_senderRunning = false;
         g_senderThread.join();
     }
+    // Release controllers when not connected so detection is scoped to a live
+    // session (the sender thread has already been joined, so SDL is now idle).
+    g_sdlInput.stop();
     reset_server_assignment_state();
+    reset_roster_state();
     if (was_connected) set_status_message("Disconnected");
 }
 

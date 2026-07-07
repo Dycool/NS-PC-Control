@@ -102,7 +102,6 @@ MainWindow::MainWindow() {
     timer->start();
     load_saved_bindings();
     load_macro_entries();
-    g_sdlInput.start();
     updateUi();
 }
 
@@ -148,77 +147,32 @@ void MainWindow::toggleConnection() {
 
 void MainWindow::updateUi() {
     const bool connected = g_connected.load();
-    if (!connected) g_sdlInput.poll();
     connectBtn->setText(connected ? "Disconnect" : "Connect");
     ipEdit->setEnabled(!connected);
     keyboardCombo->setEnabled(!connected);
     bindingsBtn->setEnabled(!connected && g_keyboardMode.load() != KB_OFF);
     statusLabel->setText(std_to_q(status_message()));
-    auto sdl = g_sdlInput.snapshot();
-    const ServerAssignmentView assignment = server_assignment_snapshot();
-    std::string sdlErr = g_sdlInput.error();
-    int km = g_keyboardMode.load();
-    const bool joyconPairMode = g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
-    const int desiredHeight = joyconPairMode ? platformPairHeight() : platformHeight();
-    if (height() != desiredHeight) setFixedSize(platformWidth(), desiredHeight);
-    for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(!joyconPairMode || i < 2);
 
-    int shifted_p1_target = -1;
-    if (km == KB_SINGLE && sdl[0].connected) {
-        const int maxTarget = joyconPairMode ? 2 : 4;
-        for (int s = 1; s < maxTarget; ++s) {
-            if (!sdl[s].connected) { shifted_p1_target = s; break; }
-        }
+    const int desiredHeight = platformHeight();
+    if (height() != desiredHeight) setFixedSize(platformWidth(), desiredHeight);
+    for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(true);
+
+    if (!connected) {
+        for (int i = 0; i < 4; ++i)
+            padLabels[i]->setText(std_to_q("P" + std::to_string(i + 1) + ": Not connected"));
+        return;
     }
+
+    const RosterView roster = roster_snapshot();
     for (int i = 0; i < 4; ++i) {
-        if (joyconPairMode && i >= 2) {
-            padLabels[i]->clear();
-            continue;
-        }
         QString text;
-        bool sourceConnectedForUi = false;
-        if (joyconPairMode) {
-            std::string sourceName;
-            bool sourceConnected = false;
-            int motionSource = i;
-            if (i == 0 && km != KB_OFF) {
-                sourceConnected = true;
-                sourceName = km == KB_SINGLE ? "Keyboard" : (sdl[0].connected ? "SDL3 Controller / Keyboard" : "Idle / Keyboard");
-                motionSource = (km == KB_OVERRIDE && sdl[0].connected) ? 0 : -1;
-            } else if (i == shifted_p1_target) {
-                sourceConnected = true;
-                sourceName = sdl[0].name.empty() ? "SDL3 Gamepad" : sdl[0].name;
-                motionSource = 0;
-            } else if (sdl[i].connected) {
-                sourceConnected = true;
-                sourceName = sdl[i].name.empty() ? "SDL3 Gamepad" : sdl[i].name;
-            }
-            if (sourceConnected) {
-                sourceConnectedForUi = true;
-                const bool hasMotion = motionSource >= 0 && motionSource < 4 && sdl[motionSource].has_motion;
-                text = std_to_q("P" + std::to_string(i + 1) + ": Joy-Con L+R Pair from " + sourceName + (hasMotion ? " + gyro" : ""));
-            } else if (!sdlErr.empty() && i == 0) {
-                text = "P1: SDL3 error";
-            } else {
-                text = std_to_q("P" + std::to_string(i + 1) + ": Not connected");
-            }
-        } else if (i == 0 && km != KB_OFF) {
-            sourceConnectedForUi = true;
-            text = km == KB_SINGLE ? "P1: Keyboard" : (sdl[0].connected ? "P1: SDL3 Controller / Keyboard" : "P1: Idle / Keyboard");
-        } else if (i == shifted_p1_target) {
-            sourceConnectedForUi = true;
-            text = std_to_q("P" + std::to_string(i + 1) + ": " + (sdl[0].name.empty() ? "SDL3 Gamepad" : sdl[0].name) + " (Shifted)");
-        } else if (sdl[i].connected) {
-            sourceConnectedForUi = true;
-            text = std_to_q("P" + std::to_string(i + 1) + ": " + (sdl[i].name.empty() ? "SDL3 Gamepad" : sdl[i].name) + (sdl[i].has_motion ? " + gyro" : ""));
-        } else if (!sdlErr.empty() && i == 0) {
-            text = "P1: SDL3 error";
+        if (roster.valid && roster.ports[i].present) {
+            std::string name = roster.ports[i].name;
+            if (name.empty()) name = "Controller";
+            if (roster.ports[i].has_gyro) name += " + gyro";
+            text = std_to_q("P" + std::to_string(i + 1) + ": " + name);
         } else {
             text = std_to_q("P" + std::to_string(i + 1) + ": Not connected");
-        }
-        if (connected && sourceConnectedForUi) {
-            const std::string suffix = console_assignment_suffix(assignment, i);
-            if (!suffix.empty()) text += std_to_q(suffix);
         }
         padLabels[i]->setText(text);
     }

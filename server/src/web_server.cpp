@@ -36,6 +36,10 @@ void flush_rumble_to_udp(int sock, int client_idx) {
     const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
     const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
     const bool switch_asleep = switch2_sleep_confirmed();
+    const uint64_t roster_seq = refresh_roster_seq();
+    ns::RosterPacket roster_pkt{};
+    get_roster_packet(roster_pkt);
+    bool has_roster = false;
 
     {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -102,6 +106,10 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 }
             }
         }
+        if (roster_seq != c.udp_last_roster_seq) {
+            c.udp_last_roster_seq = roster_seq;
+            has_roster = true;
+        }
         if (state_seq != c.udp_last_server_state_seq) {
             c.udp_last_server_state_seq = state_seq;
             if (!any_assignment_packet) {
@@ -152,6 +160,12 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 std::println(stderr, "[udp] failed to send amiibo status packet: {}", std::strerror(errno));
         }
     }
+    if (has_roster) {
+        ssize_t sent = sendto(sock, &roster_pkt, sizeof(ns::RosterPacket), 0,
+                              reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+        if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::RosterPacket)))
+            std::println(stderr, "[udp] failed to send roster packet: {}", std::strerror(errno));
+    }
 }
 
 struct SessionData {
@@ -169,6 +183,9 @@ struct SessionData {
     bool has_pending_rumble[4] = {};
     bool has_pending_status[4] = {};
     bool has_pending_assignment[4] = {};
+    uint8_t pending_roster[sizeof(RosterPacket)];
+    bool has_pending_roster = false;
+    uint64_t last_roster_seq = 0;
     bool close_after_write = false;
     uint64_t assigned_sleep_seq = 0;
     bool had_slot = false;
@@ -236,6 +253,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
             std::fill(sd->has_pending_status, sd->has_pending_status + 4, false);
             std::fill(sd->has_pending_assignment, sd->has_pending_assignment + 4, false);
+            sd->has_pending_roster = false;
+            sd->last_roster_seq = 0;
             sd->close_after_write = false;
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
@@ -277,6 +296,18 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     }
                 }
                 break;
+            }
+
+            if (len == sizeof(ns::ClientNamesPacket)) {
+                uint32_t magic; memcpy(&magic, payload, 4);
+                if (magic == ns::CLIENT_NAMES_MAGIC) {
+                    if (sd->ws_slot >= 0) {
+                        ns::ClientNamesPacket names{};
+                        memcpy(&names, payload, sizeof(names));
+                        if (names.version == ns::SERVER_INFO_VERSION) store_client_source_names(sd->ws_slot, names);
+                    }
+                    break;
+                }
             }
 
             if (len >= ns::macro::CHUNK_HEADER_SIZE) {
@@ -367,8 +398,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
-            if (sd->ws_slot < 0 &&
+            if (sd->ws_slot < 0 && !sd->has_pending_roster &&
                     !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; })) break;
+            bool wrote = false;
             for (int s = 0; s < 4; ++s) {
                 if (sd->has_pending_rumble[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(RumblePacket)];
@@ -376,6 +408,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     if (lws_write(wsi, buffer + LWS_PRE, sizeof(RumblePacket), LWS_WRITE_BINARY) != sizeof(RumblePacket)) return -1;
                     sd->has_pending_rumble[s] = false;
                     sd->last_rumble_seq[s] = sd->pending_rumble_seq[s];
+                    wrote = true;
                     break;
                 }
                 if (sd->has_pending_status[s]) {
@@ -383,6 +416,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     memcpy(buffer + LWS_PRE, sd->pending_status[s], sizeof(ControllerStatusPacket));
                     if (lws_write(wsi, buffer + LWS_PRE, sizeof(ControllerStatusPacket), LWS_WRITE_BINARY) != sizeof(ControllerStatusPacket)) return -1;
                     sd->has_pending_status[s] = false;
+                    wrote = true;
                     break;
                 }
                 if (sd->has_pending_assignment[s]) {
@@ -390,8 +424,15 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     memcpy(buffer + LWS_PRE, sd->pending_assignment[s], sizeof(ClientAssignmentPacket));
                     if (lws_write(wsi, buffer + LWS_PRE, sizeof(ClientAssignmentPacket), LWS_WRITE_BINARY) != sizeof(ClientAssignmentPacket)) return -1;
                     sd->has_pending_assignment[s] = false;
+                    wrote = true;
                     break;
                 }
+            }
+            if (!wrote && sd->has_pending_roster) {
+                uint8_t buffer[LWS_PRE + sizeof(RosterPacket)];
+                memcpy(buffer + LWS_PRE, sd->pending_roster, sizeof(RosterPacket));
+                if (lws_write(wsi, buffer + LWS_PRE, sizeof(RosterPacket), LWS_WRITE_BINARY) != (int)sizeof(RosterPacket)) return -1;
+                sd->has_pending_roster = false;
             }
             if (sd->close_after_write &&
                     !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) &&
@@ -401,7 +442,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                                  (unsigned char*)"server full", 11);
                 return -1;
             }
-            if (std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) ||
+            if (sd->has_pending_roster ||
+                std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) ||
                 std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) ||
                 std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) lws_callback_on_writable(wsi);
             break;
@@ -422,10 +464,14 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 bool new_rumble = false;
                 bool new_status = false;
                 bool new_assignment = false;
+                bool new_roster = false;
                 const uint64_t state_seq = refresh_server_state_seq();
                 const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
                 const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
                 const bool switch_asleep = switch2_sleep_confirmed();
+                const uint64_t roster_seq = refresh_roster_seq();
+                ns::RosterPacket roster_pkt{};
+                get_roster_packet(roster_pkt);
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) {
                     sd->ws_slot = -1;
@@ -498,7 +544,13 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         new_assignment = true;
                     }
                 }
-                if (new_assignment || new_rumble || new_status) lws_callback_on_writable(wsi);
+                if (roster_seq != sd->last_roster_seq) {
+                    sd->last_roster_seq = roster_seq;
+                    memcpy(sd->pending_roster, &roster_pkt, sizeof(roster_pkt));
+                    sd->has_pending_roster = true;
+                    new_roster = true;
+                }
+                if (new_assignment || new_rumble || new_status || new_roster) lws_callback_on_writable(wsi);
             }
             lws_set_timer_usecs(wsi, 10 * 1000);
             break;

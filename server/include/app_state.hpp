@@ -106,6 +106,8 @@ struct ClientSession {
     bool pad_present[4]{};
     uint64_t pad_last_present_us[4]{};
     bool uses_pad_presence = false;
+    ns::RosterEntry source_pads[4]{};
+    uint64_t udp_last_roster_seq = 0;
 };
 
 
@@ -190,9 +192,14 @@ struct ServerContext {
     ClientSession clients[MAX_CLIENTS]{};
     std::atomic<uint64_t> pkts_rx{0};
     std::atomic<uint64_t> hid_writes{0};
+    std::atomic<uint64_t> host_out_reports{0};
     std::atomic<uint32_t> server_state_packed{UINT32_MAX};
     std::atomic<uint64_t> server_state_seq{1};
     std::atomic<uint64_t> server_state_last_refresh_us{0};
+    std::mutex roster_mtx;
+    ns::RosterEntry roster[HID_PORT_COUNT]{};
+    std::atomic<uint64_t> roster_seq{1};
+    std::atomic<uint64_t> roster_last_refresh_us{0};
     std::mutex server_macro_mtx;
     ServerMacroRuntime server_macros[MAX_CLIENTS][4]{};
     std::mutex server_macro_upload_mtx;
@@ -234,6 +241,9 @@ bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_cl
 ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_clients,
                                                               uint8_t free_virtual_slots,
                                                               bool switch_asleep = false);
+void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet);
+uint64_t refresh_roster_seq(uint64_t now = 0, bool force = false);
+uint64_t get_roster_packet(ns::RosterPacket& packet);
 bool any_client_source_active(InputSource source, uint64_t now = 0);
 void repair_future_client_timestamp(ClientSession& c, uint64_t now);
 void clear_motion(ClientSession& c, int subpad);

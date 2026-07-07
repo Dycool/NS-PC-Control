@@ -406,6 +406,69 @@ bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_cl
     return true;
 }
 
+void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return;
+    for (int s = 0; s < 4; ++s) {
+        ns::RosterEntry e = packet.pads[s];
+        e.present = e.present ? 1 : 0;
+        e.name[ns::ROSTER_NAME_CAP - 1] = '\0';
+        c.source_pads[s] = e;
+    }
+    g_ctx.roster_last_refresh_us.store(0, std::memory_order_relaxed);
+}
+
+static bool roster_entry_equal(const ns::RosterEntry& a, const ns::RosterEntry& b) {
+    return a.present == b.present && a.has_gyro == b.has_gyro
+        && std::memcmp(a.name, b.name, ns::ROSTER_NAME_CAP) == 0;
+}
+
+uint64_t refresh_roster_seq(uint64_t now, bool force) {
+    if (now == 0) now = now_us();
+    const uint64_t last_refresh = g_ctx.roster_last_refresh_us.load(std::memory_order_relaxed);
+    if (!force && last_refresh != 0 && elapsed_us_saturated(now, last_refresh) < SERVER_STATE_REFRESH_MIN_US) {
+        return g_ctx.roster_seq.load(std::memory_order_relaxed);
+    }
+    g_ctx.roster_last_refresh_us.store(now, std::memory_order_relaxed);
+
+    ns::RosterEntry built[HID_PORT_COUNT]{};
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        const ClientSession& c = g_ctx.clients[i];
+        if (!c.active) continue;
+        for (int s = 0; s < 4; ++s) {
+            const uint8_t port = c.client_assignment[s].primary_console_port;
+            if (port >= HID_PORT_COUNT) continue;
+            if (built[port].present) continue;
+            if (c.source_pads[s].present) {
+                built[port] = c.source_pads[s];
+            } else {
+                built[port].present = 1;
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(g_ctx.roster_mtx);
+    bool changed = false;
+    for (int h = 0; h < HID_PORT_COUNT; ++h) {
+        if (!roster_entry_equal(g_ctx.roster[h], built[h])) { changed = true; break; }
+    }
+    if (changed) {
+        for (int h = 0; h < HID_PORT_COUNT; ++h) g_ctx.roster[h] = built[h];
+        return g_ctx.roster_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    return g_ctx.roster_seq.load(std::memory_order_relaxed);
+}
+
+uint64_t get_roster_packet(ns::RosterPacket& packet) {
+    packet = ns::RosterPacket{};
+    std::lock_guard<std::mutex> lk(g_ctx.roster_mtx);
+    for (int h = 0; h < HID_PORT_COUNT; ++h) packet.ports[h] = g_ctx.roster[h];
+    return g_ctx.roster_seq.load(std::memory_order_relaxed);
+}
+
 ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_clients,
                                                               uint8_t free_virtual_slots,
                                                               bool switch_asleep) {
@@ -924,6 +987,8 @@ void reset_client_session_locked(ClientSession& c) {
     c.report.reset(); c.has_new_report = false;
     clear_all_motion(c);
     c.uses_pad_presence = c.udp_rumble_enabled = false;
+    for (int s = 0; s < 4; ++s) c.source_pads[s] = ns::RosterEntry{};
+    c.udp_last_roster_seq = 0;
     reset_client_slot_streams_locked(c);
 }
 

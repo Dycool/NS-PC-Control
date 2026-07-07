@@ -39,6 +39,8 @@ if (controllerType !== CONTROLLER_PRO) {
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
 const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341, CLIENT_ASSIGNMENT_SIZE = 16;
 const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
+const CLIENT_NAMES_MAGIC = 0x4E53434E, SERVER_INFO_VERSION = 1;
+const ROSTER_NAME_CAP = 48, ROSTER_ENTRY_SIZE = 50, CLIENT_NAMES_SIZE = 224;
 const PAD_PRESENT = 1;
 const FLAG_SINGLE_PAD = 0x04;
 const EXT_STATUS_BATTERY_VALID = 0x01;
@@ -47,7 +49,19 @@ const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
 const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
-let serverSlot = 255, serverFull = false;
+let serverSlot = 255, serverFull = false, lastNamesSentMs = 0;
+function sendTouchName() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    lastNamesSentMs = Date.now();
+    const buf = new ArrayBuffer(CLIENT_NAMES_SIZE), v = new DataView(buf);
+    v.setUint32(0, CLIENT_NAMES_MAGIC, true);
+    v.setUint8(4, SERVER_INFO_VERSION);
+    v.setUint8(8, 1); // pad 0 present
+    v.setUint8(9, 0); // no gyro flag
+    const name = 'Mobile'.slice(0, ROSTER_NAME_CAP - 1);
+    for (let k = 0; k < name.length; k++) v.setUint8(8 + 2 + k, name.charCodeAt(k) & 0xff);
+    ws.send(buf);
+}
 function handleTouchWsBinaryMessage(ev) {
     if (!(ev.data instanceof ArrayBuffer)) return;
     const view = new DataView(ev.data);
@@ -338,6 +352,7 @@ function sendPacket() {
         for(let k=8; k<EXT_REPORT_SIZE; k++) view.setUint8(off+k, 0);
     }
     ws.send(buffer);
+    if (Date.now() - lastNamesSentMs > 2000) sendTouchName();
 }
 document.getElementById('btnConnect').onclick = async () => {
     if (isConnected) {
@@ -351,7 +366,7 @@ document.getElementById('btnConnect').onclick = async () => {
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
     ws.onmessage = handleTouchWsBinaryMessage;
     ws.onopen = () => {
-        isConnected = true; serverFull = false; serverSlot = 255; const btn = document.getElementById('btnConnect');
+        isConnected = true; serverFull = false; serverSlot = 255; lastNamesSentMs = 0; const btn = document.getElementById('btnConnect');
         btn.innerText = "Connected"; btn.classList.add('connected');
         connectTimeout = setTimeout(() => {
             if (window._connectionFailed) { window._connectionFailed = false; return; }

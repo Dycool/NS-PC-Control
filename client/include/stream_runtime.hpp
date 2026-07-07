@@ -40,7 +40,17 @@ extern ServerAssignmentView g_serverAssignment;
 void reset_server_assignment_state();
 void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet);
 ServerAssignmentView server_assignment_snapshot();
-std::string console_assignment_suffix(const ServerAssignmentView& view, int subpad);
+
+struct RosterView {
+    bool valid = false;
+    ns::RosterEntry ports[4]{};
+    uint64_t last_update_us = 0;
+};
+extern std::mutex g_rosterMutex;
+extern RosterView g_roster;
+void reset_roster_state();
+void handle_roster_packet(const ns::RosterPacket& packet);
+RosterView roster_snapshot();
 
 void set_status_message(const std::string& s);
 std::string status_message();

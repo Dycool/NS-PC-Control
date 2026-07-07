@@ -507,6 +507,37 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // --- Client source controller names ---
+            if (bytes == static_cast<ssize_t>(sizeof(ns::ClientNamesPacket))) {
+                uint32_t nmagic = 0;
+                memcpy(&nmagic, udp_rx.data(), 4);
+                if (nmagic == ns::CLIENT_NAMES_MAGIC) {
+                    if (hmac_verify({g_ctx.hmac_key, 32},
+                                    {udp_rx.data(), ns::CLIENT_NAMES_AUTH_SIZE},
+                                    {udp_rx.data() + ns::CLIENT_NAMES_AUTH_SIZE, HMAC_TAG_SIZE}) == 0) {
+                        if (!rate_allow(sender.sin_addr.s_addr)) continue;
+                        ns::ClientNamesPacket names{};
+                        memcpy(&names, udp_rx.data(), sizeof(names));
+                        if (names.version == ns::SERVER_INFO_VERSION) {
+                            int cidx = -1;
+                            for (int i = 0; i < MAX_CLIENTS; ++i) {
+                                std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                                if (g_ctx.clients[i].active
+                                        && g_ctx.clients[i].source == InputSource::Udp
+                                        && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr
+                                        && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                                    cidx = i; break;
+                                }
+                            }
+                            if (cidx >= 0) store_client_source_names(cidx, names);
+                        }
+                    } else if (g_ctx.verbose) {
+                        std::println("bad names HMAC, dropped");
+                    }
+                    continue;
+                }
+            }
+
             // --- Normal controller packet ---
             uint32_t src_ip = sender.sin_addr.s_addr;
             if (!rate_allow(src_ip)) continue;

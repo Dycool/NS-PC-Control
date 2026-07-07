@@ -49,7 +49,6 @@ bool is_xbox_controller(const std::string& name, uint16_t vid) {
            contains_case_insensitive(name, "elite");
 }
 
-
 }
 
 void DigitalReleaseFilter::reset() {

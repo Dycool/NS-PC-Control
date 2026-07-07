@@ -1,4 +1,6 @@
 #include "input_settings.hpp"
+#include "macro_client.hpp"
+#include "mouse_input.hpp"
 #include "shared/macros.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -14,6 +16,8 @@ std::atomic<bool> g_gyroEnabled{true};
 std::atomic<bool> g_rumbleEnabled{true};
 std::atomic<bool> g_homeShortcutEnabled{true};
 std::atomic<bool> g_captureShortcutEnabled{true};
+std::atomic<bool> g_mouseModeEnabled{false};
+std::atomic<double> g_mouseSensitivity{1.0};
 std::atomic<int> g_controllerType{ns::CONTROLLER_TYPE_PRO};
 std::unordered_map<std::string, std::string> g_keyBindings;
 std::mutex g_keyBindingsMutex;
@@ -65,9 +69,20 @@ std::string normalize_key_name(std::string s) {
     return ns::macro::upper(ns::macro::trim(std::move(s)));
 }
 
+bool is_mouse_button_name(const std::string& name) {
+    std::string c = normalize_key_name(name);
+    return c.size() == 6 && c.compare(0, 5, "MOUSE") == 0 && c[5] >= '1' && c[5] <= '5';
+}
+
+bool mouse_mode_active() {
+    return g_mouseModeEnabled.load(std::memory_order_relaxed)
+        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF;
+}
+
 bool is_valid_key_code(const std::string& s) {
     std::string c = normalize_key_name(s);
     if (c.empty()) return true;
+    if (is_mouse_button_name(c)) return true;
     static const char* named[] = {
         "ESC","ESCAPE","SPACE","ENTER","TAB","BACKSPACE","DELETE","INSERT","HOME","END","PAGEUP","PAGEDOWN",
         "CAPSLOCK","NUMLOCK","SCROLLLOCK","PAUSE","SNAPSHOT","PRINTSCREEN","CONTEXTMENU","UP","DOWN","LEFT","RIGHT",
@@ -140,6 +155,9 @@ void load_saved_feature_toggles() {
     g_rumbleEnabled.store(settings.value("RumbleEnabled", true).toBool());
     g_homeShortcutEnabled.store(settings.value("HomeShortcutEnabled", true).toBool());
     g_captureShortcutEnabled.store(settings.value("CaptureShortcutEnabled", true).toBool());
+    g_mouseModeEnabled.store(settings.value("MouseModeEnabled", false).toBool());
+    double sens = settings.value("MouseSensitivity", 1.0).toDouble();
+    g_mouseSensitivity.store((sens >= 0.05 && sens <= 20.0) ? sens : 1.0);
     int controllerType = settings.value("ControllerType", ns::CONTROLLER_TYPE_PRO).toInt();
     if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_JOYCON_PAIR)
         controllerType = ns::CONTROLLER_TYPE_PRO;
@@ -153,7 +171,30 @@ void save_feature_toggles() {
     settings.setValue("RumbleEnabled", g_rumbleEnabled.load());
     settings.setValue("HomeShortcutEnabled", g_homeShortcutEnabled.load());
     settings.setValue("CaptureShortcutEnabled", g_captureShortcutEnabled.load());
+    settings.setValue("MouseModeEnabled", g_mouseModeEnabled.load());
+    settings.setValue("MouseSensitivity", g_mouseSensitivity.load());
     settings.setValue("ControllerType", g_controllerType.load());
+}
+
+void clear_mouse_button_inputs() {
+    bool bindings_changed = false;
+    {
+        std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
+        for (auto& kv : g_keyBindings) {
+            if (is_mouse_button_name(kv.second)) { kv.second.clear(); bindings_changed = true; }
+        }
+    }
+    if (bindings_changed) save_bindings();
+
+    bool macros_changed = false;
+    {
+        std::lock_guard<std::mutex> lk(g_macro_mtx);
+        for (auto& e : g_macro_entries) {
+            if (is_mouse_button_name(e.hotkey)) { e.hotkey.clear(); macros_changed = true; }
+        }
+        if (macros_changed) rebuild_macro_hotkey_state();
+    }
+    if (macros_changed) save_macro_entries_to_disk();
 }
 
 void set_key_pressed(const std::string& key, bool down) {
@@ -171,6 +212,16 @@ bool pressed_key_cache_contains(const std::string& key) {
 
 #ifdef _WIN32
 int windows_vk_for_key(const std::string& name) {
+    if (name.size() == 6 && name.compare(0, 5, "MOUSE") == 0) {
+        switch (name[5]) {
+            case '1': return VK_LBUTTON;
+            case '2': return VK_RBUTTON;
+            case '3': return VK_MBUTTON;
+            case '4': return VK_XBUTTON1;
+            case '5': return VK_XBUTTON2;
+            default: return 0;
+        }
+    }
     if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z') return name[0];
     if (name.size() == 1 && name[0] >= '0' && name[0] <= '9') return name[0];
     if (name.size() >= 2 && name[0] == 'F') {
@@ -216,6 +267,7 @@ void update_keyboard_state_cache() {
     for (const auto& kv : g_keyBindings) {
         std::string key = normalize_key_name(kv.second);
         if (key.empty()) continue;
+        if (is_mouse_button_name(key) && !mouse_mode_active()) { g_kbStateCache[key] = false; continue; }
         bool down = false;
 #ifdef _WIN32
         int vk = windows_vk_for_key(key);
@@ -233,6 +285,7 @@ void update_keyboard_state_cache() {
 bool key_is_down(const std::string& name_raw) {
     std::string name = normalize_key_name(name_raw);
     if (name.empty()) return false;
+    if (is_mouse_button_name(name) && !mouse_mode_active()) return false;
     {
         std::lock_guard<std::mutex> lk(g_kbCacheMutex);
         auto it = g_kbStateCache.find(name);
@@ -294,5 +347,7 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     apply_axis("LSTICK_UP", "LSTICK_DOWN", rep.ly);
     apply_axis("RSTICK_LEFT", "RSTICK_RIGHT", rep.rx);
     apply_axis("RSTICK_UP", "RSTICK_DOWN", rep.ry);
+
+    if (g_mouseModeEnabled.load(std::memory_order_relaxed)) mouse_apply_right_stick(rep.rx, rep.ry);
 }
 

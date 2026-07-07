@@ -9,6 +9,7 @@
 #include "qt_helpers.hpp"
 #include "dialogs.hpp"
 #include "main_window.hpp"
+#include "mouse_input.hpp"
 #include "stream_runtime.hpp"
 
 #ifdef _MSC_VER
@@ -42,6 +43,9 @@ int main(int argc, char** argv) {
     MainWindow window;
     apply_windows_taskbar_icon(&window);
     window.show();
-    return app.exec();
+    mouse_input_start(reinterpret_cast<void*>(window.winId()));
+    const int rc = app.exec();
+    mouse_input_stop();
+    return rc;
 }
 

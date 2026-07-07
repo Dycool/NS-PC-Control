@@ -19,6 +19,8 @@ extern std::atomic<bool> g_gyroEnabled;
 extern std::atomic<bool> g_rumbleEnabled;
 extern std::atomic<bool> g_homeShortcutEnabled;
 extern std::atomic<bool> g_captureShortcutEnabled;
+extern std::atomic<bool> g_mouseModeEnabled;
+extern std::atomic<double> g_mouseSensitivity;
 extern std::atomic<int> g_controllerType;
 extern std::unordered_map<std::string, std::string> g_keyBindings;
 extern std::mutex g_keyBindingsMutex;
@@ -53,3 +55,7 @@ bool pressed_key_cache_contains(const std::string& key);
 void update_keyboard_state_cache();
 bool key_is_down(const std::string& name_raw);
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode);
+
+bool is_mouse_button_name(const std::string& name);
+bool mouse_mode_active();
+void clear_mouse_button_inputs();

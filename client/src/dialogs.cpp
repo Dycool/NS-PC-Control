@@ -15,6 +15,17 @@
 #include <mutex>
 #include <unordered_set>
 
+static std::string mouse_button_name_from_event(QMouseEvent* event) {
+    switch (event->button()) {
+        case Qt::LeftButton:    return "MOUSE1";
+        case Qt::RightButton:   return "MOUSE2";
+        case Qt::MiddleButton:  return "MOUSE3";
+        case Qt::BackButton:    return "MOUSE4";
+        case Qt::ForwardButton: return "MOUSE5";
+        default:                return {};
+    }
+}
+
 KeyCaptureDialog::KeyCaptureDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle("Press key");
     setModal(true);
@@ -90,28 +101,38 @@ void BindingsDialog::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->isAutoRepeat()) return;
+    if (event->key() == Qt::Key_Escape) { applyCapturedKey({}); return; }
+    QString key = key_name_from_qkey(event);
+    if (!key.isEmpty()) applyCapturedKey(normalize_key_name(q_to_std(key)));
+}
+
+void BindingsDialog::mousePressEvent(QMouseEvent* event) {
+    if (listeningIndex < 0 || !g_mouseModeEnabled.load()) { QDialog::mousePressEvent(event); return; }
+    std::string name = mouse_button_name_from_event(event);
+    if (name.empty()) { QDialog::mousePressEvent(event); return; }
+    applyCapturedKey(name);
+}
+
+void BindingsDialog::applyCapturedKey(const std::string& name) {
     const auto keys = binding_keys();
-    if (event->key() == Qt::Key_Escape) {
+    if (listeningIndex < 0 || listeningIndex >= (int)keys.size()) return;
+    if (name.empty()) {
         editBindings[keys[listeningIndex].first].clear();
     } else {
-        QString key = key_name_from_qkey(event);
-        if (!key.isEmpty()) {
-            std::string name = q_to_std(key);
-            bool already = std::any_of(editBindings.begin(), editBindings.end(), [&](const auto& kv) {
-                return kv.first != keys[listeningIndex].first && normalize_key_name(kv.second) == name;
-            });
-            if (!(already && setupMode)) {
-                if (!setupMode && macro_entry_hotkey_conflicts(name, -1)) {
-                    QMessageBox::information(this, "Key Conflict", std_to_q("The key " + name + " is already used by a macro."));
-                    listeningIndex = -1; refresh(); return;
-                }
-                for (auto& kv : editBindings) if (normalize_key_name(kv.second) == name) kv.second.clear();
-                editBindings[keys[listeningIndex].first] = name;
-            } else {
-                refresh();
-                valueLabels[listeningIndex]->setText("...");
-                return;
+        bool already = std::any_of(editBindings.begin(), editBindings.end(), [&](const auto& kv) {
+            return kv.first != keys[listeningIndex].first && normalize_key_name(kv.second) == name;
+        });
+        if (!(already && setupMode)) {
+            if (!setupMode && macro_entry_hotkey_conflicts(name, -1)) {
+                QMessageBox::information(this, "Key Conflict", std_to_q("The key " + name + " is already used by a macro."));
+                listeningIndex = -1; refresh(); return;
             }
+            for (auto& kv : editBindings) if (normalize_key_name(kv.second) == name) kv.second.clear();
+            editBindings[keys[listeningIndex].first] = name;
+        } else {
+            refresh();
+            valueLabels[listeningIndex]->setText("...");
+            return;
         }
     }
     refresh();
@@ -173,6 +194,27 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     rumbleBox = add_box("Rumble", g_rumbleEnabled.load());
     homeShortcutBox = add_box("Home shortcut (LStick + RStick)", g_homeShortcutEnabled.load());
     captureShortcutBox = add_box("Capture shortcut (Minus + Plus)", g_captureShortcutEnabled.load());
+    mouseModeBox = add_box("Mouse Mode (mouse aims right stick; mouse buttons bindable)", g_mouseModeEnabled.load());
+
+    auto* mouseSensRow = new QGridLayout();
+    mouseSensitivityLabel = new QLabel("Mouse sensitivity", this);
+    mouseSensRow->addWidget(mouseSensitivityLabel, 0, 0);
+    mouseSensitivitySlider = new QSlider(Qt::Horizontal, this);
+    mouseSensitivitySlider->setRange(1, 100);
+    mouseSensitivitySlider->setSingleStep(1);
+    mouseSensitivitySlider->setPageStep(5);
+    mouseSensitivitySlider->setValue(std::clamp(static_cast<int>(g_mouseSensitivity.load() * 10.0 + 0.5), 1, 100));
+    mouseSensRow->addWidget(mouseSensitivitySlider, 0, 1);
+    mouseSensitivityValue = new QLabel(this);
+    mouseSensitivityValue->setMinimumWidth(36);
+    mouseSensitivityValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    mouseSensRow->addWidget(mouseSensitivityValue, 0, 2);
+    outer->addLayout(mouseSensRow);
+    connect(mouseSensitivitySlider, &QSlider::valueChanged, this, [this](int v) {
+        mouseSensitivityValue->setText(QString::number(v / 10.0, 'f', 1));
+    });
+    mouseSensitivityValue->setText(QString::number(mouseSensitivitySlider->value() / 10.0, 'f', 1));
+    connect(mouseModeBox, &QCheckBox::toggled, this, [this] { updateMouseModeControls(); });
 
     auto* controllerRow = new QGridLayout();
     controllerRow->addWidget(new QLabel("Emulated controller", this), 0, 0);
@@ -209,6 +251,21 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     connect(amiiboTimer, &QTimer::timeout, this, [this] { updateAmiiboButton(); });
     amiiboTimer->start();
     updateAmiiboButton();
+    updateMouseModeControls();
+}
+
+void SettingsDialog::updateMouseModeControls() {
+    const bool keyboardActive = g_keyboardMode.load() != KB_OFF;
+    if (mouseModeBox) {
+        mouseModeBox->setEnabled(keyboardActive);
+        mouseModeBox->setToolTip(keyboardActive
+            ? QString()
+            : "Turn on a Keyboard Mode first — mouse mode drives the keyboard player.");
+    }
+    const bool sensEnabled = keyboardActive && mouseModeBox && mouseModeBox->isChecked();
+    if (mouseSensitivityLabel) mouseSensitivityLabel->setEnabled(sensEnabled);
+    if (mouseSensitivitySlider) mouseSensitivitySlider->setEnabled(sensEnabled);
+    if (mouseSensitivityValue) mouseSensitivityValue->setEnabled(sensEnabled);
 }
 
 void SettingsDialog::updateAmiiboButton() {
@@ -258,8 +315,12 @@ void SettingsDialog::saveSettings() {
     g_rumbleEnabled.store(rumble);
     g_homeShortcutEnabled.store(homeShortcutBox->isChecked());
     g_captureShortcutEnabled.store(captureShortcutBox->isChecked());
+    const bool mouseMode = mouseModeBox->isChecked();
+    g_mouseModeEnabled.store(mouseMode);
+    g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
     g_controllerType.store(controllerTypeBox->currentData().toInt());
     save_feature_toggles();
+    if (!mouseMode) clear_mouse_button_inputs();
     sync_sdl_input_options();
     g_sdlInput.set_gyro_enabled(gyro);
     if (!rumble) g_sdlInput.stop_all_rumble();
@@ -328,27 +389,36 @@ void MacroDialog::keyPressEvent(QKeyEvent* event) {
         QDialog::keyPressEvent(event);
         return;
     }
+    if (event->key() == Qt::Key_Escape) { applyCapturedMacroHotkey({}); return; }
+    QString key = key_name_from_qkey(event);
+    if (!key.isEmpty()) { applyCapturedMacroHotkey(normalize_key_name(q_to_std(key))); return; }
+    listeningMacro = -1;
+    rebuild();
+}
+
+void MacroDialog::mousePressEvent(QMouseEvent* event) {
+    if (listeningMacro < 0 || !g_mouseModeEnabled.load()) { QDialog::mousePressEvent(event); return; }
+    std::string name = mouse_button_name_from_event(event);
+    if (name.empty()) { QDialog::mousePressEvent(event); return; }
+    applyCapturedMacroHotkey(name);
+}
+
+void MacroDialog::applyCapturedMacroHotkey(const std::string& name) {
     bool changed = false;
     if (listeningMacro >= 0 && listeningMacro < (int)g_macro_entries.size()) {
-        if (event->key() == Qt::Key_Escape) {
+        if (name.empty()) {
             std::lock_guard<std::mutex> lk(g_macro_mtx);
             if (listeningMacro >= 0 && listeningMacro < (int)g_macro_entries.size()) {
                 g_macro_entries[listeningMacro].hotkey.clear();
                 rebuild_macro_hotkey_state();
                 changed = true;
             }
-        } else {
-            QString key = key_name_from_qkey(event);
-            if (!key.isEmpty()) {
-                std::string name = normalize_key_name(q_to_std(key));
-                if (validate_macro_hotkey_for_entry_qt(name, listeningMacro, this)) {
-                    std::lock_guard<std::mutex> lk(g_macro_mtx);
-                    if (listeningMacro >= 0 && listeningMacro < (int)g_macro_entries.size()) {
-                        g_macro_entries[listeningMacro].hotkey = name;
-                        rebuild_macro_hotkey_state();
-                        changed = true;
-                    }
-                }
+        } else if (validate_macro_hotkey_for_entry_qt(name, listeningMacro, this)) {
+            std::lock_guard<std::mutex> lk(g_macro_mtx);
+            if (listeningMacro >= 0 && listeningMacro < (int)g_macro_entries.size()) {
+                g_macro_entries[listeningMacro].hotkey = name;
+                rebuild_macro_hotkey_state();
+                changed = true;
             }
         }
     }

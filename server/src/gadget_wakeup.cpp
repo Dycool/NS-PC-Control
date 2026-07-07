@@ -176,6 +176,7 @@ namespace {
 struct FfsPortState {
     int ep0_fd = -1;
     bool descriptors_written = false;
+    bool host_enabled = false;
     uint8_t idle_rate = 0;
     uint8_t protocol = 1;
     std::deque<std::vector<uint8_t>> control_reports;
@@ -363,6 +364,7 @@ static void close_functionfs_ep0s() {
         if (p.ep0_fd >= 0) close(p.ep0_fd);
         p.ep0_fd = -1;
         p.descriptors_written = false;
+        p.host_enabled = false;
         p.control_reports.clear();
         p.idle_rate = 0;
         p.protocol = 1;
@@ -514,6 +516,7 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
         if (!dir_in && length > 0) {
             std::vector<uint8_t> discard;
             read_ep0_payload(st.ep0_fd, discard, length);
+            return;
         }
         if (dir_in && length > 0) {
             // Be conservative for rare standard IN requests that FunctionFS passes
@@ -548,9 +551,10 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
                 return;
             }
             case 0x09: { // SET_REPORT
-                std::vector<uint8_t> payload;
-                if (length > 0 && read_ep0_payload(st.ep0_fd, payload, length)) {
-                    queue_control_report(id, value, payload);
+                if (length > 0) {
+                    std::vector<uint8_t> payload;
+                    if (read_ep0_payload(st.ep0_fd, payload, length)) queue_control_report(id, value, payload);
+                    return;
                 }
                 ep0_write_status(st.ep0_fd);
                 return;
@@ -572,6 +576,7 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
     if (!dir_in && length > 0) {
         std::vector<uint8_t> discard;
         read_ep0_payload(st.ep0_fd, discard, length);
+        return;
     }
     ep0_write_status(st.ep0_fd);
 }
@@ -600,9 +605,17 @@ static void pump_functionfs_ep0_events(int id) {
                     break;
                 case FUNCTIONFS_DISABLE:
                 case FUNCTIONFS_UNBIND:
+                    if (g_ctx.verbose && g_ffs_ports[id].host_enabled)
+                        std::println("[ffs] port {} host {}", id + 1,
+                                     events[e].type == FUNCTIONFS_DISABLE ? "disabled interface" : "unbound gadget");
+                    g_ffs_ports[id].host_enabled = false;
                     mark_switch2_usb_host_disconnected();
                     break;
                 case FUNCTIONFS_ENABLE:
+                    if (g_ctx.verbose && !g_ffs_ports[id].host_enabled)
+                        std::println("[ffs] port {} host enabled interface (configuration set)", id + 1);
+                    g_ffs_ports[id].host_enabled = true;
+                    break;
                 case FUNCTIONFS_BIND:
                 case FUNCTIONFS_SUSPEND:
                 case FUNCTIONFS_RESUME:
