@@ -17,6 +17,7 @@
 #include <vector>
 
 std::atomic<bool> g_connected{false};
+std::atomic<bool> g_nfcPolling[4]{false, false, false, false};
 std::thread g_senderThread;
 std::atomic<bool> g_senderRunning{false};
 uint8_t g_hmacKey[32]{};
@@ -459,6 +460,7 @@ std::expected<void, std::string> start_connection(const std::string& target) {
 
 void stop_connection() {
     const bool was_connected = g_connected.exchange(false);
+    for (int i = 0; i < 4; ++i) g_nfcPolling[i].store(false);
     if (g_senderThread.joinable()) {
         g_senderRunning = false;
         g_senderThread.join();

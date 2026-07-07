@@ -95,6 +95,8 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             ns::ControllerStatusPacket sp{};
             std::memcpy(&sp, buf, sizeof(sp));
             if (sp.version == ns::SERVER_INFO_VERSION && sp.subpad < 4) {
+                const bool polling = (sp.reserved[3] & ns::CONTROLLER_STATUS_FLAG_NFC_POLLING) != 0;
+                g_nfcPolling[sp.subpad].store(polling, std::memory_order_relaxed);
                 int controller = controller_for_slot[sp.subpad];
                 if (controller >= 0) {
                     int player_index = (sp.player_index < 4) ? static_cast<int>(sp.player_index) : -1;

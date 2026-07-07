@@ -109,6 +109,7 @@ struct ClientSession {
     ns::RosterEntry source_pads[4]{};
     uint64_t udp_last_roster_seq = 0;
     uint64_t udp_last_roster_send_us = 0;
+    bool udp_last_nfc_polling[4]{};
 };
 
 
@@ -187,6 +188,7 @@ struct ServerContext {
     std::atomic<bool> switch2_force_next_wake{false}; // compatibility/no-op; runtime wake is RX-state based
     std::atomic<bool> switch2_delayed_wake_check_running{false};
     std::atomic<uint8_t> console_player_leds[HID_PORT_COUNT]{};
+    std::atomic<bool> console_nfc_polling[HID_PORT_COUNT]{};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};
     std::mutex mtx[MAX_CLIENTS];

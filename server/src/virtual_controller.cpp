@@ -119,6 +119,8 @@ static void nfc_transition(ControllerRuntime& rt, NfcRuntimeState next, std::str
         std::println("[nfc] port={} {} -> {} ({})", rt.ctrl + 1, nfc_state_name(rt.nfc_state), nfc_state_name(next), reason);
     }
     rt.nfc_state = next;
+    const bool polling = (next == NfcRuntimeState::PollingForTag || next == NfcRuntimeState::Discovery);
+    g_ctx.console_nfc_polling[rt.ctrl].store(polling, std::memory_order_relaxed);
 }
 
 static const char* mcu_cmd_name(uint8_t cmd, uint8_t subcmd) {
@@ -337,18 +339,12 @@ void nfc_set_power_state(ControllerRuntime& rt, uint8_t power_state) {
 }
 
 void nfc_set_config(ControllerRuntime& rt, std::span<const uint8_t> config) {
-    if (rt.nfc_power_state == MCU_POWER_READY && config.size() > 2) {
-        if (config[2] == MCU_POWER_READY || config[2] == MCU_POWER_CONFIGURED_NFC) {
-            rt.nfc_power_state = config[2];
-        }
-    }
-    if (rt.nfc_power_state == MCU_POWER_CONFIGURED_NFC) {
-        rt.nfc_tag_state = NfcTagState::None;
-        rt.nfc_seq_no = 0;
-        rt.nfc_ack_seq_no = 0;
-        rt.nfc_last_uid_valid = false;
-        nfc_queue_status(rt);
-    }
+    rt.nfc_power_state = MCU_POWER_CONFIGURED_NFC;
+    rt.nfc_tag_state = NfcTagState::None;
+    rt.nfc_seq_no = 0;
+    rt.nfc_ack_seq_no = 0;
+    rt.nfc_last_uid_valid = false;
+    nfc_queue_status(rt);
 }
 } // namespace
 
@@ -618,6 +614,7 @@ void reset_nfc_runtime(ControllerRuntime& rt, bool full_reset) {
     rt.nfc_mcu_configured = false;
     rt.nfc_mcu_resumed = false;
     rt.nfc_state = NfcRuntimeState::Off;
+    g_ctx.console_nfc_polling[rt.ctrl].store(false, std::memory_order_relaxed);
     rt.nfc_tag_state = NfcTagState::None;
     rt.nfc_power_state = MCU_POWER_SUSPENDED;
     rt.nfc_last_mcu_cmd = 0xFF;

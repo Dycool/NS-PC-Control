@@ -5,6 +5,7 @@
 #include "qt_helpers.hpp"
 #include "stream_runtime.hpp"
 #include <QApplication>
+#include <QFileDialog>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QGridLayout>
@@ -54,8 +55,11 @@ MainWindow::MainWindow() {
     grid->addWidget(settingsBtn, 3, 3);
 
     connectBtn = new QPushButton("Connect", this);
+    amiiboBtn = new QPushButton("Scan amiibo", this);
+    amiiboBtn->setVisible(false);
     quitBtn = new QPushButton("Quit", this);
     grid->addWidget(connectBtn, 4, 1);
+    grid->addWidget(amiiboBtn, 4, 2);
     grid->addWidget(quitBtn, 4, 3);
 
     auto* sep = new QFrame(this);
@@ -94,6 +98,25 @@ MainWindow::MainWindow() {
         updateUi();
     });
     connect(connectBtn, &QPushButton::clicked, this, [this] { toggleConnection(); });
+    connect(amiiboBtn, &QPushButton::clicked, this, [this] {
+        amiiboBtn->setEnabled(false);
+        QString path = QFileDialog::getOpenFileName(this, "Select Amiibo Dump", "", "Amiibo Files (*.bin)");
+
+        const int selectedType = g_controllerType.load(std::memory_order_relaxed);
+        const uint8_t subpad = (selectedType == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 1 : 0;
+
+        if (!path.isEmpty()) {
+            std::string err;
+            if (!queue_amiibo_upload_from_file(q_to_std(path), subpad, err)) {
+                QMessageBox::warning(this, "Amiibo Error", std_to_q("Failed to stage amiibo: " + err));
+            } else {
+                set_status_message("Amiibo staged successfully: " + q_to_std(path));
+            }
+        }
+        if (g_nfcPolling[subpad].load()) {
+            amiiboBtn->setEnabled(true);
+        }
+    });
     connect(quitBtn, &QPushButton::clicked, qApp, &QApplication::quit);
 
     timer = new QTimer(this);
@@ -160,7 +183,18 @@ void MainWindow::updateUi() {
     if (!connected) {
         for (int i = 0; i < 4; ++i)
             padLabels[i]->setText(std_to_q("P" + std::to_string(i + 1) + ": Not connected"));
+        amiiboBtn->setVisible(false);
         return;
+    }
+
+    const int selectedType = g_controllerType.load(std::memory_order_relaxed);
+    if (selectedType == ns::CONTROLLER_TYPE_JOYCON_R || selectedType == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
+        amiiboBtn->setVisible(true);
+        const uint8_t subpad = (selectedType == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 1 : 0;
+        const bool polling = g_nfcPolling[subpad].load(std::memory_order_relaxed);
+        amiiboBtn->setEnabled(polling);
+    } else {
+        amiiboBtn->setVisible(false);
     }
 
     const RosterView roster = roster_snapshot();

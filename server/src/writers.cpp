@@ -435,6 +435,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                             if (port_needed) report_for_port = out_reports[h];
                             const MotionReport* motion_for_port = nullptr;
                             bool has_motion_for_port = false;
+                            MotionReport jc_l_motion[3]{};
                             if (port_needed) {
                                 int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                 motion_for_port = get_hid_report(snap[cidx], sidx).motion;
@@ -446,6 +447,17 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 if (hw_slots[h].pair_member && !hw_slots[h].pair_right) {
                                     motion_for_port = nullptr;
                                     has_motion_for_port = false;
+                                }
+                                if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
+                                    for (int idx = 0; idx < 3; ++idx) {
+                                        jc_l_motion[idx].ax = -motion_for_port[idx].ax;
+                                        jc_l_motion[idx].ay = -motion_for_port[idx].ay;
+                                        jc_l_motion[idx].az = motion_for_port[idx].az;
+                                        jc_l_motion[idx].gx = -motion_for_port[idx].gx;
+                                        jc_l_motion[idx].gy = -motion_for_port[idx].gy;
+                                        jc_l_motion[idx].gz = motion_for_port[idx].gz;
+                                    }
+                                    motion_for_port = jc_l_motion;
                                 }
                             }
                             if (rt[h].input_report_mode == RID_INPUT_NFC_IR
