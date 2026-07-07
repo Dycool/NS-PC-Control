@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +19,7 @@
 #include <iostream>
 #include <mutex>
 #include <poll.h>
+#include <pthread.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/functionfs.h>
 #include <print>
@@ -180,9 +183,25 @@ struct FfsPortState {
     uint8_t idle_rate = 0;
     uint8_t protocol = 1;
     std::deque<std::vector<uint8_t>> control_reports;
+
+    int ep_in_fd = -1;   // ep1, opened blocking
+    int ep_out_fd = -1;  // ep2, opened blocking
+    std::atomic<bool> io_running{false};
+    std::atomic<bool> reader_exited{true};   // observed by stop to know when to stop signalling
+    std::atomic<bool> writer_exited{true};
+    std::thread reader_thread;               // blocking read(ep2) -> out_reports
+    std::thread writer_thread;               // in_reports -> blocking write(ep1)
+    std::mutex out_mtx;
+    std::deque<std::vector<uint8_t>> out_reports;  // host -> us (interrupt OUT)
+    std::mutex in_mtx;
+    std::condition_variable in_cv;
+    std::deque<std::vector<uint8_t>> in_reports;   // us -> host (interrupt IN)
 };
 
 std::array<FfsPortState, HID_PORT_COUNT> g_ffs_ports;
+
+static bool functionfs_start_port_io(int id);
+static void functionfs_stop_port_io(int id);
 
 #pragma pack(push, 1)
 struct HidDescriptor {
@@ -360,6 +379,7 @@ static bool write_all_fd(int fd, const std::vector<uint8_t>& data) {
 }
 
 static void close_functionfs_ep0s() {
+    for (int i = 0; i < HID_PORT_COUNT; ++i) functionfs_stop_port_io(i);
     for (auto& p : g_ffs_ports) {
         if (p.ep0_fd >= 0) close(p.ep0_fd);
         p.ep0_fd = -1;
@@ -626,6 +646,120 @@ static void pump_functionfs_ep0_events(int id) {
     }
 }
 
+static void ffs_io_wake_handler(int) {}
+
+static void ensure_ffs_io_signal_installed() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        struct sigaction sa{};
+        sa.sa_handler = ffs_io_wake_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0; // deliberately no SA_RESTART: interrupted syscalls return EINTR
+        sigaction(SIGUSR1, &sa, nullptr);
+    });
+}
+
+static void ffs_reader_loop(int id) {
+    FfsPortState& st = g_ffs_ports[id];
+    std::vector<uint8_t> buf(HIDG_MAX_REPORT_SIZE);
+    while (st.io_running.load(std::memory_order_relaxed)) {
+        int fd = st.ep_out_fd;
+        if (fd < 0) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
+        ssize_t r = read(fd, buf.data(), buf.size());
+        if (r > 0) {
+            std::lock_guard<std::mutex> lk(st.out_mtx);
+            if (st.out_reports.size() >= 64) st.out_reports.pop_front();
+            st.out_reports.emplace_back(buf.begin(), buf.begin() + r);
+            continue;
+        }
+        // r <= 0: interface not enabled yet, host disabled it, or the request
+        // was cancelled (EINTR from the shutdown signal). Back off briefly so we
+        // do not spin while the endpoint is down.
+        if (r < 0 && errno == EINTR) continue;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    st.reader_exited.store(true, std::memory_order_release);
+}
+
+// Blocking write(ep1) loop: drains in_reports and submits each report on the
+// interrupt-IN endpoint, waiting for the host to poll it.
+static void ffs_writer_loop(int id) {
+    FfsPortState& st = g_ffs_ports[id];
+    while (st.io_running.load(std::memory_order_relaxed)) {
+        std::vector<uint8_t> report;
+        {
+            std::unique_lock<std::mutex> lk(st.in_mtx);
+            st.in_cv.wait_for(lk, std::chrono::milliseconds(20), [&] {
+                return !st.in_reports.empty() || !st.io_running.load(std::memory_order_relaxed);
+            });
+            if (!st.io_running.load(std::memory_order_relaxed)) break;
+            if (st.in_reports.empty()) continue;
+            report = std::move(st.in_reports.front());
+            st.in_reports.pop_front();
+        }
+        int fd = st.ep_in_fd;
+        if (fd < 0 || report.empty()) continue;
+        // Blocking write; if the interface is disabled it errors and the report
+        // is simply dropped (the console re-reads a fresh report on wake).
+        ssize_t w = write(fd, report.data(), report.size());
+        (void)w;
+    }
+    st.writer_exited.store(true, std::memory_order_release);
+}
+
+static bool functionfs_start_port_io(int id) {
+    if (id < 0 || id >= HID_PORT_COUNT) return false;
+    FfsPortState& st = g_ffs_ports[id];
+    if (st.io_running.load(std::memory_order_relaxed)) return true;
+    ensure_ffs_io_signal_installed();
+
+    st.ep_in_fd  = open(functionfs_ep_in_path(id).c_str(),  O_WRONLY);
+    st.ep_out_fd = open(functionfs_ep_out_path(id).c_str(), O_RDONLY);
+    if (st.ep_in_fd < 0 || st.ep_out_fd < 0) {
+        if (st.ep_in_fd  >= 0) { close(st.ep_in_fd);  st.ep_in_fd  = -1; }
+        if (st.ep_out_fd >= 0) { close(st.ep_out_fd); st.ep_out_fd = -1; }
+        return false;
+    }
+    { std::lock_guard<std::mutex> lk(st.out_mtx); st.out_reports.clear(); }
+    { std::lock_guard<std::mutex> lk(st.in_mtx);  st.in_reports.clear();  }
+    st.reader_exited.store(false, std::memory_order_relaxed);
+    st.writer_exited.store(false, std::memory_order_relaxed);
+    st.io_running.store(true, std::memory_order_relaxed);
+    st.reader_thread = std::thread(ffs_reader_loop, id);
+    st.writer_thread = std::thread(ffs_writer_loop, id);
+    return true;
+}
+
+static void functionfs_stop_port_io(int id) {
+    if (id < 0 || id >= HID_PORT_COUNT) return;
+    FfsPortState& st = g_ffs_ports[id];
+    st.io_running.store(false, std::memory_order_relaxed);
+    st.in_cv.notify_all();
+
+    if (st.reader_thread.joinable()) {
+        pthread_t h = st.reader_thread.native_handle();
+        while (!st.reader_exited.load(std::memory_order_acquire)) {
+            pthread_kill(h, SIGUSR1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        st.reader_thread.join();
+    }
+    if (st.writer_thread.joinable()) {
+        pthread_t h = st.writer_thread.native_handle();
+        while (!st.writer_exited.load(std::memory_order_acquire)) {
+            st.in_cv.notify_all();
+            pthread_kill(h, SIGUSR1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        st.writer_thread.join();
+    }
+
+    if (st.ep_in_fd  >= 0) { close(st.ep_in_fd);  st.ep_in_fd  = -1; }
+    if (st.ep_out_fd >= 0) { close(st.ep_out_fd); st.ep_out_fd = -1; }
+    { std::lock_guard<std::mutex> lk(st.out_mtx); st.out_reports.clear(); }
+    { std::lock_guard<std::mutex> lk(st.in_mtx);  st.in_reports.clear();  }
+}
+
 } // namespace
 
 bool functionfs_transport_active() {
@@ -646,6 +780,7 @@ bool functionfs_nodes_ready() {
         if (g_ffs_ports[i].ep0_fd < 0 || !g_ffs_ports[i].descriptors_written) return false;
         if (access(functionfs_ep_in_path(i).c_str(), R_OK | W_OK) != 0) return false;
         if (access(functionfs_ep_out_path(i).c_str(), R_OK | W_OK) != 0) return false;
+        if (!functionfs_io_ready(i)) return false;
     }
     return true;
 }
@@ -666,11 +801,52 @@ bool usb_transport_supports_nfc_reports() {
         || g_ctx.nfc_gadget_active.load(std::memory_order_relaxed);
 }
 
+bool functionfs_io_ready(int id) {
+    if (id < 0 || id >= HID_PORT_COUNT) return false;
+    const FfsPortState& st = g_ffs_ports[id];
+    return st.io_running.load(std::memory_order_relaxed)
+        && st.ep_in_fd >= 0 && st.ep_out_fd >= 0;
+}
+
+bool functionfs_host_enabled(int id) {
+    if (id < 0 || id >= HID_PORT_COUNT) return false;
+    return g_ffs_ports[id].host_enabled;
+}
+
+bool functionfs_submit_input_report(int id, const uint8_t* data, size_t len) {
+    if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
+    if (!data || len == 0) return false;
+    FfsPortState& st = g_ffs_ports[id];
+    if (!st.host_enabled || !functionfs_io_ready(id)) return false;
+    {
+        std::lock_guard<std::mutex> lk(st.in_mtx);
+        if (st.in_reports.size() >= 8) st.in_reports.pop_front();
+        st.in_reports.emplace_back(data, data + len);
+    }
+    st.in_cv.notify_one();
+    return true;
+}
+
+bool functionfs_poll_output_report(int id, std::vector<unsigned char>& out_report) {
+    out_report.clear();
+    if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
+    FfsPortState& st = g_ffs_ports[id];
+    std::lock_guard<std::mutex> lk(st.out_mtx);
+    if (st.out_reports.empty()) return false;
+    out_report.assign(st.out_reports.front().begin(), st.out_reports.front().end());
+    st.out_reports.pop_front();
+    return true;
+}
+
+void functionfs_drain_output(int id) {
+    if (id < 0 || id >= HID_PORT_COUNT) return;
+    FfsPortState& st = g_ffs_ports[id];
+    std::lock_guard<std::mutex> lk(st.out_mtx);
+    st.out_reports.clear();
+}
+
 static bool create_hid_function(int id) {
     fs::path func = fs::path(GADGET_DIR) / "functions" / ("hid.usb" + std::to_string(id));
-    // report_length sets both the write cap and the interrupt endpoint size in
-    // f_hid, so it stays 64 for the modern gadget unless --amiibo needs the
-    // 362-byte NFC report.
     const std::string report_length = g_ctx.legacy_mode ? "8" : std::to_string(active_hidg_report_length());
     if (!mkdirs(func)
             || !write_file(func / "protocol",      "0")
@@ -1742,16 +1918,32 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
                 chmod(path, 0666);
             }
         }
-        if (all_seen && nodes_ready()) {
-            if (g_ctx.verbose) {
-                if (use_functionfs)
-                    std::println("[gadget] Done. Exposed {} FunctionFS HID interface(s) ({}/port*/ep1+ep2)",
-                                 HID_PORT_COUNT, FFS_BASE_DIR);
-                else
-                    std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})",
-                                 HID_PORT_COUNT, HID_PORT_COUNT - 1);
+        if (all_seen) {
+            if (use_functionfs) {
+                // Bring up the blocking data-endpoint I/O threads now that ep1/ep2
+                // exist. Without them the OUT endpoint never queues a USB request
+                // and the console's wired handshake would NAK-timeout forever.
+                // functionfs_nodes_ready() checks io_ready below, so start first.
+                bool io_ok = true;
+                for (int i = 0; i < HID_PORT_COUNT; ++i)
+                    if (!functionfs_start_port_io(i)) io_ok = false;
+                if (!io_ok) {
+                    for (int i = 0; i < HID_PORT_COUNT; ++i) functionfs_stop_port_io(i);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
             }
-            return true;
+            if (nodes_ready()) {
+                if (g_ctx.verbose) {
+                    if (use_functionfs)
+                        std::println("[gadget] Done. Exposed {} FunctionFS HID interface(s) ({}/port*/ep1+ep2)",
+                                     HID_PORT_COUNT, FFS_BASE_DIR);
+                    else
+                        std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})",
+                                     HID_PORT_COUNT, HID_PORT_COUNT - 1);
+                }
+                return true;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

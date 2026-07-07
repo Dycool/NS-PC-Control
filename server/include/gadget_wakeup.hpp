@@ -23,3 +23,10 @@ std::string functionfs_ep_in_path(int id);
 std::string functionfs_ep_out_path(int id);
 bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_report);
 bool usb_transport_supports_nfc_reports();
+
+// FunctionFS data-endpoint transport (dedicated blocking I/O threads own ep1/ep2).
+bool functionfs_io_ready(int id);
+bool functionfs_host_enabled(int id);
+bool functionfs_submit_input_report(int id, const uint8_t* data, size_t len);
+bool functionfs_poll_output_report(int id, std::vector<unsigned char>& out_report);
+void functionfs_drain_output(int id);

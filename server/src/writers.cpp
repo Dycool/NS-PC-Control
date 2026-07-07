@@ -89,44 +89,42 @@ void writer_thread(std::stop_token stoken, int hz) {
         for (int i = 0; i < HID_PORT_COUNT; ++i) close_port_fds(i);
     };
 
+    auto reset_port_runtime = [&](int i) {
+        rt[i].fd = write_fds[i];
+        rt[i].timer = 0;
+        rt[i].input_report_mode = RID_INPUT_STANDARD;
+        rt[i].full_report_enabled = false;
+        reset_nfc_runtime(rt[i], true);
+        rt[i].usb_seen_mac = false;
+        rt[i].usb_handshake_done = false;
+        rt[i].usb_baudrate_set = false;
+        rt[i].usb_timeout_disabled = false;
+        rt[i].pending_subcmd_reply = false;
+        rt[i].last_standard_report_us = 0;
+        rt[i].last_idle_neutral_us = 0;
+        rt[i].neutral_burst_until_us = 0;
+        memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
+    };
+    bool ffs_live[HID_PORT_COUNT] = {};
+
     while (!stoken.stop_requested()) {
         bool all_open = true;
         for (int i = 0; i < nports; ++i) {
-            if (write_fds[i] < 0 || read_fds[i] < 0) {
-                const int old_write_fd = write_fds[i];
-                if (write_fds[i] >= 0) close(write_fds[i]);
-                if (read_fds[i] >= 0 && read_fds[i] != old_write_fd) close(read_fds[i]);
-                write_fds[i] = read_fds[i] = -1;
-
-                if (g_ctx.legacy_mode) {
-                    const std::string dev = "/dev/hidg" + std::to_string(i);
-                    write_fds[i] = open(dev.c_str(), O_WRONLY | O_NONBLOCK);
+            if (g_ctx.legacy_mode) {
+                if (write_fds[i] < 0) {
+                    write_fds[i] = open(("/dev/hidg" + std::to_string(i)).c_str(), O_WRONLY | O_NONBLOCK);
                     read_fds[i] = write_fds[i];
-                } else {
-                    write_fds[i] = open(functionfs_ep_in_path(i).c_str(), O_WRONLY | O_NONBLOCK);
-                    read_fds[i]  = open(functionfs_ep_out_path(i).c_str(), O_RDONLY | O_NONBLOCK);
+                    if (write_fds[i] >= 0) reset_port_runtime(i);
+                    else all_open = false;
                 }
-
-                const bool opened = g_ctx.legacy_mode
-                    ? (write_fds[i] >= 0)
-                    : (write_fds[i] >= 0 && read_fds[i] >= 0);
-                if (opened) {
-                    rt[i].fd = write_fds[i];
-                    rt[i].timer = 0;
-                    rt[i].input_report_mode = RID_INPUT_STANDARD;
-                    rt[i].full_report_enabled = false;
-                    reset_nfc_runtime(rt[i], true);
-                    rt[i].usb_seen_mac = false;
-                    rt[i].usb_handshake_done = false;
-                    rt[i].usb_baudrate_set = false;
-                    rt[i].usb_timeout_disabled = false;
-                    rt[i].pending_subcmd_reply = false;
-                    rt[i].last_standard_report_us = 0;
-                    rt[i].last_idle_neutral_us = 0;
-                    rt[i].neutral_burst_until_us = 0;
-                    memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
-                } else {
+            } else {
+                const bool live = functionfs_transport_active() && functionfs_io_ready(i);
+                if (!live) {
+                    ffs_live[i] = false;
                     all_open = false;
+                } else if (!ffs_live[i]) {
+                    ffs_live[i] = true;
+                    reset_port_runtime(i);
                 }
             }
         }
@@ -160,7 +158,7 @@ void writer_thread(std::stop_token stoken, int hz) {
             hw_slots[h].pair_right = false;
             if (!g_ctx.legacy_mode) {
                 rt[h].neutral_burst_until_us = stamp + PRO_RELEASE_NEUTRAL_US;
-                drain_hid_output_queue(read_fds[h]);
+                functionfs_drain_output(h);
             }
         };
 
@@ -482,15 +480,10 @@ void writer_thread(std::stop_token stoken, int hz) {
 
                     if (have_report_to_write) {
                         apply_controller_type_report(controller_type_for_port(h), write_buf);
-                        ssize_t w = write(write_fds[h], write_buf, write_len);
-                        if (w < 0) {
-                            if (errno != EAGAIN && errno != EWOULDBLOCK) ok = false;
-                        } else if (w == (ssize_t)write_len) {
+                        if (functionfs_submit_input_report(h, write_buf, write_len)) {
                             if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                             ++g_ctx.hid_writes;
-                            // A report/subcommand-reply write alone is not reliable host-presence evidence.
-                            // Actual Switch activity is recorded when we read host output below.
-                        } else if (w > 0) ok = false;
+                        }
                     }
                 }
 
@@ -508,9 +501,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                         if ((subcmd == CMD_SET_PLAYER_LIGHTS || subcmd == 0x33) && !cmd_data.empty()) {
                             const uint8_t player_leds = cmd_data[0];
                             g_ctx.console_player_leds[h].store(player_leds, std::memory_order_relaxed);
-                            // The console flashes the player LEDs on its controller-pairing
-                            // (Change Grip/Order) screen. Edge-trigger a BT pairing window so a
-                            // real controller can be added exactly when the user expects it.
                             const bool pairing_screen = player_leds_indicate_pairing(player_leds);
                             if (!g_ctx.bluetooth_input_disabled
                                     && pairing_screen && !pairing_screen_open[h]) {
@@ -548,29 +538,23 @@ void writer_thread(std::stop_token stoken, int hz) {
                             case 0x04: rt[h].usb_timeout_disabled = true; break;
                             case 0x05: rt[h].usb_timeout_disabled = false; break;
                         }
-                        if (write(write_fds[h], resp_81, PRO_REPORT_SIZE) == (ssize_t)PRO_REPORT_SIZE) mark_switch2_usb_activity(now_stamp);
-                        else ok = false;
+                        if (functionfs_submit_input_report(h, resp_81, PRO_REPORT_SIZE)) mark_switch2_usb_activity(now_stamp);
                     }
                 };
 
                 for (int h = 0; h < nports; ++h) {
-                    // FunctionFS can deliver HID SET_REPORT on ep0 rather than
-                    // the interrupt OUT endpoint. Feed those reports into the
-                    // exact same Pro Controller command path.
                     std::vector<unsigned char> ctrl_report;
                     for (int control_reads = 0; control_reads < 8 && functionfs_poll_control_report(h, ctrl_report); ++control_reads) {
                         process_host_output_report(h, ctrl_report.data(), ctrl_report.size());
                     }
 
-                    for (int output_reads = 0; output_reads < 8; ++output_reads) {
-                        struct pollfd pfd = {read_fds[h], POLLIN, 0};
-                        uint8_t read_buf[HIDG_MAX_REPORT_SIZE];
-                        if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) break;
-                        ssize_t r = read(read_fds[h], read_buf, HIDG_MAX_REPORT_SIZE);
-                        if (r <= 0) continue;
-                        process_host_output_report(h, read_buf, static_cast<size_t>(r));
+                    std::vector<unsigned char> out_report;
+                    for (int output_reads = 0; output_reads < 16 && functionfs_poll_output_report(h, out_report); ++output_reads) {
+                        process_host_output_report(h, out_report.data(), out_report.size());
                     }
                 }
+
+                if (functionfs_transport_active() == false) ok = false;
             }
 
             if (!ok) {
