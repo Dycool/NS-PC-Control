@@ -482,7 +482,7 @@ void set_identity_in_0x81(uint8_t* r81, int ctrl) {
 size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
     memset(out, 0, PRO_REPORT_SIZE); out[0] = 0x81; out[1] = subtype;
     if (subtype == 0x01) {
-        out[3] = controller_type_for_port(ctrl);
+        out[3] = NS_TYPE_PRO;
         set_identity_in_0x81(out, ctrl);
     }
     return PRO_REPORT_SIZE;
