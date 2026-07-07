@@ -396,11 +396,11 @@ void set_controller_type_for_port(int ctrl, uint8_t type) {
     init_spi_flash(ctrl);
 }
 
-void apply_controller_type_input(uint8_t type, HIDReport& r) {
+void apply_controller_type_input(uint8_t type, HIDReport& r, bool pair_member) {
     if (type == NS_TYPE_JOYCON_R) {
         // Single-stick clients normally drive the left stick; a right Joy-Con
         // exposes that physical stick in the right-stick report field.
-        if (r.input.rx == 128 && r.input.ry == 128) {
+        if (!pair_member && r.input.rx == 128 && r.input.ry == 128) {
             r.input.rx = r.input.lx; r.input.ry = r.input.ly;
         }
         r.input.buttons &= BTN_Y | BTN_B | BTN_A | BTN_X | BTN_R | BTN_ZR |

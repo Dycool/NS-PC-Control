@@ -58,7 +58,13 @@ function sendTouchName() {
     v.setUint8(4, SERVER_INFO_VERSION);
     v.setUint8(8, 1); // pad 0 present
     v.setUint8(9, 0); // no gyro flag
-    const name = 'Mobile'.slice(0, ROSTER_NAME_CAP - 1);
+    let touchName = 'Mobile';
+    if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        touchName = 'iOS Controller';
+    } else if (/Android/i.test(navigator.userAgent)) {
+        touchName = 'Android Controller';
+    }
+    const name = touchName.slice(0, ROSTER_NAME_CAP - 1);
     for (let k = 0; k < name.length; k++) v.setUint8(8 + 2 + k, name.charCodeAt(k) & 0xff);
     ws.send(buf);
 }

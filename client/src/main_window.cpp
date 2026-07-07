@@ -164,15 +164,23 @@ void MainWindow::updateUi() {
     }
 
     const RosterView roster = roster_snapshot();
+    int playerNum = 1;
     for (int i = 0; i < 4; ++i) {
+        if (roster.valid && roster.ports[i].present == 2) {
+            padLabels[i]->setVisible(false);
+            continue;
+        }
+        padLabels[i]->setVisible(true);
         QString text;
-        if (roster.valid && roster.ports[i].present) {
+        if (roster.valid && roster.ports[i].present == 1) {
             std::string name = roster.ports[i].name;
             if (name.empty()) name = "Controller";
             if (roster.ports[i].has_gyro) name += " + gyro";
-            text = std_to_q("P" + std::to_string(i + 1) + ": " + name);
+            text = std_to_q("P" + std::to_string(playerNum) + ": " + name);
+            playerNum++;
         } else {
-            text = std_to_q("P" + std::to_string(i + 1) + ": Not connected");
+            text = std_to_q("P" + std::to_string(playerNum) + ": Not connected");
+            playerNum++;
         }
         padLabels[i]->setText(text);
     }

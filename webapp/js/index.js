@@ -397,15 +397,25 @@ function sendNamesIfChanged(slotPresent, slotName) {
     ws.send(buf);
 }
 function updateRosterUi() {
+    let playerNum = 1;
     for (let p = 0; p < 4; p++) {
         const el = document.getElementById(`p${p+1}Text`);
         if (!el) continue;
+        if (roster.valid && roster.ports[p] && roster.ports[p].present === 2) {
+            el.style.display = 'none';
+            continue;
+        }
+        el.style.display = 'block';
         let label = 'Not connected';
-        if (roster.valid && roster.ports[p] && roster.ports[p].present) {
+        if (roster.valid && roster.ports[p] && roster.ports[p].present === 1) {
             label = roster.ports[p].name || 'Controller';
             if (roster.ports[p].gyro) label += ' + gyro';
+            el.innerText = `P${playerNum}: ${label}`;
+            playerNum++;
+        } else {
+            el.innerText = `P${playerNum}: ${label}`;
+            playerNum++;
         }
-        el.innerText = `P${p+1}: ${label}`;
     }
 }
 function buildAndSendPacket() {

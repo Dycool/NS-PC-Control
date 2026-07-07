@@ -911,6 +911,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             guard let self, let task = webSocketTask, self.webSocket === task, self.controlClientActive else { return }
             self.statusLabel.text = "Connected"
             if self.activeClientMode == .physical { self.updatePhysicalStatusOnPage(prefix: "Connected") }
+            self.sendNamesFrame()
             self.startSending()
             self.pingTimer?.invalidate()
             self.pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
@@ -1074,6 +1075,44 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         socket.send(.data(Data(frame)), completionHandler: { _ in })
     }
 
+    private func sendNamesFrame() {
+        guard let socket = webSocket else { return }
+        var data = Data(count: 224)
+        data[0] = 0x4E
+        data[1] = 0x43
+        data[2] = 0x53
+        data[3] = 0x4E
+        data[4] = 1 // version
+
+        let touchActive = controlClientActive && activeClientMode == .touch && currentPage == .touchControls
+        if touchActive {
+            let off = 8
+            data[off] = 1
+            data[off + 1] = phoneSensorsActive ? 1 : 0
+            let name = "iOS Controller"
+            let nameBytes = Array(name.utf8.prefix(47))
+            for (k, byte) in nameBytes.enumerated() {
+                data[off + 2 + k] = byte
+            }
+        } else {
+            physicalPads.withLock { pads in
+                for i in 0..<4 {
+                    let pad = pads[i]
+                    let off = 8 + i * 50
+                    data[off] = pad.present ? 1 : 0
+                    data[off + 1] = pad.hasGyro ? 1 : 0
+                    if pad.present {
+                        let nameBytes = Array(pad.name.utf8.prefix(47))
+                        for (k, byte) in nameBytes.enumerated() {
+                            data[off + 2 + k] = byte
+                        }
+                    }
+                }
+            }
+        }
+        socket.send(.data(data)) { _ in }
+    }
+
     private func nextSeq() -> UInt32 {
         let out = seq
         seq &+= 1
@@ -1144,6 +1183,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         if activeClientMode == .physical {
             scanPhysicalControllers()
             updatePhysicalStatusOnPage()
+            sendNamesFrame()
         }
     }
 

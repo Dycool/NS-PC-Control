@@ -385,7 +385,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     if (!g_ctx.legacy_mode) {
                         set_controller_type_for_port(h, hw_slots[h].virtual_type);
-                        apply_controller_type_input(hw_slots[h].virtual_type, out_reports[h]);
+                        apply_controller_type_input(hw_slots[h].virtual_type, out_reports[h], hw_slots[h].pair_member);
                     }
                 }
             }

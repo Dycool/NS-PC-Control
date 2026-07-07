@@ -301,6 +301,7 @@ class MainActivity : AppCompatActivity() {
                         if (!controlClientActive || ws !== webSocket) return@runOnUiThread
                         statusText.text = "Connected"
                         if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
+                        sendNamesFrame()
                         startSending()
                     }
                 }
@@ -462,6 +463,44 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendResetFrameTo(socket: WebSocket) {
         try { sendFrameInternal(socketOverride = socket, flagsOverride = Protocol.FLAG_RESET, forceNeutral = true) } catch (_: Throwable) {}
+    }
+
+    private fun sendNamesFrame() {
+        val socket = ws ?: return
+        val data = ByteArray(224)
+        data[0] = 0x4E.toByte()
+        data[1] = 0x43.toByte()
+        data[2] = 0x53.toByte()
+        data[3] = 0x4E.toByte()
+        data[4] = 1.toByte()
+
+        val touchActive = controlClientActive && activeClientMode == ClientMode.TOUCH && currentPage == Page.TOUCH_CONTROLS
+        if (touchActive) {
+            val off = 8
+            data[off] = 1.toByte()
+            data[off + 1] = (if (phoneSensorsActive) 1 else 0).toByte()
+            val name = "Android Controller"
+            val nameBytes = name.toByteArray(Charsets.UTF_8).take(47)
+            for (k in nameBytes.indices) {
+                data[off + 2 + k] = nameBytes[k]
+            }
+        } else {
+            synchronized(physicalLock) {
+                for (i in 0 until Protocol.PAD_COUNT) {
+                    val pad = physicalPads[i]
+                    val off = 8 + i * 50
+                    data[off] = (if (pad.present) 1 else 0).toByte()
+                    data[off + 1] = (if (pad.hasGyro) 1 else 0).toByte()
+                    if (pad.present) {
+                        val nameBytes = pad.name.toByteArray(Charsets.UTF_8).take(47)
+                        for (k in nameBytes.indices) {
+                            data[off + 2 + k] = nameBytes[k]
+                        }
+                    }
+                }
+            }
+        }
+        try { socket.send(data.toByteString()) } catch (_: Throwable) {}
     }
 
     private fun sendFrameInternal(socketOverride: WebSocket? = null, flagsOverride: Int? = null, forceNeutral: Boolean = false) {
@@ -875,6 +914,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updatePhysicalStatusOnPage()
+        sendNamesFrame()
     }
 
     private fun isControllerDevice(device: InputDevice): Boolean {

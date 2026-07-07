@@ -108,6 +108,7 @@ struct ClientSession {
     bool uses_pad_presence = false;
     ns::RosterEntry source_pads[4]{};
     uint64_t udp_last_roster_seq = 0;
+    uint64_t udp_last_roster_send_us = 0;
 };
 
 

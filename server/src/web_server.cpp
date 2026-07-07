@@ -106,8 +106,11 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 }
             }
         }
-        if (roster_seq != c.udp_last_roster_seq) {
+        const uint64_t now = ns::now_us();
+        const bool periodic_resend = c.udp_last_roster_send_us == 0 || now - c.udp_last_roster_send_us >= 2'000'000ULL;
+        if (roster_seq != c.udp_last_roster_seq || periodic_resend) {
             c.udp_last_roster_seq = roster_seq;
+            c.udp_last_roster_send_us = now;
             has_roster = true;
         }
         if (state_seq != c.udp_last_server_state_seq) {

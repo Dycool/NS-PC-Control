@@ -221,5 +221,5 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
 
 uint8_t controller_type_for_port(int ctrl);
 void set_controller_type_for_port(int ctrl, uint8_t type);
-void apply_controller_type_input(uint8_t type, ns::HIDReport& r);
+void apply_controller_type_input(uint8_t type, ns::HIDReport& r, bool pair_member = false);
 void apply_controller_type_report(uint8_t type, uint8_t* buf);

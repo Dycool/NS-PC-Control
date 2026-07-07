@@ -441,11 +441,24 @@ uint64_t refresh_roster_seq(uint64_t now, bool force) {
         for (int s = 0; s < 4; ++s) {
             const uint8_t port = c.client_assignment[s].primary_console_port;
             if (port >= HID_PORT_COUNT) continue;
-            if (built[port].present) continue;
-            if (c.source_pads[s].present) {
-                built[port] = c.source_pads[s];
-            } else {
-                built[port].present = 1;
+            if (built[port].present != 1) {
+                if (c.source_pads[s].present && c.source_pads[s].name[0] != '\0') {
+                    built[port] = c.source_pads[s];
+                    built[port].present = 1;
+                } else {
+                    built[port].present = 1;
+                    const char* default_name = (c.source == InputSource::WebSocket) ? "Mobile" : "Controller";
+                    std::strncpy(built[port].name, default_name, sizeof(built[port].name) - 1);
+                    built[port].name[sizeof(built[port].name) - 1] = '\0';
+                }
+            }
+            const uint8_t mask = c.client_assignment[s].console_port_mask;
+            for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                if (h != port && (mask & (1 << h))) {
+                    built[h].present = 2;
+                    built[h].has_gyro = 0;
+                    std::memset(built[h].name, 0, sizeof(built[h].name));
+                }
             }
         }
     }
@@ -989,6 +1002,7 @@ void reset_client_session_locked(ClientSession& c) {
     c.uses_pad_presence = c.udp_rumble_enabled = false;
     for (int s = 0; s < 4; ++s) c.source_pads[s] = ns::RosterEntry{};
     c.udp_last_roster_seq = 0;
+    c.udp_last_roster_send_us = 0;
     reset_client_slot_streams_locked(c);
 }
 
