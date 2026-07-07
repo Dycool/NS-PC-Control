@@ -56,7 +56,7 @@ MainWindow::MainWindow() {
 
     connectBtn = new QPushButton("Connect", this);
     amiiboBtn = new QPushButton("Scan amiibo", this);
-    amiiboBtn->setVisible(false);
+    amiiboBtn->setEnabled(false);
     quitBtn = new QPushButton("Quit", this);
     grid->addWidget(connectBtn, 4, 1);
     grid->addWidget(amiiboBtn, 4, 2);
@@ -183,18 +183,18 @@ void MainWindow::updateUi() {
     if (!connected) {
         for (int i = 0; i < 4; ++i)
             padLabels[i]->setText(std_to_q("P" + std::to_string(i + 1) + ": Not connected"));
-        amiiboBtn->setVisible(false);
+        amiiboBtn->setEnabled(false);
         return;
     }
 
     const int selectedType = g_controllerType.load(std::memory_order_relaxed);
-    if (selectedType == ns::CONTROLLER_TYPE_JOYCON_R || selectedType == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
-        amiiboBtn->setVisible(true);
+    amiiboBtn->setVisible(true);
+    if (selectedType == ns::CONTROLLER_TYPE_JOYCON_L) {
+        amiiboBtn->setEnabled(false);
+    } else {
         const uint8_t subpad = (selectedType == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 1 : 0;
         const bool polling = g_nfcPolling[subpad].load(std::memory_order_relaxed);
         amiiboBtn->setEnabled(polling);
-    } else {
-        amiiboBtn->setVisible(false);
     }
 
     const RosterView roster = roster_snapshot();

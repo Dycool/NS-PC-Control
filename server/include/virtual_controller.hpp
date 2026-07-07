@@ -20,7 +20,7 @@ constexpr size_t NFC_MCU_QUEUE_CAP = 8;
 constexpr uint64_t PRO_REPORT_INTERVAL_US = 4'000ULL;
 constexpr int PRO_WRITER_HZ = 1'000'000 / PRO_REPORT_INTERVAL_US;
 // Default Pro Controller battery/connection byte: full battery, connected, not charging.
-constexpr uint8_t PRO_BAT_CON = 0x81;
+constexpr uint8_t PRO_BAT_CON = 0x80;
 constexpr uint8_t PRO_VIBRATOR_REPORT = 0x0B;
 constexpr int PRO_IDLE_REPORT_HZ = 30;
 constexpr uint64_t PRO_IDLE_REPORT_INTERVAL_US = 1'000'000ULL / PRO_IDLE_REPORT_HZ;
