@@ -402,6 +402,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     out_reports[h] = get_hid_report(snap[hw_slots[h].client_idx], hw_slots[h].sub_idx);
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     if (!g_ctx.legacy_mode) {
+                        const uint8_t profile = requested_controller_profile_from_report(out_reports[h]);
                         set_controller_type_for_port(h, profile);
                         apply_controller_type_input(hw_slots[h].virtual_type, out_reports[h], hw_slots[h].pair_member);
                     }
@@ -453,7 +454,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                             have_report_to_write = true;
                             wrote_cmd_response = true;
                         } else if (rt[h].pending_subcmd_reply) {
-                            bool is_s2 = g_port_switch2[h];
                             rt[h].pending_reply.id = RID_INPUT_SUBCMD; // subcmd reply ID; research uses similar for S2
                             rt[h].pending_reply.timer = pro_timer_from_us(now_stamp);
                             if (port_needed) apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);

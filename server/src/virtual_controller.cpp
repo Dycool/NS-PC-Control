@@ -399,7 +399,7 @@ void apply_input_controls_to_pro21(const HIDReport& src, ProInputReport21& out) 
     pack_stick_12(out.left_stick, src.input.lx, src.input.ly); pack_stick_12(out.right_stick, src.input.rx, src.input.ry);
 }
 
-void build_standard_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, ProInputReport30& out, bool is_switch2 = false) {
+void build_standard_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, ProInputReport30& out, bool is_switch2) {
     memset(&out, 0, sizeof(out));
     out.id = is_switch2 ? 0x09 : RID_INPUT_STANDARD;  // S2 Pro uses 0x09 per research; start with common for others
     out.timer = timer;
@@ -581,9 +581,6 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
             reply->reply_data[0] = 0x01;
         }
         return 1;
-    case 0x15: // pairing related
-        reply->ack = 0x80;
-        return 0;
     // NFC subs from research for amiibo (kept for fallback; primary path for cmd 0x01 uses raw header responses)
     case 0x05: // Get status - signal scan requested if no tag (match pcap structure)
         reply->ack = 0x80;
