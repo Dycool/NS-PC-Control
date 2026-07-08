@@ -207,6 +207,8 @@ void publish_controller_status_event(int client_idx, int sub_idx, uint8_t player
 void publish_client_assignment_event(int client_idx, int sub_idx, uint8_t console_port_mask,
                                      uint8_t primary_console_port, uint8_t requested_type,
                                      uint8_t virtual_type);
+void publish_amiibo_request(int client_idx, int sub_idx, bool requested);
+void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, uint16_t len);
 bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns::ControllerStatusPacket& packet);
 bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_clients,
                                   uint8_t free_virtual_slots, uint32_t& seq,

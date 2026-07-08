@@ -22,6 +22,7 @@ extern std::atomic<bool> g_captureShortcutEnabled;
 extern std::atomic<bool> g_mouseModeEnabled;
 extern std::atomic<double> g_mouseSensitivity;
 extern std::atomic<int> g_controllerType;
+extern std::atomic<bool> g_switch2ModeEnabled;
 extern std::unordered_map<std::string, std::string> g_keyBindings;
 extern std::mutex g_keyBindingsMutex;
 extern std::mutex g_pressedKeysMutex;

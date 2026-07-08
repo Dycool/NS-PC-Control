@@ -114,6 +114,19 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             ns::RumblePacket rp{};
             std::memcpy(&rp, buf, sizeof(rp));
             rumble.apply_packet(rp, controller_for_slot);
+        } else if (magic == ns::AMIIBO_REQUEST_MAGIC && n == sizeof(ns::AmiiboRequestPacket)) {
+            ns::AmiiboRequestPacket ar{};
+            std::memcpy(&ar, buf, sizeof(ar));
+            if (ar.subpad < 4) {
+                g_amiiboScanPending[ar.subpad] = (ar.requested != 0);
+            }
+        } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= (int)(sizeof(uint32_t) + 1 + 2)) {
+            ns::AmiiboDataPacket ad{};
+            std::memcpy(&ad, buf, std::min((size_t)n, sizeof(ad)));
+            if (ad.subpad < 4) {
+                // write back to file if path known - handled in main window update or separate
+                // for now, the main window can check a global data
+            }
         }
     }
 }

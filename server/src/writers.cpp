@@ -27,6 +27,10 @@ static uint8_t requested_controller_profile_from_report(const HIDReport& report)
         case ns::CONTROLLER_TYPE_PRO:
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
         case ns::CONTROLLER_TYPE_HORI:
+        case ns::CONTROLLER_TYPE_PRO_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
             return report.reserved[2];
         case ns::CONTROLLER_TYPE_DEFAULT:
         default:
@@ -37,21 +41,26 @@ static uint8_t requested_controller_profile_from_report(const HIDReport& report)
 static uint8_t virtual_type_for_profile(uint8_t profile, bool pair_right_side = false) {
     switch (profile) {
         case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
             return NS_TYPE_JOYCON_L;
         case ns::CONTROLLER_TYPE_JOYCON_R:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
             return NS_TYPE_JOYCON_R;
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
             return pair_right_side ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L;
         case ns::CONTROLLER_TYPE_HORI:
             return NS_TYPE_HORI;
         case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_PRO_S2:
         default:
             return NS_TYPE_PRO;
     }
 }
 
 static bool profile_is_pair(uint8_t profile) {
-    return profile == ns::CONTROLLER_TYPE_JOYCON_PAIR;
+    return profile == ns::CONTROLLER_TYPE_JOYCON_PAIR ||
+           profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
 }
 
 static const HIDReport& get_hid_report(const ClientSession& c, int s) {
@@ -262,12 +271,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 if (base + 1 < nports
                                         && hw_slots[base].client_idx == -1
                                         && hw_slots[base + 1].client_idx == -1) {
-                                    set_controller_type_for_port(base, NS_TYPE_JOYCON_L);
-                                    set_controller_type_for_port(base + 1, NS_TYPE_JOYCON_R);
+                                    set_controller_type_for_port(base, profile);
+                                    set_controller_type_for_port(base + 1, profile);
                                 }
                             }
                         } else if (s >= 0 && s < nports && hw_slots[s].client_idx == -1) {
-                            set_controller_type_for_port(s, virtual_type_for_profile(profile));
+                            set_controller_type_for_port(s, profile);
                         }
                     }
                 }
@@ -307,14 +316,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                             hw_slots[base].virtual_type = NS_TYPE_JOYCON_L;
                             hw_slots[base].pair_member = true;
                             hw_slots[base].pair_right = false;
-                            set_controller_type_for_port(base, NS_TYPE_JOYCON_L);
+                            set_controller_type_for_port(base, profile);
 
                             hw_slots[base + 1].client_idx = c;
                             hw_slots[base + 1].sub_idx = s;
                             hw_slots[base + 1].virtual_type = NS_TYPE_JOYCON_R;
                             hw_slots[base + 1].pair_member = true;
                             hw_slots[base + 1].pair_right = true;
-                            set_controller_type_for_port(base + 1, NS_TYPE_JOYCON_R);
+                            set_controller_type_for_port(base + 1, profile);
 
                             if (g_ctx.verbose) std::println("Map -> PC {} (Pad {}) took console Ports {}+{} as Joy-Con L+R",
                                                           c + 1, s + 1, base + 1, base + 2);
@@ -340,7 +349,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         hw_slots[chosen].virtual_type = virtual_type;
                         hw_slots[chosen].pair_member = false;
                         hw_slots[chosen].pair_right = false;
-                        set_controller_type_for_port(chosen, virtual_type);
+                        set_controller_type_for_port(chosen, profile);
                         if (g_ctx.verbose) std::println("Map -> PC {} (Pad {}) took console Port {}", c + 1, s + 1, chosen + 1);
                         publish_controller_status_event(c, s, g_ctx.console_player_leds[chosen].load(std::memory_order_relaxed), VIRTUAL_BODY_RGB[chosen]);
                     }
@@ -367,10 +376,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                 const int s = hw_slots[h].sub_idx;
                 assignment_masks[c][s] = static_cast<uint8_t>(assignment_masks[c][s] | (1u << h));
                 if (assignment_primary[c][s] == ns::CONTROLLER_CONSOLE_PORT_NONE) assignment_primary[c][s] = static_cast<uint8_t>(h);
+                const uint8_t req = assignment_requested[c][s];
+                const bool s2_pair = (req == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
+                const bool s2 = (req == ns::CONTROLLER_TYPE_PRO_S2 || req == ns::CONTROLLER_TYPE_JOYCON_L_S2 || req == ns::CONTROLLER_TYPE_JOYCON_R_S2 || s2_pair);
                 assignment_virtual[c][s] = hw_slots[h].pair_member
-                    ? ns::CONTROLLER_TYPE_JOYCON_PAIR
-                    : (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L ? ns::CONTROLLER_TYPE_JOYCON_L
-                        : (hw_slots[h].virtual_type == NS_TYPE_JOYCON_R ? ns::CONTROLLER_TYPE_JOYCON_R : ns::CONTROLLER_TYPE_PRO));
+                    ? (s2_pair ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2 : ns::CONTROLLER_TYPE_JOYCON_PAIR)
+                    : (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L ? (s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L)
+                        : (hw_slots[h].virtual_type == NS_TYPE_JOYCON_R ? (s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R)
+                            : (s2 ? ns::CONTROLLER_TYPE_PRO_S2 : ns::CONTROLLER_TYPE_PRO)));
             }
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!snap[c].active) continue;
@@ -386,7 +399,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     out_reports[h] = get_hid_report(snap[hw_slots[h].client_idx], hw_slots[h].sub_idx);
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     if (!g_ctx.legacy_mode) {
-                        set_controller_type_for_port(h, hw_slots[h].virtual_type);
+                        set_controller_type_for_port(h, profile);
                         apply_controller_type_input(hw_slots[h].virtual_type, out_reports[h], hw_slots[h].pair_member);
                     }
                 }
@@ -428,7 +441,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                         }
                     } else {
                         if (rt[h].pending_subcmd_reply) {
-                            rt[h].pending_reply.id = RID_INPUT_SUBCMD;
+                            bool is_s2 = g_port_switch2[h];
+                            rt[h].pending_reply.id = RID_INPUT_SUBCMD; // subcmd reply ID; research uses similar for S2
                             rt[h].pending_reply.timer = pro_timer_from_us(now_stamp);
                             if (port_needed) apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);
                             else fill_neutral_controls(rt[h].pending_reply);
@@ -469,9 +483,23 @@ void writer_thread(std::stop_token stoken, int hz) {
                                     }
                                 }
                                 ProInputReport30 std_in{};
-                                build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in);
-                                memcpy(write_buf, &std_in, sizeof(ProInputReport30));
-                                write_len = sizeof(ProInputReport30);
+                                bool is_s2 = g_port_switch2[h];
+                                check_amiibo_expiry(h);
+                                if (is_s2) {
+                                    if (hw_slots[h].virtual_type == NS_TYPE_PRO) {
+                                        build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), write_buf);
+                                        write_len = PRO_REPORT_SIZE;
+                                    } else {
+                                        // JC S2: use dedicated builder per research (0x07 L / 0x08 R)
+                                        uint8_t rid = (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L ? 0x07 : 0x08);
+                                        build_s2_jc_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), rid, write_buf);
+                                        write_len = PRO_REPORT_SIZE;
+                                    }
+                                } else {
+                                    build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);
+                                    memcpy(write_buf, &std_in, sizeof(ProInputReport30));
+                                    write_len = sizeof(ProInputReport30);
+                                }
                                 have_report_to_write = true;
 
                                 if (port_needed || release_burst) rt[h].last_standard_report_us = now_stamp;
@@ -481,7 +509,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
 
                     if (have_report_to_write) {
-                        if (hw_slots[h].virtual_type != NS_TYPE_HORI) {
+                        if (hw_slots[h].virtual_type != NS_TYPE_HORI && !g_port_switch2[h]) {
                             apply_controller_type_report(controller_type_for_port(h), write_buf);
                         }
                         if (functionfs_submit_input_report(h, write_buf, write_len)) {
@@ -497,6 +525,32 @@ void writer_thread(std::stop_token stoken, int hz) {
                     ++g_ctx.host_out_reports;
                     mark_switch2_usb_activity(now_stamp);
                     uint8_t id = read_buf[0];
+                    bool is_s2 = g_port_switch2[h];
+                    if (is_s2) {
+                        // S2 command output from research: the report may contain header for command or rumble+cmd combined
+                        // For S2, parse header if looks like command (cmd ID, 0x91 or data)
+                        if (r >= 8) {
+                            uint8_t cmd_id = read_buf[0];
+                            uint8_t dir = read_buf[1];
+                            if (dir == 0x91 || dir == 0x01) {
+                                // S2 command header
+                                uint8_t subcmd = read_buf[3];
+                                std::span<const uint8_t> cmd_data(read_buf + 8, r > 8 ? std::min<size_t>(56, r - 8) : 0);
+                                if (hw_slots[h].client_idx != -1) {
+                                    // rumble may be in other reports or combined
+                                }
+                                memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
+                                int reply_len = handle_subcommand(rt[h], subcmd, cmd_data, &rt[h].pending_reply);
+                                rt[h].pending_subcmd_reply = (reply_len >= 0);
+                                return; // handled as S2 command
+                            }
+                        }
+                        // fallback for rumble
+                        if (id == 0x01 || id == 0x02 || id == RID_OUTPUT_RUMBLE) {
+                            if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
+                            return;
+                        }
+                    }
                     if (id == RID_OUTPUT_CMD) {
                         if (r <= 10) return;
                         if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, false);

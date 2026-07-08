@@ -19,6 +19,7 @@ std::atomic<bool> g_captureShortcutEnabled{true};
 std::atomic<bool> g_mouseModeEnabled{false};
 std::atomic<double> g_mouseSensitivity{1.0};
 std::atomic<int> g_controllerType{ns::CONTROLLER_TYPE_PRO};
+std::atomic<bool> g_switch2ModeEnabled{false};
 std::unordered_map<std::string, std::string> g_keyBindings;
 std::mutex g_keyBindingsMutex;
 std::mutex g_pressedKeysMutex;
@@ -156,10 +157,12 @@ void load_saved_feature_toggles() {
     g_homeShortcutEnabled.store(settings.value("HomeShortcutEnabled", true).toBool());
     g_captureShortcutEnabled.store(settings.value("CaptureShortcutEnabled", true).toBool());
     g_mouseModeEnabled.store(settings.value("MouseModeEnabled", false).toBool());
+    g_switch2ModeEnabled.store(settings.value("Switch2ModeEnabled", false).toBool());
     double sens = settings.value("MouseSensitivity", 1.0).toDouble();
     g_mouseSensitivity.store((sens >= 0.05 && sens <= 20.0) ? sens : 1.0);
     int controllerType = settings.value("ControllerType", ns::CONTROLLER_TYPE_PRO).toInt();
-    if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_HORI)
+    if ((controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_HORI) &&
+        (controllerType < ns::CONTROLLER_TYPE_PRO_S2 || controllerType > ns::CONTROLLER_TYPE_JOYCON_PAIR_S2))
         controllerType = ns::CONTROLLER_TYPE_PRO;
     g_controllerType.store(controllerType);
     sync_sdl_input_options();
@@ -172,6 +175,7 @@ void save_feature_toggles() {
     settings.setValue("HomeShortcutEnabled", g_homeShortcutEnabled.load());
     settings.setValue("CaptureShortcutEnabled", g_captureShortcutEnabled.load());
     settings.setValue("MouseModeEnabled", g_mouseModeEnabled.load());
+    settings.setValue("Switch2ModeEnabled", g_switch2ModeEnabled.load());
     settings.setValue("MouseSensitivity", g_mouseSensitivity.load());
     settings.setValue("ControllerType", g_controllerType.load());
 }

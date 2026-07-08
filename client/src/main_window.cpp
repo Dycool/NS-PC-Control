@@ -55,9 +55,11 @@ MainWindow::MainWindow() {
     grid->addWidget(settingsBtn, 3, 3);
 
     connectBtn = new QPushButton("Connect", this);
+    scanAmiiboBtn = new QPushButton("Scan Amiibo", this);
     quitBtn = new QPushButton("Quit", this);
-    grid->addWidget(connectBtn, 4, 1, 1, 2);
-    grid->addWidget(quitBtn, 4, 3);
+    grid->addWidget(connectBtn, 4, 0, 1, 1);
+    grid->addWidget(scanAmiiboBtn, 4, 1, 1, 1);
+    grid->addWidget(quitBtn, 4, 2, 1, 1);
 
     auto* sep = new QFrame(this);
     sep->setFrameShape(QFrame::HLine);
@@ -95,6 +97,7 @@ MainWindow::MainWindow() {
         updateUi();
     });
     connect(connectBtn, &QPushButton::clicked, this, [this] { toggleConnection(); });
+    connect(scanAmiiboBtn, &QPushButton::clicked, this, [this] { onScanAmiiboClicked(); });
     connect(quitBtn, &QPushButton::clicked, qApp, &QApplication::quit);
 
     timer = new QTimer(this);
@@ -154,6 +157,19 @@ void MainWindow::updateUi() {
     bindingsBtn->setEnabled(!connected && g_keyboardMode.load() != KB_OFF);
     statusLabel->setText(std_to_q(status_message()));
 
+    bool s2Mode = g_switch2ModeEnabled.load();
+    int ctype = g_controllerType.load();
+    bool isJoyconL = (ctype == ns::CONTROLLER_TYPE_JOYCON_L || ctype == ns::CONTROLLER_TYPE_JOYCON_L_S2);
+    bool showScan = connected && s2Mode && !isJoyconL;
+    if (scanAmiiboBtn) {
+        scanAmiiboBtn->setVisible(showScan);
+        bool canScan = showScan && g_amiiboScanPending[0];
+        scanAmiiboBtn->setEnabled(canScan);
+    }
+    if (!showScan) {
+        for (int i = 0; i < 4; i++) g_amiiboScanPending[i] = false;
+    }
+
     const int desiredHeight = platformHeight();
     if (height() != desiredHeight) setFixedSize(platformWidth(), desiredHeight);
     for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(true);
@@ -187,6 +203,27 @@ void MainWindow::updateUi() {
         }
         padLabels[i]->setText(text);
     }
+}
+
+void MainWindow::onScanAmiiboClicked() {
+    if (!g_connected.load() || !g_switch2ModeEnabled.load()) return;
+    int subpad = 0; // primary for now
+    QString path = QFileDialog::getOpenFileName(this, "Select Amiibo .bin file", "", "Amiibo files (*.bin)");
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "Error", "Failed to open file.");
+        return;
+    }
+    QByteArray data = f.readAll();
+    f.close();
+    if (data.size() > 540) data.resize(540); // cap
+    g_amiiboPaths[subpad] = path;
+    // send to server
+    sendAmiiboData(subpad, data);
+    // local pending clear after click? server will handle timeout
+    g_amiiboScanPending[subpad] = false;
+    updateUi();
 }
 
 

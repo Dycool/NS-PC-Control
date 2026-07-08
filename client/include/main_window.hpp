@@ -26,14 +26,19 @@ private:
     QPushButton* macrosBtn = nullptr;
     QPushButton* settingsBtn = nullptr;
     QPushButton* connectBtn = nullptr;
+    QPushButton* scanAmiiboBtn = nullptr;
     QPushButton* quitBtn = nullptr;
     QLabel* statusLabel = nullptr;
     QLabel* padLabels[4]{};
     QTimer* timer = nullptr;
+
+    bool amiiboScanPending[4] = {};
+    QString amiiboFilePath[4];
 
     static int platformWidth();
     static int platformHeight();
     static int platformPairHeight();
     void toggleConnection();
     void updateUi();
+    void onScanAmiiboClicked();
 };

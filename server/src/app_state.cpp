@@ -228,6 +228,10 @@ static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
         case ns::CONTROLLER_TYPE_PRO:
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
         case ns::CONTROLLER_TYPE_HORI:
+        case ns::CONTROLLER_TYPE_PRO_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
             return report.reserved[2];
         case ns::CONTROLLER_TYPE_DEFAULT:
         default:
@@ -245,11 +249,11 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
             continue;
         }
         const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
-        needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 2 : 1;
+        needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
     }
     if (needed == 0 && reserve_when_idle) {
         const uint8_t profile = requested_profile_from_wire_report(report.p1);
-        needed = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR) ? 2 : 1;
+        needed = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
     }
     return std::min(needed, HID_PORT_COUNT);
 }
@@ -405,6 +409,34 @@ bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_cl
     packet.max_clients = MAX_CLIENTS;
     packet.free_virtual_slots = free_virtual_slots;
     return true;
+}
+
+void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return;
+    // send immediately for UDP
+    if (c.source == InputSource::Udp) {
+        ns::AmiiboRequestPacket pkt{};
+        pkt.subpad = static_cast<uint8_t>(sub_idx);
+        pkt.requested = requested ? 1 : 0;
+        // no hmac for simplicity in this path, or add if needed
+        sendto(sock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0, (sockaddr*)&c.addr, sizeof(c.addr));
+    }
+    // for web would be different, but ns-client is UDP
+}
+
+void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, uint16_t len) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || !data || len == 0) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active || c.source != InputSource::Udp) return;
+    ns::AmiiboDataPacket pkt{};
+    pkt.subpad = static_cast<uint8_t>(sub_idx);
+    pkt.data_len = len;
+    std::memcpy(pkt.data, data, std::min<size_t>(len, sizeof(pkt.data)));
+    sendto(sock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0, (sockaddr*)&c.addr, sizeof(c.addr));
 }
 
 void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet) {

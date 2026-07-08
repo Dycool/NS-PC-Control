@@ -267,6 +267,13 @@ static std::vector<uint8_t> ffs_report_descriptor(int id) {
     if (controller_type_for_port(id) == NS_TYPE_HORI) {
         return std::vector<uint8_t>(LEGACY_REPORT_DESC, LEGACY_REPORT_DESC + sizeof(LEGACY_REPORT_DESC));
     }
+    if (g_port_switch2[id]) {
+        // Use S2 descriptors from research (different per type: 0x05 common + 0x07/08/09)
+        if (controller_protocol_type_for_port(id) == ns::CONTROLLER_TYPE_PRO_S2) {
+            return std::vector<uint8_t>(S2_PRO_REPORT_DESC, S2_PRO_REPORT_DESC + S2_PRO_REPORT_DESC_SIZE);
+        }
+        return std::vector<uint8_t>(S2_JC_REPORT_DESC, S2_JC_REPORT_DESC + S2_JC_REPORT_DESC_SIZE);
+    }
     return std::vector<uint8_t>(VIRTUAL_CONTROLLER_REPORT_DESC,
                                 VIRTUAL_CONTROLLER_REPORT_DESC + VIRTUAL_CONTROLLER_REPORT_DESC_SIZE);
 }
@@ -281,6 +288,12 @@ static HidDescriptor make_hid_descriptor(int id) {
     hid.bReportDescriptorType = 0x22; // Report descriptor
     if (controller_type_for_port(id) == NS_TYPE_HORI) {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(sizeof(LEGACY_REPORT_DESC)));
+    } else if (g_port_switch2[id]) {
+        if (controller_protocol_type_for_port(id) == ns::CONTROLLER_TYPE_PRO_S2) {
+            hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_PRO_REPORT_DESC_SIZE));
+        } else {
+            hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_JC_REPORT_DESC_SIZE));
+        }
     } else {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(VIRTUAL_CONTROLLER_REPORT_DESC_SIZE));
     }
@@ -310,7 +323,7 @@ static usb_endpoint_descriptor_no_audio make_hid_endpoint_descriptor(int id, boo
     if (controller_type_for_port(id) == NS_TYPE_HORI) {
         ep.wMaxPacketSize = htole16(8);
     } else {
-        ep.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
+        ep.wMaxPacketSize = htole16(PRO_REPORT_SIZE); // 64 for S2 Pro/JC and modern per research
     }
     ep.bInterval = high_speed ? 4 : 4;
     return ep;
@@ -1866,16 +1879,16 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     // Modern FunctionFS keeps the same Nintendo VID/PID/product surface, but the
     // HID interface itself is owned by user space. That lets us answer HID report
     // descriptor requests and accept SET_REPORT control traffic directly.
-    bool ok = write_file(gd / "bcdDevice",                  g_ctx.legacy_mode ? "0x0200" : "0x0210")
+    bool ok = write_file(gd / "bcdDevice",                  g_ctx.legacy_mode ? "0x0200" : "0x0200") // S2 bcd per research
            && write_file(gd / "bcdUSB",                     "0x0200")
            && write_file(gd / "idVendor",                   g_ctx.legacy_mode ? "0x0F0D" : "0x057e")
-           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : "0x2009")
-           && write_file(gd / "bDeviceClass",               g_ctx.legacy_mode ? "0xFF"   : "0x00")
-           && write_file(gd / "bDeviceSubClass",            g_ctx.legacy_mode ? "0xFF"   : "0x00")
-           && write_file(gd / "bDeviceProtocol",            g_ctx.legacy_mode ? "0xFF"   : "0x00")
+           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : "0x2069") // S2 Pro PID per research; S1 was 0x2009; Hori legacy unchanged
+           && write_file(gd / "bDeviceClass",               g_ctx.legacy_mode ? "0xFF"   : "0xEF")
+           && write_file(gd / "bDeviceSubClass",            g_ctx.legacy_mode ? "0xFF"   : "0x02")
+           && write_file(gd / "bDeviceProtocol",            g_ctx.legacy_mode ? "0xFF"   : "0x01") // S2 per research device desc
            && write_file(gd / "strings/0x409/serialnumber", g_ctx.legacy_mode ? "000000000001" : g_ctx.usb_serial)
-           && write_file(gd / "strings/0x409/manufacturer", "NS Bridge")
-           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : "Motion USB Gamepad")
+           && write_file(gd / "strings/0x409/manufacturer", g_ctx.legacy_mode ? "Hori" : "Nintendo")
+           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : "Switch 2 Pro Controller") // or per type, from research
            && write_file(cd / "MaxPower",                   "500")
            && write_file(cd / "bmAttributes",               g_ctx.legacy_mode ? "0x80" : "0xA0");
     if (g_ctx.legacy_mode) ok = ok && write_file(cd / "strings/0x409/configuration", "USB 4-Player Hub Config");

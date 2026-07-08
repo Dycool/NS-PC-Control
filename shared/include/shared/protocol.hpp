@@ -113,6 +113,11 @@ enum ControllerType : uint8_t {
     // this value for the physical/source pad; the server owns the L/R expansion.
     CONTROLLER_TYPE_JOYCON_PAIR = 4,
     CONTROLLER_TYPE_HORI        = 5,
+    // Switch 2 variants (when g_switch2ModeEnabled on client)
+    CONTROLLER_TYPE_PRO_S2         = 6,
+    CONTROLLER_TYPE_JOYCON_L_S2    = 7,
+    CONTROLLER_TYPE_JOYCON_R_S2    = 8,
+    CONTROLLER_TYPE_JOYCON_PAIR_S2 = 9,
 };
 static constexpr std::size_t ROSTER_NAME_CAP = 48;
 
@@ -260,6 +265,22 @@ struct RosterPacket {
     uint8_t    version = SERVER_INFO_VERSION;
     uint8_t    reserved[3]{};
     RosterEntry ports[4];
+} NS_PACKED_ATTR;
+
+static constexpr uint32_t AMIIBO_REQUEST_MAGIC = 0x4E534152u; // 'NSAR'
+struct AmiiboRequestPacket {
+    uint32_t magic = AMIIBO_REQUEST_MAGIC;
+    uint8_t subpad = 0;
+    uint8_t requested = 0; // 1 = console wants Amiibo scan
+    uint8_t reserved[2]{};
+} NS_PACKED_ATTR;
+
+static constexpr uint32_t AMIIBO_DATA_MAGIC = 0x4E534144u; // 'NSAD'
+struct AmiiboDataPacket {
+    uint32_t magic = AMIIBO_DATA_MAGIC;
+    uint8_t subpad = 0;
+    uint16_t data_len = 0;
+    uint8_t data[540]{}; // NTAG215 Amiibo data
 } NS_PACKED_ATTR;
 // ── Unified UDP packet ───────────────────────────────────────────────────────
 struct Packet {

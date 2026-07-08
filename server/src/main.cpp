@@ -457,6 +457,12 @@ int main(int argc, char** argv) {
                     server_macro_handle_chunk_packet({udp_rx.data(), static_cast<size_t>(bytes)}, sender);
                     continue;
                 }
+                if (mmagic == ns::AMIIBO_DATA_MAGIC) {
+                    ns::AmiiboDataPacket ad{};
+                    memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
+                    set_amiibo_data_for_port(0, ad.data, ad.data_len); // primary port
+                    continue;
+                }
             }
 
             // --- Macro text packet ---

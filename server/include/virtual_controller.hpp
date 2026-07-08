@@ -47,6 +47,11 @@ extern const uint8_t VIRTUAL_CONTROLLER_REPORT_DESC[];
 extern const size_t VIRTUAL_CONTROLLER_REPORT_DESC_SIZE;
 extern const uint8_t LEGACY_REPORT_DESC[85];
 
+extern const uint8_t S2_PRO_REPORT_DESC[];
+extern const size_t S2_PRO_REPORT_DESC_SIZE;
+extern const uint8_t S2_JC_REPORT_DESC[];
+extern const size_t S2_JC_REPORT_DESC_SIZE;
+
 #define NS_LOCAL_PACKED __attribute__((packed))
 
 struct NS_LOCAL_PACKED ProInputReport30 {
@@ -125,11 +130,19 @@ void build_standard_report(const ns::HIDReport& src,
                            bool has_motion,
                            bool imu_enabled,
                            uint8_t timer,
-                           ProInputReport30& out);
+                           ProInputReport30& out,
+                           bool is_switch2 = false);
+
+void build_s2_pro_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t* out);
+void build_s2_jc_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t report_id, uint8_t* out);
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
 
 uint8_t controller_type_for_port(int ctrl);
-void set_controller_type_for_port(int ctrl, uint8_t type);
+void set_controller_type_for_port(int ctrl, uint8_t protocol_type);
+uint8_t controller_protocol_type_for_port(int ctrl);
 void apply_controller_type_input(uint8_t type, ns::HIDReport& r, bool pair_member = false);
 void apply_controller_type_report(uint8_t type, uint8_t* buf);
+
+// Per-port Switch 2 flag (set when S2 protocol type used)
+extern bool g_port_switch2[HID_PORT_COUNT];
