@@ -98,9 +98,6 @@ struct ClientSession {
     uint32_t udp_last_controller_status_seq[4]{};
     uint32_t udp_last_client_assignment_seq[4]{};
     uint64_t udp_last_server_state_seq = 0;
-    uint32_t udp_last_amiibo_version[4]{};
-    uint8_t udp_last_amiibo_flags[4]{};
-    uint64_t udp_last_amiibo_send_us[4]{};
     bool udp_rumble_enabled = false;
     uint32_t udp_last_rumble_seq[4]{};
     bool pad_present[4]{};
@@ -109,7 +106,6 @@ struct ClientSession {
     ns::RosterEntry source_pads[4]{};
     uint64_t udp_last_roster_seq = 0;
     uint64_t udp_last_roster_send_us = 0;
-    bool udp_last_nfc_polling[4]{};
 };
 
 
@@ -119,23 +115,7 @@ struct ServerMacroRuntime {
     uint64_t start_us = 0;
 };
 
-struct ServerAmiiboState {
-    // ``armed`` models an amiibo held to the reader: the tag stays available for
-    // the whole NFC session (games read, verify, then possibly write). A clean
-    // dump idles out after AMIIBO_ARM_WINDOW_US, sliding forward while the
-    // console actively engages the NFC MCU. A dirty (written) dump is kept until
-    // the UDP client pulls it for auto-save, then held for AMIIBO_PULL_GRACE_US
-    // so lost chunks can be re-pulled.
-    bool armed = false;
-    bool present = false;
-    bool dirty = false;
-    bool write_requested = false;
-    uint32_t version = 0;
-    uint32_t write_request_version = 0;
-    uint64_t armed_until_us = 0;
-    uint32_t crc32 = 0;
-    std::vector<uint8_t> dump;
-};
+
 
 struct ServerMacroUploadRuntime {
     bool active = false;
@@ -156,14 +136,7 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     bool legacy_mode = false;
-    // True while a client has an amiibo staged/dirty. With the FunctionFS modern
-    // transport this no longer changes the USB report length or forces a
-    // re-enumeration; it is kept as NFC runtime/state telemetry. Legacy/f_hid
-    // still uses it to choose the larger report_length if that path is used.
-    std::atomic<bool> nfc_gadget_active{false};
-    // Modern USB transport uses FunctionFS instead of /dev/hidg*. FunctionFS lets
-    // us expose the NFC/IR 0x31 report descriptor from boot and write 362-byte
-    // NFC reports only when needed, without rebuilding the gadget for amiibo.
+    // Modern USB transport uses FunctionFS instead of /dev/hidg*.
     std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;
     bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
@@ -188,7 +161,6 @@ struct ServerContext {
     std::atomic<bool> switch2_force_next_wake{false}; // compatibility/no-op; runtime wake is RX-state based
     std::atomic<bool> switch2_delayed_wake_check_running{false};
     std::atomic<uint8_t> console_player_leds[HID_PORT_COUNT]{};
-    std::atomic<bool> console_nfc_polling[HID_PORT_COUNT]{};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};
     std::mutex mtx[MAX_CLIENTS];
@@ -207,8 +179,6 @@ struct ServerContext {
     ServerMacroRuntime server_macros[MAX_CLIENTS][4]{};
     std::mutex server_macro_upload_mtx;
     ServerMacroUploadRuntime server_macro_uploads[MAX_CLIENTS]{};
-    std::mutex server_amiibo_mtx;
-    ServerAmiiboState server_amiibos[MAX_CLIENTS][4]{};
     struct lws_context* lws_context = nullptr;
 };
 extern ServerContext g_ctx;
@@ -275,19 +245,7 @@ bool rate_allow(uint32_t ip);
 int server_macro_client_for_sender(const sockaddr_in& sender);
 bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const sockaddr_in& sender);
 bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t> data);
-bool server_amiibo_arm(int client_idx, int subpad, std::span<const uint8_t> dump);
-bool server_amiibo_is_armed(int client_idx, int subpad, uint64_t now = 0, uint32_t* version = nullptr);
-// True if any client/pad has a staged (or dirty, pending-pull) amiibo. Does not
-// slide the idle window, so it is safe to poll for the gadget report-size decision.
-bool server_amiibo_any_armed(uint64_t now = 0);
-bool server_amiibo_get_dump(int client_idx, int subpad, uint64_t now, std::vector<uint8_t>& out, uint32_t* version = nullptr);
-bool server_amiibo_get_status(int client_idx, int subpad, ns::AmiiboStatusPacket& out);
-bool server_amiibo_request_write_upload(int client_idx, int subpad);
-bool server_amiibo_apply_write_command(int client_idx, int subpad, std::span<const uint8_t> command, uint32_t* version = nullptr);
-bool server_amiibo_handle_pull_request(int sock, std::span<const uint8_t> data, const sockaddr_in& sender);
-uint32_t server_amiibo_crc32(std::span<const uint8_t> data);
-void server_amiibo_mark_present(int client_idx, int subpad, bool present);
-void server_amiibo_clear_all_for_client(int client_idx);
+
 bool server_macro_running(int client_idx, int subpad);
 void server_macro_apply(int client_idx, int subpad, ns::HoriHIDReport& live);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);

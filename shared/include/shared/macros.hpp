@@ -37,16 +37,7 @@ inline constexpr std::uint8_t  CHUNK_FLAG_LAST = 0x01;
 
 enum class UploadKind : std::uint8_t {
     Macro  = 0,
-    Amiibo = 1,
 };
-
-// How long a scanned (clean) virtual tag stays on the reader while idle. The
-// deadline slides forward whenever the console actively engages the NFC MCU,
-// so a game can read/verify/write for as long as it wants once it starts.
-inline constexpr std::uint64_t AMIIBO_ARM_WINDOW_US = 60ULL * 1000ULL * 1000ULL;
-// After answering an updated-dump pull, the server keeps the (now clean) dump
-// armed for this long so the UDP client can re-pull if a chunk datagram was lost.
-inline constexpr std::uint64_t AMIIBO_PULL_GRACE_US = 30ULL * 1000ULL * 1000ULL;
 
 struct Step {
     std::uint16_t buttons = 0;

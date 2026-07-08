@@ -24,7 +24,7 @@ bool functionfs_nodes_ready();
 std::string functionfs_ep_in_path(int id);
 std::string functionfs_ep_out_path(int id);
 bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_report);
-bool usb_transport_supports_nfc_reports();
+bool usb_transport_rebuild_ffs_port(int id);
 
 // FunctionFS data-endpoint transport (dedicated blocking I/O threads own ep1/ep2).
 bool functionfs_io_ready(int id);

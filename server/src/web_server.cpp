@@ -30,8 +30,6 @@ void flush_rumble_to_udp(int sock, int client_idx) {
     bool has_assignment[4]{};
     ns::ControllerStatusPacket pending_status[4]{};
     bool has_status[4]{};
-    ns::AmiiboStatusPacket pending_amiibo[4]{};
-    bool has_amiibo[4]{};
     const uint64_t state_seq = refresh_server_state_seq();
     const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
     const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
@@ -74,10 +72,7 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                 has[s] = true;
             }
             uint32_t status_seq = c.controller_status_seq[s];
-            int primary_port = c.client_assignment[s].primary_console_port;
-            bool nfc_polling = (primary_port >= 0 && primary_port < HID_PORT_COUNT) ? g_ctx.console_nfc_polling[primary_port].load() : false;
-            bool last_nfc_polling = c.udp_last_nfc_polling[s];
-            if (status_seq != c.udp_last_controller_status_seq[s] || nfc_polling != last_nfc_polling) {
+            if (status_seq != c.udp_last_controller_status_seq[s]) {
                 pending_status[s] = ns::ControllerStatusPacket{};
                 pending_status[s].subpad = static_cast<uint8_t>(s);
                 pending_status[s].player_index = c.controller_status[s].player_index;
@@ -88,29 +83,8 @@ void flush_rumble_to_udp(int sock, int client_idx) {
                     pending_status[s].reserved[2] = c.controller_status[s].body_rgb[2];
                     pending_status[s].reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
                 }
-                if (nfc_polling) {
-                    pending_status[s].reserved[3] |= ns::CONTROLLER_STATUS_FLAG_NFC_POLLING;
-                }
                 c.udp_last_controller_status_seq[s] = status_seq;
-                c.udp_last_nfc_polling[s] = nfc_polling;
                 has_status[s] = true;
-            }
-            ns::AmiiboStatusPacket as{};
-            if (server_amiibo_get_status(client_idx, s, as)) {
-                const bool changed = as.amiibo_version != c.udp_last_amiibo_version[s]
-                                     || as.flags != c.udp_last_amiibo_flags[s];
-                // Dirty/write-request statuses need a client action; keep
-                // resending them until the state moves on so one lost datagram
-                // cannot stall the auto-save or write flow.
-                const bool actionable = (as.flags & (ns::AMIIBO_STATUS_FLAG_DIRTY | ns::AMIIBO_STATUS_FLAG_WRITE_REQUEST)) != 0;
-                const uint64_t now = ns::now_us();
-                if (changed || (actionable && now - c.udp_last_amiibo_send_us[s] >= 500'000ULL)) {
-                    pending_amiibo[s] = as;
-                    c.udp_last_amiibo_version[s] = as.amiibo_version;
-                    c.udp_last_amiibo_flags[s] = as.flags;
-                    c.udp_last_amiibo_send_us[s] = now;
-                    has_amiibo[s] = true;
-                }
             }
         }
         const uint64_t now = ns::now_us();
@@ -163,11 +137,6 @@ void flush_rumble_to_udp(int sock, int client_idx) {
             if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::ControllerStatusPacket)))
                 std::println(stderr, "[udp] failed to send controller status packet: {}", std::strerror(errno));
         }
-        if (has_amiibo[s]) {
-            ssize_t sent = sendto(sock, &pending_amiibo[s], sizeof(ns::AmiiboStatusPacket), 0,
-                                  reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-            if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::AmiiboStatusPacket)))
-                std::println(stderr, "[udp] failed to send amiibo status packet: {}", std::strerror(errno));
         }
     }
     if (has_roster) {
@@ -184,7 +153,6 @@ struct SessionData {
     bool ws_first = true;
     uint32_t last_rumble_seq[4] = {};
     uint32_t last_status_seq[4] = {};
-    bool last_nfc_polling[4] = {};
     uint32_t last_assignment_seq[4] = {};
     uint64_t last_server_state_seq = 0;
     uint32_t pending_rumble_seq[4] = {};
@@ -517,10 +485,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         new_rumble = true;
                     }
                     uint32_t status_seq = g_ctx.clients[sd->ws_slot].controller_status_seq[s];
-                    int primary_port = g_ctx.clients[sd->ws_slot].client_assignment[s].primary_console_port;
-                    bool nfc_polling = (primary_port >= 0 && primary_port < HID_PORT_COUNT) ? g_ctx.console_nfc_polling[primary_port].load() : false;
-                    bool last_nfc_polling = sd->last_nfc_polling[s];
-                    if (status_seq != sd->last_status_seq[s] || nfc_polling != last_nfc_polling) {
+                    if (status_seq != sd->last_status_seq[s]) {
                         ControllerStatusPacket sp{};
                         sp.subpad = static_cast<uint8_t>(s);
                         sp.player_index = g_ctx.clients[sd->ws_slot].controller_status[s].player_index;
@@ -531,12 +496,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                             sp.reserved[2] = g_ctx.clients[sd->ws_slot].controller_status[s].body_rgb[2];
                             sp.reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
                         }
-                        if (nfc_polling) {
-                            sp.reserved[3] |= ns::CONTROLLER_STATUS_FLAG_NFC_POLLING;
-                        }
                         memcpy(sd->pending_status[s], &sp, sizeof(sp));
                         sd->last_status_seq[s] = status_seq;
-                        sd->last_nfc_polling[s] = nfc_polling;
                         sd->has_pending_status[s] = true;
                         new_status = true;
                     }

@@ -263,15 +263,15 @@ static bool path_is_mountpoint(const fs::path& p) {
     return false;
 }
 
-static std::vector<uint8_t> ffs_report_descriptor() {
-    // FunctionFS always advertises the NFC-capable descriptor. Normal play still
-    // emits 0x30/0x21/0x81 reports; 0x31 is only written when the console enters
-    // NFC/IR mode. This removes the old f_hid report_length re-enumeration dance.
-    return std::vector<uint8_t>(VIRTUAL_CONTROLLER_REPORT_DESC_NFC,
-                                VIRTUAL_CONTROLLER_REPORT_DESC_NFC + VIRTUAL_CONTROLLER_REPORT_DESC_NFC_SIZE);
+static std::vector<uint8_t> ffs_report_descriptor(int id) {
+    if (controller_type_for_port(id) == NS_TYPE_HORI) {
+        return std::vector<uint8_t>(LEGACY_REPORT_DESC, LEGACY_REPORT_DESC + sizeof(LEGACY_REPORT_DESC));
+    }
+    return std::vector<uint8_t>(VIRTUAL_CONTROLLER_REPORT_DESC,
+                                VIRTUAL_CONTROLLER_REPORT_DESC + VIRTUAL_CONTROLLER_REPORT_DESC_SIZE);
 }
 
-static HidDescriptor make_hid_descriptor() {
+static HidDescriptor make_hid_descriptor(int id) {
     HidDescriptor hid{};
     hid.bLength = sizeof(HidDescriptor);
     hid.bDescriptorType = 0x21;       // HID descriptor
@@ -279,7 +279,11 @@ static HidDescriptor make_hid_descriptor() {
     hid.bCountryCode = 0;
     hid.bNumDescriptors = 1;
     hid.bReportDescriptorType = 0x22; // Report descriptor
-    hid.wDescriptorLength = htole16(static_cast<uint16_t>(VIRTUAL_CONTROLLER_REPORT_DESC_NFC_SIZE));
+    if (controller_type_for_port(id) == NS_TYPE_HORI) {
+        hid.wDescriptorLength = htole16(static_cast<uint16_t>(sizeof(LEGACY_REPORT_DESC)));
+    } else {
+        hid.wDescriptorLength = htole16(static_cast<uint16_t>(VIRTUAL_CONTROLLER_REPORT_DESC_SIZE));
+    }
     return hid;
 }
 
@@ -297,31 +301,33 @@ static usb_interface_descriptor make_hid_interface_descriptor() {
     return intf;
 }
 
-static usb_endpoint_descriptor_no_audio make_hid_endpoint_descriptor(bool in, bool high_speed) {
+static usb_endpoint_descriptor_no_audio make_hid_endpoint_descriptor(int id, bool in, bool high_speed) {
     usb_endpoint_descriptor_no_audio ep{};
     ep.bLength = USB_DT_ENDPOINT_SIZE;
     ep.bDescriptorType = USB_DT_ENDPOINT;
     ep.bEndpointAddress = static_cast<uint8_t>((in ? USB_DIR_IN : USB_DIR_OUT) | 0x01);
     ep.bmAttributes = USB_ENDPOINT_XFER_INT;
-    // Keep endpoint packets controller-like. FunctionFS accepts a 362-byte IN
-    // transfer for report 0x31 and the UDC splits it into endpoint packets.
-    ep.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
+    if (controller_type_for_port(id) == NS_TYPE_HORI) {
+        ep.wMaxPacketSize = htole16(8);
+    } else {
+        ep.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
+    }
     ep.bInterval = high_speed ? 4 : 4;
     return ep;
 }
 
-static void append_hid_function_descriptors(std::vector<uint8_t>& out, bool high_speed) {
+static void append_hid_function_descriptors(std::vector<uint8_t>& out, int id, bool high_speed) {
     const auto intf = make_hid_interface_descriptor();
-    const auto hid = make_hid_descriptor();
-    const auto ep_in = make_hid_endpoint_descriptor(true, high_speed);
-    const auto ep_out = make_hid_endpoint_descriptor(false, high_speed);
+    const auto hid = make_hid_descriptor(id);
+    const auto ep_in = make_hid_endpoint_descriptor(id, true, high_speed);
+    const auto ep_out = make_hid_endpoint_descriptor(id, false, high_speed);
     append_obj(out, intf);
     append_obj(out, hid);
     append_obj(out, ep_in);
     append_obj(out, ep_out);
 }
 
-static std::vector<uint8_t> build_functionfs_descriptors() {
+static std::vector<uint8_t> build_functionfs_descriptors(int id) {
     std::vector<uint8_t> out;
     append_u32(out, FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
     const size_t length_pos = out.size();
@@ -329,8 +335,8 @@ static std::vector<uint8_t> build_functionfs_descriptors() {
     append_u32(out, FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
     append_u32(out, 4); // FS: interface + HID + IN ep + OUT ep
     append_u32(out, 4); // HS: interface + HID + IN ep + OUT ep
-    append_hid_function_descriptors(out, false);
-    append_hid_function_descriptors(out, true);
+    append_hid_function_descriptors(out, id, false);
+    append_hid_function_descriptors(out, id, true);
     const uint32_t len = htole32(static_cast<uint32_t>(out.size()));
     std::memcpy(out.data() + length_pos, &len, sizeof(len));
     return out;
@@ -419,7 +425,7 @@ static bool prepare_functionfs_instance(int id) {
     st.ep0_fd = open(ep0.c_str(), O_RDWR | O_NONBLOCK);
     if (st.ep0_fd < 0) return false;
 
-    const auto descs = build_functionfs_descriptors();
+    const auto descs = build_functionfs_descriptors(id);
     const auto strings = build_functionfs_strings();
     if (!write_all_fd(st.ep0_fd, descs) || !write_all_fd(st.ep0_fd, strings)) {
         close(st.ep0_fd);
@@ -511,12 +517,12 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
 
     if ((bm & USB_TYPE_MASK) == USB_TYPE_STANDARD && dir_in && req == USB_REQ_GET_DESCRIPTOR) {
         if (desc_type == 0x22) { // HID report descriptor
-            const auto report = ffs_report_descriptor();
+            const auto report = ffs_report_descriptor(id);
             ep0_write_data(st.ep0_fd, report.data(), report.size(), length);
             return;
         }
         if (desc_type == 0x21) { // HID descriptor
-            const auto hid = make_hid_descriptor();
+            const auto hid = make_hid_descriptor(id);
             ep0_write_data(st.ep0_fd, reinterpret_cast<const uint8_t*>(&hid), sizeof(hid), length);
             return;
         }
@@ -796,9 +802,7 @@ bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_repo
     return true;
 }
 
-bool usb_transport_supports_nfc_reports() {
-    return false;
-}
+
 
 bool functionfs_io_ready(int id) {
     if (id < 0 || id >= HID_PORT_COUNT) return false;
@@ -846,7 +850,7 @@ void functionfs_drain_output(int id) {
 
 static bool create_hid_function(int id) {
     fs::path func = fs::path(GADGET_DIR) / "functions" / ("hid.usb" + std::to_string(id));
-    const std::string report_length = g_ctx.legacy_mode ? "8" : std::to_string(active_hidg_report_length());
+    const std::string report_length = g_ctx.legacy_mode ? "8" : std::to_string(PRO_REPORT_SIZE);
     if (!mkdirs(func)
             || !write_file(func / "protocol",      "0")
             || !write_file(func / "subclass",       "0")
@@ -857,9 +861,7 @@ static bool create_hid_function(int id) {
     if (g_ctx.legacy_mode) {
         if (!write_file(desc_path, LEGACY_REPORT_DESC, sizeof(LEGACY_REPORT_DESC))) return false;
     } else {
-        size_t desc_len = 0;
-        const uint8_t* desc = active_report_descriptor(desc_len);
-        if (!write_file(desc_path, desc, desc_len)) return false;
+        if (!write_file(desc_path, VIRTUAL_CONTROLLER_REPORT_DESC, VIRTUAL_CONTROLLER_REPORT_DESC_SIZE)) return false;
     }
 
     fs::path link_path = fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(id));
@@ -1831,7 +1833,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         std::println("[gadget] {}; creating built-in {}-interface {} gadget",
                      reason ? reason : "USB gadget not ready",
                      HID_PORT_COUNT,
-                     g_ctx.legacy_mode ? "legacy 8-byte HID" : "FunctionFS Pro/NFC HID");
+                     g_ctx.legacy_mode ? "legacy 8-byte HID" : "FunctionFS Pro HID");
     }
 
     int dummy = 0;
@@ -1884,9 +1886,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             if (!create_functionfs_function(i)) return false;
         }
         g_ctx.functionfs_transport_active.store(true, std::memory_order_relaxed);
-        // FunctionFS always exposes the NFC report descriptor, so there is no
-        // report_length edge to arm here. The atomic tracks actual staged tags.
-        g_ctx.nfc_gadget_active.store(false, std::memory_order_relaxed);
+
     } else {
         g_ctx.functionfs_transport_active.store(false, std::memory_order_relaxed);
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -1988,4 +1988,23 @@ void teardown_gadget() {
 
 bool run_gadget_setup_if_needed(bool force, const char* reason) {
     return setup_gadget_builtin(force, reason);
+}
+
+bool usb_transport_rebuild_ffs_port(int id) {
+    if (id < 0 || id >= HID_PORT_COUNT) return false;
+    if (g_ctx.verbose) {
+        std::println("[gadget] Rebuilding FunctionFS configuration dynamically for port {}", id + 1);
+    }
+    functionfs_stop_port_io(id);
+
+    fs::path link_path = ffs_config_link(id);
+    std::error_code ec;
+    fs::remove(link_path, ec);
+
+    if (!prepare_functionfs_instance(id)) return false;
+
+    fs::path func = ffs_function_dir(id);
+    if (symlink(func.c_str(), link_path.c_str()) != 0) return false;
+
+    return functionfs_start_port_io(id);
 }

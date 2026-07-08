@@ -15,7 +15,6 @@ You can choose which controller type the server emulates for your connection:
 
 ### 2. Hori Controller
 - Emulates a wired Hori Pad.
-- Uses smaller, 8-byte reports for the absolute lowest latency.
 - Does **not** support gyroscope or rumble.
 
 ### 3. Joy-Con (L)

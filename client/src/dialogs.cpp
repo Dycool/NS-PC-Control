@@ -283,7 +283,9 @@ void SettingsDialog::saveSettings() {
     const bool mouseMode = mouseModeBox->isChecked();
     g_mouseModeEnabled.store(mouseMode);
     g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
-    g_controllerType.store(controllerTypeBox->currentData().toInt());
+    if (!g_connected.load()) {
+        g_controllerType.store(controllerTypeBox->currentData().toInt());
+    }
     save_feature_toggles();
     if (!mouseMode) clear_mouse_button_inputs();
     sync_sdl_input_options();

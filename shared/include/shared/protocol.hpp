@@ -42,9 +42,6 @@ static constexpr uint32_t RUMBLE_MAGIC = 0x4E535652u; // 'NSVR'
 static constexpr uint32_t PRECISION_RUMBLE_MAGIC = 0x4E535648u; // 'NSVH'
 static constexpr uint32_t CONTROLLER_STATUS_MAGIC = 0x4E534353u; // 'NSCS'
 static constexpr uint32_t CLIENT_ASSIGNMENT_MAGIC = 0x4E534341u; // 'NSCA' server -> client slot/console-port assignment
-static constexpr uint32_t AMIIBO_STATUS_MAGIC = 0x4E534153u; // 'NSAS' server -> UDP client dirty/save status
-static constexpr uint32_t AMIIBO_PULL_MAGIC   = 0x4E534150u; // 'NSAP' UDP client -> server pull updated dump
-static constexpr uint32_t AMIIBO_CHUNK_MAGIC  = 0x4E53414Bu; // 'NSAK' server -> UDP client updated dump chunk
 static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
 static constexpr uint32_t CLIENT_NAMES_MAGIC = 0x4E53434Eu; // 'NSCN'
 static constexpr uint32_t ROSTER_MAGIC = 0x4E53524Fu; // 'NSRO'
@@ -122,16 +119,10 @@ static constexpr std::size_t ROSTER_NAME_CAP = 48;
 static constexpr uint8_t CONTROLLER_PLAYER_INDEX_UNKNOWN = 0xFF;
 static constexpr uint8_t CONTROLLER_CONSOLE_PORT_NONE = 0xFF;
 static constexpr uint8_t CONTROLLER_STATUS_FLAG_BODY_RGB_VALID = 0x01;
-static constexpr uint8_t CONTROLLER_STATUS_FLAG_NFC_POLLING   = 0x02;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ACCEPTED         = 0x01;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SERVER_FULL      = 0x02;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP    = 0x04;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
-static constexpr uint8_t AMIIBO_STATUS_FLAG_DIRTY = 0x01;
-static constexpr uint8_t AMIIBO_STATUS_FLAG_HAS_DUMP = 0x02;
-static constexpr uint8_t AMIIBO_STATUS_FLAG_WRITE_REQUEST = 0x04;
-static constexpr std::size_t AMIIBO_DUMP_BYTES = 540;
-static constexpr std::size_t AMIIBO_UDP_CHUNK_MAX = 900;
 
 
 // ── Legacy input reports ─────────────────────────────────────────────────────
@@ -206,43 +197,6 @@ struct PrecisionRumblePacket {
 } NS_PACKED_ATTR;
 
 
-struct AmiiboStatusPacket {
-    uint32_t magic = AMIIBO_STATUS_MAGIC;
-    uint8_t  version = SERVER_INFO_VERSION;
-    uint8_t  subpad = 0;
-    uint8_t  flags = 0;
-    uint8_t  reserved0 = 0;
-    uint32_t amiibo_version = 0;
-    uint32_t total_len = 0;
-    uint32_t crc32 = 0;
-} NS_PACKED_ATTR;
-
-struct AmiiboPullRequest {
-    uint32_t magic = AMIIBO_PULL_MAGIC;
-    uint8_t  version = SERVER_INFO_VERSION;
-    uint8_t  subpad = 0;
-    uint8_t  reserved0 = 0;
-    uint8_t  reserved1 = 0;
-    uint32_t amiibo_version = 0;
-    uint32_t seq = 0;
-    uint8_t  hmac[HMAC_TAG_SIZE]{};
-} NS_PACKED_ATTR;
-
-struct AmiiboChunkHeader {
-    uint32_t magic = AMIIBO_CHUNK_MAGIC;
-    uint8_t  version = SERVER_INFO_VERSION;
-    uint8_t  subpad = 0;
-    uint8_t  flags = 0;
-    uint8_t  reserved0 = 0;
-    uint32_t amiibo_version = 0;
-    uint32_t chunk_index = 0;
-    uint32_t chunk_count = 0;
-    uint32_t total_len = 0;
-    uint16_t chunk_len = 0;
-    uint32_t crc32 = 0;
-} NS_PACKED_ATTR;
-static constexpr std::size_t AMIIBO_PULL_AUTH_SIZE = sizeof(AmiiboPullRequest) - HMAC_TAG_SIZE;
-static constexpr std::size_t AMIIBO_CHUNK_HEADER_SIZE = sizeof(AmiiboChunkHeader);
 
 struct ServerInfoProbe {
     uint32_t magic = SERVER_INFO_MAGIC;
@@ -351,12 +305,7 @@ static_assert(sizeof(ClientNamesPacket) == 224,
               "ClientNamesPacket wire layout changed");
 static_assert(sizeof(RosterPacket) == 208,
               "RosterPacket wire layout changed");
-static_assert(sizeof(AmiiboStatusPacket) == 20,
-              "AmiiboStatusPacket wire layout changed");
-static_assert(sizeof(AmiiboPullRequest) == 32,
-              "AmiiboPullRequest wire layout changed");
-static_assert(sizeof(AmiiboChunkHeader) == 30,
-              "AmiiboChunkHeader wire layout changed");
+
 static_assert(sizeof(ServerInfoProbe) == 8,
               "ServerInfoProbe wire layout changed");
 static_assert(sizeof(ServerInfoReply) == 16,

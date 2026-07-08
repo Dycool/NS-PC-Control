@@ -43,7 +43,7 @@ static uint8_t virtual_type_for_profile(uint8_t profile, bool pair_right_side = 
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
             return pair_right_side ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L;
         case ns::CONTROLLER_TYPE_HORI:
-            return NS_TYPE_PRO;
+            return NS_TYPE_HORI;
         case ns::CONTROLLER_TYPE_PRO:
         default:
             return NS_TYPE_PRO;
@@ -97,7 +97,6 @@ void writer_thread(std::stop_token stoken, int hz) {
         rt[i].timer = 0;
         rt[i].input_report_mode = RID_INPUT_STANDARD;
         rt[i].full_report_enabled = false;
-        reset_nfc_runtime(rt[i], true);
         rt[i].usb_seen_mac = false;
         rt[i].usb_handshake_done = false;
         rt[i].usb_baudrate_set = false;
@@ -192,20 +191,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 last_switch_sleep_poll_us = now_stamp;
             }
 
-            // FunctionFS advertises the NFC-capable report descriptor from boot,
-            // so staging/removing an amiibo no longer rebuilds the gadget. Keep
-            // the normal controller transport stable; the current main branch
-            // does not re-enumerate when a client starts sending input.
-            if (!g_ctx.legacy_mode) {
-                const bool want_nfc = server_amiibo_any_armed(now_stamp);
-                const bool nfc_edge = (want_nfc != g_ctx.nfc_gadget_active.load(std::memory_order_relaxed));
-                if (nfc_edge) {
-                    g_ctx.nfc_gadget_active.store(want_nfc, std::memory_order_relaxed);
-                    if (g_ctx.verbose)
-                        std::println("[amiibo] {} NFC session; FunctionFS keeps USB enumerated",
-                                     want_nfc ? "arming" : "idling");
-                }
-            }
+
             ClientSession snap[MAX_CLIENTS];
             bool stale[MAX_CLIENTS] = {};
 
@@ -238,27 +224,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
-            bool wants_hori = false;
-            for (int c = 0; c < MAX_CLIENTS; ++c) {
-                if (!snap[c].active) continue;
-                for (int s = 0; s < 4; ++s) {
-                    if (snap[c].uses_pad_presence && !snap[c].pad_present[s]) continue;
-                    const HIDReport* pads[4] = {&snap[c].report.p1, &snap[c].report.p2, &snap[c].report.p3, &snap[c].report.p4};
-                    if (pads[s]->reserved[2] == ns::CONTROLLER_TYPE_HORI) {
-                        wants_hori = true;
-                        break;
-                    }
-                }
-                if (wants_hori) break;
-            }
 
-            if (wants_hori != g_ctx.legacy_mode) {
-                g_ctx.legacy_mode = wants_hori;
-                std::println("Switching USB gadget mode: legacy_mode={}", g_ctx.legacy_mode);
-                close_all_fds();
-                run_gadget_setup_if_needed(true, g_ctx.legacy_mode ? "Client requested Hori Controller" : "All clients request modern Controller");
-                break;
-            }
 
             for (int h = 0; h < nports; ++h) {
                 if (hw_slots[h].client_idx == -1) continue;
@@ -268,7 +234,18 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint64_t last_seen = snap[cidx].pad_last_present_us[sidx];
                     absent_too_long = (last_seen == 0) || (now_stamp - last_seen >= WEB_PAD_ABSENT_RELEASE_US);
                 }
-                if ((!snap[cidx].active || absent_too_long) && !server_macro_running(cidx, sidx)) {
+                bool profile_changed = false;
+                if (snap[cidx].active && !absent_too_long) {
+                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[cidx], sidx));
+                    if (profile_is_pair(profile)) {
+                        const uint8_t expected = virtual_type_for_profile(profile, hw_slots[h].pair_right);
+                        profile_changed = !hw_slots[h].pair_member || hw_slots[h].virtual_type != expected;
+                    } else {
+                        const uint8_t expected = virtual_type_for_profile(profile);
+                        profile_changed = hw_slots[h].pair_member || hw_slots[h].virtual_type != expected;
+                    }
+                }
+                if (((!snap[cidx].active || absent_too_long) && !server_macro_running(cidx, sidx)) || profile_changed) {
                     release_hw_slot(h, now_stamp);
                 }
             }
@@ -440,72 +417,73 @@ void writer_thread(std::stop_token stoken, int hz) {
                     size_t write_len = PRO_REPORT_SIZE;
                     bool have_report_to_write = false, wrote_subcmd_reply = false;
 
-                    if (rt[h].pending_subcmd_reply) {
-                        rt[h].pending_reply.id = RID_INPUT_SUBCMD;
-                        rt[h].pending_reply.timer = pro_timer_from_us(now_stamp);
-                        if (port_needed) apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);
-                        else fill_neutral_controls(rt[h].pending_reply);
-                        memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
-                        write_len = sizeof(ProInputReport21);
-                        have_report_to_write = wrote_subcmd_reply = true;
-                    } else if (rt[h].full_report_enabled) {
-                        bool release_burst = rt[h].neutral_burst_until_us != 0 && now_stamp < rt[h].neutral_burst_until_us;
-                        if (rt[h].neutral_burst_until_us != 0 && now_stamp >= rt[h].neutral_burst_until_us) rt[h].neutral_burst_until_us = 0;
+                    if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
+                        HoriHIDReport r = out_reports[h].input;
+                        r.vendor = 0;
+                        if (port_needed && r != prev[h]) {
+                            memcpy(write_buf, &r, sizeof(HoriHIDReport));
+                            write_len = sizeof(HoriHIDReport);
+                            have_report_to_write = true;
+                            prev[h] = r;
+                        }
+                    } else {
+                        if (rt[h].pending_subcmd_reply) {
+                            rt[h].pending_reply.id = RID_INPUT_SUBCMD;
+                            rt[h].pending_reply.timer = pro_timer_from_us(now_stamp);
+                            if (port_needed) apply_input_controls_to_pro21(out_reports[h], rt[h].pending_reply);
+                            else fill_neutral_controls(rt[h].pending_reply);
+                            memcpy(write_buf, &rt[h].pending_reply, sizeof(ProInputReport21));
+                            write_len = sizeof(ProInputReport21);
+                            have_report_to_write = wrote_subcmd_reply = true;
+                        } else if (rt[h].full_report_enabled) {
+                            bool release_burst = rt[h].neutral_burst_until_us != 0 && now_stamp < rt[h].neutral_burst_until_us;
+                            if (rt[h].neutral_burst_until_us != 0 && now_stamp >= rt[h].neutral_burst_until_us) rt[h].neutral_burst_until_us = 0;
 
-                        bool idle_due = (rt[h].last_idle_neutral_us == 0) || (elapsed_us_saturated(now_stamp, rt[h].last_idle_neutral_us) >= PRO_IDLE_REPORT_INTERVAL_US);
-                        bool standard_due = (rt[h].last_standard_report_us == 0) || (elapsed_us_saturated(now_stamp, rt[h].last_standard_report_us) >= PRO_REPORT_INTERVAL_US);
+                            bool idle_due = (rt[h].last_idle_neutral_us == 0) || (elapsed_us_saturated(now_stamp, rt[h].last_idle_neutral_us) >= PRO_IDLE_REPORT_INTERVAL_US);
+                            bool standard_due = (rt[h].last_standard_report_us == 0) || (elapsed_us_saturated(now_stamp, rt[h].last_standard_report_us) >= PRO_REPORT_INTERVAL_US);
 
-                        if ((port_needed || release_burst) ? standard_due : idle_due) {
-                            HIDReport report_for_port;
-                            if (port_needed) report_for_port = out_reports[h];
-                            const MotionReport* motion_for_port = nullptr;
-                            bool has_motion_for_port = false;
-                            MotionReport jc_l_motion[3]{};
-                            if (port_needed) {
-                                int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
-                                motion_for_port = get_hid_report(snap[cidx], sidx).motion;
-                                has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
-                                // In server-side Joy-Con L+R pair mode the source pad is
-                                // duplicated into two virtual ports, but games use the R
-                                // Joy-Con IMU for the pair. Keep standalone Joy-Con L mode
-                                // unchanged; only suppress motion for the pair's virtual L.
-                                if (hw_slots[h].pair_member && !hw_slots[h].pair_right) {
-                                    motion_for_port = nullptr;
-                                    has_motion_for_port = false;
-                                }
-                                if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
-                                    for (int idx = 0; idx < 3; ++idx) {
-                                        jc_l_motion[idx].ax = -motion_for_port[idx].ax;
-                                        jc_l_motion[idx].ay = -motion_for_port[idx].ay;
-                                        jc_l_motion[idx].az = motion_for_port[idx].az;
-                                        jc_l_motion[idx].gx = -motion_for_port[idx].gx;
-                                        jc_l_motion[idx].gy = -motion_for_port[idx].gy;
-                                        jc_l_motion[idx].gz = motion_for_port[idx].gz;
+                            if ((port_needed || release_burst) ? standard_due : idle_due) {
+                                HIDReport report_for_port;
+                                if (port_needed) report_for_port = out_reports[h];
+                                const MotionReport* motion_for_port = nullptr;
+                                bool has_motion_for_port = false;
+                                MotionReport jc_l_motion[3]{};
+                                if (port_needed) {
+                                    int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
+                                    motion_for_port = get_hid_report(snap[cidx], sidx).motion;
+                                    has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
+                                    if (hw_slots[h].pair_member && !hw_slots[h].pair_right) {
+                                        motion_for_port = nullptr;
+                                        has_motion_for_port = false;
                                     }
-                                    motion_for_port = jc_l_motion;
+                                    if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
+                                        for (int idx = 0; idx < 3; ++idx) {
+                                            jc_l_motion[idx].ax = -motion_for_port[idx].ax;
+                                            jc_l_motion[idx].ay = -motion_for_port[idx].ay;
+                                            jc_l_motion[idx].az = motion_for_port[idx].az;
+                                            jc_l_motion[idx].gx = -motion_for_port[idx].gx;
+                                            jc_l_motion[idx].gy = -motion_for_port[idx].gy;
+                                            jc_l_motion[idx].gz = motion_for_port[idx].gz;
+                                        }
+                                        motion_for_port = jc_l_motion;
+                                    }
                                 }
-                            }
-                            if (rt[h].input_report_mode == RID_INPUT_NFC_IR
-                                    && usb_transport_supports_nfc_reports()) {
-                                ProInputReport31 nfc_in{};
-                                build_nfc_ir_report(rt[h], report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), nfc_in);
-                                memcpy(write_buf, &nfc_in, sizeof(ProInputReport31));
-                                write_len = sizeof(ProInputReport31);
-                            } else {
                                 ProInputReport30 std_in{};
                                 build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in);
                                 memcpy(write_buf, &std_in, sizeof(ProInputReport30));
                                 write_len = sizeof(ProInputReport30);
-                            }
-                            have_report_to_write = true;
+                                have_report_to_write = true;
 
-                            if (port_needed || release_burst) rt[h].last_standard_report_us = now_stamp;
-                            else rt[h].last_idle_neutral_us = now_stamp;
+                                if (port_needed || release_burst) rt[h].last_standard_report_us = now_stamp;
+                                else rt[h].last_idle_neutral_us = now_stamp;
+                            }
                         }
                     }
 
                     if (have_report_to_write) {
-                        apply_controller_type_report(controller_type_for_port(h), write_buf);
+                        if (hw_slots[h].virtual_type != NS_TYPE_HORI) {
+                            apply_controller_type_report(controller_type_for_port(h), write_buf);
+                        }
                         if (functionfs_submit_input_report(h, write_buf, write_len)) {
                             if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                             ++g_ctx.hid_writes;
@@ -544,16 +522,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         rt[h].pending_subcmd_reply = (reply_len >= 0);
                     } else if (id == RID_OUTPUT_RUMBLE) {
                         if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
-                    } else if (id == RID_OUTPUT_NFC_IR) {
-                        int cidx = hw_slots[h].client_idx;
-                        int sidx = hw_slots[h].sub_idx;
-                        uint32_t amiibo_version = 0;
-                        const bool amiibo_armed = (cidx >= 0 && sidx >= 0)
-                            ? server_amiibo_is_armed(cidx, sidx, now_stamp, &amiibo_version)
-                            : false;
-                        if (cidx != -1) publish_rumble_event(cidx, sidx, read_buf, r, false);
-                        handle_nfc_ir_output_report(rt[h], std::span<const uint8_t>(read_buf, r),
-                                                    cidx, sidx, amiibo_armed, amiibo_version);
+
                     } else if (id == 0x80) {
                         uint8_t resp_81[PRO_REPORT_SIZE] = {};
                         build_usb_81_response(resp_81, read_buf[1], h);
