@@ -411,8 +411,9 @@ void apply_controller_type_input(uint8_t type, HIDReport& r, bool pair_member) {
 
 void apply_controller_type_report(uint8_t type, uint8_t* buf) {
     if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R) return;
-    // conn_info low nibble 0xE = Joy-Con ((v >> 1) & 3 == 3) + wireless-powered bit.
-    buf[2] = (buf[2] & 0xF0) | 0x0E;
+    // buf is a 0x30/0x21 report: conn_info at [2], buttons at [3..5].
+    // conn_info low nibble 0xF = Joy-Con ((v >> 1) & 3 == 3) + USB-powered bit.
+    buf[2] = (buf[2] & 0xF0) | 0x0F;
     // Map the side's shoulder/trigger pair onto SR/SL so the normal
     // single-Joy-Con "press SL+SR" registration gesture remains available.
     uint8_t& side = type == NS_TYPE_JOYCON_R ? buf[3] : buf[5];
