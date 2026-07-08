@@ -95,8 +95,6 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             ns::ControllerStatusPacket sp{};
             std::memcpy(&sp, buf, sizeof(sp));
             if (sp.version == ns::SERVER_INFO_VERSION && sp.subpad < 4) {
-                const bool polling = (sp.reserved[3] & ns::CONTROLLER_STATUS_FLAG_NFC_POLLING) != 0;
-                g_nfcPolling[sp.subpad].store(polling, std::memory_order_relaxed);
                 int controller = controller_for_slot[sp.subpad];
                 if (controller >= 0) {
                     int player_index = (sp.player_index < 4) ? static_cast<int>(sp.player_index) : -1;
@@ -108,12 +106,6 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             ns::RosterPacket rp{};
             std::memcpy(&rp, buf, sizeof(rp));
             handle_roster_packet(rp);
-        } else if (magic == ns::AMIIBO_STATUS_MAGIC && n == sizeof(ns::AmiiboStatusPacket)) {
-            ns::AmiiboStatusPacket ap{};
-            std::memcpy(&ap, buf, sizeof(ap));
-            handle_amiibo_status_packet(ap);
-        } else if (magic == ns::AMIIBO_CHUNK_MAGIC && n >= (int)sizeof(ns::AmiiboChunkHeader)) {
-            handle_amiibo_chunk_packet(std::span<const uint8_t>(buf, static_cast<size_t>(n)));
         } else if (magic == ns::PRECISION_RUMBLE_MAGIC && n == sizeof(ns::PrecisionRumblePacket)) {
             ns::PrecisionRumblePacket rp{};
             std::memcpy(&rp, buf, sizeof(rp));

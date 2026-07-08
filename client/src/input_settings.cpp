@@ -159,7 +159,7 @@ void load_saved_feature_toggles() {
     double sens = settings.value("MouseSensitivity", 1.0).toDouble();
     g_mouseSensitivity.store((sens >= 0.05 && sens <= 20.0) ? sens : 1.0);
     int controllerType = settings.value("ControllerType", ns::CONTROLLER_TYPE_PRO).toInt();
-    if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_JOYCON_PAIR)
+    if (controllerType < ns::CONTROLLER_TYPE_JOYCON_L || controllerType > ns::CONTROLLER_TYPE_HORI)
         controllerType = ns::CONTROLLER_TYPE_PRO;
     g_controllerType.store(controllerType);
     sync_sdl_input_options();

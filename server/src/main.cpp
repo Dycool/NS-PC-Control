@@ -170,7 +170,6 @@ int main(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         std::string s = argv[i] ? argv[i] : "";
         if      (s == "-wake")                  s = "--wake";
-        else if (s == "-hori")                  s = "--hori";
         else if (s == "-bt" || s == "--bt") {
             std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled "
                                  "by default. Use -no-bt to disable it.");
@@ -202,7 +201,6 @@ int main(int argc, char** argv) {
     app.add_flag  ("-v",       g_ctx.verbose,              "Enable verbose output");
     app.add_flag  ("--wake",   g_ctx.switch2_wakeup_setup_requested,
                                                            "Run interactive Joy-Con 2 wake setup and exit");
-    app.add_flag  ("--hori",   g_ctx.legacy_mode,          "Expose the legacy 8-byte HORI controller gadget");
     app.add_flag  ("--pair",   pair_explicit,              "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
     app.add_flag  ("--no-bt",  no_bt,                      "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
     app.add_flag  ("--upnp",   do_upnp,                   "Forward UDP port via UPnP");
@@ -449,15 +447,7 @@ int main(int argc, char** argv) {
             }
 
 
-            // --- Amiibo updated-dump pull request ---
-            if (bytes == static_cast<ssize_t>(sizeof(ns::AmiiboPullRequest))) {
-                uint32_t amagic = 0;
-                memcpy(&amagic, udp_rx.data(), 4);
-                if (amagic == ns::AMIIBO_PULL_MAGIC) {
-                    server_amiibo_handle_pull_request(sock, {udp_rx.data(), static_cast<size_t>(bytes)}, sender);
-                    continue;
-                }
-            }
+
 
             // --- Macro chunk ---
             if (bytes >= 4) {

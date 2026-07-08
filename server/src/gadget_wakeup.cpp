@@ -797,8 +797,7 @@ bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_repo
 }
 
 bool usb_transport_supports_nfc_reports() {
-    return functionfs_transport_active()
-        || g_ctx.nfc_gadget_active.load(std::memory_order_relaxed);
+    return false;
 }
 
 bool functionfs_io_ready(int id) {

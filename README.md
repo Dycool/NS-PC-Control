@@ -56,24 +56,6 @@ unzip ns-pc-control-raspberry-pi.zip
 * Open `http://<pi-ip>:8080` in your browser.
 * See the **[Web App Guide](docs/web-app.md)** for details.
 
----
-
-## 🎛️ Controller Emulation Modes
-
-The Raspberry Pi server can emulate **two different controller profiles**:
-
-| Feature | Hori Controllers | Pro Controllers |
-|---------|--------------------|---------------------|
-| HID report size | 8 bytes | 64 bytes |
-| **Latency** | **Fastest** | **Fast** |
-| **Gyro** | **No** | **Yes** |
-| **Rumble** | **No** | **Yes** |
-
-Default mode is the pro controller. Use `-hori` if you have any issues with the other mode:
-
-```bash
-sudo chrt -f 99 ./ns-backend -hori
-```
 
 ---
 
@@ -96,7 +78,7 @@ Detailed guides and technical information are in the `docs/` folder:
 
 * **[Raspberry Pi System Setup](docs/raspberry-pi-setup.md)** - Enabling USB gadget mode and automating on boot.
 * **[Building from Source](docs/building-from-source.md)** - Compiling the desktop client (Windows/Mac/Linux), Android/iOS mobile apps, and server from scratch.
-* **[Controller Modes](docs/controller-modes.md)** - Legacy vs modern backend mode, gyro, rumble, and how to choose.
+* **[Controller Modes](docs/controller-modes.md)** - Legacy vs modern backend mode, gyro, rumble, and Joy-Con emulation.
 * **[Macros](docs/macros.md)** - Recording and replaying button sequences for speedruns and TAS.
 * **[Architecture & Security](docs/architecture.md)** - Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Clients](docs/web-app.md)** - Using the embedded web interface and mobile touch controls.

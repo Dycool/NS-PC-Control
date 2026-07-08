@@ -35,6 +35,7 @@ static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
     c.last_rx_us = now;
     c.report.reset();
     c.report.p1.input = pad.input;
+    c.report.p1.reserved[2] = ns::CONTROLLER_TYPE_PRO;
     if (pad.battery_percent >= 0 && pad.battery_percent <= 100) {
         c.report.p1.reserved[0] = static_cast<uint8_t>(pad.battery_percent);
         c.report.p1.reserved[1] |= EXT_STATUS_BATTERY_VALID;

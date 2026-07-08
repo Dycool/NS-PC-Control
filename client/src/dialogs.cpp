@@ -220,6 +220,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerRow->addWidget(new QLabel("Emulated controller", this), 0, 0);
     controllerTypeBox = new QComboBox(this);
     controllerTypeBox->addItem("Pro Controller", ns::CONTROLLER_TYPE_PRO);
+    controllerTypeBox->addItem("Hori Controller", ns::CONTROLLER_TYPE_HORI);
     controllerTypeBox->addItem("Joy-Con (L)", ns::CONTROLLER_TYPE_JOYCON_L);
     controllerTypeBox->addItem("Joy-Con (R)", ns::CONTROLLER_TYPE_JOYCON_R);
     controllerTypeBox->addItem("Joy-Con L + R Pair", ns::CONTROLLER_TYPE_JOYCON_PAIR);
@@ -228,11 +229,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerRow->addWidget(controllerTypeBox, 0, 1);
     outer->addLayout(controllerRow);
 
-    auto* amiiboRow = new QGridLayout();
-    amiiboRow->addWidget(new QLabel("Amiibo", this), 0, 0);
-    scanAmiiboButton = new QPushButton("Scan Amiibo", this);
-    amiiboRow->addWidget(scanAmiiboButton, 0, 1);
-    outer->addLayout(amiiboRow);
+
 
     auto* buttons = new QGridLayout();
     QPushButton* save = new QPushButton("Save", this);
@@ -241,16 +238,22 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     buttons->addWidget(cancel, 0, 3);
     outer->addLayout(buttons);
 
-    connect(controllerTypeBox, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { updateAmiiboButton(); });
-    connect(scanAmiiboButton, &QPushButton::clicked, this, [this] { scanAmiibo(); });
+    connect(controllerTypeBox, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        const bool connected = g_connected.load();
+        controllerTypeBox->setEnabled(!connected);
+        controllerTypeBox->setToolTip(connected
+            ? QStringLiteral("Disconnect to change the emulated controller type.")
+            : QString());
+    });
     connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
-    // The dialog is modal, but the connection can still drop in the background.
-    auto* amiiboTimer = new QTimer(this);
-    amiiboTimer->setInterval(250);
-    connect(amiiboTimer, &QTimer::timeout, this, [this] { updateAmiiboButton(); });
-    amiiboTimer->start();
-    updateAmiiboButton();
+
+    const bool connected = g_connected.load();
+    controllerTypeBox->setEnabled(!connected);
+    controllerTypeBox->setToolTip(connected
+        ? QStringLiteral("Disconnect to change the emulated controller type.")
+        : QString());
+
     updateMouseModeControls();
 }
 
@@ -268,50 +271,7 @@ void SettingsDialog::updateMouseModeControls() {
     if (mouseSensitivityValue) mouseSensitivityValue->setEnabled(sensEnabled);
 }
 
-void SettingsDialog::updateAmiiboButton() {
-    if (!scanAmiiboButton || !controllerTypeBox) return;
-    const int mode = controllerTypeBox->currentData().toInt();
-    const bool hasJoyconR = mode == ns::CONTROLLER_TYPE_JOYCON_R || mode == ns::CONTROLLER_TYPE_JOYCON_PAIR;
-    const bool connected = g_connected.load();
-    scanAmiiboButton->setEnabled(hasJoyconR && connected);
-    controllerTypeBox->setEnabled(!connected);
-    controllerTypeBox->setToolTip(connected
-        ? QStringLiteral("Disconnect to change the emulated controller type.")
-        : QString());
-}
 
-void SettingsDialog::scanAmiibo() {
-    if (!controllerTypeBox) return;
-    const int mode = controllerTypeBox->currentData().toInt();
-    if (mode != ns::CONTROLLER_TYPE_JOYCON_R && mode != ns::CONTROLLER_TYPE_JOYCON_PAIR) return;
-    if (!g_connected.load()) return;
-    QString path = QFileDialog::getOpenFileName(this, "Open Amiibo Dump", QString(), "Amiibo dumps (*.bin);;All files (*)");
-    if (path.isEmpty()) return;
-    if (!g_connected.load()) {
-        QMessageBox::warning(this, "Scan Amiibo", "Lost connection to the server; the amiibo was not scanned.");
-        return;
-    }
-
-    // Make the active sender advertise the selected NFC-capable mode immediately
-    // even if the user scans before pressing Save in this dialog. Cancel still
-    // only affects the other settings in the dialog; Scan Amiibo is explicit.
-    g_controllerType.store(mode);
-
-    // In Joy-Con L+R mode the server expands one source subpad into virtual
-    // Joy-Con L/R ports and attaches NFC to that source's virtual R side.
-    // Upload to the source subpad, not a client-side fake P2.
-    uint8_t amiiboSubpad = 0;
-    if (mode == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
-        auto sdl = g_sdlInput.snapshot();
-        for (int i = 0; i < 4; ++i) {
-            if (sdl[i].connected) { amiiboSubpad = static_cast<uint8_t>(i); break; }
-        }
-    }
-    std::string err;
-    if (!queue_amiibo_upload_from_file(q_to_std(path), amiiboSubpad, err)) {
-        QMessageBox::warning(this, "Scan Amiibo", std_to_q(err));
-    }
-}
 
 void SettingsDialog::saveSettings() {
     const bool gyro = gyroBox->isChecked();

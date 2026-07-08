@@ -26,6 +26,7 @@ static uint8_t requested_controller_profile_from_report(const HIDReport& report)
         case ns::CONTROLLER_TYPE_JOYCON_R:
         case ns::CONTROLLER_TYPE_PRO:
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+        case ns::CONTROLLER_TYPE_HORI:
             return report.reserved[2];
         case ns::CONTROLLER_TYPE_DEFAULT:
         default:
@@ -41,6 +42,8 @@ static uint8_t virtual_type_for_profile(uint8_t profile, bool pair_right_side = 
             return NS_TYPE_JOYCON_R;
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
             return pair_right_side ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L;
+        case ns::CONTROLLER_TYPE_HORI:
+            return NS_TYPE_PRO;
         case ns::CONTROLLER_TYPE_PRO:
         default:
             return NS_TYPE_PRO;
@@ -235,6 +238,28 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
+            bool wants_hori = false;
+            for (int c = 0; c < MAX_CLIENTS; ++c) {
+                if (!snap[c].active) continue;
+                for (int s = 0; s < 4; ++s) {
+                    if (snap[c].uses_pad_presence && !snap[c].pad_present[s]) continue;
+                    const HIDReport* pads[4] = {&snap[c].report.p1, &snap[c].report.p2, &snap[c].report.p3, &snap[c].report.p4};
+                    if (pads[s]->reserved[2] == ns::CONTROLLER_TYPE_HORI) {
+                        wants_hori = true;
+                        break;
+                    }
+                }
+                if (wants_hori) break;
+            }
+
+            if (wants_hori != g_ctx.legacy_mode) {
+                g_ctx.legacy_mode = wants_hori;
+                std::println("Switching USB gadget mode: legacy_mode={}", g_ctx.legacy_mode);
+                close_all_fds();
+                run_gadget_setup_if_needed(true, g_ctx.legacy_mode ? "Client requested Hori Controller" : "All clients request modern Controller");
+                break;
+            }
+
             for (int h = 0; h < nports; ++h) {
                 if (hw_slots[h].client_idx == -1) continue;
                 int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
@@ -275,7 +300,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (!snap[c].active) continue;
                 for (int s = 0; s < 4; ++s) {
                     const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[c], s));
-                    const bool wants_pair = !g_ctx.legacy_mode && profile_is_pair(profile);
+                    const bool wants_pair = profile_is_pair(profile);
 
                     int mapped_count = 0;
                     bool has_pair_l = false, has_pair_r = false;

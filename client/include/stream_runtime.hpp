@@ -13,7 +13,6 @@
 #include <expected>
 
 extern std::atomic<bool> g_connected;
-extern std::atomic<bool> g_nfcPolling[4];
 extern std::thread g_senderThread;
 extern std::atomic<bool> g_senderRunning;
 extern uint8_t g_hmacKey[32];

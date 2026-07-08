@@ -17,7 +17,6 @@
 #include <vector>
 
 std::atomic<bool> g_connected{false};
-std::atomic<bool> g_nfcPolling[4]{false, false, false, false};
 std::thread g_senderThread;
 std::atomic<bool> g_senderRunning{false};
 uint8_t g_hmacKey[32]{};
@@ -142,7 +141,8 @@ static uint8_t requested_controller_profile_for_frame() {
     if (mode == ns::CONTROLLER_TYPE_JOYCON_L ||
             mode == ns::CONTROLLER_TYPE_JOYCON_R ||
             mode == ns::CONTROLLER_TYPE_PRO ||
-            mode == ns::CONTROLLER_TYPE_JOYCON_PAIR) {
+            mode == ns::CONTROLLER_TYPE_JOYCON_PAIR ||
+            mode == ns::CONTROLLER_TYPE_HORI) {
         return static_cast<uint8_t>(mode);
     }
     return ns::CONTROLLER_TYPE_PRO;
@@ -323,15 +323,11 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     while (running.load(std::memory_order_relaxed)) {
         const uint64_t loop_start_us = ns::now_us();
         std::string upload;
-        std::vector<uint8_t> amiibo_upload;
-        uint8_t amiibo_upload_subpad = 0;
         if (cfg.gui_features && (loop_start_us - last_kb_poll_us >= 10000ULL)) {
             update_keyboard_state_cache();
             {
                 std::lock_guard<std::mutex> lk(g_macro_mtx);
                 upload.swap(g_macro_upload_pending);
-                amiibo_upload.swap(g_amiibo_upload_pending);
-                amiibo_upload_subpad = g_amiibo_upload_subpad_pending;
             }
             poll_macro_entry_hotkeys();
             last_kb_poll_us = loop_start_us;
@@ -354,23 +350,8 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
         send_client_names_if_changed(sock, dest, cfg.hmac_key, g_keyboardMode.load(), last_names, last_names_send_us);
         // Typed uploads are sent after the live input frame so the server has
-        // already seen the current controller type (important for Joy-Con R NFC).
+        // already seen the current controller type.
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
-        if (!amiibo_upload.empty()) {
-            const bool ok = send_amiibo_udp_packet(sock, dest, cfg.hmac_key, amiibo_upload, amiibo_upload_subpad);
-            set_status_message(ok ? "Amiibo sent" : "Amiibo send failed");
-        }
-        std::string amiibo_save_path;
-        uint8_t amiibo_save_subpad = 0;
-        uint32_t amiibo_save_version = 0;
-        if (take_amiibo_save_request(amiibo_save_path, amiibo_save_subpad, amiibo_save_version)) {
-            const bool ok = send_amiibo_pull_request(sock, dest, cfg.hmac_key, amiibo_save_subpad, amiibo_save_version);
-            set_status_message(ok ? "Pulling updated amiibo dump" : "Amiibo save request failed");
-        } else if (take_amiibo_pull_retry(amiibo_save_subpad, amiibo_save_version)) {
-            // A pull request or its reply chunks were lost; ask again while the
-            // server still holds the updated dump.
-            send_amiibo_pull_request(sock, dest, cfg.hmac_key, amiibo_save_subpad, amiibo_save_version);
-        }
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
             set_status_message(g_serverFullDisconnect.load(std::memory_order_relaxed) ? "Server full" : "Disconnected");
@@ -460,7 +441,6 @@ std::expected<void, std::string> start_connection(const std::string& target) {
 
 void stop_connection() {
     const bool was_connected = g_connected.exchange(false);
-    for (int i = 0; i < 4; ++i) g_nfcPolling[i].store(false);
     if (g_senderThread.joinable()) {
         g_senderRunning = false;
         g_senderThread.join();

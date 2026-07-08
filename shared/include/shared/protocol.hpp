@@ -115,6 +115,7 @@ enum ControllerType : uint8_t {
     // slots, exposed to the Switch as Joy-Con L + Joy-Con R. The client sends
     // this value for the physical/source pad; the server owns the L/R expansion.
     CONTROLLER_TYPE_JOYCON_PAIR = 4,
+    CONTROLLER_TYPE_HORI        = 5,
 };
 static constexpr std::size_t ROSTER_NAME_CAP = 48;
 

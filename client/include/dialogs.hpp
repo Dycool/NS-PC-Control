@@ -58,15 +58,12 @@ private:
     QCheckBox* homeShortcutBox = nullptr;
     QCheckBox* captureShortcutBox = nullptr;
     QComboBox* controllerTypeBox = nullptr;
-    QPushButton* scanAmiiboButton = nullptr;
     QCheckBox* mouseModeBox = nullptr;
     QLabel* mouseSensitivityLabel = nullptr;
     QSlider* mouseSensitivitySlider = nullptr;
     QLabel* mouseSensitivityValue = nullptr;
 
-    void updateAmiiboButton();
     void updateMouseModeControls();
-    void scanAmiibo();
     void saveSettings();
 };
 

@@ -26,7 +26,6 @@ private:
     QPushButton* macrosBtn = nullptr;
     QPushButton* settingsBtn = nullptr;
     QPushButton* connectBtn = nullptr;
-    QPushButton* amiiboBtn = nullptr;
     QPushButton* quitBtn = nullptr;
     QLabel* statusLabel = nullptr;
     QLabel* padLabels[4]{};

@@ -32,8 +32,6 @@ make
 
 ```bash
 sudo ./ns-backend
-# Hori mode
-sudo ./ns-backend -hori
 ```
 
 > The server automatically creates and binds the HID gadget on startup and cleans up on exit.
