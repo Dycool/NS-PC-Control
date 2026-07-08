@@ -6,6 +6,7 @@
 #include "stream_runtime.hpp"
 #include <QApplication>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QGridLayout>
@@ -210,6 +211,22 @@ void MainWindow::onScanAmiiboClicked() {
     int subpad = 0; // primary for now
     QString path = QFileDialog::getOpenFileName(this, "Select Amiibo .bin file", "", "Amiibo files (*.bin)");
     if (path.isEmpty()) return;
+
+    QFileInfo fileInfo(path);
+    constexpr qint64 MAX_AMIIBO_FILE_SIZE = 1024; // NTAG215 core is always 540 bytes.
+    // Real dumps vary 532-570 bytes due to different readers/tools.
+    // Game-written data (levels, custom gear, progress etc.) lives *inside* those 540 bytes — it does not make the file larger.
+    // We allow up to 1KB to be very safe against minor headers/overhead from tools like TagMo, Proxmark, N2Elite, etc.
+    if (fileInfo.size() > MAX_AMIIBO_FILE_SIZE) {
+        QMessageBox::warning(this, "Invalid Amiibo File",
+            QString("Selected file is too large (%1 bytes).\n"
+                    "Standard Amiibo .bin files are 540 bytes (NTAG215). "
+                    "Even ones with game data written stay ~540 bytes. "
+                    "Max allowed here is %2 bytes for tool variations.")
+                .arg(fileInfo.size()).arg(MAX_AMIIBO_FILE_SIZE));
+        return;
+    }
+
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
         QMessageBox::warning(this, "Error", "Failed to open file.");
@@ -217,7 +234,7 @@ void MainWindow::onScanAmiiboClicked() {
     }
     QByteArray data = f.readAll();
     f.close();
-    if (data.size() > 540) data.resize(540); // cap
+    if (data.size() > 540) data.resize(540); // cap to exact NTAG215 image size (server also enforces 540)
     g_amiiboPaths[subpad] = path;
     // send to server
     sendAmiiboData(subpad, data);

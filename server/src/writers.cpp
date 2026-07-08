@@ -111,10 +111,13 @@ void writer_thread(std::stop_token stoken, int hz) {
         rt[i].usb_baudrate_set = false;
         rt[i].usb_timeout_disabled = false;
         rt[i].pending_subcmd_reply = false;
+        rt[i].pending_cmd_response = false;
+        rt[i].cmd_response_len = 0;
         rt[i].last_standard_report_us = 0;
         rt[i].last_idle_neutral_us = 0;
         rt[i].neutral_burst_until_us = 0;
         memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
+        memset(rt[i].cmd_response_buf, 0, sizeof(rt[i].cmd_response_buf));
     };
     bool ffs_live[HID_PORT_COUNT] = {};
 
@@ -428,7 +431,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const bool port_needed = (hw_slots[h].client_idx != -1);
                     uint8_t write_buf[HIDG_MAX_REPORT_SIZE] = {};
                     size_t write_len = PRO_REPORT_SIZE;
-                    bool have_report_to_write = false, wrote_subcmd_reply = false;
+                    bool have_report_to_write = false, wrote_subcmd_reply = false, wrote_cmd_response = false;
 
                     if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
                         HoriHIDReport r = out_reports[h].input;
@@ -440,7 +443,16 @@ void writer_thread(std::stop_token stoken, int hz) {
                             prev[h] = r;
                         }
                     } else {
-                        if (rt[h].pending_subcmd_reply) {
+                        if (rt[h].pending_cmd_response && g_port_switch2[h]) {
+                            // Accurate S2 command responses (e.g. NFC 0x01) use observed header format, not 0x21 subcmd wrapper
+                            size_t clen = std::min(rt[h].cmd_response_len, sizeof(write_buf));
+                            if (clen == 0) clen = 64; // pad
+                            std::memcpy(write_buf, rt[h].cmd_response_buf, clen);
+                            if (clen < sizeof(write_buf)) std::memset(write_buf + clen, 0, sizeof(write_buf) - clen);
+                            write_len = sizeof(write_buf);
+                            have_report_to_write = true;
+                            wrote_cmd_response = true;
+                        } else if (rt[h].pending_subcmd_reply) {
                             bool is_s2 = g_port_switch2[h];
                             rt[h].pending_reply.id = RID_INPUT_SUBCMD; // subcmd reply ID; research uses similar for S2
                             rt[h].pending_reply.timer = pro_timer_from_us(now_stamp);
@@ -487,12 +499,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 check_amiibo_expiry(h);
                                 if (is_s2) {
                                     if (hw_slots[h].virtual_type == NS_TYPE_PRO) {
-                                        build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), write_buf);
+                                        build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), h, write_buf);
                                         write_len = PRO_REPORT_SIZE;
                                     } else {
                                         // JC S2: use dedicated builder per research (0x07 L / 0x08 R)
                                         uint8_t rid = (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L ? 0x07 : 0x08);
-                                        build_s2_jc_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), rid, write_buf);
+                                        build_s2_jc_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), rid, h, write_buf);
                                         write_len = PRO_REPORT_SIZE;
                                     }
                                 } else {
@@ -514,6 +526,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         }
                         if (functionfs_submit_input_report(h, write_buf, write_len)) {
                             if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
+                            if (wrote_cmd_response) rt[h].pending_cmd_response = false;
                             ++g_ctx.hid_writes;
                         }
                     }
@@ -533,9 +546,31 @@ void writer_thread(std::stop_token stoken, int hz) {
                             uint8_t cmd_id = read_buf[0];
                             uint8_t dir = read_buf[1];
                             if (dir == 0x91 || dir == 0x01) {
-                                // S2 command header
+                                // S2 command header per research
                                 uint8_t subcmd = read_buf[3];
                                 std::span<const uint8_t> cmd_data(read_buf + 8, r > 8 ? std::min<size_t>(56, r - 8) : 0);
+                                if (cmd_id == 0x01) {
+                                    // NFC (and other 0x01 subs) - use accurate raw response format from commands.md
+                                    uint8_t* cr = rt[h].cmd_response_buf;
+                                    uint8_t transport = (r > 2 ? read_buf[2] : 0x00);
+                                    cr[0] = 0x01;
+                                    cr[1] = 0x01;
+                                    cr[2] = transport;
+                                    cr[3] = subcmd;
+                                    cr[4] = 0x00;
+                                    cr[5] = (subcmd == 0x15 ? 0x10 : 0x00);
+                                    cr[6] = (subcmd == 0x15 ? 0x78 : 0xf8);
+                                    cr[7] = 0x00;
+                                    size_t pay = fill_nfc_response_payload(subcmd, cmd_data, cr + 8, h);
+                                    rt[h].cmd_response_len = 8 + pay;
+                                    if (subcmd == 0x15 && pay > 0) {
+                                        // match ex response header more
+                                        cr[2] = 0x01;
+                                    }
+                                    rt[h].pending_cmd_response = true;
+                                    return;
+                                }
+                                // non-NFC commands still use subcmd reply path (may evolve)
                                 if (hw_slots[h].client_idx != -1) {
                                     // rumble may be in other reports or combined
                                 }

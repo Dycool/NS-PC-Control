@@ -145,6 +145,29 @@ void flush_rumble_to_udp(int sock, int client_idx) {
         if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::RosterPacket)))
             std::println(stderr, "[udp] failed to send roster packet: {}", std::strerror(errno));
     }
+
+    // Amiibo packets
+    for (int s = 0; s < 4; ++s) {
+        if (c.amiibo_request_pending[s]) {
+            ns::AmiiboRequestPacket pkt{};
+            pkt.subpad = static_cast<uint8_t>(s);
+            pkt.requested = 1;
+            ssize_t sent = sendto(sock, &pkt, sizeof(pkt), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+            if (g_ctx.verbose && sent < 0)
+                std::println(stderr, "[udp] failed to send amiibo request: {}", std::strerror(errno));
+            c.amiibo_request_pending[s] = false;
+        }
+        if (c.amiibo_writeback_pending[s]) {
+            ns::AmiiboDataPacket pkt{};
+            pkt.subpad = static_cast<uint8_t>(s);
+            pkt.data_len = c.amiibo_writeback_len[s];
+            std::memcpy(pkt.data, c.amiibo_writeback_data[s], std::min<size_t>(pkt.data_len, 540));
+            ssize_t sent = sendto(sock, &pkt, sizeof(pkt), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+            if (g_ctx.verbose && sent < 0)
+                std::println(stderr, "[udp] failed to send amiibo writeback: {}", std::strerror(errno));
+            c.amiibo_writeback_pending[s] = false;
+        }
+    }
 }
 
 struct SessionData {

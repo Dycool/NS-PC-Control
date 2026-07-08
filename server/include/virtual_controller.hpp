@@ -103,6 +103,9 @@ struct ControllerRuntime {
     bool usb_baudrate_set = false;
     bool usb_timeout_disabled = false;
     bool pending_subcmd_reply = false;
+    bool pending_cmd_response = false;
+    uint8_t cmd_response_buf[64] = {};
+    size_t cmd_response_len = 0;
     uint64_t last_standard_report_us = 0;
     uint64_t last_idle_neutral_us = 0;
     uint64_t neutral_burst_until_us = 0;
@@ -133,9 +136,10 @@ void build_standard_report(const ns::HIDReport& src,
                            ProInputReport30& out,
                            bool is_switch2 = false);
 
-void build_s2_pro_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t* out);
-void build_s2_jc_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t report_id, uint8_t* out);
+void build_s2_pro_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, int port, uint8_t* out);
+void build_s2_jc_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t report_id, int port, uint8_t* out);
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
+size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data, uint8_t* payload, int port);
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
 
 uint8_t controller_type_for_port(int ctrl);

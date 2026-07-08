@@ -460,7 +460,8 @@ int main(int argc, char** argv) {
                 if (mmagic == ns::AMIIBO_DATA_MAGIC) {
                     ns::AmiiboDataPacket ad{};
                     memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
-                    set_amiibo_data_for_port(0, ad.data, ad.data_len); // primary port
+                    int p = (ad.subpad >= 0 && ad.subpad < 4) ? ad.subpad : 0;
+                    set_amiibo_data_for_port(p, ad.data, ad.data_len);
                     continue;
                 }
             }

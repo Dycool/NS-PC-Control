@@ -114,6 +114,11 @@ static uint8_t g_port_protocol_type[HID_PORT_COUNT] = {
 static std::vector<uint8_t> g_amiibo_data[HID_PORT_COUNT];
 static std::chrono::steady_clock::time_point g_amiibo_expiry[HID_PORT_COUNT];
 static bool g_amiibo_modified[HID_PORT_COUNT] = {};
+
+bool is_amiibo_placed(int port) {
+    if (port < 0 || port >= HID_PORT_COUNT) return false;
+    return !g_amiibo_data[port].empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
+}
 constexpr size_t SPI_FLASH_SIZE = 0x200000; // 2MB per research for S2, 64k for S1 compatibility
 uint8_t g_spi_flash[4][SPI_FLASH_SIZE];
 bool g_spi_initialized[4] = {};
@@ -124,7 +129,10 @@ uint8_t controller_type_for_port(int ctrl) {
 
 void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     if (port < 0 || port >= HID_PORT_COUNT || !data) return;
-    g_amiibo_data[port].assign(data, data + len);
+    constexpr size_t AMIIBO_SIZE = 540;
+    g_amiibo_data[port].resize(AMIIBO_SIZE, 0x00);
+    size_t copy = std::min(len, AMIIBO_SIZE);
+    if (copy) std::memcpy(g_amiibo_data[port].data(), data, copy);
     g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     g_amiibo_modified[port] = false;
 }
@@ -133,7 +141,8 @@ void check_amiibo_expiry(int port) {
     if (port < 0 || port >= HID_PORT_COUNT || g_amiibo_data[port].empty()) return;
     if (std::chrono::steady_clock::now() > g_amiibo_expiry[port]) {
         if (g_amiibo_modified[port]) {
-            publish_amiibo_writeback(0, port, g_amiibo_data[port].data(), (uint16_t)g_amiibo_data[port].size());
+            constexpr size_t AMIIBO_SIZE = 540;
+            publish_amiibo_writeback(0, port, g_amiibo_data[port].data(), (uint16_t)AMIIBO_SIZE);
         }
         g_amiibo_data[port].clear();
     }
@@ -410,7 +419,7 @@ void build_standard_report(const HIDReport& src, const MotionReport motion_sampl
 
 // Basic S2 report builder based on ndeadly research (hid_reports.md)
 // For Pro S2: report ID 0x09, specific button layout (includes C/GL/GR), 12bit sticks, motion
-void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t* out) {
+void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, int port, uint8_t* out) {
     memset(out, 0, PRO_REPORT_SIZE);
     out[0] = 0x09;                    // Report ID 0x09 (S2 Pro main input per research)
     out[1] = timer;                   // counter (research: byte 0 after ID)
@@ -447,7 +456,8 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
 
     // Unknown, NFC state, headset audio state (research)
     out[12] = 0x30;
-    out[13] = 0; // NFC state
+    uint8_t nfc_state = (port >= 0 && is_amiibo_placed(port)) ? 0x01 : 0x00;
+    out[13] = nfc_state; // NFC state (0x0C after ID) per hid_reports.md; 0=idle, 1=present/processing
     out[14] = 0; // headset
 
     // Motion: length + data (research uses 0x28 for 3 samples, packed)
@@ -459,7 +469,7 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
 }
 
 // S2 Joy-Con builder (research 0x07 for L, 0x08 for R)
-void build_s2_jc_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t report_id, uint8_t* out) {
+void build_s2_jc_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t report_id, int port, uint8_t* out) {
     memset(out, 0, PRO_REPORT_SIZE);
     out[0] = report_id; // 0x07 L or 0x08 R
     out[1] = timer;
@@ -481,17 +491,23 @@ void build_s2_jc_report(const HIDReport& src, const MotionReport motion_samples[
                  ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) |
                  ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);
         out[4] = (btn & BTN_CAPTURE ? 0x80 : 0);
-        pack_stick_12(out + 5, src.input.lx, src.input.ly);
+        out[5] = 0x07; // unk per doc
+        pack_stick_12(out + 6, src.input.lx, src.input.ly);
+        // NFC at 0xE (wire 15) always 0 for L
+        out[15] = 0;
     } else { // R
         out[3] = (btn & BTN_RSTICK ? 0x80 : 0) | (btn & BTN_PLUS ? 0x40 : 0) | (btn & BTN_ZR ? 0x20 : 0) | (btn & BTN_R ? 0x10 : 0) |
                  (btn & BTN_X ? 0x08 : 0) | (btn & BTN_Y ? 0x04 : 0) | (btn & BTN_A ? 0x02 : 0) | (btn & BTN_B ? 0x01 : 0);
         out[4] = (btn & BTN_HOME ? 0x40 : 0);
-        pack_stick_12(out + 5, src.input.rx, src.input.ry);
+        out[5] = 0x07; // unk
+        pack_stick_12(out + 6, src.input.rx, src.input.ry);
+        uint8_t nfc_state = (port >= 0 && is_amiibo_placed(port)) ? 0x01 : 0x00;
+        out[15] = nfc_state; // NFC state (doc 0xE) at wire byte 15 for R
     }
-    out[9] = 0; // NFC
-    out[10] = (has_motion && imu_enabled) ? 0x28 : 0;
+    out[9] = 0; // space for mouse etc (approximate)
+    out[16] = (has_motion && imu_enabled) ? 0x28 : 0;
     if (has_motion && imu_enabled && motion_samples) {
-        memcpy(out + 11, motion_samples, sizeof(MotionReport) * 3);
+        memcpy(out + 17, motion_samples, sizeof(MotionReport) * 3);
     }
 }
 
@@ -568,40 +584,55 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
     case 0x15: // pairing related
         reply->ack = 0x80;
         return 0;
-    // NFC subs from research for amiibo
-    case 0x05: // Get status - signal scan requested if no tag
+    // NFC subs from research for amiibo (kept for fallback; primary path for cmd 0x01 uses raw header responses)
+    case 0x05: // Get status - signal scan requested if no tag (match pcap structure)
         reply->ack = 0x80;
-        // return status with no tag or with if placed
-        reply->reply_data[0] = 0x09; // example
-        // if data placed, set state to present
-        if (!g_amiibo_data[rt.ctrl].empty()) {
-            reply->reply_data[1] = 0x01; // present
+        reply->reply_data[0] = 0x09;
+        reply->reply_data[1] = 0x00;
+        reply->reply_data[2] = 0x00;
+        reply->reply_data[3] = 0x00;
+        reply->reply_data[4] = 0x01;
+        reply->reply_data[5] = 0x01;
+        reply->reply_data[6] = 0x02;
+        reply->reply_data[7] = 0x00;
+        if (!g_amiibo_data[rt.ctrl].empty() && g_amiibo_data[rt.ctrl].size() >= 8) {
+            std::memcpy(reply->reply_data + 8, g_amiibo_data[rt.ctrl].data(), 8);
         }
-        publish_amiibo_request(0, rt.ctrl, g_amiibo_data[rt.ctrl].empty()); // notify client if no data yet
-        return 8;
+        publish_amiibo_request(0, rt.ctrl, g_amiibo_data[rt.ctrl].empty());
+        return 32;
     case 0x06: // Read device
         reply->ack = 0x80;
-        if (!g_amiibo_data[rt.ctrl].empty()) {
-            // return some device info or UID from bin
-            std::memcpy(reply->reply_data, g_amiibo_data[rt.ctrl].data(), std::min<size_t>(16, g_amiibo_data[rt.ctrl].size()));
+        if (!g_amiibo_data[rt.ctrl].empty() && g_amiibo_data[rt.ctrl].size() >= 8) {
+            std::memcpy(reply->reply_data, g_amiibo_data[rt.ctrl].data(), 8);
         }
         return 16;
     case 0x15: // Read buffer - serve the amiibo bin
         reply->ack = 0x80;
         if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 2) {
-            uint16_t offset = cmd_data[0] | (cmd_data[1] << 8); // assume
+            uint16_t offset = cmd_data[0] | (cmd_data[1] << 8);
             size_t to_copy = std::min(g_amiibo_data[rt.ctrl].size() - offset, (size_t)64);
-            std::memcpy(reply->reply_data, g_amiibo_data[rt.ctrl].data() + offset, to_copy);
-            reply->reply_data[0] = (uint8_t)to_copy; // length?
+            std::memcpy(reply->reply_data + 4, g_amiibo_data[rt.ctrl].data() + offset, to_copy);
+            reply->reply_data[0] = 0x00;
+            reply->reply_data[1] = cmd_data[0];
+            reply->reply_data[2] = cmd_data[1];
+            reply->reply_data[3] = (uint8_t)to_copy;
         }
         return 64;
-    case 0x14: // Write buffer - write to bin data
+    case 0x14: // Write buffer - write to bin data (accurate per PC2_Write_Amiibo.pcapng + research)
         reply->ack = 0x80;
-        if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() > 2) {
+        if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 4) {
+            // Format from pcap: after the 8-byte cmd header the data starts with
+            //   [offset (LE, 2 bytes)] 00 [chunk_size-ish (2B)] + real NTAG data
+            // e.g. 00 00 4c 00 <data for off 0>,   4c 00 4c 00 <data for off 0x4c>, etc.
+            // Real data starts at +4; write it at the offset into our 540-byte image.
             uint16_t offset = cmd_data[0] | (cmd_data[1] << 8);
-            size_t len = cmd_data.size() - 2;
-            if (offset + len <= g_amiibo_data[rt.ctrl].size()) {
-                std::memcpy(g_amiibo_data[rt.ctrl].data() + offset, cmd_data.data() + 2, len);
+            size_t wstart = 4;
+            size_t len = cmd_data.size() - wstart;
+            if (offset + len > g_amiibo_data[rt.ctrl].size()) {
+                len = g_amiibo_data[rt.ctrl].size() > offset ? g_amiibo_data[rt.ctrl].size() - offset : 0;
+            }
+            if (len > 0) {
+                std::memcpy(g_amiibo_data[rt.ctrl].data() + offset, cmd_data.data() + wstart, len);
                 g_amiibo_modified[rt.ctrl] = true;
             }
         }
@@ -615,6 +646,73 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
 
 bool rumble_half_is_all_zero(const uint8_t* f) { return f[0] == 0 && f[1] == 0 && f[2] == 0 && f[3] == 0; }
 bool rumble_half_is_neutral_carrier(const uint8_t* f) { return f[0] == 0x00 && f[1] == 0x01 && f[2] == 0x40 && f[3] == 0x40; }
+
+// Accurate NFC command 0x01 responses per commands.md from research (called for raw header path).
+// Builds payload after the standard 8-byte command response header (caller sets 01 01 xx sub 00 f8/.. 00 00).
+size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data, uint8_t* payload, int port) {
+    constexpr size_t AMIIBO_SIZE = 540;
+    if (port < 0 || port >= HID_PORT_COUNT) port = 0;
+    auto& adata = g_amiibo_data[port];
+    bool placed = !adata.empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
+    std::memset(payload, 0, 56);
+    size_t plen = 0;
+    switch (nfc_sub) {
+    case 0x05: { // Get status - match captured structure from PC2_Write_Amiibo.pcapng
+        // Observed when tag present: 09 00 00 00 01 01 02 00 <tag-info/UID-ish 8B> 00...
+        payload[0] = 0x09; payload[1] = 0x00; payload[2] = 0x00; payload[3] = 0x00;
+        payload[4] = 0x01; payload[5] = 0x01; payload[6] = 0x02; payload[7] = 0x00;
+        if (placed && adata.size() >= 8) {
+            // insert some tag identifying bytes (real UID area from the placed bin)
+            std::memcpy(payload + 8, adata.data(), 8);
+        } else {
+            // no tag: leave zeros or minimal
+        }
+        publish_amiibo_request(0, port, !placed);
+        plen = 32;
+        break;
+    }
+    case 0x06: {
+        if (placed && adata.size() >= 8) std::memcpy(payload, adata.data(), 8);
+        plen = 16;
+        break;
+    }
+    case 0x15: { // Read buffer
+        if (placed && cmd_data.size() >= 2) {
+            uint16_t off = cmd_data[0] | (cmd_data[1] << 8);
+            size_t to_copy = (off < adata.size()) ? std::min(adata.size() - off, (size_t)60) : 0;
+            payload[0] = 0x00;
+            payload[1] = cmd_data[0];
+            payload[2] = cmd_data[1];
+            payload[3] = static_cast<uint8_t>(to_copy);
+            if (to_copy) std::memcpy(payload + 4, adata.data() + off, to_copy);
+            plen = 4 + to_copy;
+        }
+        break;
+    }
+    case 0x14: { // Write buffer (accurate format from pcap: [off_le 2B] 00 [size 2B] + data)
+        if (placed && cmd_data.size() >= 4) {
+            uint16_t off = cmd_data[0] | (cmd_data[1] << 8);
+            size_t wstart = 4;
+            size_t wlen = cmd_data.size() - wstart;
+            if (off + wlen > adata.size()) wlen = adata.size() > off ? adata.size() - off : 0;
+            if (wlen) {
+                std::memcpy(adata.data() + off, cmd_data.data() + wstart, wlen);
+                g_amiibo_modified[port] = true;
+            }
+        }
+        // Write responses in captures include a status-ish payload after the common header
+        // (df 0a 00 ...). Provide a short plausible one so length matches real traffic.
+        payload[0] = 0xdf; payload[1] = 0x0a; payload[2] = 0x00; payload[3] = 0x00;
+        payload[4] = 0x00; payload[5] = 0x00; payload[6] = 0x00; payload[7] = 0x30;
+        payload[8] = 0x00; payload[9] = 0x00; payload[10] = 0x00; payload[11] = 0x06;
+        plen = 24;
+        break;
+    }
+    default: break;
+    }
+    if (adata.size() != AMIIBO_SIZE) adata.resize(AMIIBO_SIZE, 0);
+    return plen;
+}
 
 struct DecodedPrecisionRumbleHalf { uint8_t low = 0; uint8_t high = 0; };
 

@@ -234,14 +234,16 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     }
 }
 
-void send_amiibo_data(uint8_t subpad, const QByteArray& data) {
-    // called from main window when button clicked and connected
-    // send a simple unauth packet for simplicity (or integrate with sign)
-    // for production, use the sock from connect, assume global or call from context
-    // here we use a simple send if possible
-    // To make it work, we 'll use the existing send mechanism by having a global sock if connected
-    // For this, we'll assume it's called when connected and use a placeholder
-    // In practice, the sock is in the connect scope, so we 'll add a global for send sock
+void sendAmiiboData(uint8_t subpad, const QByteArray& data) {
+    if (g_sendSock == INVALID_SOCKET) return;
+    ns::AmiiboDataPacket pkt{};
+    pkt.magic = ns::AMIIBO_DATA_MAGIC;
+    pkt.subpad = subpad;
+    size_t dl = std::min<size_t>(data.size(), 540);
+    pkt.data_len = static_cast<uint16_t>(dl);
+    if (dl > 0) std::memcpy(pkt.data, data.constData(), dl);
+    // Server accepts directly on magic match (no hmac verification for this control packet)
+    send_all_udp(g_sendSock, g_sendDest, std::span(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
 }
 
 void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint32_t& seq, const ClientFrame& frame) {

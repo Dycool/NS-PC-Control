@@ -106,6 +106,12 @@ struct ClientSession {
     ns::RosterEntry source_pads[4]{};
     uint64_t udp_last_roster_seq = 0;
     uint64_t udp_last_roster_send_us = 0;
+
+    // Amiibo support
+    bool amiibo_request_pending[4] = {};
+    bool amiibo_writeback_pending[4] = {};
+    uint16_t amiibo_writeback_len[4] = {};
+    uint8_t amiibo_writeback_data[4][540] = {};
 };
 
 

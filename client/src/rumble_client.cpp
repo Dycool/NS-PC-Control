@@ -8,6 +8,10 @@
 #include <cstring>
 #include <thread>
 #include <span>
+#include <QFile>
+
+extern std::atomic<bool> g_amiiboScanPending[4];
+extern QString g_amiiboPaths[4];
 
 void RumbleManager::apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
     if (rp.subpad >= 4) return;
@@ -120,12 +124,21 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             if (ar.subpad < 4) {
                 g_amiiboScanPending[ar.subpad] = (ar.requested != 0);
             }
-        } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= (int)(sizeof(uint32_t) + 1 + 2)) {
+        } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= (int)(sizeof(ns::AmiiboDataPacket) - 540 + 4)) {
             ns::AmiiboDataPacket ad{};
             std::memcpy(&ad, buf, std::min((size_t)n, sizeof(ad)));
             if (ad.subpad < 4) {
-                // write back to file if path known - handled in main window update or separate
-                // for now, the main window can check a global data
+                // Writeback from server (modified amiibo after game wrote via NFC 0x14) -> persist to .bin
+                QString p = g_amiiboPaths[ad.subpad];
+                if (!p.isEmpty() && ad.data_len > 0) {
+                    QFile f(p);
+                    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                        size_t wlen = std::min<size_t>(ad.data_len, 540);
+                        f.write(reinterpret_cast<const char*>(ad.data), wlen);
+                        f.close();
+                    }
+                }
+                g_amiiboScanPending[ad.subpad] = false;
             }
         }
     }

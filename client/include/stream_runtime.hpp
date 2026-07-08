@@ -11,6 +11,7 @@
 #include <array>
 #include <thread>
 #include <expected>
+#include <QByteArray>
 
 extern std::atomic<bool> g_connected;
 extern std::thread g_senderThread;
@@ -89,6 +90,7 @@ void send_client_frame(SOCKET sock,
                        const uint8_t hmac_key[32],
                        uint32_t& seq,
                        const ClientFrame& frame);
+void sendAmiiboData(uint8_t subpad, const QByteArray& data);
 int run_client_stream(const ClientStreamConfig& cfg,
                       std::atomic<bool>& running,
                       std::string* err_out = nullptr);

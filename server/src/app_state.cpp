@@ -416,15 +416,7 @@ void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
     if (!c.active) return;
-    // send immediately for UDP
-    if (c.source == InputSource::Udp) {
-        ns::AmiiboRequestPacket pkt{};
-        pkt.subpad = static_cast<uint8_t>(sub_idx);
-        pkt.requested = requested ? 1 : 0;
-        // no hmac for simplicity in this path, or add if needed
-        sendto(sock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0, (sockaddr*)&c.addr, sizeof(c.addr));
-    }
-    // for web would be different, but ns-client is UDP
+    c.amiibo_request_pending[sub_idx] = requested;
 }
 
 void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, uint16_t len) {
@@ -432,11 +424,9 @@ void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, 
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
     if (!c.active || c.source != InputSource::Udp) return;
-    ns::AmiiboDataPacket pkt{};
-    pkt.subpad = static_cast<uint8_t>(sub_idx);
-    pkt.data_len = len;
-    std::memcpy(pkt.data, data, std::min<size_t>(len, sizeof(pkt.data)));
-    sendto(sock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0, (sockaddr*)&c.addr, sizeof(c.addr));
+    c.amiibo_writeback_pending[sub_idx] = true;
+    c.amiibo_writeback_len[sub_idx] = len;
+    std::memcpy(c.amiibo_writeback_data[sub_idx], data, std::min<size_t>(len, 540));
 }
 
 void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet) {
