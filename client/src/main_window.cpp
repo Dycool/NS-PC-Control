@@ -164,11 +164,11 @@ void MainWindow::updateUi() {
     bool showScan = connected && s2Mode && !isJoyconL;
     if (scanAmiiboBtn) {
         scanAmiiboBtn->setVisible(showScan);
-        bool canScan = showScan && g_amiiboScanPending[0];
+        bool canScan = showScan && g_amiiboScanPending[0].load();
         scanAmiiboBtn->setEnabled(canScan);
     }
     if (!showScan) {
-        for (int i = 0; i < 4; i++) g_amiiboScanPending[i] = false;
+        for (int i = 0; i < 4; i++) g_amiiboScanPending[i].store(false);
     }
 
     const int desiredHeight = platformHeight();
@@ -239,7 +239,7 @@ void MainWindow::onScanAmiiboClicked() {
     // send to server
     sendAmiiboData(subpad, data);
     // local pending clear after click? server will handle timeout
-    g_amiiboScanPending[subpad] = false;
+    g_amiiboScanPending[subpad].store(false);
     updateUi();
 }
 

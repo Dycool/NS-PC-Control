@@ -15,5 +15,4 @@ struct WebClient;
 
 constexpr size_t UDP_RX_MAX_PACKET_SIZE = ns::PACKET_SIZE;
 
-void flush_rumble_to_udp(int sock, int client_idx);
 void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, bool serve_http_webapp);

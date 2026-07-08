@@ -10,9 +10,6 @@
 #include <span>
 #include <QFile>
 
-extern std::atomic<bool> g_amiiboScanPending[4];
-extern QString g_amiiboPaths[4];
-
 void RumbleManager::apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
     if (rp.subpad >= 4) return;
     ns::RumblePacket fallback{.magic = ns::RUMBLE_MAGIC, .subpad = rp.subpad,

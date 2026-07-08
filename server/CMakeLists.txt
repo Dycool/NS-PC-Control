@@ -171,6 +171,7 @@ add_executable(ns-backend
     src/main.cpp
     src/app_state.cpp
     src/web_server.cpp
+    src/udp_feedback.cpp
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
     src/writers.cpp

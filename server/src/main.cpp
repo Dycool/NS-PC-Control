@@ -53,6 +53,7 @@ static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxe
 #include "gadget_wakeup.hpp"
 #include "writers.hpp"
 #include "web_server.hpp"
+#include "udp_feedback.hpp"
 #include "bluetooth_input.hpp"
 #include "bluetooth_manager.hpp"
 
@@ -460,7 +461,7 @@ int main(int argc, char** argv) {
                 if (mmagic == ns::AMIIBO_DATA_MAGIC) {
                     ns::AmiiboDataPacket ad{};
                     memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
-                    int p = (ad.subpad >= 0 && ad.subpad < 4) ? ad.subpad : 0;
+                    int p = (ad.subpad < 4) ? ad.subpad : 0;
                     set_amiibo_data_for_port(p, ad.data, ad.data_len);
                     continue;
                 }
@@ -690,7 +691,7 @@ int main(int argc, char** argv) {
             if (wake_on_new_client) {
                 maybe_send_switch2_wake_advert("UDP client connected");
             }
-            flush_rumble_to_udp(sock, cidx);
+            flush_feedback_to_udp(sock, cidx);
         }
     }
 

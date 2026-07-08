@@ -148,5 +148,9 @@ uint8_t controller_protocol_type_for_port(int ctrl);
 void apply_controller_type_input(uint8_t type, ns::HIDReport& r, bool pair_member = false);
 void apply_controller_type_report(uint8_t type, uint8_t* buf);
 
+bool is_amiibo_placed(int port);
+void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len);
+void check_amiibo_expiry(int port);
+
 // Per-port Switch 2 flag (set when S2 protocol type used)
 extern bool g_port_switch2[HID_PORT_COUNT];

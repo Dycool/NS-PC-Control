@@ -32,9 +32,6 @@ private:
     QLabel* padLabels[4]{};
     QTimer* timer = nullptr;
 
-    bool amiiboScanPending[4] = {};
-    QString amiiboFilePath[4];
-
     static int platformWidth();
     static int platformHeight();
     static int platformPairHeight();
