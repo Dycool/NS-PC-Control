@@ -140,12 +140,14 @@ int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uin
 int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data, uint8_t* payload, int port);
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
+void publish_s2_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
 
 uint8_t controller_type_for_port(int ctrl);
 void set_controller_type_for_port(int ctrl, uint8_t protocol_type);
 uint8_t controller_protocol_type_for_port(int ctrl);
 uint8_t switch2_input_report_id_for_port(int ctrl);
 uint8_t switch2_output_report_id_for_port(int ctrl);
+bool controller_port_supports_amiibo(int ctrl);
 void apply_controller_type_input(uint8_t type, ns::HIDReport& r, bool pair_member = false);
 void apply_controller_type_report(uint8_t type, uint8_t* buf);
 void apply_s2_controller_type_report(uint8_t type, uint8_t* buf);

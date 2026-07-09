@@ -18,6 +18,26 @@ using namespace ns;
 
 uint8_t pro_timer_from_us(uint64_t t_us) { return (uint8_t)((t_us / 5000ULL) & 0xFF); }
 
+static void write_u16le(uint8_t* dst, uint16_t v) {
+    dst[0] = static_cast<uint8_t>(v & 0xFF);
+    dst[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+}
+
+static void write_i16le(uint8_t* dst, int16_t v) {
+    write_u16le(dst, static_cast<uint16_t>(v));
+}
+
+static void write_s2_motion_sample(uint8_t* dst, const MotionReport& sample) {
+    // Switch 2 report 0x09 stores each 12-byte sample as:
+    // [gyro_x, accel_x, gyro_y, accel_y, gyro_z, accel_z], all int16 LE.
+    write_i16le(dst + 0,  sample.gx);
+    write_i16le(dst + 2,  sample.ax);
+    write_i16le(dst + 4,  sample.gy);
+    write_i16le(dst + 6,  sample.ay);
+    write_i16le(dst + 8,  sample.gz);
+    write_i16le(dst + 10, sample.az);
+}
+
 // Plain modern descriptor: reports 0x30/0x21/0x81 and the 0x01/0x10/0x80 outputs,
 // max report 64 bytes. This is the exact descriptor the console-matched wired
 // session enumerated with; it keeps the interrupt endpoints at 64 bytes.
@@ -47,9 +67,9 @@ extern const uint8_t LEGACY_REPORT_DESC[85] = {
     0x20,0x75,0x08,0x95,0x01,0x81,0x02,0xC0
 };
 
-// S2 report descriptors - EXACT from ndeadly/switch2_controller_research/descriptors.md
-// These are the precise HID report descriptors the Switch 2 expects for its controllers.
-// (Previously approximated; now using the real parsed bytes for compatibility.)
+// S2 report descriptor based on the Pro Controller 2 descriptor from
+// ndeadly/switch2_controller_research, extended with Joy-Con 2 report IDs
+// 0x07/0x08 and output 0x01 for the wired Joy-Con-over-USB split identity path.
 extern const uint8_t S2_PRO_REPORT_DESC[] = {
     0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x05, 0x05, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95, 0x3F, 0x75, 0x08, 0x81, 0x02,
     0x85, 0x09, 0x09, 0x01, 0x95, 0x02, 0x81, 0x02,
@@ -59,7 +79,15 @@ extern const uint8_t S2_PRO_REPORT_DESC[] = {
     0x09, 0x30, 0x09, 0x31, 0x09, 0x33, 0x09, 0x35, 0x26, 0xFF, 0x0F, 0x95, 0x04, 0x75, 0x0C, 0x81, 0x02,
     0xC0,
     0x05, 0xFF, 0x09, 0x02, 0x26, 0xFF, 0x00, 0x95, 0x34, 0x75, 0x08, 0x81, 0x02,
-    0x85, 0x02, 0x09, 0x01, 0x95, 0x3F, 0x91, 0x02,
+
+    // Joy-Con 2 L/R input reports. These are vendor-shaped 63-byte inputs;
+    // the concrete byte layout is generated in build_s2_joycon_report().
+    0x85, 0x07, 0x09, 0x03, 0x95, 0x3F, 0x75, 0x08, 0x81, 0x02,
+    0x85, 0x08, 0x09, 0x04, 0x95, 0x3F, 0x75, 0x08, 0x81, 0x02,
+
+    // Joy-Con 2 output report 0x01 and Pro Controller 2 output report 0x02.
+    0x85, 0x01, 0x09, 0x05, 0x95, 0x3F, 0x75, 0x08, 0x91, 0x02,
+    0x85, 0x02, 0x09, 0x01, 0x95, 0x3F, 0x75, 0x08, 0x91, 0x02,
     0xC0
 };
 extern const size_t S2_PRO_REPORT_DESC_SIZE = sizeof(S2_PRO_REPORT_DESC);
@@ -133,6 +161,7 @@ void configure_usb_controller_family(UsbControllerFamily family) {
 
 void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     if (port < 0 || port >= HID_PORT_COUNT || !data) return;
+    if (!controller_port_supports_amiibo(port)) return;
     constexpr size_t AMIIBO_SIZE = 540;
     g_amiibo_data[port].resize(AMIIBO_SIZE, 0x00);
     size_t copy = std::min(len, AMIIBO_SIZE);
@@ -221,16 +250,30 @@ uint8_t controller_protocol_type_for_port(int ctrl) {
 }
 
 uint8_t switch2_input_report_id_for_port(int ctrl) {
-    (void)ctrl;
-    // The composite USB gadget uses the validated Pro Controller 2 transport
-    // for every S2 interface. Individual Joy-Con semantics are applied to the
-    // controls, not by swapping a live interface descriptor/report family.
-    return 0x09;
+    switch (controller_type_for_port(ctrl)) {
+        case NS_TYPE_JOYCON_L: return 0x07;
+        case NS_TYPE_JOYCON_R: return 0x08;
+        case NS_TYPE_PRO:
+        default: return 0x09;
+    }
 }
 
 uint8_t switch2_output_report_id_for_port(int ctrl) {
-    (void)ctrl;
-    return 0x02;
+    switch (controller_type_for_port(ctrl)) {
+        case NS_TYPE_JOYCON_L:
+        case NS_TYPE_JOYCON_R:
+            return 0x01;
+        case NS_TYPE_PRO:
+        default:
+            return 0x02;
+    }
+}
+
+bool controller_port_supports_amiibo(int ctrl) {
+    if (ctrl < 0 || ctrl >= HID_PORT_COUNT) return false;
+    if (!g_port_switch2[ctrl]) return false;
+    const uint8_t t = controller_type_for_port(ctrl);
+    return t == NS_TYPE_PRO || t == NS_TYPE_JOYCON_R;
 }
 
 void apply_controller_type_input(uint8_t type, HIDReport& r, bool pair_member) {
@@ -368,8 +411,11 @@ size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
 }
 
 void build_get_device_info_response(uint8_t* out, int ctrl) {
-    uint8_t proto = controller_protocol_type_for_port(ctrl);
-    uint8_t dev_type = g_port_switch2[ctrl] ? NS_TYPE_PRO : proto;
+    // Keep the 0x80-01 USB-session type as Pro Controller, but report the
+    // logical controller type here. This split identity is what lets wired
+    // Joy-Con profiles stay on the USB input path instead of being pushed into
+    // a Bluetooth-pairing-only flow.
+    uint8_t dev_type = controller_type_for_port(ctrl);
     memset(out, 0, 36); out[0] = 0x03; out[1] = 0x49; out[2] = dev_type; out[3] = 0x02;
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
     out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3]; out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
@@ -469,24 +515,102 @@ void build_standard_report(const ns::HIDReport& src, const ns::MotionReport moti
     out.gyro_y_2  = imu[2].gx; out.gyro_x_2  = imu[2].gy; out.gyro_z_2  = imu[2].gz;
 }
 
-// Basic S2 report builder based on ndeadly research (hid_reports.md)
-// For Pro S2: report ID 0x09, specific button layout (includes C/GL/GR), 12bit sticks, motion
-void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, int port, uint8_t* out) {
-    memset(out, 0, PRO_REPORT_SIZE);
-    const uint8_t report_id = switch2_input_report_id_for_port(port);
-    out[0] = report_id;
-    out[1] = timer;                   // counter (research: byte 0 after ID)
-    // S2 power info bitfield (research): [0] external, [1] charging, [2-5] level 0-9
+// S2 motion block follows PicoSwitch2 commit be3a731: length 30,
+// timestamp + temperature header, then two 12-byte samples encoded as
+// interleaved [gyro, accel] int16 LE lanes. Offsets include the report ID at
+// out[0]; Pro2 and Joy-Con2 place the block at different body offsets.
+static uint8_t s2_power_info_from_hid(const HIDReport& src) {
+    // S2 power info bitfield (research): [0] external, [1] charging,
+    // [2:5] battery level 0-9, [6:7] reserved.
     uint8_t pwr = 0x01;
     if (src.reserved[1] & EXT_STATUS_BATTERY_VALID) {
-      int pct = src.reserved[0];
-      uint8_t lvl = std::min<uint8_t>(9, pct / 11);
-      pwr = (lvl << 2) | 0x01;
+        int pct = std::clamp<int>(src.reserved[0], 0, 100);
+        uint8_t lvl = static_cast<uint8_t>(std::min(9, pct / 11));
+        pwr = static_cast<uint8_t>((lvl << 2) | 0x01);
     }
     if (src.reserved[1] & EXT_STATUS_BATTERY_CHARGING) pwr |= 0x02;
-    out[2] = pwr;
+    return pwr;
+}
 
-    // Buttons per research hid_reports.md for 0x09
+static void write_s2_motion_block(uint8_t* out,
+                                  size_t motion_len_index,
+                                  size_t motion_data_index,
+                                  const MotionReport motion_samples[3],
+                                  bool has_motion,
+                                  bool imu_enabled,
+                                  int port) {
+    if (!imu_enabled || !has_motion || !motion_samples) return;
+
+    static uint16_t s2_motion_timestamp[HID_PORT_COUNT] = {};
+    const int motion_port = (port >= 0 && port < HID_PORT_COUNT) ? port : 0;
+    s2_motion_timestamp[motion_port] = static_cast<uint16_t>(s2_motion_timestamp[motion_port] + 4);
+
+    out[motion_len_index] = 30;
+    write_u16le(out + motion_data_index + 0, s2_motion_timestamp[motion_port]);
+    write_u16le(out + motion_data_index + 2, 0x0C00);
+    write_s2_motion_sample(out + motion_data_index + 4,  motion_samples[1]);
+    write_s2_motion_sample(out + motion_data_index + 16, motion_samples[2]);
+}
+
+static void build_s2_joycon_report(const HIDReport& src,
+                                   const MotionReport motion_samples[3],
+                                   bool has_motion,
+                                   bool imu_enabled,
+                                   uint8_t timer,
+                                   int port,
+                                   uint8_t* out,
+                                   bool right) {
+    memset(out, 0, PRO_REPORT_SIZE);
+    out[0] = right ? 0x08 : 0x07;
+    out[1] = timer;
+    out[2] = s2_power_info_from_hid(src);
+
+    const uint16_t btn = src.input.buttons;
+    const uint8_t hat = src.input.hat;
+    if (right) {
+        out[3] = (btn & BTN_RSTICK ? 0x80 : 0) | (btn & BTN_PLUS ? 0x40 : 0) |
+                 (btn & BTN_ZR ? 0x20 : 0) | (btn & BTN_R ? 0x10 : 0) |
+                 (btn & BTN_X ? 0x08 : 0) | (btn & BTN_Y ? 0x04 : 0) |
+                 (btn & BTN_A ? 0x02 : 0) | (btn & BTN_B ? 0x01 : 0);
+        // Expose SL/SR through the same physical shoulder pair so the normal
+        // single Joy-Con registration gesture is available over USB.
+        out[4] = (btn & BTN_ZR ? 0x80 : 0) | (btn & BTN_R ? 0x40 : 0) |
+                 (btn & BTN_HOME ? 0x01 : 0);
+        pack_stick_12(out + 6, src.input.rx, src.input.ry);
+    } else {
+        out[3] = (btn & BTN_LSTICK ? 0x80 : 0) | (btn & BTN_MINUS ? 0x40 : 0) |
+                 (btn & BTN_ZL ? 0x20 : 0) | (btn & BTN_L ? 0x10 : 0) |
+                 ((hat == HAT_N || hat == HAT_NE || hat == HAT_NW) ? 0x08 : 0) |
+                 ((hat == HAT_W || hat == HAT_NW || hat == HAT_SW) ? 0x04 : 0) |
+                 ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) |
+                 ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);
+        out[4] = (btn & BTN_ZL ? 0x80 : 0) | (btn & BTN_L ? 0x40 : 0) |
+                 (btn & BTN_CAPTURE ? 0x01 : 0);
+        pack_stick_12(out + 6, src.input.lx, src.input.ly);
+    }
+
+    out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
+    out[9] = 0x00; // unknown; mouse data at 0x0A..0x0E intentionally disabled for now
+    out[15] = (right && controller_port_supports_amiibo(port) && is_amiibo_placed(port)) ? 0x01 : 0x00;
+    write_s2_motion_block(out, 16, 17, motion_samples, has_motion, imu_enabled, port);
+}
+
+// S2 report builder. Pro Controller 2 uses report 0x09; Joy-Con 2 L/R use
+// reports 0x07/0x08. The USB session/descriptor can remain Pro-like, but the
+// logical device info/SPI/report stream follows the selected pad type.
+void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, int port, uint8_t* out) {
+    const uint8_t ns_type = controller_type_for_port(port);
+    if (ns_type == NS_TYPE_JOYCON_L || ns_type == NS_TYPE_JOYCON_R) {
+        build_s2_joycon_report(src, motion_samples, has_motion, imu_enabled, timer, port, out, ns_type == NS_TYPE_JOYCON_R);
+        return;
+    }
+
+    memset(out, 0, PRO_REPORT_SIZE);
+    out[0] = 0x09;
+    out[1] = timer;
+    out[2] = s2_power_info_from_hid(src);
+
+    // Buttons per research hid_reports.md for 0x09.
     uint16_t btn = src.input.buttons;
     uint8_t hat = src.input.hat;
     out[3] = (btn & BTN_RSTICK ? 0x80 : 0) | (btn & BTN_PLUS ? 0x40 : 0) |
@@ -495,31 +619,21 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
              (btn & BTN_A ? 0x02 : 0) | (btn & BTN_B ? 0x01 : 0);
     out[4] = (btn & BTN_LSTICK ? 0x80 : 0) | (btn & BTN_MINUS ? 0x40 : 0) |
              (btn & BTN_ZL ? 0x20 : 0) | (btn & BTN_L ? 0x10 : 0) |
-             ((hat == HAT_N || hat == HAT_NE || hat == HAT_NW) ? 0x08 : 0) | // Up
-             ((hat == HAT_W || hat == HAT_NW || hat == HAT_SW) ? 0x04 : 0) | // Left
-             ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) | // Right
-             ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);  // Down
+             ((hat == HAT_N || hat == HAT_NE || hat == HAT_NW) ? 0x08 : 0) |
+             ((hat == HAT_W || hat == HAT_NW || hat == HAT_SW) ? 0x04 : 0) |
+             ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) |
+             ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);
     out[5] = (btn & BTN_CAPTURE ? 0x02 : 0) | (btn & BTN_HOME ? 0x01 : 0);
-    // C, GL, GR, headset bits per research (extra in S2 Pro) - 0 for base
 
-    // Left stick (research bytes 5-7, 12-bit)
     pack_stick_12(out + 6, src.input.lx, src.input.ly);
-    // Right stick (research bytes 8-10)
     pack_stick_12(out + 9, src.input.rx, src.input.ry);
 
-    // Unknown, NFC state, headset audio state (research)
     out[12] = 0x30;
-    uint8_t nfc_state = (port >= 0 && is_amiibo_placed(port)) ? 0x01 : 0x00;
-    out[13] = nfc_state; // NFC state (0x0C after ID) per hid_reports.md; 0=idle, 1=present/processing
-    out[14] = 0; // headset
-
-    // Motion: length + data (research uses 0x28 for 3 samples, packed)
-    out[15] = (has_motion && imu_enabled) ? 0x28 : 0;
-    if (has_motion && imu_enabled && motion_samples) {
-        // Placeholder - research has specific accel/gyro packing per sample
-        memcpy(out + 16, motion_samples, sizeof(MotionReport) * 3);
-    }
+    out[13] = (controller_port_supports_amiibo(port) && is_amiibo_placed(port)) ? 0x01 : 0x00;
+    out[14] = 0x00;
+    write_s2_motion_block(out, 15, 16, motion_samples, has_motion, imu_enabled, port);
 }
+
 
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply) {
     std::ranges::fill(reply->reply_data, 0); reply->ack = 0x80; reply->subcmd_id = subcmd;
@@ -613,18 +727,20 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
             std::memcpy(reply->reply_data, g_amiibo_data[rt.ctrl].data(), 8);
         }
         return 16;
-    case 0x15: // Read buffer - serve the amiibo bin
+    case 0x15: { // Read buffer - serve the amiibo bin
         reply->ack = 0x80;
+        size_t to_copy = 0;
         if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 2) {
             uint16_t offset = cmd_data[0] | (cmd_data[1] << 8);
-            size_t to_copy = std::min(g_amiibo_data[rt.ctrl].size() - offset, (size_t)64);
-            std::memcpy(reply->reply_data + 4, g_amiibo_data[rt.ctrl].data() + offset, to_copy);
+            to_copy = (offset < g_amiibo_data[rt.ctrl].size()) ? std::min(g_amiibo_data[rt.ctrl].size() - offset, (size_t)45) : 0;
+            if (to_copy) std::memcpy(reply->reply_data + 4, g_amiibo_data[rt.ctrl].data() + offset, to_copy);
             reply->reply_data[0] = 0x00;
             reply->reply_data[1] = cmd_data[0];
             reply->reply_data[2] = cmd_data[1];
             reply->reply_data[3] = (uint8_t)to_copy;
         }
-        return 64;
+        return 4 + static_cast<int>(to_copy);
+    }
     case 0x14: // Write buffer - write to bin data (accurate per PC2_Write_Amiibo.pcapng + research)
         reply->ack = 0x80;
         if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 4) {
@@ -659,9 +775,13 @@ bool rumble_half_is_neutral_carrier(const uint8_t* f) { return f[0] == 0x00 && f
 size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data, uint8_t* payload, int port) {
     constexpr size_t AMIIBO_SIZE = 540;
     if (port < 0 || port >= HID_PORT_COUNT) port = 0;
+    std::memset(payload, 0, 56);
+    if (!controller_port_supports_amiibo(port)) {
+        publish_amiibo_request_for_port(port, false);
+        return 0;
+    }
     auto& adata = g_amiibo_data[port];
     bool placed = !adata.empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
-    std::memset(payload, 0, 56);
     size_t plen = 0;
     switch (nfc_sub) {
     case 0x05: { // Get status - match captured structure from PC2_Write_Amiibo.pcapng
@@ -688,7 +808,10 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     case 0x15: { // Read buffer: [4 unknown][2 offset LE][up to 64 data bytes]
         if (placed && cmd_data.size() >= 2) {
             uint16_t off = cmd_data[0] | (cmd_data[1] << 8);
-            size_t to_copy = (off < adata.size()) ? std::min(adata.size() - off, (size_t)64) : 0;
+            // cmd_response_buf has 64 bytes total; after report ID + 8-byte
+            // response header, payload has 55 bytes. This format needs 6 bytes
+            // of metadata, leaving 49 tag bytes per response without overflow.
+            size_t to_copy = (off < adata.size()) ? std::min(adata.size() - off, (size_t)49) : 0;
             payload[0] = payload[1] = payload[2] = payload[3] = 0x00; // 4 unknown
             payload[4] = cmd_data[0]; payload[5] = cmd_data[1];        // 2 offset (LE)
             if (to_copy) std::memcpy(payload + 6, adata.data() + off, to_copy);
@@ -714,7 +837,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     }
     default: break;
     }
-    if (adata.size() != AMIIBO_SIZE) adata.resize(AMIIBO_SIZE, 0);
+    if (placed && adata.size() != AMIIBO_SIZE) adata.resize(AMIIBO_SIZE, 0);
     return plen;
 }
 
@@ -746,9 +869,8 @@ uint8_t rumble_decode_half_to_u8(const uint8_t* f) {
     return (uint8_t)std::clamp(strength > 0 ? std::max((int)RUMBLE_MIN_NONZERO, strength) : 0, 0, 255);
 }
 
-void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral) {
-    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || len < 10) return;
-    const uint8_t* rb = packet + 2;
+static void publish_rumble_event_from_bytes(int client_idx, int sub_idx, const uint8_t* rb, bool publish_neutral) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || !rb) return;
     DecodedPrecisionRumbleHalf left = rumble_decode_half_precision_to_dual(rb), right = rumble_decode_half_precision_to_dual(rb + 4);
     uint8_t low = std::max(left.low, right.low), high = std::max(left.high, right.high);
 
@@ -773,4 +895,17 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
 
     g_ctx.clients[client_idx].rumble_active[sub_idx] = !neutral;
     g_ctx.clients[client_idx].rumble_seq[sub_idx]++;
+}
+
+void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral) {
+    if (len < 10 || !packet) return;
+    publish_rumble_event_from_bytes(client_idx, sub_idx, packet + 2, publish_neutral);
+}
+
+void publish_s2_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral) {
+    if (len < 9 || !packet) return;
+    // Switch 2 output report 0x01/0x02 carries 16 bytes of HD-rumble data
+    // immediately after the report ID. Reuse the first two 4-byte actuator
+    // slices for the existing client feedback path.
+    publish_rumble_event_from_bytes(client_idx, sub_idx, packet + 1, publish_neutral);
 }

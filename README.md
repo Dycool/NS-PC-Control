@@ -42,6 +42,8 @@ unzip ns-pc-control-raspberry-pi.zip
 
 * Enable USB gadget, check the [Raspberry Pi setup](docs/raspberry-pi-setup.md) for more details.
 * Start the backend: `sudo chrt -f 99 ./ns-backend`
+  * Switch 2 USB mode: `sudo chrt -f 99 ./ns-backend --s2`
+  * Legacy HORI USB mode: `sudo chrt -f 99 ./ns-backend --hori`
 
 **2. 💻 PC / Mobile (Client):**
 * **Desktop** — Download the zip for your OS (Windows, Mac, or Linux), launch `ns-client`, enter your Pi's IP.

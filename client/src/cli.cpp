@@ -55,7 +55,7 @@ int cli_main(const std::vector<std::string>& original_args) {
     app.add_option("host", host_arg, "Target IP[:PORT]")->required();
     auto* opt_m = app.add_option("-m,--macro", macro_path);
     auto* opt_k = app.add_option("-k,--keyboard", k_val)->expected(0, 1);
-    app.add_option("-c,--controller", controller_type, "Emulated controller: pro, hori, joycon-l, joycon-r, or joycon-lr");
+    app.add_option("-c,--controller", controller_type, "Emulated controller: pro, joycon-l, joycon-r, or joycon-lr");
 
     std::vector<const char*> argv_ptrs;
     for (const auto& a : args) argv_ptrs.push_back(a.c_str());
@@ -76,7 +76,6 @@ int cli_main(const std::vector<std::string>& original_args) {
     load_saved_bindings();
     load_saved_feature_toggles();
     if (controller_type == "pro") g_controllerType.store(ns::CONTROLLER_TYPE_PRO);
-    else if (controller_type == "hori") g_controllerType.store(ns::CONTROLLER_TYPE_HORI);
     else if (controller_type == "joycon-l") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_L);
     else if (controller_type == "joycon-r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
     else if (controller_type == "joycon-lr" || controller_type == "joycon-pair" || controller_type == "joycon-l+r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_PAIR);

@@ -1,31 +1,42 @@
 # Controller Emulation Modes
 
-The Raspberry Pi server can emulate several controller profiles, allowing you to choose the layout and features that best match your setup.
+The Raspberry Pi server now owns the USB controller family. The client only chooses the logical controller shape for input mapping; it no longer chooses HORI or Switch 2 mode directly.
 
 ---
 
-## Supported Controller Profiles
+## Server USB family flags
 
-You can choose which controller type the server emulates for your connection:
+By default, the server starts as a Switch 1 Pro/Joy-Con-capable USB gadget.
+
+- `--s2` starts the server with the Switch 2 USB identity. Clients detect this during the server-info handshake and automatically request the Switch 2 protocol variants. The desktop client shows **Scan Amiibo** only while connected to an `--s2` server.
+- `--hori` starts the server with the legacy HORI USB identity.
+- `--hori` and `--s2` are mutually exclusive.
+
+Examples:
+
+```bash
+sudo ns-backend --s2
+sudo ns-backend --hori
+```
+
+---
+
+## Client logical controller shapes
+
+The desktop/CLI client can choose these logical shapes:
 
 ### 1. Pro Controller
-- The default profile.
-- Emulates a standard Switch Pro Controller.
-- Supports **gyroscope** and **rumble** (requires client-side support and hardware support).
+- The default shape.
+- Supports gyroscope and rumble when the selected server USB family supports them.
 
-### 2. Hori Controller
-- Emulates a wired Hori Pad.
-- Does **not** support gyroscope or rumble.
-
-### 3. Joy-Con (L)
-- Emulates a standalone left Joy-Con.
+### 2. Joy-Con (L)
+- Maps input as a standalone left Joy-Con.
 - Useful for single-Joy-Con multiplayer games.
 
-### 4. Joy-Con (R)
-- Emulates a standalone right Joy-Con.
+### 3. Joy-Con (R)
+- Maps input as a standalone right Joy-Con.
 - Useful for standalone right-hand Joy-Con controls.
 
-### 5. Joy-Con L + R Pair
-- Emulates a combined Joy-Con pair (Left + Right).
-- Exposes the connection as two separate virtual USB devices (Joy-Con L and Joy-Con R) connected to the Switch, which can be grouped as a pair. This allocates **two virtual ports** on the server.
-
+### 4. Joy-Con L + R Pair
+- Maps one source controller as a combined Joy-Con pair.
+- The server expands it into two virtual USB devices, Joy-Con L and Joy-Con R, which allocates **two virtual ports**.

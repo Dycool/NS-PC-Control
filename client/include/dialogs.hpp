@@ -59,7 +59,6 @@ private:
     QCheckBox* captureShortcutBox = nullptr;
     QComboBox* controllerTypeBox = nullptr;
     QCheckBox* mouseModeBox = nullptr;
-    QCheckBox* switch2ModeBox = nullptr;
     QLabel* mouseSensitivityLabel = nullptr;
     QSlider* mouseSensitivitySlider = nullptr;
     QLabel* mouseSensitivityValue = nullptr;

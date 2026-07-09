@@ -167,12 +167,15 @@ void MainWindow::updateUi() {
 
     bool s2Mode = g_switch2ModeEnabled.load();
     int ctype = g_controllerType.load();
-    bool isJoyconL = (ctype == ns::CONTROLLER_TYPE_JOYCON_L || ctype == ns::CONTROLLER_TYPE_JOYCON_L_S2);
-    bool isHori = (ctype == ns::CONTROLLER_TYPE_HORI);
-    bool showScan = s2Mode && !isJoyconL && !isHori;
+    bool nfcCapable = (ctype == ns::CONTROLLER_TYPE_PRO || ctype == ns::CONTROLLER_TYPE_PRO_S2 ||
+                       ctype == ns::CONTROLLER_TYPE_JOYCON_R || ctype == ns::CONTROLLER_TYPE_JOYCON_R_S2 ||
+                       ctype == ns::CONTROLLER_TYPE_JOYCON_PAIR || ctype == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
+    bool showScan = connected && s2Mode && nfcCapable;
     if (scanAmiiboBtn) {
         scanAmiiboBtn->setVisible(showScan);
-        bool canScan = showScan && g_amiiboScanPending[0].load() && connected;
+        bool pendingAmiibo = false;
+        for (int i = 0; i < 4; ++i) pendingAmiibo = pendingAmiibo || g_amiiboScanPending[i].load();
+        bool canScan = showScan && pendingAmiibo && connected;
         scanAmiiboBtn->setEnabled(canScan);
     }
     if (!showScan) {
@@ -216,10 +219,12 @@ void MainWindow::updateUi() {
 }
 
 void MainWindow::onScanAmiiboClicked() {
-    int ctype = g_controllerType.load();
-    bool isHori = (ctype == ns::CONTROLLER_TYPE_HORI);
-    if (!g_connected.load() || !g_switch2ModeEnabled.load() || isHori) return;
-    int subpad = 0; // primary for now
+    if (!g_connected.load() || !g_switch2ModeEnabled.load()) return;
+    int subpad = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (g_amiiboScanPending[i].load()) { subpad = i; break; }
+    }
+    if (subpad < 0) subpad = 0;
     QString path = QFileDialog::getOpenFileName(this, "Select Amiibo .bin file", "", "Amiibo files (*.bin)");
     if (path.isEmpty()) return;
 

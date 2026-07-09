@@ -56,6 +56,10 @@ enum ServerBackend : uint8_t {
 
 static constexpr uint8_t SERVER_INFO_FLAG_SWITCH_ASLEEP = 1u << 0;
 static constexpr uint8_t SERVER_INFO_FLAG_SERVER_FULL   = 1u << 1;
+// Server-selected USB identity. Clients use this to request the matching
+// Switch 2 protocol variants and to expose Switch 2-only UI such as Amiibo.
+static constexpr uint8_t SERVER_INFO_FLAG_SWITCH2_MODE  = 1u << 2;
+static constexpr uint8_t SERVER_INFO_FLAG_HORI_MODE     = 1u << 3;
 
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {

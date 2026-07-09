@@ -344,51 +344,9 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
-            // Derive the USB controller family from the connected clients instead
-            // of a startup flag. One composite gadget = one device identity, so
-            // the family (S1/S2/Hori) is a device-level property that can only be
-            // one thing at a time. Hold the current family while any active client
-            // still uses it; otherwise adopt the first requested family (idle
-            // defaults to Switch 1). Changing it re-enumerates the gadget, which
-            // only happens on a real family change, never on a per-pad type change.
-            {
-                // Use each client's RAW (uncoerced) request to decide the family.
-                // Hold the current family while any active client explicitly asks
-                // for it; otherwise adopt the first explicitly-requested family.
-                // Clients that ask for a different family are not dropped — they
-                // are coerced onto whatever family ends up active.
-                UsbControllerFamily first_request = UsbControllerFamily::Switch1;
-                bool any_explicit = false, current_still_used = false;
-                for (int c = 0; c < MAX_CLIENTS; ++c) {
-                    if (!snap[c].active) continue;
-                    for (int s = 0; s < 4; ++s) {
-                        const uint8_t raw = get_hid_report(snap[c], s).reserved[2];
-                        if (raw == ns::CONTROLLER_TYPE_DEFAULT) continue; // no preference
-                        const bool active = snap[c].uses_pad_presence
-                            ? snap[c].pad_present[s]
-                            : !hid_is_neutral(get_hid_report(snap[c], s));
-                        if (!active && !server_macro_running(c, s)) continue;
-                        const UsbControllerFamily fam = usb_family_for_profile(raw);
-                        if (!any_explicit) { first_request = fam; any_explicit = true; }
-                        if (fam == g_ctx.usb_controller_family) current_still_used = true;
-                    }
-                }
-                UsbControllerFamily desired = g_ctx.usb_controller_family;
-                if (active_client_count(now_stamp) == 0) desired = UsbControllerFamily::Switch1; // idle default
-                else if (any_explicit && !current_still_used) desired = first_request;
-
-                if (desired != g_ctx.usb_controller_family) {
-                    if (g_ctx.verbose)
-                        std::println("[gadget] USB controller family -> {}; re-enumerating gadget",
-                                     usb_controller_family_name(desired));
-                    g_ctx.usb_controller_family = desired;
-                    for (int i = 0; i < HID_PORT_COUNT; ++i) {
-                        set_controller_type_for_port(i, coerce_profile_to_family(ns::CONTROLLER_TYPE_PRO, desired));
-                    }
-                    run_gadget_setup_if_needed(true, "USB controller family changed");
-                    break; // restart the outer loop; endpoints are re-created
-                }
-            }
+            // The USB controller family is now a server startup choice (--s2/--hori),
+            // not a client request. Keep the gadget identity stable and coerce every
+            // client profile onto g_ctx.usb_controller_family in app_state.cpp.
 
             reconcile_hw_slots(snap, now_stamp);
 
@@ -508,7 +466,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                     int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                     motion_for_port = get_hid_report(snap[cidx], sidx).motion;
                                     has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
-                                    if (hw_slots[h].pair_member && !hw_slots[h].pair_right) {
+                                    if (hw_slots[h].pair_member && !hw_slots[h].pair_right && !g_port_switch2[h]) {
                                         motion_for_port = nullptr;
                                         has_motion_for_port = false;
                                     }
@@ -528,7 +486,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 bool is_s2 = g_port_switch2[h];
                                 check_amiibo_expiry(h);
                                 if (is_s2) {
-                                    // Over USB, S2 Joy-Cons must use the Pro Controller 2 format (0x09)
                                     build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), h, write_buf);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
@@ -569,7 +526,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                     bool is_s2 = g_port_switch2[h];
                     if (is_s2) {
                         const uint8_t expected_report_id = switch2_output_report_id_for_port(h);
-                        size_t cmd_off = (id == expected_report_id) ? 1 : 0;
+                        const bool s2_output_report_id = (id == expected_report_id || id == 0x01 || id == 0x02);
+                        size_t cmd_off = s2_output_report_id ? 1 : 0;
                         if (r >= cmd_off + 8 && read_buf[cmd_off + 1] == 0x91) {
                             const uint8_t cmd_id = read_buf[cmd_off + 0];
                             const uint8_t transport = read_buf[cmd_off + 2];
@@ -586,8 +544,16 @@ void writer_thread(std::stop_token stoken, int hz) {
                             cr[2] = 0x01;
                             cr[3] = transport;
                             cr[4] = subcmd;
-                            cr[5] = 0x00;
-                            cr[6] = 0xF8;
+                            // Response status bytes follow the captures/docs:
+                            //   NFC command 0x01 commonly replies with 00 f8, while the
+                            //   initialisation/feature/LED/rumble/battery paths use 10 78.
+                            if (cmd_id == 0x01) {
+                                cr[5] = 0x00;
+                                cr[6] = 0xF8;
+                            } else {
+                                cr[5] = 0x10;
+                                cr[6] = 0x78;
+                            }
                             cr[7] = 0x00;
                             cr[8] = 0x00;
                             size_t payload_len = 0;
@@ -605,7 +571,50 @@ void writer_thread(std::stop_token stoken, int hz) {
                                     cr[payload_off] = 0x01;
                                     payload_len = 4;
                                 }
-                            } else if (cmd_id == 0x01) {
+                            } else if (cmd_id == 0x0C) {
+                                // Switch 2 feature selection. Motion is feature bit 2
+                                // in the captured PC2 init path; reply shapes mirror the
+                                // PicoSwitch2/ns2-testing handler so the console can finish
+                                // feature setup before reading report 0x09 IMU data.
+                                if (subcmd == 0x01) { // get feature info
+                                    const uint8_t f = !cmd_data.empty() ? cmd_data[0] : 0;
+                                    const bool joycon = controller_type_for_port(h) == NS_TYPE_JOYCON_L || controller_type_for_port(h) == NS_TYPE_JOYCON_R;
+                                    const uint8_t motion_like = joycon ? 0x03 : 0x01;
+                                    cr[payload_off + 4] = (f & 0x01) ? 0x07 : 0x00;
+                                    cr[payload_off + 5] = (f & 0x02) ? 0x07 : 0x00;
+                                    cr[payload_off + 6] = (f & 0x04) ? motion_like : 0x00;
+                                    cr[payload_off + 7] = (f & 0x80) ? motion_like : 0x00;
+                                    cr[payload_off + 8] = (f & 0x10) ? motion_like : 0x00;
+                                    cr[payload_off + 9] = (f & 0x20) ? 0x03 : 0x00;
+                                    payload_len = 12;
+                                } else if (subcmd == 0x06) { // configure feature
+                                    std::memset(cr + payload_off, 0, 40);
+                                    const uint8_t f = !cmd_data.empty() ? cmd_data[0] : 0;
+                                    const bool mentions_motion = (f & 0x04) != 0;
+                                    if (mentions_motion) {
+                                        // Capture/docs example for IMU configure returns 4 zero bytes,
+                                        // length 2, then 00 50 followed by padding.
+                                        cr[payload_off + 4] = 0x02;
+                                        cr[payload_off + 8] = 0x00;
+                                        cr[payload_off + 9] = 0x50;
+                                        rt[h].imu_enabled = true;
+                                    } else if (cmd_data.size() > 4) {
+                                        cr[payload_off + 4] = cmd_data[4];
+                                    }
+                                    payload_len = 40;
+                                } else { // set/clear/enable/disable mask
+                                    if (subcmd == 0x03) {
+                                        // Clear feature mask disables report features until a new mask is set.
+                                        rt[h].imu_enabled = false;
+                                    } else if (!cmd_data.empty()) {
+                                        const bool mentions_motion = (cmd_data[0] & 0x04) != 0;
+                                        if (subcmd == 0x04 && mentions_motion) rt[h].imu_enabled = true;
+                                        else if (subcmd == 0x05 && mentions_motion) rt[h].imu_enabled = false;
+                                        else if (subcmd == 0x02 && !mentions_motion) rt[h].imu_enabled = false;
+                                    }
+                                    payload_len = 4;
+                                }
+                            } else if (cmd_id == 0x01 && controller_port_supports_amiibo(h)) {
                                 payload_len = fill_nfc_response_payload(subcmd, cmd_data, cr + payload_off, h);
                             }
 
@@ -613,8 +622,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                             rt[h].pending_cmd_response = true;
                             return;
                         }
-                        if (id == expected_report_id || id == RID_OUTPUT_RUMBLE) {
-                            if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
+                        if (s2_output_report_id) {
+                            if (hw_slots[h].client_idx != -1) publish_s2_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
                             return;
                         }
                     }

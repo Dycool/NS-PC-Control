@@ -142,9 +142,11 @@ void raise_sender_priority() {
 
 
 static uint8_t requested_controller_profile_for_frame() {
+    if (g_horiModeEnabled.load(std::memory_order_relaxed)) return ns::CONTROLLER_TYPE_HORI;
+
     int mode = g_controllerType.load(std::memory_order_relaxed);
     const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
-    if (s2 && mode != ns::CONTROLLER_TYPE_HORI) {
+    if (s2) {
         switch (mode) {
             case ns::CONTROLLER_TYPE_PRO:         mode = ns::CONTROLLER_TYPE_PRO_S2; break;
             case ns::CONTROLLER_TYPE_JOYCON_L:    mode = ns::CONTROLLER_TYPE_JOYCON_L_S2; break;
@@ -157,7 +159,6 @@ static uint8_t requested_controller_profile_for_frame() {
             mode == ns::CONTROLLER_TYPE_JOYCON_R ||
             mode == ns::CONTROLLER_TYPE_PRO ||
             mode == ns::CONTROLLER_TYPE_JOYCON_PAIR ||
-            mode == ns::CONTROLLER_TYPE_HORI ||
             mode == ns::CONTROLLER_TYPE_PRO_S2 ||
             mode == ns::CONTROLLER_TYPE_JOYCON_L_S2 ||
             mode == ns::CONTROLLER_TYPE_JOYCON_R_S2 ||
@@ -184,7 +185,8 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     frame.reset();
     auto sdl = g_sdlInput.snapshot();
     const uint64_t filter_now = ns::now_us();
-    const bool joycon_pair_mode = g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
+    const bool joycon_pair_mode = !g_horiModeEnabled.load(std::memory_order_relaxed)
+        && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
     const int source_slots = joycon_pair_mode ? 2 : 4;
 
     for (int i = 0; i < 4; ++i) {
@@ -277,7 +279,8 @@ static void set_roster_name(ns::RosterEntry& e, const std::string& name) {
 static void build_local_roster_entries(int keyboard_mode, ns::RosterEntry out[4]) {
     for (int i = 0; i < 4; ++i) out[i] = ns::RosterEntry{};
     auto sdl = g_sdlInput.snapshot();
-    const bool joycon_pair = g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
+    const bool joycon_pair = !g_horiModeEnabled.load(std::memory_order_relaxed)
+        && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
     const int source_slots = joycon_pair ? 2 : 4;
 
     int shifted_p1_target = -1;
@@ -447,6 +450,8 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     int port = ns::DEFAULT_PORT;
     if (!parse_host_port(target, host, port)) return std::unexpected("Please enter a Raspberry Pi IP address.");
     g_serverProbeFull.store(false, std::memory_order_relaxed);
+    g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
+    g_horiModeEnabled.store(false, std::memory_order_relaxed);
     if (!probe_server_sync(host, port)) {
         if (g_serverProbeFull.load(std::memory_order_relaxed)) return std::unexpected("Server is full. All virtual controller slots are in use.");
         return std::unexpected("Server not reachable. Check the IP address.");
@@ -485,6 +490,9 @@ void stop_connection() {
     g_sdlInput.stop();
     reset_server_assignment_state();
     reset_roster_state();
+    g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
+    g_horiModeEnabled.store(false, std::memory_order_relaxed);
+    for (int i = 0; i < 4; ++i) g_amiiboScanPending[i].store(false, std::memory_order_relaxed);
     if (was_connected) set_status_message("Disconnected");
 }
 

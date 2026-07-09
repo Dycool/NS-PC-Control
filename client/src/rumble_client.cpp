@@ -10,6 +10,21 @@
 #include <span>
 #include <QFile>
 
+
+static void apply_server_info_reply(const ns::ServerInfoReply& reply) {
+    g_serverLastReplyUs.store(ns::now_us());
+    g_switch2ModeEnabled.store((reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH2_MODE) != 0,
+                               std::memory_order_relaxed);
+    g_horiModeEnabled.store((reply.reserved[0] & ns::SERVER_INFO_FLAG_HORI_MODE) != 0,
+                            std::memory_order_relaxed);
+    if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
+        g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
+    }
+    if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
+        g_serverProbeFull.store(true, std::memory_order_relaxed);
+    }
+}
+
 void RumbleManager::apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]) {
     if (rp.subpad >= 4) return;
     ns::RumblePacket fallback{.magic = ns::RUMBLE_MAGIC, .subpad = rp.subpad,
@@ -79,15 +94,7 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
         if (magic == ns::SERVER_INFO_MAGIC && n == sizeof(ns::ServerInfoReply)) {
             ns::ServerInfoReply reply{};
             std::memcpy(&reply, buf, sizeof(reply));
-            if (reply.version == ns::SERVER_INFO_VERSION) {
-                g_serverLastReplyUs.store(ns::now_us());
-                if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
-                    g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
-                }
-                if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
-                    g_serverProbeFull.store(true, std::memory_order_relaxed);
-                }
-            }
+            if (reply.version == ns::SERVER_INFO_VERSION) apply_server_info_reply(reply);
         } else if (magic == ns::CLIENT_ASSIGNMENT_MAGIC && n == sizeof(ns::ClientAssignmentPacket)) {
             ns::ClientAssignmentPacket ap{};
             std::memcpy(&ap, buf, sizeof(ap));
@@ -149,10 +156,7 @@ bool detect_server_is_legacy(SOCKET sock, const sockaddr_in& dest) {
         ns::ServerInfoReply reply{};
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(&reply), sizeof(reply), 0, nullptr, nullptr);
         if (n == sizeof(reply) && reply.magic == ns::SERVER_INFO_MAGIC && reply.version == ns::SERVER_INFO_VERSION) {
-            g_serverLastReplyUs.store(ns::now_us());
-            if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
-                g_serverProbeFull.store(true, std::memory_order_relaxed);
-            }
+            apply_server_info_reply(reply);
             return reply.backend == ns::SERVER_BACKEND_LEGACY;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -175,11 +179,7 @@ bool probe_server_sync(const std::string& host, int port) {
         ns::ServerInfoReply reply{};
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(&reply), sizeof(reply), 0, nullptr, nullptr);
         if (n == sizeof(reply) && reply.magic == ns::SERVER_INFO_MAGIC && reply.version == ns::SERVER_INFO_VERSION) {
-            if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {
-                g_serverProbeFull.store(true, std::memory_order_relaxed);
-                closesocket(sock);
-                return true;
-            }
+            apply_server_info_reply(reply);
             closesocket(sock);
             return true;
         }

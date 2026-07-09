@@ -220,7 +220,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerRow->addWidget(new QLabel("Emulated controller", this), 0, 0);
     controllerTypeBox = new QComboBox(this);
     controllerTypeBox->addItem("Pro Controller", ns::CONTROLLER_TYPE_PRO);
-    controllerTypeBox->addItem("Hori Controller", ns::CONTROLLER_TYPE_HORI);
     controllerTypeBox->addItem("Joy-Con (L)", ns::CONTROLLER_TYPE_JOYCON_L);
     controllerTypeBox->addItem("Joy-Con (R)", ns::CONTROLLER_TYPE_JOYCON_R);
     controllerTypeBox->addItem("Joy-Con L + R Pair", ns::CONTROLLER_TYPE_JOYCON_PAIR);
@@ -229,7 +228,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerRow->addWidget(controllerTypeBox, 0, 1);
     outer->addLayout(controllerRow);
 
-    switch2ModeBox = add_box("Switch 2 Mode", g_switch2ModeEnabled.load());
 
     auto* buttons = new QGridLayout();
     QPushButton* save = new QPushButton("Save", this);
@@ -244,12 +242,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         controllerTypeBox->setToolTip(connected
             ? QStringLiteral("Disconnect to change the emulated controller type.")
             : QString());
-        if (switch2ModeBox) {
-            switch2ModeBox->setEnabled(!connected);
-            switch2ModeBox->setToolTip(connected
-                ? QStringLiteral("Disconnect to change Switch 2 Mode.")
-                : QString());
-        }
     });
     connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
@@ -260,12 +252,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         ? QStringLiteral("Disconnect to change the emulated controller type.")
         : QString());
 
-    if (switch2ModeBox) {
-        switch2ModeBox->setEnabled(!connected);
-        switch2ModeBox->setToolTip(connected
-            ? QStringLiteral("Disconnect to change Switch 2 Mode.")
-            : QString());
-    }
 
     updateMouseModeControls();
 }
@@ -298,7 +284,6 @@ void SettingsDialog::saveSettings() {
     g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
     if (!g_connected.load()) {
         g_controllerType.store(controllerTypeBox->currentData().toInt());
-        g_switch2ModeEnabled.store(switch2ModeBox ? switch2ModeBox->isChecked() : false);
     }
     save_feature_toggles();
     if (!mouseMode) clear_mouse_button_inputs();

@@ -172,6 +172,8 @@ int main(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         std::string s = argv[i] ? argv[i] : "";
         if      (s == "-wake")                  s = "--wake";
+        else if (s == "-hori")                  s = "--hori";
+        else if (s == "-s2")                    s = "--s2";
         else if (s == "-bt" || s == "--bt") {
             std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled "
                                  "by default. Use -no-bt to disable it.");
@@ -193,6 +195,8 @@ int main(int argc, char** argv) {
     bool        pair_explicit     = false;
     bool        no_bt             = false;
     bool        legacy_p          = false;
+    bool        use_hori          = false;
+    bool        use_s2            = false;
     int         web_port          = 8080;
 
     CLI::App app{"ns-backend - Switch Input Server\n\n"
@@ -205,7 +209,9 @@ int main(int argc, char** argv) {
                                                            "Run interactive Joy-Con 2 wake setup and exit");
     app.add_flag  ("--pair",   pair_explicit,              "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
     app.add_flag  ("--no-bt",  no_bt,                      "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
-    app.add_flag  ("--upnp",   do_upnp,                   "Forward UDP port via UPnP");
+    app.add_flag  ("--hori",   use_hori,                   "Use legacy HORI USB controller identity");
+    app.add_flag  ("--s2",     use_s2,                     "Use Switch 2 USB controller identity");
+    app.add_flag  ("--upnp",   do_upnp,                    "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag  ("-p",       legacy_p,                   "")->group("");
 
@@ -227,6 +233,10 @@ int main(int argc, char** argv) {
     }
     if (legacy_p) {
         std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead");
+        return 1;
+    }
+    if (use_hori && use_s2) {
+        std::println(stderr, "error: --hori and --s2 are mutually exclusive");
         return 1;
     }
     if (!bind_arg.empty() && !parse_bind_arg(bind_arg, bind_addr, port)) {
@@ -282,6 +292,12 @@ int main(int argc, char** argv) {
     }
 
     randomize_controller_identity();
+    // Default is Switch 1. The only runtime choices are explicit startup flags:
+    //   --s2   => Switch 2 USB identity/profile family
+    //   --hori => legacy HORI USB identity/profile family
+    const UsbControllerFamily selected_usb_family = use_s2 ? UsbControllerFamily::Switch2
+        : (use_hori ? UsbControllerFamily::Hori : UsbControllerFamily::Switch1);
+    configure_usb_controller_family(selected_usb_family);
     if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
         std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");
         return 1;
@@ -363,6 +379,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> extras;
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
+    if (use_hori)                         extras.push_back("HORI USB mode");
+    if (use_s2)                           extras.push_back("Switch 2 USB mode");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");
@@ -431,6 +449,12 @@ int main(int argc, char** argv) {
                             && switch2_dormant_udp_endpoint_matches(sender)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     }
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH2_MODE;
+                    }
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Hori) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_HORI_MODE;
+                    }
                     if (free_slots_now <= 0 || active_now >= MAX_CLIENTS) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SERVER_FULL;
                     }
@@ -468,9 +492,25 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
-                    const int port_for_source = client_idx >= 0
+                    int port_for_source = client_idx >= 0
                         ? console_port_for_client_subpad(client_idx, ad.subpad)
                         : -1;
+                    // Joy-Con L+R pair exposes NFC on the right virtual port.
+                    // If the primary assignment is the left port, route the
+                    // uploaded tag to any assigned port that actually has NFC.
+                    if (client_idx >= 0 && (port_for_source < 0 || !controller_port_supports_amiibo(port_for_source))) {
+                        uint8_t mask = 0;
+                        {
+                            std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+                            mask = g_ctx.clients[client_idx].client_assignment[ad.subpad].console_port_mask;
+                        }
+                        for (int port = 0; port < HID_PORT_COUNT; ++port) {
+                            if ((mask & (1u << port)) && controller_port_supports_amiibo(port)) {
+                                port_for_source = port;
+                                break;
+                            }
+                        }
+                    }
                     if (port_for_source >= 0) {
                         set_amiibo_data_for_port(port_for_source, ad.data, ad.data_len);
                     }
