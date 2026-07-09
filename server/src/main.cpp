@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -456,8 +457,23 @@ int main(int argc, char** argv) {
                 if (mmagic == ns::AMIIBO_DATA_MAGIC) {
                     ns::AmiiboDataPacket ad{};
                     memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
-                    int p = (ad.subpad < 4) ? ad.subpad : 0;
-                    set_amiibo_data_for_port(p, ad.data, ad.data_len);
+                    int client_idx = -1;
+                    for (int i = 0; i < MAX_CLIENTS; ++i) {
+                        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                        if (g_ctx.clients[i].active
+                                && g_ctx.clients[i].source == InputSource::Udp
+                                && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr
+                                && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                            client_idx = i;
+                            break;
+                        }
+                    }
+                    const int port_for_source = client_idx >= 0
+                        ? console_port_for_client_subpad(client_idx, ad.subpad)
+                        : -1;
+                    if (port_for_source >= 0) {
+                        set_amiibo_data_for_port(port_for_source, ad.data, ad.data_len);
+                    }
                     continue;
                 }
             }

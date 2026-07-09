@@ -234,6 +234,10 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 if (dormant_until_input[i] && switch_sleeping && !real_bt_input) {
                     continue;
                 }
+                if (active_client_count(now) >= MAX_CLIENTS || free_virtual_slot_count(now) <= 0) {
+                    any_waiting = true;
+                    continue;
+                }
                 client_for_sdl[i] = allocate_client_session(now, nullptr, true, InputSource::Bluetooth, i);
                 if (client_for_sdl[i] >= 0) {
                     std::println("New Bluetooth client accepted into Slot {}", client_for_sdl[i] + 1);

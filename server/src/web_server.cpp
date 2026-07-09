@@ -129,7 +129,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (text.starts_with("MACRO_RUN:")) {
                     uint64_t now = now_us();
                     if (sd->ws_slot < 0) {
-                        sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
+                        if (active_client_count(now) < MAX_CLIENTS && free_virtual_slot_count(now) > 0) {
+                            sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
+                        }
                         if (sd->ws_slot >= 0) {
                             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                             sd->had_slot = true;
@@ -167,7 +169,10 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 uint32_t magic; memcpy(&magic, payload, 4);
                 if (magic == ns::macro::UDP_CHUNK_MAGIC) {
                     if (sd->ws_slot < 0) {
-                        sd->ws_slot = allocate_client_session(now_us(), nullptr, true, InputSource::WebSocket);
+                        const uint64_t now = now_us();
+                        if (active_client_count(now) < MAX_CLIENTS && free_virtual_slot_count(now) > 0) {
+                            sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
+                        }
                         if (sd->ws_slot >= 0) {
                             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                             sd->had_slot = true;
@@ -241,7 +246,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 }
 
                 for (int s = 0; s < 4; ++s) {
-                    if (pad_present[s]) { c.pad_present[s] = true; c.pad_last_present_us[s] = now; }
+                    c.pad_present[s] = pad_present[s];
+                    c.pad_last_present_us[s] = pad_present[s] ? now : 0;
                 }
             }
             if (sd->ws_slot >= 0 && wake_on_new_client) {

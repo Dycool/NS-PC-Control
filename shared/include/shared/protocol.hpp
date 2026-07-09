@@ -128,6 +128,7 @@ static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ACCEPTED         = 0x01;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SERVER_FULL      = 0x02;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP    = 0x04;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
+static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
 
 
 // ── Legacy input reports ─────────────────────────────────────────────────────

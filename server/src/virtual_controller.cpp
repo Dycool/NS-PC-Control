@@ -63,7 +63,6 @@ extern const uint8_t S2_PRO_REPORT_DESC[] = {
     0xC0
 };
 extern const size_t S2_PRO_REPORT_DESC_SIZE = sizeof(S2_PRO_REPORT_DESC);
-// Removed S2_JC_REPORT_DESC as all USB S2 controllers must enumerate as Pro Controller 2
 
 uint8_t CTRL_MAC_BE[4][6] = {
     {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA0}, {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA1},
@@ -113,6 +112,25 @@ uint8_t controller_type_for_port(int ctrl) {
     return ctrl >= 0 && ctrl < HID_PORT_COUNT ? g_port_controller_type[ctrl] : NS_TYPE_PRO;
 }
 
+void configure_usb_controller_family(UsbControllerFamily family) {
+    g_ctx.usb_controller_family = family;
+    uint8_t profile = ns::CONTROLLER_TYPE_PRO;
+    switch (family) {
+        case UsbControllerFamily::Switch1:
+            profile = ns::CONTROLLER_TYPE_PRO;
+            break;
+        case UsbControllerFamily::Switch2:
+            profile = ns::CONTROLLER_TYPE_PRO_S2;
+            break;
+        case UsbControllerFamily::Hori:
+            profile = ns::CONTROLLER_TYPE_HORI;
+            break;
+    }
+    for (int port = 0; port < HID_PORT_COUNT; ++port) {
+        set_controller_type_for_port(port, profile);
+    }
+}
+
 void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     if (port < 0 || port >= HID_PORT_COUNT || !data) return;
     constexpr size_t AMIIBO_SIZE = 540;
@@ -128,9 +146,22 @@ void check_amiibo_expiry(int port) {
     if (std::chrono::steady_clock::now() > g_amiibo_expiry[port]) {
         if (g_amiibo_modified[port]) {
             constexpr size_t AMIIBO_SIZE = 540;
-            publish_amiibo_writeback(0, port, g_amiibo_data[port].data(), (uint16_t)AMIIBO_SIZE);
+            int client_idx = -1;
+            int sub_idx = -1;
+            if (client_subpad_for_console_port(port, client_idx, sub_idx)) {
+                publish_amiibo_writeback(client_idx, sub_idx, g_amiibo_data[port].data(),
+                                         static_cast<uint16_t>(AMIIBO_SIZE));
+            }
         }
         g_amiibo_data[port].clear();
+    }
+}
+
+static void publish_amiibo_request_for_port(int port, bool requested) {
+    int client_idx = -1;
+    int sub_idx = -1;
+    if (client_subpad_for_console_port(port, client_idx, sub_idx)) {
+        publish_amiibo_request(client_idx, sub_idx, requested);
     }
 }
 
@@ -178,13 +209,28 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
     g_spi_initialized[ctrl] = false;
     init_spi_flash(ctrl);
 
-    // Rebuild the gadget so the host re-enumerates the new descriptors and SPI flash.
-    run_gadget_setup_if_needed(true, "Dynamic controller type change");
+    // The report semantics may vary per interface, but the USB descriptor and
+    // device identity are fixed by UsbControllerFamily at startup. Rebuilding
+    // a composite gadget here used to disconnect every player whenever any
+    // source appeared, disappeared, or changed profile.
 }
 
 uint8_t controller_protocol_type_for_port(int ctrl) {
     if (ctrl >= 0 && ctrl < HID_PORT_COUNT) return g_port_protocol_type[ctrl];
     return ns::CONTROLLER_TYPE_PRO;
+}
+
+uint8_t switch2_input_report_id_for_port(int ctrl) {
+    (void)ctrl;
+    // The composite USB gadget uses the validated Pro Controller 2 transport
+    // for every S2 interface. Individual Joy-Con semantics are applied to the
+    // controls, not by swapping a live interface descriptor/report family.
+    return 0x09;
+}
+
+uint8_t switch2_output_report_id_for_port(int ctrl) {
+    (void)ctrl;
+    return 0x02;
 }
 
 void apply_controller_type_input(uint8_t type, HIDReport& r, bool pair_member) {
@@ -218,6 +264,7 @@ void apply_controller_type_report(uint8_t type, uint8_t* buf) {
 
 void apply_s2_controller_type_report(uint8_t type, uint8_t* buf) {
     if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R) return;
+    if (buf[0] != 0x09) return;
     // buf is a 0x09 report: power info at [2], buttons at [3..5].
     // S2 does NOT use conn_info in buf[2] like S1, so we leave it as battery info.
     // Map L/R and ZL/ZR to spare bits in buf[5] for SL/SR single-joycon pairing gesture.
@@ -262,26 +309,29 @@ void init_spi_flash(int ctrl) {
     if (ctrl < 0 || ctrl >= 4 || g_spi_initialized[ctrl]) return;
     uint8_t* flash = g_spi_flash[ctrl]; std::memset(flash, 0xFF, SPI_FLASH_SIZE);
     uint8_t prod = controller_type_for_port(ctrl);
-    if (g_port_switch2[ctrl]) {
-        // S2 product IDs per ndeadly research (JoyCon2 R: 0x2066, L: 0x2067, Pro: 0x2069)
-        uint8_t proto = controller_protocol_type_for_port(ctrl);
-        if (proto == ns::CONTROLLER_TYPE_JOYCON_R_S2 || proto == ns::CONTROLLER_TYPE_JOYCON_R) prod = 0x66; // low byte example
-        else if (proto == ns::CONTROLLER_TYPE_JOYCON_L_S2 || proto == ns::CONTROLLER_TYPE_JOYCON_L) prod = 0x67;
-        else prod = 0x69; // Pro S2
-    }
     flash[0x6012] = prod; flash[0x6013] = 0xA0; flash[0x601B] = 0x02;
     if (g_port_switch2[ctrl]) {
-        // S2 factory data per research memory_layout.md and descriptors
-        // VID/PID
-        flash[0x13012] = 0x7E;
-        flash[0x13013] = 0x05;
-        flash[0x13014] = prod;
-        flash[0x13015] = 0x20;
-        // example colors from research (can be customized)
+        // Same trick as the Switch 1 Joy-Con discovery: the USB device always
+        // enumerates as a Pro Controller 2 (PID 0x2069) to keep the wired
+        // session alive, but the factory-memory product ID reported to the
+        // console identifies the actual controller. Per ndeadly research:
+        //   Pro Controller 2 = 0x2069, Joy-Con 2 (R) = 0x2066, (L) = 0x2067.
+        uint8_t pid_lo = 0x69; // Pro Controller 2
+        switch (controller_type_for_port(ctrl)) {
+            case NS_TYPE_JOYCON_R: pid_lo = 0x66; break;
+            case NS_TYPE_JOYCON_L: pid_lo = 0x67; break;
+            default: break;
+        }
+        // S2 factory data (memory_layout.md): serial, VID/PID, colors.
+        static const char kSerial[] = "HEJ710011212470";
+        std::memcpy(flash + 0x13002, kSerial, 15); // 0x13002..0x13011 (16B, last NUL)
+        flash[0x13012] = 0x7E; flash[0x13013] = 0x05;          // VID 0x057E (LE)
+        flash[0x13014] = pid_lo; flash[0x13015] = 0x20;        // PID 0x20xx (LE)
         flash[0x13019] = 0x23; flash[0x1301A] = 0x23; flash[0x1301B] = 0x23; // body
         flash[0x1301C] = 0xA0; flash[0x1301D] = 0xA0; flash[0x1301E] = 0xA0; // buttons
-        // cals etc from research (simplified, full in repo)
-        // pairing etc at 0x1FA000 would be set if needed
+        flash[0x1301F] = 0xE6; flash[0x13020] = 0xE6; flash[0x13021] = 0xE6; // highlight
+        flash[0x13022] = 0x32; flash[0x13023] = 0x32; flash[0x13024] = 0x32; // grip
+        flash[0x1FA000] = 0x00; // pairing count = 0 over USB
     }
 
     auto put16 = [&](uint16_t a, int16_t v) { flash[a] = v; flash[a+1] = v >> 8; };
@@ -310,11 +360,7 @@ void set_identity_in_0x81(uint8_t* r81, int ctrl) {
 size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
     memset(out, 0, PRO_REPORT_SIZE); out[0] = 0x81; out[1] = subtype;
     if (subtype == 0x01) {
-        uint8_t proto = controller_protocol_type_for_port(ctrl);
-        uint8_t dev_type = proto;
-        if (proto == ns::CONTROLLER_TYPE_PRO_S2) dev_type = NS_TYPE_PRO;
-        else if (proto == ns::CONTROLLER_TYPE_JOYCON_L_S2) dev_type = NS_TYPE_JOYCON_L;
-        else if (proto == ns::CONTROLLER_TYPE_JOYCON_R_S2) dev_type = NS_TYPE_JOYCON_R;
+        uint8_t dev_type = NS_TYPE_PRO;
         out[3] = dev_type;
         set_identity_in_0x81(out, ctrl);
     }
@@ -323,11 +369,7 @@ size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl) {
 
 void build_get_device_info_response(uint8_t* out, int ctrl) {
     uint8_t proto = controller_protocol_type_for_port(ctrl);
-    uint8_t dev_type = proto;
-    if (proto == ns::CONTROLLER_TYPE_PRO_S2) dev_type = NS_TYPE_PRO;
-    else if (proto == ns::CONTROLLER_TYPE_JOYCON_L_S2) dev_type = NS_TYPE_JOYCON_L;
-    else if (proto == ns::CONTROLLER_TYPE_JOYCON_R_S2) dev_type = NS_TYPE_JOYCON_R;
-    else if (proto == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) dev_type = NS_TYPE_PRO; // or handle pair
+    uint8_t dev_type = g_port_switch2[ctrl] ? NS_TYPE_PRO : proto;
     memset(out, 0, 36); out[0] = 0x03; out[1] = 0x49; out[2] = dev_type; out[3] = 0x02;
     const uint8_t* mac = CTRL_MAC_BE[ctrl];
     out[4] = mac[5]; out[5] = mac[4]; out[6] = mac[3]; out[7] = mac[2]; out[8] = mac[1]; out[9] = mac[0];
@@ -431,7 +473,8 @@ void build_standard_report(const ns::HIDReport& src, const ns::MotionReport moti
 // For Pro S2: report ID 0x09, specific button layout (includes C/GL/GR), 12bit sticks, motion
 void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, int port, uint8_t* out) {
     memset(out, 0, PRO_REPORT_SIZE);
-    out[0] = 0x09;                    // Report ID 0x09 (S2 Pro main input per research)
+    const uint8_t report_id = switch2_input_report_id_for_port(port);
+    out[0] = report_id;
     out[1] = timer;                   // counter (research: byte 0 after ID)
     // S2 power info bitfield (research): [0] external, [1] charging, [2-5] level 0-9
     uint8_t pwr = 0x01;
@@ -562,7 +605,7 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
         if (!g_amiibo_data[rt.ctrl].empty() && g_amiibo_data[rt.ctrl].size() >= 8) {
             std::memcpy(reply->reply_data + 8, g_amiibo_data[rt.ctrl].data(), 8);
         }
-        publish_amiibo_request(0, rt.ctrl, g_amiibo_data[rt.ctrl].empty());
+        publish_amiibo_request_for_port(rt.ctrl, g_amiibo_data[rt.ctrl].empty());
         return 32;
     case 0x06: // Read device
         reply->ack = 0x80;
@@ -631,25 +674,25 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         } else {
             // no tag: leave zeros or minimal
         }
-        publish_amiibo_request(0, port, !placed);
+        publish_amiibo_request_for_port(port, !placed);
         plen = 32;
         break;
     }
     case 0x06: {
-        if (placed && adata.size() >= 8) std::memcpy(payload, adata.data(), 8);
-        plen = 16;
+        // Read device: per research this only initiates the read; the response
+        // is header-only (01 01 00 06 00 f8 00 00). The tag bytes are pulled by
+        // the console afterwards with repeated 0x15 (read buffer) requests.
+        plen = 0;
         break;
     }
-    case 0x15: { // Read buffer
+    case 0x15: { // Read buffer: [4 unknown][2 offset LE][up to 64 data bytes]
         if (placed && cmd_data.size() >= 2) {
             uint16_t off = cmd_data[0] | (cmd_data[1] << 8);
-            size_t to_copy = (off < adata.size()) ? std::min(adata.size() - off, (size_t)60) : 0;
-            payload[0] = 0x00;
-            payload[1] = cmd_data[0];
-            payload[2] = cmd_data[1];
-            payload[3] = static_cast<uint8_t>(to_copy);
-            if (to_copy) std::memcpy(payload + 4, adata.data() + off, to_copy);
-            plen = 4 + to_copy;
+            size_t to_copy = (off < adata.size()) ? std::min(adata.size() - off, (size_t)64) : 0;
+            payload[0] = payload[1] = payload[2] = payload[3] = 0x00; // 4 unknown
+            payload[4] = cmd_data[0]; payload[5] = cmd_data[1];        // 2 offset (LE)
+            if (to_copy) std::memcpy(payload + 6, adata.data() + off, to_copy);
+            plen = 6 + to_copy;
         }
         break;
     }
@@ -664,12 +707,9 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
                 g_amiibo_modified[port] = true;
             }
         }
-        // Write responses in captures include a status-ish payload after the common header
-        // (df 0a 00 ...). Provide a short plausible one so length matches real traffic.
-        payload[0] = 0xdf; payload[1] = 0x0a; payload[2] = 0x00; payload[3] = 0x00;
-        payload[4] = 0x00; payload[5] = 0x00; payload[6] = 0x00; payload[7] = 0x30;
-        payload[8] = 0x00; payload[9] = 0x00; payload[10] = 0x00; payload[11] = 0x06;
-        plen = 24;
+        // Write buffer: per research the response is header-only
+        // (01 01 00 14 00 f8 00 00); the staged bytes are applied above.
+        plen = 0;
         break;
     }
     default: break;

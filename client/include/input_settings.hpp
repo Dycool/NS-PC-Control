@@ -31,6 +31,7 @@ extern SDLInputManager g_sdlInput;
 extern std::atomic<uint64_t> g_serverLastReplyUs;
 extern std::atomic<bool> g_serverRequestedDisconnect;
 extern std::atomic<bool> g_serverFullDisconnect;
+extern std::atomic<bool> g_serverProfileUnsupportedDisconnect;
 extern std::atomic<bool> g_serverProbeFull;
 
 void sync_sdl_input_options();

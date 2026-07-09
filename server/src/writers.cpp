@@ -20,22 +20,10 @@
 using namespace ns;
 
 
+// Profile actually used for mapping/reports: coerced onto the active family so a
+// mismatched client is adapted rather than dropped.
 static uint8_t requested_controller_profile_from_report(const HIDReport& report) {
-    switch (report.reserved[2]) {
-        case ns::CONTROLLER_TYPE_JOYCON_L:
-        case ns::CONTROLLER_TYPE_JOYCON_R:
-        case ns::CONTROLLER_TYPE_PRO:
-        case ns::CONTROLLER_TYPE_JOYCON_PAIR:
-        case ns::CONTROLLER_TYPE_HORI:
-        case ns::CONTROLLER_TYPE_PRO_S2:
-        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
-        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
-        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
-            return report.reserved[2];
-        case ns::CONTROLLER_TYPE_DEFAULT:
-        default:
-            return ns::CONTROLLER_TYPE_PRO;
-    }
+    return coerce_profile_to_family(report.reserved[2], g_ctx.usb_controller_family);
 }
 
 static uint8_t virtual_type_for_profile(uint8_t profile, bool pair_right_side = false) {
@@ -140,29 +128,167 @@ void writer_thread(std::stop_token stoken, int hz) {
         bool pairing_screen_open[HID_PORT_COUNT] = {}; // edge-trigger for grip/order auto-pair
         uint64_t last_switch_sleep_poll_us = 0;
 
-        auto release_hw_slot = [&](int h, uint64_t stamp) {
-            hw_slots[h].client_idx = -1;
-            hw_slots[h].sub_idx = -1;
-            hw_slots[h].pair_member = false;
-            hw_slots[h].pair_right = false;
-            rt[h].neutral_burst_until_us = stamp + PRO_RELEASE_NEUTRAL_US;
-            functionfs_drain_output(h);
+        const auto idle_virtual_type = [] {
+            return g_ctx.usb_controller_family == UsbControllerFamily::Hori ? NS_TYPE_HORI : NS_TYPE_PRO;
+        };
+        for (int h = 0; h < nports; ++h) hw_slots[h].virtual_type = idle_virtual_type();
+
+        auto protocol_for_slot = [](uint8_t profile, bool pair_right) -> uint8_t {
+            if (!profile_is_pair(profile)) return profile;
+            const bool is_s2 = profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+            if (pair_right) return is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2
+                                         : ns::CONTROLLER_TYPE_JOYCON_R;
+            return is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2
+                         : ns::CONTROLLER_TYPE_JOYCON_L;
         };
 
-        auto find_free_pair_base = [&](int source_subpad) -> int {
-            if (source_subpad >= 0 && source_subpad < 2) {
-                const int preferred = source_subpad * 2;
-                if (preferred + 1 < nports
-                        && hw_slots[preferred].client_idx == -1
-                        && hw_slots[preferred + 1].client_idx == -1) {
-                    return preferred;
+        struct SourceRequest {
+            int client_idx = -1;
+            int sub_idx = -1;
+            uint8_t profile = ns::CONTROLLER_TYPE_PRO;
+        };
+
+        auto same_slot = [](const HwSlot& a, const HwSlot& b) {
+            return a.client_idx == b.client_idx
+                && a.sub_idx == b.sub_idx
+                && a.virtual_type == b.virtual_type
+                && a.pair_member == b.pair_member
+                && a.pair_right == b.pair_right;
+        };
+
+        // Reconcile the complete source-pad layout in one pass. Allocating pairs
+        // first makes [0,1]/[2,3] atomic and allows active single pads to be
+        // compacted instead of permanently fragmenting the only pair groups.
+        auto reconcile_hw_slots = [&](const ClientSession snaps[MAX_CLIENTS], uint64_t stamp) {
+            std::vector<SourceRequest> pairs;
+            std::vector<SourceRequest> singles;
+            for (int c = 0; c < MAX_CLIENTS; ++c) {
+                if (!snaps[c].active) continue;
+                for (int s = 0; s < 4; ++s) {
+                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
+                    if (!controller_profile_supported_by_usb_family(profile)) continue;
+                    const bool macro_active = server_macro_running(c, s);
+                    const bool active = snaps[c].uses_pad_presence
+                        ? (snaps[c].pad_present[s] || macro_active)
+                        : (!hid_is_neutral(get_hid_report(snaps[c], s)) || macro_active);
+                    if (!active) continue;
+                    (profile_is_pair(profile) ? pairs : singles).push_back({c, s, profile});
                 }
             }
-            for (int base = 0; base + 1 < nports; base += 2) {
-                if (hw_slots[base].client_idx == -1 && hw_slots[base + 1].client_idx == -1)
-                    return base;
+
+            auto existing_pair_base = [&](const SourceRequest& req) {
+                for (int base = 0; base + 1 < nports; base += 2) {
+                    const HwSlot& left = hw_slots[base];
+                    const HwSlot& right = hw_slots[base + 1];
+                    if (left.client_idx == req.client_idx && left.sub_idx == req.sub_idx
+                            && left.pair_member && !left.pair_right
+                            && right.client_idx == req.client_idx && right.sub_idx == req.sub_idx
+                            && right.pair_member && right.pair_right) {
+                        return base;
+                    }
+                }
+                return -1;
+            };
+            auto existing_single_port = [&](const SourceRequest& req) {
+                for (int h = 0; h < nports; ++h) {
+                    if (hw_slots[h].client_idx == req.client_idx && hw_slots[h].sub_idx == req.sub_idx
+                            && !hw_slots[h].pair_member) return h;
+                }
+                return -1;
+            };
+            const int requested_slots = static_cast<int>(pairs.size() * 2 + singles.size());
+            if (requested_slots > nports) {
+                // A live session is allowed to change its request, but that
+                // change must not evict unrelated already-mapped players. Keep
+                // only requests with an exact committed layout; the excess
+                // request remains visibly unassigned in feedback until space
+                // is available.
+                pairs.erase(std::remove_if(pairs.begin(), pairs.end(), [&](const SourceRequest& req) {
+                    return existing_pair_base(req) < 0;
+                }), pairs.end());
+                singles.erase(std::remove_if(singles.begin(), singles.end(), [&](const SourceRequest& req) {
+                    return existing_single_port(req) < 0;
+                }), singles.end());
             }
-            return -1;
+            std::stable_sort(pairs.begin(), pairs.end(), [&](const SourceRequest& a, const SourceRequest& b) {
+                return (existing_pair_base(a) >= 0) > (existing_pair_base(b) >= 0);
+            });
+            std::stable_sort(singles.begin(), singles.end(), [&](const SourceRequest& a, const SourceRequest& b) {
+                return (existing_single_port(a) >= 0) > (existing_single_port(b) >= 0);
+            });
+
+            HwSlot next_slots[HID_PORT_COUNT];
+            for (int h = 0; h < nports; ++h) next_slots[h].virtual_type = idle_virtual_type();
+            auto pair_base_free = [&](int base) {
+                return base >= 0 && base + 1 < nports
+                    && next_slots[base].client_idx == -1
+                    && next_slots[base + 1].client_idx == -1;
+            };
+            auto first_free_pair_base = [&] {
+                for (int base = 0; base + 1 < nports; base += 2) {
+                    if (pair_base_free(base)) return base;
+                }
+                return -1;
+            };
+            auto first_free_port = [&] {
+                for (int h = 0; h < nports; ++h) {
+                    if (next_slots[h].client_idx == -1) return h;
+                }
+                return -1;
+            };
+
+            for (const SourceRequest& req : pairs) {
+                int base = existing_pair_base(req);
+                if (!pair_base_free(base)) base = -1;
+                if (base < 0 && req.sub_idx < 2 && pair_base_free(req.sub_idx * 2)) base = req.sub_idx * 2;
+                if (base < 0) base = first_free_pair_base();
+                if (base < 0) continue;
+                next_slots[base] = {req.client_idx, req.sub_idx, NS_TYPE_JOYCON_L, true, false};
+                next_slots[base + 1] = {req.client_idx, req.sub_idx, NS_TYPE_JOYCON_R, true, true};
+            }
+            for (const SourceRequest& req : singles) {
+                int port = existing_single_port(req);
+                if (port < 0 || next_slots[port].client_idx != -1) port = -1;
+                if (port < 0 && req.sub_idx < nports && next_slots[req.sub_idx].client_idx == -1) port = req.sub_idx;
+                if (port < 0) port = first_free_port();
+                if (port < 0) continue;
+                next_slots[port] = {req.client_idx, req.sub_idx, virtual_type_for_profile(req.profile), false, false};
+            }
+
+            for (int h = 0; h < nports; ++h) {
+                if (same_slot(hw_slots[h], next_slots[h])) continue;
+                const HwSlot old = hw_slots[h];
+                if (old.client_idx != -1) {
+                    rt[h].neutral_burst_until_us = stamp + PRO_RELEASE_NEUTRAL_US;
+                    functionfs_drain_output(h);
+                    if (old.virtual_type == NS_TYPE_HORI && next_slots[h].client_idx == -1) {
+                        HoriHIDReport neutral{};
+                        neutral.reset();
+                        neutral.vendor = 0;
+                        functionfs_submit_input_report(h, reinterpret_cast<const uint8_t*>(&neutral), sizeof(neutral));
+                        prev[h] = neutral;
+                    }
+                }
+                hw_slots[h] = next_slots[h];
+                if (hw_slots[h].client_idx != -1) {
+                    const int c = hw_slots[h].client_idx;
+                    const int s = hw_slots[h].sub_idx;
+                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
+                    set_controller_type_for_port(h, protocol_for_slot(profile, hw_slots[h].pair_right));
+                    if (old.client_idx != c || old.sub_idx != s) {
+                        publish_controller_status_event(c, s,
+                                                        g_ctx.console_player_leds[h].load(std::memory_order_relaxed),
+                                                        VIRTUAL_BODY_RGB[h]);
+                    }
+                } else {
+                    const uint8_t idle_profile = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                        ? ns::CONTROLLER_TYPE_PRO_S2
+                        : (g_ctx.usb_controller_family == UsbControllerFamily::Hori
+                            ? ns::CONTROLLER_TYPE_HORI
+                            : ns::CONTROLLER_TYPE_PRO);
+                    set_controller_type_for_port(h, idle_profile);
+                }
+            }
         };
 
         while (!stoken.stop_requested()) {
@@ -205,135 +331,66 @@ void writer_thread(std::stop_token stoken, int hz) {
                 snap[c] = g_ctx.clients[c];
                 stale[c] = snap[c].active && snap[c].last_rx_us != 0 && client_idle_us > CLIENT_STALE_NEUTRAL_US;
                 if (stale[c]) {
+                    // Neutralize stale controls without erasing the requested
+                    // controller profile. Identity is configuration, not live
+                    // input; losing it used to remap quiet Joy-Cons/Hori pads
+                    // as Pro controllers after only 350 ms.
+                    HIDReport* pads[4] = {&snap[c].report.p1, &snap[c].report.p2,
+                                          &snap[c].report.p3, &snap[c].report.p4};
+                    uint8_t profiles[4] = {pads[0]->reserved[2], pads[1]->reserved[2],
+                                           pads[2]->reserved[2], pads[3]->reserved[2]};
                     snap[c].report.reset();
+                    for (int s = 0; s < 4; ++s) pads[s]->reserved[2] = profiles[s];
                 }
             }
 
-
-
-            for (int h = 0; h < nports; ++h) {
-                if (hw_slots[h].client_idx == -1) continue;
-                int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
-                bool absent_too_long = false;
-                if (snap[cidx].uses_pad_presence && !snap[cidx].pad_present[sidx]) {
-                    uint64_t last_seen = snap[cidx].pad_last_present_us[sidx];
-                    absent_too_long = (last_seen == 0) || (now_stamp - last_seen >= WEB_PAD_ABSENT_RELEASE_US);
-                }
-                bool profile_changed = false;
-                if (snap[cidx].active && !absent_too_long) {
-                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[cidx], sidx));
-                    if (profile_is_pair(profile)) {
-                        const uint8_t expected = virtual_type_for_profile(profile, hw_slots[h].pair_right);
-                        profile_changed = !hw_slots[h].pair_member || hw_slots[h].virtual_type != expected;
-                    } else {
-                        const uint8_t expected = virtual_type_for_profile(profile);
-                        profile_changed = hw_slots[h].pair_member || hw_slots[h].virtual_type != expected;
+            // Derive the USB controller family from the connected clients instead
+            // of a startup flag. One composite gadget = one device identity, so
+            // the family (S1/S2/Hori) is a device-level property that can only be
+            // one thing at a time. Hold the current family while any active client
+            // still uses it; otherwise adopt the first requested family (idle
+            // defaults to Switch 1). Changing it re-enumerates the gadget, which
+            // only happens on a real family change, never on a per-pad type change.
+            {
+                // Use each client's RAW (uncoerced) request to decide the family.
+                // Hold the current family while any active client explicitly asks
+                // for it; otherwise adopt the first explicitly-requested family.
+                // Clients that ask for a different family are not dropped — they
+                // are coerced onto whatever family ends up active.
+                UsbControllerFamily first_request = UsbControllerFamily::Switch1;
+                bool any_explicit = false, current_still_used = false;
+                for (int c = 0; c < MAX_CLIENTS; ++c) {
+                    if (!snap[c].active) continue;
+                    for (int s = 0; s < 4; ++s) {
+                        const uint8_t raw = get_hid_report(snap[c], s).reserved[2];
+                        if (raw == ns::CONTROLLER_TYPE_DEFAULT) continue; // no preference
+                        const bool active = snap[c].uses_pad_presence
+                            ? snap[c].pad_present[s]
+                            : !hid_is_neutral(get_hid_report(snap[c], s));
+                        if (!active && !server_macro_running(c, s)) continue;
+                        const UsbControllerFamily fam = usb_family_for_profile(raw);
+                        if (!any_explicit) { first_request = fam; any_explicit = true; }
+                        if (fam == g_ctx.usb_controller_family) current_still_used = true;
                     }
                 }
-                if (((!snap[cidx].active || absent_too_long) && !server_macro_running(cidx, sidx)) || profile_changed) {
-                    release_hw_slot(h, now_stamp);
-                }
-            }
+                UsbControllerFamily desired = g_ctx.usb_controller_family;
+                if (active_client_count(now_stamp) == 0) desired = UsbControllerFamily::Switch1; // idle default
+                else if (any_explicit && !current_still_used) desired = first_request;
 
-            for (int c = 0; c < MAX_CLIENTS; ++c) {
-                if (!snap[c].active || !snap[c].uses_pad_presence) continue;
-                for (int s = 0; s < nports; ++s) {
-                    if (!snap[c].pad_present[s]) continue;
-                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[c], s));
-                    if (profile_is_pair(profile)) {
-                        if (s < 2) {
-                            const int base = s * 2;
-                            if (base + 1 < nports
-                                    && hw_slots[base].client_idx == -1
-                                    && hw_slots[base + 1].client_idx == -1) {
-                                bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
-                                uint8_t lp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L;
-                                uint8_t rp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R;
-                                set_controller_type_for_port(base, lp);
-                                set_controller_type_for_port(base + 1, rp);
-                            }
-                        }
-                    } else if (s >= 0 && s < nports && hw_slots[s].client_idx == -1) {
-                        set_controller_type_for_port(s, profile);
+                if (desired != g_ctx.usb_controller_family) {
+                    if (g_ctx.verbose)
+                        std::println("[gadget] USB controller family -> {}; re-enumerating gadget",
+                                     usb_controller_family_name(desired));
+                    g_ctx.usb_controller_family = desired;
+                    for (int i = 0; i < HID_PORT_COUNT; ++i) {
+                        set_controller_type_for_port(i, coerce_profile_to_family(ns::CONTROLLER_TYPE_PRO, desired));
                     }
+                    run_gadget_setup_if_needed(true, "USB controller family changed");
+                    break; // restart the outer loop; endpoints are re-created
                 }
             }
 
-            for (int c = 0; c < MAX_CLIENTS; ++c) {
-                if (!snap[c].active) continue;
-                for (int s = 0; s < 4; ++s) {
-                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[c], s));
-                    const bool wants_pair = profile_is_pair(profile);
-
-                    int mapped_count = 0;
-                    bool has_pair_l = false, has_pair_r = false;
-                    for (int h = 0; h < nports; ++h) {
-                        if (hw_slots[h].client_idx == c && hw_slots[h].sub_idx == s) {
-                            ++mapped_count;
-                            if (hw_slots[h].pair_member && !hw_slots[h].pair_right && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) has_pair_l = true;
-                            if (hw_slots[h].pair_member &&  hw_slots[h].pair_right && hw_slots[h].virtual_type == NS_TYPE_JOYCON_R) has_pair_r = true;
-                        }
-                    }
-                    if (wants_pair ? (has_pair_l && has_pair_r) : (mapped_count > 0)) continue;
-
-                    bool macro_active_for_pad = server_macro_running(c, s);
-                    if (snap[c].uses_pad_presence) {
-                        if (!snap[c].pad_present[s] && !macro_active_for_pad) continue;
-                    } else {
-                        if (hid_is_neutral(get_hid_report(snap[c], s)) && !macro_active_for_pad) continue;
-                    }
-
-                    if (wants_pair) {
-                        const int base = find_free_pair_base(s);
-                        if (base != -1) {
-                            bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
-                            uint8_t lp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L;
-                            uint8_t rp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R;
-
-                            hw_slots[base].client_idx = c;
-                            hw_slots[base].sub_idx = s;
-                            hw_slots[base].virtual_type = NS_TYPE_JOYCON_L;
-                            hw_slots[base].pair_member = true;
-                            hw_slots[base].pair_right = false;
-                            set_controller_type_for_port(base, lp);
-
-                            hw_slots[base + 1].client_idx = c;
-                            hw_slots[base + 1].sub_idx = s;
-                            hw_slots[base + 1].virtual_type = NS_TYPE_JOYCON_R;
-                            hw_slots[base + 1].pair_member = true;
-                            hw_slots[base + 1].pair_right = true;
-                            set_controller_type_for_port(base + 1, rp);
-
-                            if (g_ctx.verbose) std::println("Map -> PC {} (Pad {}) took console Ports {}+{} as Joy-Con L+R",
-                                                          c + 1, s + 1, base + 1, base + 2);
-                            publish_controller_status_event(c, s, g_ctx.console_player_leds[base].load(std::memory_order_relaxed), VIRTUAL_BODY_RGB[base]);
-                            publish_controller_status_event(c, s, g_ctx.console_player_leds[base + 1].load(std::memory_order_relaxed), VIRTUAL_BODY_RGB[base + 1]);
-                        }
-                        continue;
-                    }
-
-                    int chosen = -1;
-                    if (s >= 0 && s < nports && hw_slots[s].client_idx == -1) {
-                        chosen = s;
-                    } else {
-                        for (int h = 0; h < nports; ++h) {
-                            if (hw_slots[h].client_idx == -1) { chosen = h; break; }
-                        }
-                    }
-
-                    if (chosen != -1) {
-                        const uint8_t virtual_type = virtual_type_for_profile(profile);
-                        hw_slots[chosen].client_idx = c;
-                        hw_slots[chosen].sub_idx = s;
-                        hw_slots[chosen].virtual_type = virtual_type;
-                        hw_slots[chosen].pair_member = false;
-                        hw_slots[chosen].pair_right = false;
-                        set_controller_type_for_port(chosen, profile);
-                        if (g_ctx.verbose) std::println("Map -> PC {} (Pad {}) took console Port {}", c + 1, s + 1, chosen + 1);
-                        publish_controller_status_event(c, s, g_ctx.console_player_leds[chosen].load(std::memory_order_relaxed), VIRTUAL_BODY_RGB[chosen]);
-                    }
-                }
-            }
+            reconcile_hw_slots(snap, now_stamp);
 
             uint8_t assignment_masks[MAX_CLIENTS][4] = {};
             uint8_t assignment_primary[MAX_CLIENTS][4];
@@ -358,11 +415,21 @@ void writer_thread(std::stop_token stoken, int hz) {
                 const uint8_t req = assignment_requested[c][s];
                 const bool s2_pair = (req == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
                 const bool s2 = (req == ns::CONTROLLER_TYPE_PRO_S2 || req == ns::CONTROLLER_TYPE_JOYCON_L_S2 || req == ns::CONTROLLER_TYPE_JOYCON_R_S2 || s2_pair);
-                assignment_virtual[c][s] = hw_slots[h].pair_member
-                    ? (s2_pair ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2 : ns::CONTROLLER_TYPE_JOYCON_PAIR)
-                    : (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L ? (s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L)
-                        : (hw_slots[h].virtual_type == NS_TYPE_JOYCON_R ? (s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R)
-                            : (s2 ? ns::CONTROLLER_TYPE_PRO_S2 : ns::CONTROLLER_TYPE_PRO)));
+                if (hw_slots[h].pair_member) {
+                    assignment_virtual[c][s] = s2_pair ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2
+                                                       : ns::CONTROLLER_TYPE_JOYCON_PAIR;
+                } else if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
+                    assignment_virtual[c][s] = ns::CONTROLLER_TYPE_HORI;
+                } else if (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
+                    assignment_virtual[c][s] = s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2
+                                                   : ns::CONTROLLER_TYPE_JOYCON_L;
+                } else if (hw_slots[h].virtual_type == NS_TYPE_JOYCON_R) {
+                    assignment_virtual[c][s] = s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2
+                                                   : ns::CONTROLLER_TYPE_JOYCON_R;
+                } else {
+                    assignment_virtual[c][s] = s2 ? ns::CONTROLLER_TYPE_PRO_S2
+                                                   : ns::CONTROLLER_TYPE_PRO;
+                }
             }
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!snap[c].active) continue;
@@ -396,13 +463,15 @@ void writer_thread(std::stop_token stoken, int hz) {
                     bool have_report_to_write = false, wrote_subcmd_reply = false, wrote_cmd_response = false;
 
                     if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
-                        HoriHIDReport r = out_reports[h].input;
-                        r.vendor = 0;
-                        if (port_needed && r != prev[h]) {
-                            memcpy(write_buf, &r, sizeof(HoriHIDReport));
-                            write_len = sizeof(HoriHIDReport);
-                            have_report_to_write = true;
-                            prev[h] = r;
+                        if (port_needed) {
+                            HoriHIDReport r = out_reports[h].input;
+                            r.vendor = 0;
+                            if (r != prev[h]) {
+                                memcpy(write_buf, &r, sizeof(HoriHIDReport));
+                                write_len = sizeof(HoriHIDReport);
+                                have_report_to_write = true;
+                                prev[h] = r;
+                            }
                         }
                     } else {
                         if (rt[h].pending_cmd_response && g_port_switch2[h]) {
@@ -499,48 +568,52 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint8_t id = read_buf[0];
                     bool is_s2 = g_port_switch2[h];
                     if (is_s2) {
-                        // S2 command output from research: the report may contain header for command or rumble+cmd combined
-                        // For S2, parse header if looks like command (cmd ID, 0x91 or data)
-                        if (r >= 8) {
-                            uint8_t cmd_id = read_buf[0];
-                            uint8_t dir = read_buf[1];
-                            if (dir == 0x91 || dir == 0x01) {
-                                // S2 command header per research
-                                uint8_t subcmd = read_buf[3];
-                                std::span<const uint8_t> cmd_data(read_buf + 8, r > 8 ? std::min<size_t>(56, r - 8) : 0);
-                                if (cmd_id == 0x01) {
-                                    // NFC (and other 0x01 subs) - use accurate raw response format from commands.md
-                                    uint8_t* cr = rt[h].cmd_response_buf;
-                                    uint8_t transport = (r > 2 ? read_buf[2] : 0x00);
-                                    cr[0] = 0x01;
-                                    cr[1] = 0x01;
-                                    cr[2] = transport;
-                                    cr[3] = subcmd;
-                                    cr[4] = 0x00;
-                                    cr[5] = (subcmd == 0x15 ? 0x10 : 0x00);
-                                    cr[6] = (subcmd == 0x15 ? 0x78 : 0xf8);
-                                    cr[7] = 0x00;
-                                    size_t pay = fill_nfc_response_payload(subcmd, cmd_data, cr + 8, h);
-                                    rt[h].cmd_response_len = 8 + pay;
-                                    if (subcmd == 0x15 && pay > 0) {
-                                        // match ex response header more
-                                        cr[2] = 0x01;
-                                    }
-                                    rt[h].pending_cmd_response = true;
-                                    return;
+                        const uint8_t expected_report_id = switch2_output_report_id_for_port(h);
+                        size_t cmd_off = (id == expected_report_id) ? 1 : 0;
+                        if (r >= cmd_off + 8 && read_buf[cmd_off + 1] == 0x91) {
+                            const uint8_t cmd_id = read_buf[cmd_off + 0];
+                            const uint8_t transport = read_buf[cmd_off + 2];
+                            const uint8_t subcmd = read_buf[cmd_off + 3];
+                            const size_t declared_len = read_buf[cmd_off + 5];
+                            const size_t available_len = r > cmd_off + 8 ? (r - cmd_off - 8) : 0;
+                            const size_t data_len = std::min({declared_len, available_len, static_cast<size_t>(56)});
+                            std::span<const uint8_t> cmd_data(read_buf + cmd_off + 8, data_len);
+
+                            uint8_t* cr = rt[h].cmd_response_buf;
+                            std::memset(cr, 0, sizeof(rt[h].cmd_response_buf));
+                            cr[0] = 0x05; // S2 common command-response input report
+                            cr[1] = cmd_id;
+                            cr[2] = 0x01;
+                            cr[3] = transport;
+                            cr[4] = subcmd;
+                            cr[5] = 0x00;
+                            cr[6] = 0xF8;
+                            cr[7] = 0x00;
+                            cr[8] = 0x00;
+                            size_t payload_len = 0;
+                            constexpr size_t payload_off = 9;
+
+                            if (cmd_id == 0x03) {
+                                if (subcmd == 0x03) {
+                                    rt[h].full_report_enabled = cmd_data.empty() || cmd_data[0] != 0;
+                                    cr[payload_off] = rt[h].full_report_enabled ? 0x01 : 0x00;
+                                    payload_len = 4;
+                                } else if (subcmd == 0x0A) {
+                                    if (!cmd_data.empty()) rt[h].input_report_mode = cmd_data[0];
+                                } else if (subcmd == 0x0D) {
+                                    rt[h].full_report_enabled = true;
+                                    cr[payload_off] = 0x01;
+                                    payload_len = 4;
                                 }
-                                // non-NFC commands still use subcmd reply path (may evolve)
-                                if (hw_slots[h].client_idx != -1) {
-                                    // rumble may be in other reports or combined
-                                }
-                                memset(&rt[h].pending_reply, 0, sizeof(rt[h].pending_reply));
-                                int reply_len = handle_subcommand(rt[h], subcmd, cmd_data, &rt[h].pending_reply);
-                                rt[h].pending_subcmd_reply = (reply_len >= 0);
-                                return; // handled as S2 command
+                            } else if (cmd_id == 0x01) {
+                                payload_len = fill_nfc_response_payload(subcmd, cmd_data, cr + payload_off, h);
                             }
+
+                            rt[h].cmd_response_len = payload_off + payload_len;
+                            rt[h].pending_cmd_response = true;
+                            return;
                         }
-                        // fallback for rumble
-                        if (id == 0x01 || id == 0x02 || id == RID_OUTPUT_RUMBLE) {
+                        if (id == expected_report_id || id == RID_OUTPUT_RUMBLE) {
                             if (hw_slots[h].client_idx != -1) publish_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
                             return;
                         }

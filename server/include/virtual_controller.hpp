@@ -111,6 +111,7 @@ struct ControllerRuntime {
 };
 
 void randomize_controller_identity();
+void configure_usb_controller_family(UsbControllerFamily family);
 void init_spi_flash(int ctrl);
 size_t build_usb_81_response(uint8_t* out, uint8_t subtype, int ctrl);
 void build_get_device_info_response(uint8_t* out, int ctrl);
@@ -143,6 +144,8 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
 uint8_t controller_type_for_port(int ctrl);
 void set_controller_type_for_port(int ctrl, uint8_t protocol_type);
 uint8_t controller_protocol_type_for_port(int ctrl);
+uint8_t switch2_input_report_id_for_port(int ctrl);
+uint8_t switch2_output_report_id_for_port(int ctrl);
 void apply_controller_type_input(uint8_t type, ns::HIDReport& r, bool pair_member = false);
 void apply_controller_type_report(uint8_t type, uint8_t* buf);
 void apply_s2_controller_type_report(uint8_t type, uint8_t* buf);

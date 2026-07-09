@@ -38,6 +38,15 @@ const char* input_source_name(InputSource source) {
     }
 }
 
+const char* usb_controller_family_name(UsbControllerFamily family) {
+    switch (family) {
+        case UsbControllerFamily::Switch1: return "switch1";
+        case UsbControllerFamily::Switch2: return "switch2";
+        case UsbControllerFamily::Hori:    return "hori";
+        default:                            return "unknown";
+    }
+}
+
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
     return (then == 0 || then > now) ? 0 : now - then;
 }
@@ -221,22 +230,71 @@ int active_client_count(uint64_t now) {
     return count;
 }
 
-static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
-    switch (report.reserved[2]) {
+// The physical "shape" a profile represents, independent of Switch generation.
+enum class ProfileShape : uint8_t { Pro, JoyConL, JoyConR, Pair };
+
+static ProfileShape profile_shape(uint8_t profile) {
+    switch (profile) {
         case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:    return ProfileShape::JoyConL;
         case ns::CONTROLLER_TYPE_JOYCON_R:
-        case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:    return ProfileShape::JoyConR;
         case ns::CONTROLLER_TYPE_JOYCON_PAIR:
-        case ns::CONTROLLER_TYPE_HORI:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2: return ProfileShape::Pair;
+        default:                                 return ProfileShape::Pro; // Pro/Pro_S2/Hori/default
+    }
+}
+
+// Map any requested profile onto the equivalent profile in the given family.
+// The USB device can only be one family at a time, so a mismatched client is
+// adapted to the active family (keeping its L/R/pair shape) instead of rejected.
+uint8_t coerce_profile_to_family(uint8_t profile, UsbControllerFamily family) {
+    const ProfileShape shape = profile_shape(profile);
+    switch (family) {
+        case UsbControllerFamily::Switch2:
+            switch (shape) {
+                case ProfileShape::JoyConL: return ns::CONTROLLER_TYPE_JOYCON_L_S2;
+                case ProfileShape::JoyConR: return ns::CONTROLLER_TYPE_JOYCON_R_S2;
+                case ProfileShape::Pair:    return ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+                default:                    return ns::CONTROLLER_TYPE_PRO_S2;
+            }
+        case UsbControllerFamily::Hori:
+            return ns::CONTROLLER_TYPE_HORI; // Hori exposes a single Pro-like pad
+        case UsbControllerFamily::Switch1:
+        default:
+            switch (shape) {
+                case ProfileShape::JoyConL: return ns::CONTROLLER_TYPE_JOYCON_L;
+                case ProfileShape::JoyConR: return ns::CONTROLLER_TYPE_JOYCON_R;
+                case ProfileShape::Pair:    return ns::CONTROLLER_TYPE_JOYCON_PAIR;
+                default:                    return ns::CONTROLLER_TYPE_PRO;
+            }
+    }
+}
+
+static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
+    return coerce_profile_to_family(report.reserved[2], g_ctx.usb_controller_family);
+}
+
+UsbControllerFamily usb_family_for_profile(uint8_t profile) {
+    switch (profile) {
         case ns::CONTROLLER_TYPE_PRO_S2:
         case ns::CONTROLLER_TYPE_JOYCON_L_S2:
         case ns::CONTROLLER_TYPE_JOYCON_R_S2:
         case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
-            return report.reserved[2];
-        case ns::CONTROLLER_TYPE_DEFAULT:
+            return UsbControllerFamily::Switch2;
+        case ns::CONTROLLER_TYPE_HORI:
+            return UsbControllerFamily::Hori;
         default:
-            return ns::CONTROLLER_TYPE_PRO;
+            return UsbControllerFamily::Switch1;
     }
+}
+
+bool controller_profile_supported_by_usb_family(uint8_t /*profile*/) {
+    // Every requested profile is now coerced onto the active family
+    // (coerce_profile_to_family), so a client is never rejected for a family
+    // mismatch — it is adapted to the current family instead. Kept as an always
+    // -true hook so slot accounting and the old reject call sites stay valid.
+    return true;
 }
 
 int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle) {
@@ -245,13 +303,19 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
     for (int s = 0; s < 4; ++s) {
         if (pad_present && !pad_present[s]) continue;
         const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
+        if (!controller_profile_supported_by_usb_family(profile)) continue;
         needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
     }
     if (needed == 0 && reserve_when_idle) {
         const uint8_t profile = requested_profile_from_wire_report(report.p1);
-        needed = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
+        if (controller_profile_supported_by_usb_family(profile)) {
+            needed = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
+        }
     }
-    return std::min(needed, HID_PORT_COUNT);
+    // Do not clamp here. Callers use a value larger than HID_PORT_COUNT to
+    // reject a request that can only be partially mapped (for example, three
+    // Joy-Con pairs).
+    return needed;
 }
 
 int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
@@ -263,17 +327,17 @@ int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
         ClientSession& c = g_ctx.clients[i];
         repair_future_client_timestamp(c, now);
         if (!c.active || c.last_rx_us == 0 || elapsed_us_saturated(now, c.last_rx_us) > CLIENT_TIMEOUT_US) continue;
-        bool any_assignment = false;
         uint8_t assigned_mask = 0;
         for (int s = 0; s < 4; ++s) {
             assigned_mask = static_cast<uint8_t>(assigned_mask | c.client_assignment[s].console_port_mask);
-            if (c.client_assignment[s].console_port_mask != 0) any_assignment = true;
         }
-        if (any_assignment) {
-            used += std::popcount(static_cast<unsigned>(assigned_mask));
-        } else {
-            used += requested_virtual_slots_for_report(c.report, c.pad_present, true);
-        }
+        // An existing assignment does not cover source pads which appeared
+        // later in the same session. Reserve for the larger of the committed
+        // layout and the current request so another client cannot be admitted
+        // into those pending ports in the gap before the writer reconciles it.
+        const int assigned = std::popcount(static_cast<unsigned>(assigned_mask));
+        const int requested = requested_virtual_slots_for_report(c.report, c.pad_present, true);
+        used += std::max(assigned, requested);
     }
     return std::min(used, HID_PORT_COUNT);
 }
@@ -407,6 +471,40 @@ bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_cl
     return true;
 }
 
+int console_port_for_client_subpad(int client_idx, int sub_idx) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return -1;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    const ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return -1;
+    const uint8_t primary = c.client_assignment[sub_idx].primary_console_port;
+    if (primary < HID_PORT_COUNT) return primary;
+    const uint8_t mask = c.client_assignment[sub_idx].console_port_mask;
+    for (int port = 0; port < HID_PORT_COUNT; ++port) {
+        if (mask & (1u << port)) return port;
+    }
+    return -1;
+}
+
+bool client_subpad_for_console_port(int console_port, int& client_idx, int& sub_idx) {
+    client_idx = -1;
+    sub_idx = -1;
+    if (console_port < 0 || console_port >= HID_PORT_COUNT) return false;
+    const uint8_t bit = static_cast<uint8_t>(1u << console_port);
+    for (int cidx = 0; cidx < MAX_CLIENTS; ++cidx) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[cidx]);
+        const ClientSession& c = g_ctx.clients[cidx];
+        if (!c.active) continue;
+        for (int sidx = 0; sidx < 4; ++sidx) {
+            if (c.client_assignment[sidx].console_port_mask & bit) {
+                client_idx = cidx;
+                sub_idx = sidx;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -506,6 +604,22 @@ ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_cli
                                                               bool switch_asleep) {
     ns::ClientAssignmentPacket packet{};
     packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_SERVER_FULL;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    packet.subpad = 0;
+    packet.console_port_mask = 0;
+    packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    packet.active_clients = active_clients;
+    packet.max_clients = MAX_CLIENTS;
+    packet.free_virtual_slots = free_virtual_slots;
+    return packet;
+}
+
+ns::ClientAssignmentPacket make_server_profile_unsupported_assignment_packet(uint8_t active_clients,
+                                                                              uint8_t free_virtual_slots,
+                                                                              bool switch_asleep) {
+    ns::ClientAssignmentPacket packet{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED;
     if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
     packet.server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
     packet.subpad = 0;
@@ -627,6 +741,7 @@ int server_macro_client_for_sender(const sockaddr_in& sender) {
             g_ctx.clients[i].last_rx_us = now; return i;
         }
     }
+    if (active_client_count(now) >= MAX_CLIENTS || free_virtual_slot_count(now) <= 0) return -1;
     return allocate_client_session(now, &sender, false, InputSource::Udp);
 }
 

@@ -263,12 +263,39 @@ static bool path_is_mountpoint(const fs::path& p) {
     return false;
 }
 
+static bool gadget_uses_hori_identity() {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Hori;
+}
+
+static bool gadget_uses_switch2_identity() {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2;
+}
+
+static const char* gadget_id_vendor() {
+    return gadget_uses_hori_identity() ? "0x0F0D" : "0x057e";
+}
+
+static const char* gadget_id_product() {
+    if (gadget_uses_hori_identity()) return "0x0092";
+    return gadget_uses_switch2_identity() ? "0x2069" : "0x2009";
+}
+
+static const char* gadget_bcd_device() {
+    return "0x0200";
+}
+
+static const char* gadget_product_string() {
+    if (gadget_uses_hori_identity()) return "Legacy USB Gamepad";
+    return gadget_uses_switch2_identity() ? "Switch 2 Pro Controller"
+                                          : "Nintendo Switch Pro Controller";
+}
+
 static std::vector<uint8_t> ffs_report_descriptor(int id) {
-    if (controller_type_for_port(id) == NS_TYPE_HORI) {
+    (void)id;
+    if (gadget_uses_hori_identity()) {
         return std::vector<uint8_t>(LEGACY_REPORT_DESC, LEGACY_REPORT_DESC + sizeof(LEGACY_REPORT_DESC));
     }
-    if (g_port_switch2[id]) {
-        // Over USB, all S2 controllers enumerate as a Pro Controller 2, similar to Switch 1
+    if (gadget_uses_switch2_identity()) {
         return std::vector<uint8_t>(S2_PRO_REPORT_DESC, S2_PRO_REPORT_DESC + S2_PRO_REPORT_DESC_SIZE);
     }
     return std::vector<uint8_t>(VIRTUAL_CONTROLLER_REPORT_DESC,
@@ -276,6 +303,7 @@ static std::vector<uint8_t> ffs_report_descriptor(int id) {
 }
 
 static HidDescriptor make_hid_descriptor(int id) {
+    (void)id;
     HidDescriptor hid{};
     hid.bLength = sizeof(HidDescriptor);
     hid.bDescriptorType = 0x21;       // HID descriptor
@@ -283,9 +311,9 @@ static HidDescriptor make_hid_descriptor(int id) {
     hid.bCountryCode = 0;
     hid.bNumDescriptors = 1;
     hid.bReportDescriptorType = 0x22; // Report descriptor
-    if (controller_type_for_port(id) == NS_TYPE_HORI) {
+    if (gadget_uses_hori_identity()) {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(sizeof(LEGACY_REPORT_DESC)));
-    } else if (g_port_switch2[id]) {
+    } else if (gadget_uses_switch2_identity()) {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_PRO_REPORT_DESC_SIZE));
     } else {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(VIRTUAL_CONTROLLER_REPORT_DESC_SIZE));
@@ -308,12 +336,13 @@ static usb_interface_descriptor make_hid_interface_descriptor() {
 }
 
 static usb_endpoint_descriptor_no_audio make_hid_endpoint_descriptor(int id, bool in, bool high_speed) {
+    (void)id;
     usb_endpoint_descriptor_no_audio ep{};
     ep.bLength = USB_DT_ENDPOINT_SIZE;
     ep.bDescriptorType = USB_DT_ENDPOINT;
     ep.bEndpointAddress = static_cast<uint8_t>((in ? USB_DIR_IN : USB_DIR_OUT) | 0x01);
     ep.bmAttributes = USB_ENDPOINT_XFER_INT;
-    if (controller_type_for_port(id) == NS_TYPE_HORI) {
+    if (gadget_uses_hori_identity()) {
         ep.wMaxPacketSize = htole16(8);
     } else {
         ep.wMaxPacketSize = htole16(PRO_REPORT_SIZE); // 64 for S2 Pro/JC and modern per research
@@ -505,7 +534,10 @@ static void queue_control_report(int id, uint16_t w_value, const std::vector<uin
     if (id < 0 || id >= HID_PORT_COUNT || payload.empty()) return;
     auto report = payload;
     const uint8_t report_id = static_cast<uint8_t>(w_value & 0xFF);
-    if (report_id != 0 && report.front() != report_id) report.insert(report.begin(), report_id);
+    // HID SET_REPORT carries its report ID in wValue; the EP0 payload does
+    // not reliably contain it. Always preserve that framing instead of
+    // guessing from payload[0] (command IDs can equal the output report ID).
+    if (report_id != 0) report.insert(report.begin(), report_id);
     auto& q = g_ffs_ports[id].control_reports;
     if (q.size() >= 16) q.pop_front();
     q.push_back(std::move(report));
@@ -1844,24 +1876,22 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             || !mkdirs(gd / "functions"))
         return false;
 
-    bool any_s2 = false;
-    for (int i = 0; i < HID_PORT_COUNT; ++i) if (g_port_switch2[i]) any_s2 = true;
-
+    const bool any_hori = gadget_uses_hori_identity();
     // Modern FunctionFS keeps the same Nintendo VID/PID/product surface, but the
     // HID interface itself is owned by user space. That lets us answer HID report
     // descriptor requests and accept SET_REPORT control traffic directly.
-    bool ok = write_file(gd / "bcdDevice",                  "0x0200")
+    bool ok = write_file(gd / "bcdDevice",                  gadget_bcd_device())
            && write_file(gd / "bcdUSB",                     "0x0200")
-           && write_file(gd / "idVendor",                   "0x057e")
-           && write_file(gd / "idProduct",                  any_s2 ? "0x2069" : "0x2009") // S2 or S1 PID
-           && write_file(gd / "bDeviceClass",               "0xEF")
-           && write_file(gd / "bDeviceSubClass",            "0x02")
-           && write_file(gd / "bDeviceProtocol",            "0x01")
-           && write_file(gd / "strings/0x409/serialnumber", g_ctx.usb_serial)
-           && write_file(gd / "strings/0x409/manufacturer", "Nintendo")
-           && write_file(gd / "strings/0x409/product",      any_s2 ? "Switch 2 Pro Controller" : "Nintendo Switch Pro Controller")
+           && write_file(gd / "idVendor",                   gadget_id_vendor())
+           && write_file(gd / "idProduct",                  gadget_id_product())
+           && write_file(gd / "bDeviceClass",               any_hori ? "0xFF" : "0xEF")
+           && write_file(gd / "bDeviceSubClass",            any_hori ? "0xFF" : "0x02")
+           && write_file(gd / "bDeviceProtocol",            any_hori ? "0xFF" : "0x01")
+           && write_file(gd / "strings/0x409/serialnumber", any_hori ? "000000000001" : g_ctx.usb_serial)
+           && write_file(gd / "strings/0x409/manufacturer", any_hori ? "NS Bridge" : "Nintendo")
+           && write_file(gd / "strings/0x409/product",      gadget_product_string())
            && write_file(cd / "MaxPower",                   "500")
-           && write_file(cd / "bmAttributes",               "0xA0");
+           && write_file(cd / "bmAttributes",               any_hori ? "0x80" : "0xA0");
     if (!ok) return false;
 
     for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -1955,4 +1985,3 @@ void teardown_gadget() {
 bool run_gadget_setup_if_needed(bool force, const char* reason) {
     return setup_gadget_builtin(force, reason);
 }
-

@@ -64,6 +64,14 @@ enum class InputSource : uint8_t {
 
 const char* input_source_name(InputSource source);
 
+enum class UsbControllerFamily : uint8_t {
+    Switch1,
+    Switch2,
+    Hori,
+};
+
+const char* usb_controller_family_name(UsbControllerFamily family);
+
 struct ControllerStatusState {
     uint8_t player_leds = 0;
     uint8_t player_index = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
@@ -141,6 +149,7 @@ struct ServerContext {
     std::atomic<bool> running{true};
     bool verbose = false;
     std::string usb_serial;
+    UsbControllerFamily usb_controller_family = UsbControllerFamily::Switch1;
     // Modern USB transport uses FunctionFS instead of /dev/hidg*.
     std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;
@@ -202,6 +211,9 @@ bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 int active_client_count(uint64_t now = 0);
 int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle = true);
+bool controller_profile_supported_by_usb_family(uint8_t profile);
+UsbControllerFamily usb_family_for_profile(uint8_t profile);
+uint8_t coerce_profile_to_family(uint8_t profile, UsbControllerFamily family);
 int active_requested_virtual_slots(uint64_t now = 0, int ignore_client_idx = -1);
 int free_virtual_slot_count(uint64_t now = 0, int ignore_client_idx = -1);
 uint32_t pack_server_state(uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep);
@@ -221,6 +233,11 @@ bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_cl
 ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_clients,
                                                               uint8_t free_virtual_slots,
                                                               bool switch_asleep = false);
+ns::ClientAssignmentPacket make_server_profile_unsupported_assignment_packet(uint8_t active_clients,
+                                                                              uint8_t free_virtual_slots,
+                                                                              bool switch_asleep = false);
+int console_port_for_client_subpad(int client_idx, int sub_idx);
+bool client_subpad_for_console_port(int console_port, int& client_idx, int& sub_idx);
 void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet);
 uint64_t refresh_roster_seq(uint64_t now = 0, bool force = false);
 uint64_t get_roster_packet(ns::RosterPacket& packet);
