@@ -141,7 +141,6 @@ struct ServerContext {
     std::atomic<bool> running{true};
     bool verbose = false;
     std::string usb_serial;
-    bool legacy_mode = false;
     // Modern USB transport uses FunctionFS instead of /dev/hidg*.
     std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;
@@ -202,7 +201,7 @@ void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 int active_client_count(uint64_t now = 0);
-int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool legacy_mode, bool reserve_when_idle = true);
+int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle = true);
 int active_requested_virtual_slots(uint64_t now = 0, int ignore_client_idx = -1);
 int free_virtual_slot_count(uint64_t now = 0, int ignore_client_idx = -1);
 uint32_t pack_server_state(uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep);

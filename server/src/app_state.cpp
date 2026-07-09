@@ -239,15 +239,11 @@ static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
     }
 }
 
-int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool legacy_mode, bool reserve_when_idle) {
+int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle) {
     const ns::HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
     int needed = 0;
     for (int s = 0; s < 4; ++s) {
         if (pad_present && !pad_present[s]) continue;
-        if (legacy_mode) {
-            needed += 1;
-            continue;
-        }
         const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
         needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
     }
@@ -276,7 +272,7 @@ int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
         if (any_assignment) {
             used += std::popcount(static_cast<unsigned>(assigned_mask));
         } else {
-            used += requested_virtual_slots_for_report(c.report, c.pad_present, g_ctx.legacy_mode, true);
+            used += requested_virtual_slots_for_report(c.report, c.pad_present, true);
         }
     }
     return std::min(used, HID_PORT_COUNT);

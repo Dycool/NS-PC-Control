@@ -194,7 +194,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) sd->ws_slot = -1;
             }
             if (sd->ws_slot < 0) {
-                const int required_slots = requested_virtual_slots_for_report(report, pad_present, g_ctx.legacy_mode, true);
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
                 const int free_slots_now = free_virtual_slot_count(now);
                 if (required_slots > free_slots_now) {
                     ns::ClientAssignmentPacket full = make_server_full_assignment_packet(

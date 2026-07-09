@@ -351,9 +351,8 @@ int main(int argc, char** argv) {
     // Startup message
     // -----------------------------------------------------------------------
     if (g_ctx.verbose) {
-        std::println("UDP {}:{} writer={} Hz mode={}",
-                     bind_addr, port, PRO_WRITER_HZ,
-                     g_ctx.legacy_mode ? "hori" : "modern");
+        std::println("UDP {}:{} writer={} Hz mode=modern",
+                     bind_addr, port, PRO_WRITER_HZ);
     }
 
     std::string start_msg = std::format("Started ns-backend server on {}:{}", bind_addr, port);
@@ -363,7 +362,6 @@ int main(int argc, char** argv) {
     std::vector<std::string> extras;
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
-    if (g_ctx.legacy_mode)                extras.push_back("HORI mode");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");
@@ -421,12 +419,9 @@ int main(int argc, char** argv) {
                 memcpy(&probe, udp_rx.data(), sizeof(probe));
                 if (probe.magic == SERVER_INFO_MAGIC && probe.version == SERVER_INFO_VERSION) {
                     ServerInfoReply reply{
-                        .backend        = static_cast<uint8_t>(g_ctx.legacy_mode
-                                              ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO),
-                        .udp_interval_ms = static_cast<uint16_t>(g_ctx.legacy_mode
-                                              ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
-                        .udp_hz         = static_cast<uint16_t>(g_ctx.legacy_mode
-                                              ? LEGACY_UDP_HZ : PRO_UDP_HZ),
+                        .backend        = static_cast<uint8_t>(SERVER_BACKEND_PRO),
+                        .udp_interval_ms = static_cast<uint16_t>(PRO_UDP_INTERVAL_MS),
+                        .udp_hz         = static_cast<uint16_t>(PRO_UDP_HZ),
                     };
                     const uint64_t reply_now = now_us();
                     const int free_slots_now = free_virtual_slot_count(reply_now);
@@ -607,7 +602,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
 
-                const int required_slots = requested_virtual_slots_for_report(report, pad_present, g_ctx.legacy_mode, true);
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
                 const int free_slots_now = free_virtual_slot_count(now);
                 const int active_now = active_client_count(now);
                 if (required_slots > free_slots_now || active_now >= MAX_CLIENTS) {

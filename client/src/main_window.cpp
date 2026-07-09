@@ -58,9 +58,12 @@ MainWindow::MainWindow() {
     connectBtn = new QPushButton("Connect", this);
     scanAmiiboBtn = new QPushButton("Scan Amiibo", this);
     quitBtn = new QPushButton("Quit", this);
-    grid->addWidget(connectBtn, 4, 0, 1, 1);
-    grid->addWidget(scanAmiiboBtn, 4, 1, 1, 2);
-    grid->addWidget(quitBtn, 4, 3, 1, 1);
+
+    // Restore exact original grid positions from main branch:
+    // connect at (4,1), quit at (4,3). Place Scan Amiibo at (4,2) with natural size (no colspan).
+    grid->addWidget(connectBtn, 4, 1);
+    grid->addWidget(scanAmiiboBtn, 4, 2);
+    grid->addWidget(quitBtn, 4, 3);
 
     auto* sep = new QFrame(this);
     sep->setFrameShape(QFrame::HLine);

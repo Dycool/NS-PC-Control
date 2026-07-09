@@ -268,11 +268,8 @@ static std::vector<uint8_t> ffs_report_descriptor(int id) {
         return std::vector<uint8_t>(LEGACY_REPORT_DESC, LEGACY_REPORT_DESC + sizeof(LEGACY_REPORT_DESC));
     }
     if (g_port_switch2[id]) {
-        // Use S2 descriptors from research (different per type: 0x05 common + 0x07/08/09)
-        if (controller_protocol_type_for_port(id) == ns::CONTROLLER_TYPE_PRO_S2) {
-            return std::vector<uint8_t>(S2_PRO_REPORT_DESC, S2_PRO_REPORT_DESC + S2_PRO_REPORT_DESC_SIZE);
-        }
-        return std::vector<uint8_t>(S2_JC_REPORT_DESC, S2_JC_REPORT_DESC + S2_JC_REPORT_DESC_SIZE);
+        // Over USB, all S2 controllers enumerate as a Pro Controller 2, similar to Switch 1
+        return std::vector<uint8_t>(S2_PRO_REPORT_DESC, S2_PRO_REPORT_DESC + S2_PRO_REPORT_DESC_SIZE);
     }
     return std::vector<uint8_t>(VIRTUAL_CONTROLLER_REPORT_DESC,
                                 VIRTUAL_CONTROLLER_REPORT_DESC + VIRTUAL_CONTROLLER_REPORT_DESC_SIZE);
@@ -289,11 +286,7 @@ static HidDescriptor make_hid_descriptor(int id) {
     if (controller_type_for_port(id) == NS_TYPE_HORI) {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(sizeof(LEGACY_REPORT_DESC)));
     } else if (g_port_switch2[id]) {
-        if (controller_protocol_type_for_port(id) == ns::CONTROLLER_TYPE_PRO_S2) {
-            hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_PRO_REPORT_DESC_SIZE));
-        } else {
-            hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_JC_REPORT_DESC_SIZE));
-        }
+        hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_PRO_REPORT_DESC_SIZE));
     } else {
         hid.wDescriptorLength = htole16(static_cast<uint16_t>(VIRTUAL_CONTROLLER_REPORT_DESC_SIZE));
     }
@@ -861,27 +854,7 @@ void functionfs_drain_output(int id) {
     st.out_reports.clear();
 }
 
-static bool create_hid_function(int id) {
-    fs::path func = fs::path(GADGET_DIR) / "functions" / ("hid.usb" + std::to_string(id));
-    const std::string report_length = g_ctx.legacy_mode ? "8" : std::to_string(PRO_REPORT_SIZE);
-    if (!mkdirs(func)
-            || !write_file(func / "protocol",      "0")
-            || !write_file(func / "subclass",       "0")
-            || !write_file(func / "report_length",  report_length))
-        return false;
 
-    fs::path desc_path = func / "report_desc";
-    if (g_ctx.legacy_mode) {
-        if (!write_file(desc_path, LEGACY_REPORT_DESC, sizeof(LEGACY_REPORT_DESC))) return false;
-    } else {
-        if (!write_file(desc_path, VIRTUAL_CONTROLLER_REPORT_DESC, VIRTUAL_CONTROLLER_REPORT_DESC_SIZE)) return false;
-    }
-
-    fs::path link_path = fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(id));
-    std::error_code ec;
-    fs::remove(link_path, ec);
-    return symlink(func.c_str(), link_path.c_str()) == 0;
-}
 
 // ===========================================================================
 // Wake config I/O
@@ -1822,8 +1795,7 @@ static void print_gadget_host_config_error() {
 }
 
 static bool setup_gadget_builtin(bool force, const char* reason) {
-    const bool use_functionfs = !g_ctx.legacy_mode;
-    auto nodes_ready = [&]() { return use_functionfs ? functionfs_nodes_ready() : hidg_nodes_ready(); };
+    auto nodes_ready = [&]() { return functionfs_nodes_ready(); };
 
     if (!force && nodes_ready()) return true;
     if (!force && g_ctx.gadget_setup_attempted.exchange(true)) {
@@ -1831,8 +1803,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         // FunctionFS has more moving parts than f_hid (mounts + ep0 descriptors).
         // If a previous setup was interrupted half-way, rebuild it instead of
         // getting stuck forever with missing endpoints.
-        if (use_functionfs) force = true;
-        else return false;
+        force = true;
     }
     if (force) g_ctx.gadget_setup_attempted.store(true);
 
@@ -1843,18 +1814,15 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     }
 
     if (g_ctx.verbose) {
-        std::println("[gadget] {}; creating built-in {}-interface {} gadget",
+        std::println("[gadget] {}; creating built-in {}-interface FunctionFS Pro HID gadget",
                      reason ? reason : "USB gadget not ready",
-                     HID_PORT_COUNT,
-                     g_ctx.legacy_mode ? "legacy 8-byte HID" : "FunctionFS Pro HID");
+                     HID_PORT_COUNT);
     }
 
     int dummy = 0;
     dummy = std::system("modprobe libcomposite >/dev/null 2>&1 || true"); (void)dummy;
-    if (use_functionfs) {
-        dummy = std::system("modprobe usb_f_fs >/dev/null 2>&1 || true");
-        (void)dummy;
-    }
+    dummy = std::system("modprobe usb_f_fs >/dev/null 2>&1 || true");
+    (void)dummy;
     dummy = std::system("mountpoint -q /sys/kernel/config "
                         "|| mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true"); (void)dummy;
 
@@ -1882,33 +1850,24 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     // Modern FunctionFS keeps the same Nintendo VID/PID/product surface, but the
     // HID interface itself is owned by user space. That lets us answer HID report
     // descriptor requests and accept SET_REPORT control traffic directly.
-    bool ok = write_file(gd / "bcdDevice",                  g_ctx.legacy_mode ? "0x0200" : "0x0200")
+    bool ok = write_file(gd / "bcdDevice",                  "0x0200")
            && write_file(gd / "bcdUSB",                     "0x0200")
-           && write_file(gd / "idVendor",                   g_ctx.legacy_mode ? "0x0F0D" : "0x057e")
-           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : (any_s2 ? "0x2069" : "0x2009")) // S2 or S1 PID
-           && write_file(gd / "bDeviceClass",               g_ctx.legacy_mode ? "0xFF"   : "0xEF")
-           && write_file(gd / "bDeviceSubClass",            g_ctx.legacy_mode ? "0xFF"   : "0x02")
-           && write_file(gd / "bDeviceProtocol",            g_ctx.legacy_mode ? "0xFF"   : "0x01")
-           && write_file(gd / "strings/0x409/serialnumber", g_ctx.legacy_mode ? "000000000001" : g_ctx.usb_serial)
-           && write_file(gd / "strings/0x409/manufacturer", g_ctx.legacy_mode ? "Hori" : "Nintendo")
-           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : (any_s2 ? "Switch 2 Pro Controller" : "Nintendo Switch Pro Controller"))
+           && write_file(gd / "idVendor",                   "0x057e")
+           && write_file(gd / "idProduct",                  any_s2 ? "0x2069" : "0x2009") // S2 or S1 PID
+           && write_file(gd / "bDeviceClass",               "0xEF")
+           && write_file(gd / "bDeviceSubClass",            "0x02")
+           && write_file(gd / "bDeviceProtocol",            "0x01")
+           && write_file(gd / "strings/0x409/serialnumber", g_ctx.usb_serial)
+           && write_file(gd / "strings/0x409/manufacturer", "Nintendo")
+           && write_file(gd / "strings/0x409/product",      any_s2 ? "Switch 2 Pro Controller" : "Nintendo Switch Pro Controller")
            && write_file(cd / "MaxPower",                   "500")
-           && write_file(cd / "bmAttributes",               g_ctx.legacy_mode ? "0x80" : "0xA0");
-    if (g_ctx.legacy_mode) ok = ok && write_file(cd / "strings/0x409/configuration", "USB 4-Player Hub Config");
+           && write_file(cd / "bmAttributes",               "0xA0");
     if (!ok) return false;
 
-    if (use_functionfs) {
-        for (int i = 0; i < HID_PORT_COUNT; ++i) {
-            if (!create_functionfs_function(i)) return false;
-        }
-        g_ctx.functionfs_transport_active.store(true, std::memory_order_relaxed);
-
-    } else {
-        g_ctx.functionfs_transport_active.store(false, std::memory_order_relaxed);
-        for (int i = 0; i < HID_PORT_COUNT; ++i) {
-            if (!create_hid_function(i)) return false;
-        }
+    for (int i = 0; i < HID_PORT_COUNT; ++i) {
+        if (!create_functionfs_function(i)) return false;
     }
+    g_ctx.functionfs_transport_active.store(true, std::memory_order_relaxed);
 
     std::string UDC = first_udc_name();
     if (UDC.empty()) {
@@ -1921,41 +1880,29 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     for (int tries = 0; tries < 20; ++tries) {
         bool all_seen = true;
         for (int i = 0; i < HID_PORT_COUNT; ++i) {
-            if (use_functionfs) {
-                if (access(functionfs_ep_in_path(i).c_str(), F_OK) != 0) all_seen = false;
-                if (access(functionfs_ep_out_path(i).c_str(), F_OK) != 0) all_seen = false;
-                chmod(functionfs_ep_in_path(i).c_str(), 0666);
-                chmod(functionfs_ep_out_path(i).c_str(), 0666);
-            } else {
-                char path[32];
-                std::snprintf(path, sizeof(path), "/dev/hidg%d", i);
-                if (access(path, F_OK) != 0) all_seen = false;
-                chmod(path, 0666);
-            }
+            if (access(functionfs_ep_in_path(i).c_str(), F_OK) != 0) all_seen = false;
+            if (access(functionfs_ep_out_path(i).c_str(), F_OK) != 0) all_seen = false;
+            chmod(functionfs_ep_in_path(i).c_str(), 0666);
+            chmod(functionfs_ep_out_path(i).c_str(), 0666);
         }
         if (all_seen) {
-            if (use_functionfs) {
-                // Bring up the blocking data-endpoint I/O threads now that ep1/ep2
-                // exist. Without them the OUT endpoint never queues a USB request
-                // and the console's wired handshake would NAK-timeout forever.
-                // functionfs_nodes_ready() checks io_ready below, so start first.
-                bool io_ok = true;
-                for (int i = 0; i < HID_PORT_COUNT; ++i)
-                    if (!functionfs_start_port_io(i)) io_ok = false;
-                if (!io_ok) {
-                    for (int i = 0; i < HID_PORT_COUNT; ++i) functionfs_stop_port_io(i);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    continue;
-                }
+            // Bring up the blocking data-endpoint I/O threads now that ep1/ep2
+            // exist. Without them the OUT endpoint never queues a USB request
+            // and the console's wired handshake would NAK-timeout forever.
+            // functionfs_nodes_ready() checks io_ready below, so start first.
+            bool io_ok = true;
+            for (int i = 0; i < HID_PORT_COUNT; ++i)
+                if (!functionfs_start_port_io(i)) io_ok = false;
+            if (!io_ok) {
+                for (int i = 0; i < HID_PORT_COUNT; ++i) functionfs_stop_port_io(i);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
             }
+            
             if (nodes_ready()) {
                 if (g_ctx.verbose) {
-                    if (use_functionfs)
-                        std::println("[gadget] Done. Exposed {} FunctionFS HID interface(s) ({}/port*/ep1+ep2)",
-                                     HID_PORT_COUNT, FFS_BASE_DIR);
-                    else
-                        std::println("[gadget] Done. Exposed {} USB gamepad HID interface(s) (/dev/hidg0..{})",
-                                     HID_PORT_COUNT, HID_PORT_COUNT - 1);
+                    std::println("[gadget] Done. Exposed {} FunctionFS HID interface(s) ({}/port*/ep1+ep2)",
+                                 HID_PORT_COUNT, FFS_BASE_DIR);
                 }
                 return true;
             }
@@ -1997,7 +1944,7 @@ void teardown_gadget() {
         fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409", ec);
         fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1",               ec);
         fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409",             ec);
-        fs::remove(GADGET_DIR,                                                          ec);
+        fs::remove(GADGET_DIR,                                                        ec);
     }
     if (g_ctx.verbose) std::println("[gadget] USB gadget closed");
 }
@@ -2006,21 +1953,3 @@ bool run_gadget_setup_if_needed(bool force, const char* reason) {
     return setup_gadget_builtin(force, reason);
 }
 
-bool usb_transport_rebuild_ffs_port(int id) {
-    if (id < 0 || id >= HID_PORT_COUNT) return false;
-    if (g_ctx.verbose) {
-        std::println("[gadget] Rebuilding FunctionFS configuration dynamically for port {}", id + 1);
-    }
-    functionfs_stop_port_io(id);
-
-    fs::path link_path = ffs_config_link(id);
-    std::error_code ec;
-    fs::remove(link_path, ec);
-
-    if (!prepare_functionfs_instance(id)) return false;
-
-    fs::path func = ffs_function_dir(id);
-    if (symlink(func.c_str(), link_path.c_str()) != 0) return false;
-
-    return functionfs_start_port_io(id);
-}

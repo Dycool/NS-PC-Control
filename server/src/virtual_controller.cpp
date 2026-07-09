@@ -63,21 +63,7 @@ extern const uint8_t S2_PRO_REPORT_DESC[] = {
     0xC0
 };
 extern const size_t S2_PRO_REPORT_DESC_SIZE = sizeof(S2_PRO_REPORT_DESC);
-
-extern const uint8_t S2_JC_REPORT_DESC[] = {
-    0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x05, 0x05, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95, 0x3F, 0x75, 0x08, 0x81, 0x02,
-    0x85, 0x07, 0x09, 0x01, 0x95, 0x02, 0x81, 0x02,
-    0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x25, 0x01, 0x95, 0x10, 0x75, 0x01, 0x81, 0x02,
-    0x05, 0xFF, 0x09, 0x01, 0x26, 0xFF, 0x00, 0x95, 0x01, 0x75, 0x08, 0x81, 0x02,
-    0x05, 0x01, 0x09, 0x01, 0xA1, 0x00,
-    0x09, 0x30, 0x09, 0x31, 0x26, 0xFF, 0x0F, 0x95, 0x02, 0x75, 0x0C, 0x81, 0x02,
-    0xC0,
-    0x05, 0xFF, 0x09, 0x02, 0x26, 0xFF, 0x00, 0x95, 0x37, 0x75, 0x08, 0x81, 0x02,
-    0x85, 0x01, 0x09, 0x01, 0x95, 0x3F, 0x91, 0x02,
-    0xC0
-};
-extern const size_t S2_JC_REPORT_DESC_SIZE = sizeof(S2_JC_REPORT_DESC);
-
+// Removed S2_JC_REPORT_DESC as all USB S2 controllers must enumerate as Pro Controller 2
 
 uint8_t CTRL_MAC_BE[4][6] = {
     {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA0}, {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA1},
@@ -110,7 +96,6 @@ bool g_port_switch2[HID_PORT_COUNT] = { false, false, false, false };
 static uint8_t g_port_protocol_type[HID_PORT_COUNT] = {
     ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO
 };
-static bool s2_gadget_configured = false;
 
 static std::vector<uint8_t> g_amiibo_data[HID_PORT_COUNT];
 static std::chrono::steady_clock::time_point g_amiibo_expiry[HID_PORT_COUNT];
@@ -151,6 +136,8 @@ void check_amiibo_expiry(int port) {
 
 void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
     if (ctrl < 0 || ctrl >= HID_PORT_COUNT) return;
+    if (g_port_protocol_type[ctrl] == protocol_type) return;
+
     bool is_s2 = false;
     uint8_t ns_type = NS_TYPE_PRO;
     switch (protocol_type) {
@@ -176,27 +163,23 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
             is_s2 = (protocol_type == ns::CONTROLLER_TYPE_PRO_S2);
             break;
         case ns::CONTROLLER_TYPE_HORI:
+            ns_type = NS_TYPE_HORI;
+            is_s2 = false;
+            break;
         default:
             ns_type = NS_TYPE_PRO;
             is_s2 = false;
             break;
     }
-    if (g_port_controller_type[ctrl] == ns_type && g_port_switch2[ctrl] == is_s2) return;
+    
     g_port_controller_type[ctrl] = ns_type;
     g_port_switch2[ctrl] = is_s2;
     g_port_protocol_type[ctrl] = protocol_type;
     g_spi_initialized[ctrl] = false;
     init_spi_flash(ctrl);
 
-    // Rebuild FFS descriptors so report desc matches the (S2 or not) type.
-    if (!g_ctx.legacy_mode) {
-        usb_transport_rebuild_ffs_port(ctrl);
-    }
-
-    if (is_s2 && !s2_gadget_configured) {
-        s2_gadget_configured = true;
-        run_gadget_setup_if_needed(true, "S2 mode first activated");
-    }
+    // Rebuild the gadget so the host re-enumerates the new descriptors and SPI flash.
+    run_gadget_setup_if_needed(true, "Dynamic controller type change");
 }
 
 uint8_t controller_protocol_type_for_port(int ctrl) {
@@ -231,6 +214,22 @@ void apply_controller_type_report(uint8_t type, uint8_t* buf) {
     uint8_t& side = type == NS_TYPE_JOYCON_R ? buf[3] : buf[5];
     if (side & 0x40) side |= 0x10;
     if (side & 0x80) side |= 0x20;
+}
+
+void apply_s2_controller_type_report(uint8_t type, uint8_t* buf) {
+    if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R) return;
+    // buf is a 0x09 report: power info at [2], buttons at [3..5].
+    // S2 does NOT use conn_info in buf[2] like S1, so we leave it as battery info.
+    // Map L/R and ZL/ZR to spare bits in buf[5] for SL/SR single-joycon pairing gesture.
+    // In S2 buf[5]: bits 5,6,7 are unused (0x20, 0x40, 0x80).
+    // Let's map SR to 0x40 and SL to 0x80.
+    if (type == NS_TYPE_JOYCON_R) {
+        if (buf[3] & 0x10) buf[5] |= 0x40; // R -> SR
+        if (buf[3] & 0x20) buf[5] |= 0x80; // ZR -> SL
+    } else {
+        if (buf[4] & 0x10) buf[5] |= 0x40; // L -> SR
+        if (buf[4] & 0x20) buf[5] |= 0x80; // ZL -> SL
+    }
 }
 
 bool read_random_bytes(uint8_t* dst, size_t len) {
@@ -457,7 +456,7 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
              ((hat == HAT_W || hat == HAT_NW || hat == HAT_SW) ? 0x04 : 0) | // Left
              ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) | // Right
              ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);  // Down
-    out[5] = (btn & BTN_CAPTURE ? 0x20 : 0) | (btn & BTN_HOME ? 0x10 : 0);
+    out[5] = (btn & BTN_CAPTURE ? 0x02 : 0) | (btn & BTN_HOME ? 0x01 : 0);
     // C, GL, GR, headset bits per research (extra in S2 Pro) - 0 for base
 
     // Left stick (research bytes 5-7, 12-bit)
@@ -476,49 +475,6 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
     if (has_motion && imu_enabled && motion_samples) {
         // Placeholder - research has specific accel/gyro packing per sample
         memcpy(out + 16, motion_samples, sizeof(MotionReport) * 3);
-    }
-}
-
-// S2 Joy-Con builder (research 0x07 for L, 0x08 for R)
-void build_s2_jc_report(const HIDReport& src, const MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, uint8_t report_id, int port, uint8_t* out) {
-    memset(out, 0, PRO_REPORT_SIZE);
-    out[0] = report_id; // 0x07 L or 0x08 R
-    out[1] = timer;
-    uint8_t pwr = 0x01;
-    if (src.reserved[1] & EXT_STATUS_BATTERY_VALID) {
-      int pct = src.reserved[0];
-      uint8_t lvl = std::min<uint8_t>(9, pct / 11);
-      pwr = (lvl << 2) | 0x01;
-    }
-    if (src.reserved[1] & EXT_STATUS_BATTERY_CHARGING) pwr |= 0x02;
-    out[2] = pwr;
-
-    uint16_t btn = src.input.buttons;
-    uint8_t hat = src.input.hat;
-    if (report_id == 0x07) { // L per research
-        out[3] = (btn & BTN_LSTICK ? 0x80 : 0) | (btn & BTN_MINUS ? 0x40 : 0) | (btn & BTN_ZL ? 0x20 : 0) | (btn & BTN_L ? 0x10 : 0) |
-                 ((hat == HAT_N || hat == HAT_NE || hat == HAT_NW) ? 0x08 : 0) |
-                 ((hat == HAT_W || hat == HAT_NW || hat == HAT_SW) ? 0x04 : 0) |
-                 ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) |
-                 ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);
-        out[4] = (btn & BTN_CAPTURE ? 0x80 : 0);
-        out[5] = 0x07; // unk per doc
-        pack_stick_12(out + 6, src.input.lx, src.input.ly);
-        // NFC at 0xE (wire 15) always 0 for L
-        out[15] = 0;
-    } else { // R
-        out[3] = (btn & BTN_RSTICK ? 0x80 : 0) | (btn & BTN_PLUS ? 0x40 : 0) | (btn & BTN_ZR ? 0x20 : 0) | (btn & BTN_R ? 0x10 : 0) |
-                 (btn & BTN_X ? 0x08 : 0) | (btn & BTN_Y ? 0x04 : 0) | (btn & BTN_A ? 0x02 : 0) | (btn & BTN_B ? 0x01 : 0);
-        out[4] = (btn & BTN_HOME ? 0x40 : 0);
-        out[5] = 0x07; // unk
-        pack_stick_12(out + 6, src.input.rx, src.input.ry);
-        uint8_t nfc_state = (port >= 0 && is_amiibo_placed(port)) ? 0x01 : 0x00;
-        out[15] = nfc_state; // NFC state (doc 0xE) at wire byte 15 for R
-    }
-    out[9] = 0; // space for mouse etc (approximate)
-    out[16] = (has_motion && imu_enabled) ? 0x28 : 0;
-    if (has_motion && imu_enabled && motion_samples) {
-        memcpy(out + 17, motion_samples, sizeof(MotionReport) * 3);
     }
 }
 
