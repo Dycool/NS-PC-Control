@@ -235,28 +235,26 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
-            if (!g_ctx.legacy_mode) {
-                for (int c = 0; c < MAX_CLIENTS; ++c) {
-                    if (!snap[c].active || !snap[c].uses_pad_presence) continue;
-                    for (int s = 0; s < nports; ++s) {
-                        if (!snap[c].pad_present[s]) continue;
-                        const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[c], s));
-                        if (profile_is_pair(profile)) {
-                            if (s < 2) {
-                                const int base = s * 2;
-                                if (base + 1 < nports
-                                        && hw_slots[base].client_idx == -1
-                                        && hw_slots[base + 1].client_idx == -1) {
-                                    bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
-                                    uint8_t lp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L;
-                                    uint8_t rp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R;
-                                    set_controller_type_for_port(base, lp);
-                                    set_controller_type_for_port(base + 1, rp);
-                                }
+            for (int c = 0; c < MAX_CLIENTS; ++c) {
+                if (!snap[c].active || !snap[c].uses_pad_presence) continue;
+                for (int s = 0; s < nports; ++s) {
+                    if (!snap[c].pad_present[s]) continue;
+                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[c], s));
+                    if (profile_is_pair(profile)) {
+                        if (s < 2) {
+                            const int base = s * 2;
+                            if (base + 1 < nports
+                                    && hw_slots[base].client_idx == -1
+                                    && hw_slots[base + 1].client_idx == -1) {
+                                bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
+                                uint8_t lp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L;
+                                uint8_t rp = is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R;
+                                set_controller_type_for_port(base, lp);
+                                set_controller_type_for_port(base + 1, rp);
                             }
-                        } else if (s >= 0 && s < nports && hw_slots[s].client_idx == -1) {
-                            set_controller_type_for_port(s, profile);
                         }
+                    } else if (s >= 0 && s < nports && hw_slots[s].client_idx == -1) {
+                        set_controller_type_for_port(s, profile);
                     }
                 }
             }
@@ -281,8 +279,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                     bool macro_active_for_pad = server_macro_running(c, s);
                     if (snap[c].uses_pad_presence) {
                         if (!snap[c].pad_present[s] && !macro_active_for_pad) continue;
-                    } else if (g_ctx.legacy_mode) {
-                        if (input_is_neutral(get_hid_report(snap[c], s).input) && !macro_active_for_pad) continue;
                     } else {
                         if (hid_is_neutral(get_hid_report(snap[c], s)) && !macro_active_for_pad) continue;
                     }

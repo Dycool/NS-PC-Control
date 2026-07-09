@@ -1840,7 +1840,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     const fs::path gd = GADGET_DIR;
     const fs::path cd = CONFIG_DIR;
     if (!mkdirs(gd / "strings/0x409")
-            || !mkdirs(g_ctx.legacy_mode ? cd / "strings/0x409" : cd)
+            || !mkdirs(cd)
             || !mkdirs(gd / "functions"))
         return false;
 
