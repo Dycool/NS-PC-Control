@@ -1930,6 +1930,9 @@ void teardown_gadget() {
 
     if (had_gadget) write_file(fs::path(GADGET_DIR) / "UDC", "");
     for (int i = 0; i < HID_PORT_COUNT; ++i) {
+        functionfs_stop_port_io(i);
+    }
+    for (int i = 0; i < HID_PORT_COUNT; ++i) {
         fs::remove(fs::path(CONFIG_DIR)  / ("hid.usb" + std::to_string(i)), ec);
         fs::remove(ffs_config_link(i), ec);
     }
