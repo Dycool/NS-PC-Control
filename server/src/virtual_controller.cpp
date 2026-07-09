@@ -110,6 +110,7 @@ bool g_port_switch2[HID_PORT_COUNT] = { false, false, false, false };
 static uint8_t g_port_protocol_type[HID_PORT_COUNT] = {
     ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO
 };
+static bool s2_gadget_configured = false;
 
 static std::vector<uint8_t> g_amiibo_data[HID_PORT_COUNT];
 static std::chrono::steady_clock::time_point g_amiibo_expiry[HID_PORT_COUNT];
@@ -186,6 +187,16 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
     g_port_protocol_type[ctrl] = protocol_type;
     g_spi_initialized[ctrl] = false;
     init_spi_flash(ctrl);
+
+    // Rebuild FFS descriptors so report desc matches the (S2 or not) type.
+    if (!g_ctx.legacy_mode) {
+        usb_transport_rebuild_ffs_port(ctrl);
+    }
+
+    if (is_s2 && !s2_gadget_configured) {
+        s2_gadget_configured = true;
+        run_gadget_setup_if_needed(true, "S2 mode first activated");
+    }
 }
 
 uint8_t controller_protocol_type_for_port(int ctrl) {

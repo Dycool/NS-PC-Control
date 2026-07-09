@@ -59,8 +59,8 @@ MainWindow::MainWindow() {
     scanAmiiboBtn = new QPushButton("Scan Amiibo", this);
     quitBtn = new QPushButton("Quit", this);
     grid->addWidget(connectBtn, 4, 0, 1, 1);
-    grid->addWidget(scanAmiiboBtn, 4, 1, 1, 1);
-    grid->addWidget(quitBtn, 4, 2, 1, 1);
+    grid->addWidget(scanAmiiboBtn, 4, 1, 1, 2);
+    grid->addWidget(quitBtn, 4, 3, 1, 1);
 
     auto* sep = new QFrame(this);
     sep->setFrameShape(QFrame::HLine);
@@ -144,8 +144,12 @@ void MainWindow::toggleConnection() {
     if (g_connected.load()) {
         stop_connection();
     } else {
+        connectBtn->setEnabled(false);
+        connectBtn->setText("Connecting...");
+        QCoreApplication::processEvents();
         auto res = start_connection(q_to_std(ipEdit->text()));
         if (!res) QMessageBox::critical(this, "Error", std_to_q(res.error()));
+        connectBtn->setEnabled(true);
     }
 }
 
@@ -161,10 +165,11 @@ void MainWindow::updateUi() {
     bool s2Mode = g_switch2ModeEnabled.load();
     int ctype = g_controllerType.load();
     bool isJoyconL = (ctype == ns::CONTROLLER_TYPE_JOYCON_L || ctype == ns::CONTROLLER_TYPE_JOYCON_L_S2);
-    bool showScan = connected && s2Mode && !isJoyconL;
+    bool isHori = (ctype == ns::CONTROLLER_TYPE_HORI);
+    bool showScan = s2Mode && !isJoyconL && !isHori;
     if (scanAmiiboBtn) {
         scanAmiiboBtn->setVisible(showScan);
-        bool canScan = showScan && g_amiiboScanPending[0].load();
+        bool canScan = showScan && g_amiiboScanPending[0].load() && connected;
         scanAmiiboBtn->setEnabled(canScan);
     }
     if (!showScan) {
@@ -172,10 +177,11 @@ void MainWindow::updateUi() {
     }
 
     const int desiredHeight = platformHeight();
-    if (height() != desiredHeight) setFixedSize(platformWidth(), desiredHeight);
+    if (height() != desiredHeight) setFixedSize(platformWidth(), platformHeight());
     for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(true);
 
     if (!connected) {
+        for (int i = 0; i < 4; i++) g_amiiboScanPending[i].store(false);
         for (int i = 0; i < 4; ++i)
             padLabels[i]->setText(std_to_q("P" + std::to_string(i + 1) + ": Not connected"));
         return;
@@ -207,7 +213,9 @@ void MainWindow::updateUi() {
 }
 
 void MainWindow::onScanAmiiboClicked() {
-    if (!g_connected.load() || !g_switch2ModeEnabled.load()) return;
+    int ctype = g_controllerType.load();
+    bool isHori = (ctype == ns::CONTROLLER_TYPE_HORI);
+    if (!g_connected.load() || !g_switch2ModeEnabled.load() || isHori) return;
     int subpad = 0; // primary for now
     QString path = QFileDialog::getOpenFileName(this, "Select Amiibo .bin file", "", "Amiibo files (*.bin)");
     if (path.isEmpty()) return;

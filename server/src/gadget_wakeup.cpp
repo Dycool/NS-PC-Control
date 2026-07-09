@@ -1876,19 +1876,22 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             || !mkdirs(gd / "functions"))
         return false;
 
+    bool any_s2 = false;
+    for (int i = 0; i < HID_PORT_COUNT; ++i) if (g_port_switch2[i]) any_s2 = true;
+
     // Modern FunctionFS keeps the same Nintendo VID/PID/product surface, but the
     // HID interface itself is owned by user space. That lets us answer HID report
     // descriptor requests and accept SET_REPORT control traffic directly.
-    bool ok = write_file(gd / "bcdDevice",                  g_ctx.legacy_mode ? "0x0200" : "0x0200") // S2 bcd per research
+    bool ok = write_file(gd / "bcdDevice",                  g_ctx.legacy_mode ? "0x0200" : "0x0200")
            && write_file(gd / "bcdUSB",                     "0x0200")
            && write_file(gd / "idVendor",                   g_ctx.legacy_mode ? "0x0F0D" : "0x057e")
-           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : "0x2069") // S2 Pro PID per research; S1 was 0x2009; Hori legacy unchanged
+           && write_file(gd / "idProduct",                  g_ctx.legacy_mode ? "0x0092" : (any_s2 ? "0x2069" : "0x2009")) // S2 or S1 PID
            && write_file(gd / "bDeviceClass",               g_ctx.legacy_mode ? "0xFF"   : "0xEF")
            && write_file(gd / "bDeviceSubClass",            g_ctx.legacy_mode ? "0xFF"   : "0x02")
-           && write_file(gd / "bDeviceProtocol",            g_ctx.legacy_mode ? "0xFF"   : "0x01") // S2 per research device desc
+           && write_file(gd / "bDeviceProtocol",            g_ctx.legacy_mode ? "0xFF"   : "0x01")
            && write_file(gd / "strings/0x409/serialnumber", g_ctx.legacy_mode ? "000000000001" : g_ctx.usb_serial)
            && write_file(gd / "strings/0x409/manufacturer", g_ctx.legacy_mode ? "Hori" : "Nintendo")
-           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : "Switch 2 Pro Controller") // or per type, from research
+           && write_file(gd / "strings/0x409/product",      g_ctx.legacy_mode ? "Legacy USB Gamepad" : (any_s2 ? "Switch 2 Pro Controller" : "Nintendo Switch Pro Controller"))
            && write_file(cd / "MaxPower",                   "500")
            && write_file(cd / "bmAttributes",               g_ctx.legacy_mode ? "0x80" : "0xA0");
     if (g_ctx.legacy_mode) ok = ok && write_file(cd / "strings/0x409/configuration", "USB 4-Player Hub Config");
