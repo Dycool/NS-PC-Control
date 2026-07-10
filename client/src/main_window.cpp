@@ -165,12 +165,20 @@ void MainWindow::updateUi() {
     bindingsBtn->setEnabled(true);
     statusLabel->setText(std_to_q(status_message()));
 
-    bool s2Mode = g_switch2ModeEnabled.load();
-    int ctype = g_controllerType.load();
-    bool nfcCapable = (ctype == ns::CONTROLLER_TYPE_PRO || ctype == ns::CONTROLLER_TYPE_PRO_S2 ||
-                       ctype == ns::CONTROLLER_TYPE_JOYCON_R || ctype == ns::CONTROLLER_TYPE_JOYCON_R_S2 ||
-                       ctype == ns::CONTROLLER_TYPE_JOYCON_PAIR || ctype == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
-    bool showScan = connected && s2Mode && nfcCapable;
+    // NFC belongs to the actual native S2 slot, not merely to the client's
+    // requested controller mode. In --s2 only console port 0 is native; clients
+    // assigned exclusively to S1 fallback slots must never see the scan button.
+    const ServerAssignmentView assignment = server_assignment_snapshot();
+    bool assignedNativeNfc = false;
+    for (int s = 0; s < 4; ++s) {
+        if ((assignment.console_port_mask[s] & 0x01u) == 0) continue;
+        const uint8_t type = assignment.virtual_type[s];
+        const bool nfcType = type == ns::CONTROLLER_TYPE_PRO_S2
+            || type == ns::CONTROLLER_TYPE_JOYCON_R_S2
+            || type == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+        assignedNativeNfc = assignedNativeNfc || nfcType;
+    }
+    const bool showScan = connected && assignment.accepted && assignedNativeNfc;
     if (scanAmiiboBtn) {
         scanAmiiboBtn->setVisible(showScan);
         bool pendingAmiibo = false;

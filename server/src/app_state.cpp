@@ -361,8 +361,8 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
         const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
         if (!controller_profile_supported_by_usb_family(profile)) continue;
         if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-            // Native Switch 2 Joy-Con pairs occupy one L and one R FunctionFS
-            // controller, just like a Switch 1 pair occupies two HID slots.
+            // A Joy-Con pair always consumes two console slots. In --s2 the first
+            // pair may be hybrid (native S2 right + S1 left); later pairs are S1.
             needed += profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2 ? 2 : 1;
         } else {
             needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
@@ -385,9 +385,8 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
 
 static int configured_virtual_port_count() {
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-        // Three native S2 functions plus one S1 f_hid fallback make up the
-        // complete hybrid gadget. This permits a second Joy-Con pair to use
-        // the final native S2 port for L and the fallback port for R.
+        // One native S2 slot plus three S1 fallbacks still provides four total
+        // virtual controller slots. A first L+R pair uses native R + fallback L.
         return HID_PORT_COUNT;
     return HID_PORT_COUNT;
 }

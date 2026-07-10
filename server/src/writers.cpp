@@ -72,10 +72,8 @@ static bool profile_is_pair(uint8_t profile) {
            profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
 }
 
-// The f_hid fallback port inside the --s2 gadget speaks the Switch 1 protocol,
-// so map an S2 request onto its S1 equivalent. A pair may use this as its
-// right-hand slot when the first pair already occupies the first two native
-// S2 functions.
+// Every non-native port in the --s2 gadget speaks the Switch 1 protocol, so
+// map the requested S2-shaped profile onto its Switch 1 equivalent.
 static uint8_t s1_fallback_profile(uint8_t profile) {
     return coerce_profile_to_family(profile, UsbControllerFamily::Switch1);
 }
@@ -88,12 +86,12 @@ static const HIDReport& get_hid_report(const ClientSession& c, int s) {
 }
 
 static bool port_uses_s2_functionfs(int port) {
-    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-        && port >= 0 && port < g_ctx.switch2_native_port_count;
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && port == 0;
 }
 
 static int legacy_hidg_index_for_port(int port) {
-    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? 0 : port;
+    // In S2 mode logical ports 1..3 are the three sequential f_hid nodes.
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? (port - 1) : port;
 }
 
 static bool port_uses_hori_hidg(int port) {
@@ -118,8 +116,8 @@ static bool write_all_nonblock_drop(int fd, const uint8_t* data, size_t len) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    // S2: three native FunctionFS Pro2 ports + one Switch 1 f_hid fallback.
-    // S1/HORI drive all four legacy ports.
+    // S2: one native FunctionFS controller on port 0 plus three Switch 1
+    // f_hid fallbacks on ports 1..3. S1/HORI drive all four legacy ports.
     const int nports = HID_PORT_COUNT;
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
@@ -200,9 +198,8 @@ void writer_thread(std::stop_token stoken, int hz) {
 
         if (g_ctx.verbose) {
             if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                std::println("{} native S2 FunctionFS port(s) + {} S1 fallback port(s) opened",
-                             g_ctx.switch2_native_port_count,
-                             nports - g_ctx.switch2_native_port_count);
+                std::println("1 native S2 FunctionFS port + {} S1 fallback port(s) opened",
+                             nports - 1);
             else
                 std::println("{}x legacy /dev/hidg* opened", nports);
         }
@@ -255,137 +252,187 @@ void writer_thread(std::stop_token stoken, int hz) {
                 && a.pair_right == b.pair_right;
         };
 
-        // Reconcile the complete source-pad layout in one pass. Allocating pairs
-        // first makes [0,1]/[2,3] atomic and allows active single pads to be
-        // compacted instead of permanently fragmenting the only pair groups.
+        // Reconcile the complete source-pad layout in one pass. In S2 mode
+        // the first active source request owns the only native controller. If
+        // that request is an L+R pair, port 0 is the NFC-capable Joy-Con 2 R and
+        // the L half is placed on the first S1 fallback port. Every later source
+        // is represented entirely by Switch 1 fallback controllers.
         auto reconcile_hw_slots = [&](const ClientSession snaps[MAX_CLIENTS], uint64_t stamp) {
+            std::vector<SourceRequest> ordered;
             std::vector<SourceRequest> pairs;
             std::vector<SourceRequest> singles;
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!snaps[c].active) continue;
 
                 bool any_request_for_client = false;
-                for (int s = 0; s < 4; ++s) {
-                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
+                for (int sidx = 0; sidx < 4; ++sidx) {
+                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], sidx));
                     if (!controller_profile_supported_by_usb_family(profile)) continue;
-                    const bool macro_active = server_macro_running(c, s);
+                    const bool macro_active = server_macro_running(c, sidx);
                     const bool active = snaps[c].uses_pad_presence
-                        ? (snaps[c].pad_present[s] || macro_active)
-                        : (!hid_is_neutral(get_hid_report(snaps[c], s)) || macro_active);
+                        ? (snaps[c].pad_present[sidx] || macro_active)
+                        : (!hid_is_neutral(get_hid_report(snaps[c], sidx)) || macro_active);
                     if (!active) continue;
-                    // A Switch 2 pair is represented by two native S2
-                    // functions, one Joy-Con 2 L and one Joy-Con 2 R.
-                    (profile_is_pair(profile) ? pairs : singles).push_back({c, s, profile});
+                    const SourceRequest req{c, sidx, profile};
+                    ordered.push_back(req);
+                    (profile_is_pair(profile) ? pairs : singles).push_back(req);
                     any_request_for_client = true;
                 }
 
                 if (!any_request_for_client) {
-                    // Identity is configuration, not merely live input.  The
-                    // console reads device-info/SPI during USB bring-up, before
-                    // the player necessarily presses a button.  Old --test5
-                    // worked because the desired Joy-Con identity was already
-                    // active at handshake time; keep that behaviour for the app
-                    // by reserving pad 1's requested profile even while idle.
+                    // Reserve pad 1's configured identity while idle so the
+                    // console sees the intended controller during enumeration.
                     const uint8_t idle_profile = requested_controller_profile_from_report(get_hid_report(snaps[c], 0));
-                    if (controller_profile_supported_by_usb_family(idle_profile))
-                        (profile_is_pair(idle_profile) ? pairs : singles).push_back({c, 0, idle_profile});
-                }
-            }
-
-            // S2's second pair deliberately spans ports 2 (native S2 L) and
-            // 3 (Switch 1 fallback R). The per-port protocol conversion below
-            // gives each half the correct generation-specific identity.
-            const int pair_port_limit = nports;
-            auto existing_pair_base = [&](const SourceRequest& req) {
-                for (int base = 0; base + 1 < pair_port_limit; base += 2) {
-                    const HwSlot& left = hw_slots[base];
-                    const HwSlot& right = hw_slots[base + 1];
-                    if (left.client_idx == req.client_idx && left.sub_idx == req.sub_idx
-                            && left.pair_member && !left.pair_right
-                            && right.client_idx == req.client_idx && right.sub_idx == req.sub_idx
-                            && right.pair_member && right.pair_right) {
-                        return base;
+                    if (controller_profile_supported_by_usb_family(idle_profile)) {
+                        const SourceRequest req{c, 0, idle_profile};
+                        ordered.push_back(req);
+                        (profile_is_pair(idle_profile) ? pairs : singles).push_back(req);
                     }
                 }
-                return -1;
-            };
-            auto existing_single_port = [&](const SourceRequest& req) {
-                for (int h = 0; h < nports; ++h) {
-                    if (hw_slots[h].client_idx == req.client_idx && hw_slots[h].sub_idx == req.sub_idx
-                            && !hw_slots[h].pair_member) return h;
-                }
-                return -1;
-            };
-            const int requested_slots = static_cast<int>(pairs.size() * 2 + singles.size());
-            if (requested_slots > nports) {
-                // A live session is allowed to change its request, but that
-                // change must not evict unrelated already-mapped players. Keep
-                // only requests with an exact committed layout; the excess
-                // request remains visibly unassigned in feedback until space
-                // is available.
-                pairs.erase(std::remove_if(pairs.begin(), pairs.end(), [&](const SourceRequest& req) {
-                    return existing_pair_base(req) < 0;
-                }), pairs.end());
-                singles.erase(std::remove_if(singles.begin(), singles.end(), [&](const SourceRequest& req) {
-                    return existing_single_port(req) < 0;
-                }), singles.end());
             }
-            std::stable_sort(pairs.begin(), pairs.end(), [&](const SourceRequest& a, const SourceRequest& b) {
-                return (existing_pair_base(a) >= 0) > (existing_pair_base(b) >= 0);
-            });
-            std::stable_sort(singles.begin(), singles.end(), [&](const SourceRequest& a, const SourceRequest& b) {
-                return (existing_single_port(a) >= 0) > (existing_single_port(b) >= 0);
-            });
 
             HwSlot next_slots[HID_PORT_COUNT];
             for (int h = 0; h < nports; ++h) next_slots[h].virtual_type = idle_virtual_type();
-            auto pair_base_free = [&](int base) {
-                return base >= 0 && base + 1 < nports
-                    && next_slots[base].client_idx == -1
-                    && next_slots[base + 1].client_idx == -1;
+
+            auto free_port = [&](int h) {
+                return h >= 0 && h < nports && next_slots[h].client_idx == -1;
             };
-            auto first_free_pair_base = [&] {
-                for (int base = 0; base + 1 < pair_port_limit; base += 2) {
-                    if (pair_base_free(base)) return base;
+            auto first_free_port = [&](int begin) {
+                for (int h = begin; h < nports; ++h) if (free_port(h)) return h;
+                return -1;
+            };
+            auto existing_single_port = [&](const SourceRequest& req, int begin) {
+                for (int h = begin; h < nports; ++h) {
+                    if (hw_slots[h].client_idx == req.client_idx
+                            && hw_slots[h].sub_idx == req.sub_idx
+                            && !hw_slots[h].pair_member
+                            && free_port(h)) return h;
                 }
                 return -1;
             };
-            auto first_free_port = [&] {
-                for (int h = 0; h < nports; ++h) {
-                    if (next_slots[h].client_idx == -1) return h;
+            auto existing_pair_ports = [&](const SourceRequest& req, int begin, int& left, int& right) {
+                left = right = -1;
+                for (int h = begin; h < nports; ++h) {
+                    if (hw_slots[h].client_idx != req.client_idx
+                            || hw_slots[h].sub_idx != req.sub_idx
+                            || !hw_slots[h].pair_member || !free_port(h)) continue;
+                    if (hw_slots[h].pair_right) right = h;
+                    else left = h;
                 }
-                return -1;
+                if (left < begin || right < begin || left == right) left = right = -1;
+            };
+            auto assign_single = [&](const SourceRequest& req, int port) {
+                if (!free_port(port)) return false;
+                next_slots[port] = {req.client_idx, req.sub_idx,
+                                    virtual_type_for_profile(req.profile), false, false};
+                return true;
+            };
+            auto assign_pair = [&](const SourceRequest& req, int left_port, int right_port) {
+                if (!free_port(left_port) || !free_port(right_port) || left_port == right_port) return false;
+                next_slots[left_port] = {req.client_idx, req.sub_idx, NS_TYPE_JOYCON_L, true, false};
+                next_slots[right_port] = {req.client_idx, req.sub_idx, NS_TYPE_JOYCON_R, true, true};
+                return true;
             };
 
-            for (const SourceRequest& req : pairs) {
-                int base = existing_pair_base(req);
-                if (!pair_base_free(base)) base = -1;
-                // Prefer the all-native pair first in S2 mode. The second
-                // pair then takes the deliberate S2-L/S1-R hybrid group.
-                const int preferred_base = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-                    ? 0 : req.sub_idx * 2;
-                if (base < 0 && preferred_base + 1 < pair_port_limit
-                        && pair_base_free(preferred_base))
-                    base = preferred_base;
-                if (base < 0) base = first_free_pair_base();
-                if (base < 0) continue;
-                next_slots[base] = {req.client_idx, req.sub_idx, NS_TYPE_JOYCON_L, true, false};
-                next_slots[base + 1] = {req.client_idx, req.sub_idx, NS_TYPE_JOYCON_R, true, true};
-            }
-            for (const SourceRequest& req : singles) {
-                int port = existing_single_port(req);
-                if (port < 0 || next_slots[port].client_idx != -1) port = -1;
-                if (port < 0 && req.sub_idx < nports && next_slots[req.sub_idx].client_idx == -1) port = req.sub_idx;
-                if (port < 0) port = first_free_port();
-                if (port < 0) continue;
-                const uint8_t vtype = virtual_type_for_profile(req.profile);
-                next_slots[port] = {req.client_idx, req.sub_idx, vtype, false, false};
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                size_t first_fallback_request = 0;
+                if (!ordered.empty()) {
+                    const SourceRequest& native = ordered.front();
+                    if (profile_is_pair(native.profile)) {
+                        // The right half owns the one native S2 slot because it
+                        // is the half with NFC. Keep the left half on S1.
+                        int left_port = -1;
+                        for (int h = 1; h < nports; ++h) {
+                            if (hw_slots[h].client_idx == native.client_idx
+                                    && hw_slots[h].sub_idx == native.sub_idx
+                                    && hw_slots[h].pair_member
+                                    && !hw_slots[h].pair_right && free_port(h)) {
+                                left_port = h;
+                                break;
+                            }
+                        }
+                        if (left_port < 0) left_port = first_free_port(1);
+                        if (left_port >= 0 && free_port(0)) {
+                            next_slots[0] = {native.client_idx, native.sub_idx, NS_TYPE_JOYCON_R, true, true};
+                            next_slots[left_port] = {native.client_idx, native.sub_idx, NS_TYPE_JOYCON_L, true, false};
+                        }
+                    } else {
+                        assign_single(native, 0);
+                    }
+                    first_fallback_request = 1;
+                }
+
+                for (size_t i = first_fallback_request; i < ordered.size(); ++i) {
+                    const SourceRequest& req = ordered[i];
+                    if (profile_is_pair(req.profile)) {
+                        int left = -1, right = -1;
+                        existing_pair_ports(req, 1, left, right);
+                        if (left < 0 || right < 0) {
+                            left = first_free_port(1);
+                            right = -1;
+                            if (left >= 0) {
+                                for (int h = left + 1; h < nports; ++h) {
+                                    if (free_port(h)) { right = h; break; }
+                                }
+                                if (right < 0) {
+                                    for (int h = 1; h < left; ++h) {
+                                        if (free_port(h)) { right = h; break; }
+                                    }
+                                }
+                            }
+                        }
+                        if (left >= 0 && right >= 0) assign_pair(req, left, right);
+                    } else {
+                        int port = existing_single_port(req, 1);
+                        if (port < 0) port = first_free_port(1);
+                        if (port >= 0) assign_single(req, port);
+                    }
+                }
+            } else {
+                // Preserve the established all-S1/HORI behavior: pairs consume
+                // contiguous [0,1] / [2,3] groups and are allocated first.
+                auto pair_base_free = [&](int base) {
+                    return base >= 0 && base + 1 < nports && free_port(base) && free_port(base + 1);
+                };
+                auto existing_pair_base = [&](const SourceRequest& req) {
+                    for (int base = 0; base + 1 < nports; base += 2) {
+                        const HwSlot& left = hw_slots[base];
+                        const HwSlot& right = hw_slots[base + 1];
+                        if (left.client_idx == req.client_idx && left.sub_idx == req.sub_idx
+                                && left.pair_member && !left.pair_right
+                                && right.client_idx == req.client_idx && right.sub_idx == req.sub_idx
+                                && right.pair_member && right.pair_right
+                                && pair_base_free(base)) return base;
+                    }
+                    return -1;
+                };
+                for (const SourceRequest& req : pairs) {
+                    int base = existing_pair_base(req);
+                    if (base < 0) {
+                        const int preferred = req.sub_idx * 2;
+                        if (pair_base_free(preferred)) base = preferred;
+                    }
+                    if (base < 0) {
+                        for (int candidate = 0; candidate + 1 < nports; candidate += 2) {
+                            if (pair_base_free(candidate)) { base = candidate; break; }
+                        }
+                    }
+                    if (base >= 0) assign_pair(req, base, base + 1);
+                }
+                for (const SourceRequest& req : singles) {
+                    int port = existing_single_port(req, 0);
+                    if (port < 0 && req.sub_idx < nports && free_port(req.sub_idx)) port = req.sub_idx;
+                    if (port < 0) port = first_free_port(0);
+                    if (port >= 0) assign_single(req, port);
+                }
             }
 
             for (int h = 0; h < nports; ++h) {
                 if (same_slot(hw_slots[h], next_slots[h])) continue;
                 const HwSlot old = hw_slots[h];
                 if (old.client_idx != -1) {
+                    if (controller_port_supports_amiibo(h))
+                        publish_amiibo_request(old.client_idx, old.sub_idx, false);
                     rt[h].neutral_burst_until_us = stamp + PRO_RELEASE_NEUTRAL_US;
                     port_drain_output(h);
                     if (old.virtual_type == NS_TYPE_HORI && next_slots[h].client_idx == -1) {
@@ -401,10 +448,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const int c = hw_slots[h].client_idx;
                     const int s = hw_slots[h].sub_idx;
                     uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
+                    if (profile_is_pair(profile))
+                        profile = protocol_for_slot(profile, hw_slots[h].pair_right);
                     if (!port_uses_s2_functionfs(h)
                             && g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
                         profile = s1_fallback_profile(profile);
-                    set_controller_type_for_port(h, protocol_for_slot(profile, hw_slots[h].pair_right));
+                    set_controller_type_for_port(h, profile);
                     if (old.client_idx != c || old.sub_idx != s) {
                         publish_controller_status_event(c, s,
                                                         g_ctx.console_player_leds[h].load(std::memory_order_relaxed),
@@ -508,7 +557,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     if (snap[c].active) {
                         const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snap[c], s));
                         assignment_requested[c][s] = profile;
-                        assignment_virtual[c][s] = profile;
+                        assignment_virtual[c][s] = ns::CONTROLLER_TYPE_DEFAULT;
                     }
                 }
             }
@@ -520,8 +569,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (assignment_primary[c][s] == ns::CONTROLLER_CONSOLE_PORT_NONE) assignment_primary[c][s] = static_cast<uint8_t>(h);
                 const bool actual_s2 = port_uses_s2_functionfs(h);
                 if (hw_slots[h].pair_member) {
-                    assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2
-                                                         : ns::CONTROLLER_TYPE_JOYCON_PAIR;
+                    // A hybrid pair is advertised as S2-capable if either half
+                    // is the native S2 port. This lets the client expose NFC for
+                    // the right half while still showing both assigned ports.
+                    if (actual_s2) assignment_virtual[c][s] = ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+                    else if (assignment_virtual[c][s] != ns::CONTROLLER_TYPE_JOYCON_PAIR_S2)
+                        assignment_virtual[c][s] = ns::CONTROLLER_TYPE_JOYCON_PAIR;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
                     assignment_virtual[c][s] = ns::CONTROLLER_TYPE_HORI;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
@@ -540,6 +593,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                 for (int s = 0; s < 4; ++s) {
                     publish_client_assignment_event(c, s, assignment_masks[c][s], assignment_primary[c][s],
                                                     assignment_requested[c][s], assignment_virtual[c][s]);
+                    bool has_native_nfc = false;
+                    for (int h = 0; h < nports; ++h) {
+                        if ((assignment_masks[c][s] & (1u << h)) && controller_port_supports_amiibo(h)) {
+                            has_native_nfc = true;
+                            break;
+                        }
+                    }
+                    if (!has_native_nfc) publish_amiibo_request(c, s, false);
                 }
             }
 
@@ -550,13 +611,11 @@ void writer_thread(std::stop_token stoken, int hz) {
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     const uint8_t profile = requested_controller_profile_from_report(out_reports[h]);
                     uint8_t eff_profile = profile;
+                    if (profile_is_pair(eff_profile))
+                        eff_profile = protocol_for_slot(eff_profile, hw_slots[h].pair_right);
                     if (!port_uses_s2_functionfs(h)
-                            && g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-                        eff_profile = s1_fallback_profile(profile);
-                    } else if (profile_is_pair(profile)) {
-                        bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
-                        eff_profile = hw_slots[h].pair_right ? (is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R) : (is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L);
-                    }
+                            && g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                        eff_profile = s1_fallback_profile(eff_profile);
                     set_controller_type_for_port(h, eff_profile);
                     apply_controller_type_input(hw_slots[h].virtual_type, out_reports[h], hw_slots[h].pair_member);
                 }
@@ -566,11 +625,8 @@ void writer_thread(std::stop_token stoken, int hz) {
             for (int h = 0; h < nports; ++h) {
                 const bool port_needed = (hw_slots[h].client_idx != -1);
                     if (port_uses_s2_functionfs(h)) {
-                        // S2 exposes one composite USB device. The console
-                        // initializes vendor port 0 only, and switch2_native
-                        // mirrors that device-wide state to every native HID
-                        // interface. Keep each per-port writer runtime aligned
-                        // so ports 1/2 start producing input reports too.
+                        // Only logical port 0 is native S2. Its FunctionFS
+                        // vendor channel owns the streaming/feature state.
                         rt[h].full_report_enabled = switch2_native_streaming_enabled(h);
                         rt[h].input_report_mode = switch2_native_selected_report(h);
                         const uint32_t enabled_features = switch2_native_enabled_features(h);

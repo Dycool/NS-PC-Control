@@ -182,18 +182,26 @@ NativeState& state_for_port(int port) {
     return g_state[port];
 }
 
-int active_native_ports() {
-    return std::clamp(g_ctx.switch2_native_port_count, 1, 3);
+constexpr int active_native_ports() {
+    return 1;
 }
 
-void mirror_shared_runtime_state_locked(int src_port) {
-    if (src_port < 0 || src_port >= HID_PORT_COUNT) src_port = 0;
+void propagate_primary_runtime_state_locked(int src_port) {
+    // The composite S2 gadget is normally initialised through vendor interface
+    // 0.  Older code mirrored *every* command from whichever interface spoke
+    // last, so a partially initialised secondary interface could wipe the IMU
+    // or streaming state of all other controllers. Only the primary interface
+    // is allowed to publish device-wide runtime state.
+    if (src_port != 0) return;
     const NativeState& src = g_state[src_port];
     const int ports = active_native_ports();
     for (int p = 0; p < ports; ++p) {
         if (p == src_port) continue;
         g_state[p].streaming = src.streaming;
-        g_state[p].selected_report = src.selected_report;
+        // Each HID interface emits the report belonging to its own logical
+        // controller identity, even though the console may only send one
+        // device-level start-streaming command on vendor interface 0.
+        g_state[p].selected_report = switch2_input_report_id_for_port(p);
         g_state[p].feature_mask = src.feature_mask;
         g_state[p].enabled_features = src.enabled_features;
         g_state[p].stage = std::max(g_state[p].stage, src.stage);
@@ -300,6 +308,20 @@ void switch2_native_set_port_pid(int port, uint8_t pid_lo) {
     s.factory[0x14] = pid_lo;
     s.factory[0x15] = 0x20;
     std::memcpy(s.identity.data(), s.factory.data(), 0x25);
+    s.selected_report = pid_lo == 0x67 ? 0x07
+        : (pid_lo == 0x66 ? 0x08 : 0x09);
+
+    // A secondary native interface may acquire its Joy-Con/Pro identity after
+    // the primary interface has already completed the device-wide feature
+    // negotiation. Inherit that negotiated state without copying the primary
+    // report ID over the secondary controller's own report format.
+    if (port > 0 && port < active_native_ports()) {
+        const NativeState& primary = state_for_port(0);
+        s.streaming = primary.streaming;
+        s.feature_mask = primary.feature_mask;
+        s.enabled_features = primary.enabled_features;
+        s.stage = std::max(s.stage, primary.stage);
+    }
     reset_s2_motion_state(port);
 }
 
@@ -528,17 +550,11 @@ bool switch2_native_handle_vendor_command(int port,
             break;
     }
 
-    // The Switch performs one device-level identity handshake and initializes
-    // only the first vendor interface of this composite USB device.  The other
-    // native HID interfaces are additional controllers on that same device,
-    // so they must inherit the shared streaming/report/feature state from the
-    // vendor channel the console actually drives (normally port 0).
-    mirror_shared_runtime_state_locked(port);
-    if (g_ctx.verbose && id == 0x03 && sub == 0x0A && s.streaming) {
-        std::fprintf(stdout,
-                     "[s2] vendor port %d enabled shared streaming for %d native HID ports\n",
-                     port, active_native_ports());
-    }
+    // There is exactly one native S2 function. The helper remains a no-op so
+    // the state transition stays explicit.
+    propagate_primary_runtime_state_locked(port);
+    if (g_ctx.verbose && id == 0x03 && sub == 0x0A && s.streaming)
+        std::fprintf(stdout, "[s2] native port 0 streaming enabled\n");
 
     response.assign(r.begin(), r.begin() + 8 + dl);
     return true;

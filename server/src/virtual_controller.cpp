@@ -286,7 +286,13 @@ void configure_usb_controller_family(UsbControllerFamily family) {
             break;
     }
     for (int port = 0; port < HID_PORT_COUNT; ++port) {
-        set_controller_type_for_port(port, profile);
+        uint8_t port_profile = profile;
+        if (family == UsbControllerFamily::Switch2 && port != 0) {
+            // Non-native slots are real Switch 1 f_hid functions and must
+            // start with a matching S1 identity even before a client is mapped.
+            port_profile = ns::CONTROLLER_TYPE_PRO;
+        }
+        set_controller_type_for_port(port, port_profile);
     }
 }
 
@@ -385,7 +391,7 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
     // block (memory 0x13014 + ep0 identity), which the console reads instead
     // of the S1 SPI image. Keep it in sync with the selected type.
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-            && ctrl < g_ctx.switch2_native_port_count) {
+            && ctrl == 0) {
         uint8_t pid_lo = 0x69; // Pro Controller 2
         if (ns_type == NS_TYPE_JOYCON_R) pid_lo = 0x66;
         else if (ns_type == NS_TYPE_JOYCON_L) pid_lo = 0x67;

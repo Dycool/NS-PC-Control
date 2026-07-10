@@ -153,9 +153,8 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     UsbControllerFamily usb_controller_family = UsbControllerFamily::Switch1;
-    // Native Switch 2 mode exposes three full Pro2 FunctionFS controllers.
-    // Endpoint 7 is kept for one upstream-style Switch 1 f_hid fallback.
-    int switch2_native_port_count = 3;
+    // Switch 2 mode always exposes one native S2 FunctionFS controller on
+    // console port 0. Ports 1..3 are standard Switch 1 f_hid fallbacks.
     // FunctionFS transport is used only for native S2 controllers.
     std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;

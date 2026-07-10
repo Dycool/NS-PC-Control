@@ -196,6 +196,15 @@ struct FfsPortState {
     std::atomic<bool> vendor_reader_exited{true};
     std::atomic<bool> vendor_writer_exited{true};
     bool input_write_seen = false;
+    // Native S2 input reports are real-time state, not a reliable byte stream.
+    // Keep a transport-side clock so timing is stamped when the report is
+    // actually submitted to the USB endpoint, after any queued stale frames
+    // have been coalesced.
+    uint16_t s2_motion_tick = 0;
+    uint64_t s2_motion_tick_fraction = 0;
+    uint64_t s2_motion_last_write_us = 0;
+    uint8_t s2_motion_last_report_id = 0;
+    uint64_t s2_coalesced_input_reports = 0;
     std::thread reader_thread;               // blocking read(ep2) -> out_reports
     std::thread writer_thread;               // in_reports -> blocking write(ep1)
     std::thread vendor_reader_thread;        // blocking read(ep3) -> vendor_out_reports
@@ -285,16 +294,19 @@ static bool gadget_uses_switch2_identity() {
     return g_ctx.usb_controller_family == UsbControllerFamily::Switch2;
 }
 
-static int switch2_virtual_port_count() {
-    // Native S2 on the Pi Zero 2 W uses two endpoint numbers per Pro2:
-    // HID IN/OUT + vendor-bulk IN/OUT.  Three native controllers consume
-    // endpoint numbers 1..6; endpoint 7 is left for one Switch 1 f_hid fallback.
-    return std::clamp(g_ctx.switch2_native_port_count, 1, 3);
+static constexpr int switch2_virtual_port_count() {
+    // The device-recipient EP0 S2 handshake belongs to the USB device, not to
+    // each FunctionFS interface. Keep exactly one native S2 controller.
+    return 1;
 }
 
 static int legacy_hidg_node_count_for_family() {
-    // S2: three native Pro2 functions plus one Switch 1 f_hid fallback.
-    return gadget_uses_switch2_identity() ? 1 : HID_PORT_COUNT;
+    // Fill every virtual slot not occupied by a native FunctionFS controller
+    // with an upstream f_hid Switch 1 controller. This preserves reliable
+    // multi-controller support while port 0 uses the native S2 protocol.
+    return gadget_uses_switch2_identity()
+        ? HID_PORT_COUNT - switch2_virtual_port_count()
+        : HID_PORT_COUNT;
 }
 
 static int functionfs_function_count_for_family() {
@@ -981,6 +993,65 @@ static void ffs_vendor_writer_loop(int id) {
 // interrupt-IN endpoint, waiting for the host to poll it.
 static void ffs_writer_loop(int id) {
     FfsPortState& st = g_ffs_ports[id];
+
+    const auto retime_s2_motion_report = [&](std::vector<uint8_t>& report) {
+        if (!gadget_uses_switch2_identity() || report.empty()) return;
+
+        size_t motion_len_index = 0;
+        size_t motion_data_index = 0;
+        switch (report[0]) {
+            case 0x07:
+            case 0x08:
+                motion_len_index = 16;
+                motion_data_index = 17;
+                break;
+            case 0x09:
+                motion_len_index = 15;
+                motion_data_index = 16;
+                break;
+            default:
+                return;
+        }
+        if (report.size() <= motion_len_index || report[motion_len_index] < 4
+                || report.size() < motion_data_index + 2) {
+            st.s2_motion_last_write_us = 0;
+            st.s2_motion_tick_fraction = 0;
+            st.s2_motion_last_report_id = report[0];
+            return;
+        }
+
+        const uint64_t write_us = now_us();
+        uint16_t elapsed_ticks = 3;
+        if (st.s2_motion_last_write_us != 0
+                && st.s2_motion_last_report_id == report[0]
+                && write_us > st.s2_motion_last_write_us) {
+            const uint64_t delta_us = write_us - st.s2_motion_last_write_us;
+            const uint64_t scaled = st.s2_motion_tick_fraction + delta_us * 800ULL;
+            elapsed_ticks = static_cast<uint16_t>(scaled / 1'000'000ULL);
+            st.s2_motion_tick_fraction = scaled % 1'000'000ULL;
+            if (elapsed_ticks == 0) elapsed_ticks = 1;
+
+            // The currently implemented USB Joy-Con codec is the normal
+            // single-interval layout. Avoid advertising a >15-tick catch-up
+            // frame while still packing the normal layout; that mismatch is
+            // interpreted as a discontinuity by motion consumers. USB is
+            // normally polled fast enough that this clamp is only a recovery
+            // path after scheduling stalls.
+            elapsed_ticks = std::min<uint16_t>(elapsed_ticks, 15);
+        } else {
+            st.s2_motion_tick_fraction = 0;
+        }
+
+        st.s2_motion_tick = static_cast<uint16_t>(
+            (st.s2_motion_tick + elapsed_ticks) & 0x0FFFu);
+        const uint16_t timing = static_cast<uint16_t>(
+            ((elapsed_ticks & 0x0Fu) << 12) | st.s2_motion_tick);
+        report[motion_data_index] = static_cast<uint8_t>(timing & 0xFFu);
+        report[motion_data_index + 1] = static_cast<uint8_t>((timing >> 8) & 0xFFu);
+        st.s2_motion_last_write_us = write_us;
+        st.s2_motion_last_report_id = report[0];
+    };
+
     while (st.io_running.load(std::memory_order_relaxed)) {
         std::vector<uint8_t> report;
         {
@@ -995,6 +1066,7 @@ static void ffs_writer_loop(int id) {
         }
         int fd = st.ep_in_fd;
         if (fd < 0 || report.empty()) continue;
+        retime_s2_motion_report(report);
         // For S1/S2 command replies we keep the blocking semantics.  HORI is
         // latency-sensitive and has no host output path we must preserve, so its
         // endpoint is opened O_NONBLOCK above: if the host is not ready, drop
@@ -1042,6 +1114,11 @@ static bool functionfs_start_port_io(int id) {
     st.reader_exited.store(false, std::memory_order_relaxed);
     st.writer_exited.store(false, std::memory_order_relaxed);
     st.input_write_seen = false;
+    st.s2_motion_tick = 0;
+    st.s2_motion_tick_fraction = 0;
+    st.s2_motion_last_write_us = 0;
+    st.s2_motion_last_report_id = 0;
+    st.s2_coalesced_input_reports = 0;
     st.vendor_reader_exited.store(!s2_native, std::memory_order_relaxed);
     st.vendor_writer_exited.store(!s2_native, std::memory_order_relaxed);
     st.io_running.store(true, std::memory_order_relaxed);
@@ -1182,7 +1259,26 @@ bool functionfs_submit_input_report(int id, const uint8_t* data, size_t len) {
     if (!st.host_enabled || !functionfs_io_ready(id)) return false;
     {
         std::lock_guard<std::mutex> lk(st.in_mtx);
-        if (st.in_reports.size() >= 8) {
+        const bool s2_realtime_input = gadget_uses_switch2_identity()
+            && (data[0] == 0x07 || data[0] == 0x08 || data[0] == 0x09);
+        if (s2_realtime_input) {
+            // HID IN on the native S2 function is a stream of current input
+            // state. Replaying a backlog of old gyro frames after a temporary
+            // endpoint stall creates visible twitches/teleports. Keep only the
+            // newest pending state; command replies use the separate vendor-IN
+            // queue and are not coalesced here.
+            auto it = st.in_reports.begin();
+            while (it != st.in_reports.end()) {
+                const bool queued_realtime = !it->empty()
+                    && ((*it)[0] == 0x07 || (*it)[0] == 0x08 || (*it)[0] == 0x09);
+                if (queued_realtime) {
+                    it = st.in_reports.erase(it);
+                    ++st.s2_coalesced_input_reports;
+                } else {
+                    ++it;
+                }
+            }
+        } else if (st.in_reports.size() >= 8) {
             st.in_reports.pop_front();
         }
         st.in_reports.emplace_back(data, data + len);
@@ -2234,7 +2330,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     if (g_ctx.verbose) {
         if (gadget_uses_switch2_identity()) {
-            std::println("[gadget] {}; creating {} native S2 FunctionFS Pro2 controller(s) plus {} Switch 1 f_hid fallback",
+            std::println("[gadget] {}; creating {} native S2 FunctionFS controller(s) plus {} Switch 1 f_hid fallback controller(s)",
                          reason ? reason : "USB gadget not ready", ffs_count, legacy_count);
         } else if (gadget_uses_hori_identity()) {
             std::println("[gadget] {}; creating upstream-style 4-interface f_hid HORI gadget",
@@ -2299,7 +2395,11 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         if (!create_functionfs_function(i)) return false;
     }
     for (int i = 0; i < legacy_count; ++i) {
-        const int hid_id = gadget_uses_switch2_identity() ? (HID_PORT_COUNT - 1) : i;
+        // Function directory names must remain unique even though /dev/hidgN
+        // numbering is assigned densely by f_hid in creation/link order.
+        const int hid_id = gadget_uses_switch2_identity()
+            ? switch2_virtual_port_count() + i
+            : i;
         if (!create_hid_function(hid_id)) return false;
     }
     g_ctx.functionfs_transport_active.store(ffs_count > 0, std::memory_order_relaxed);
@@ -2342,7 +2442,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             if (nodes_ready()) {
                 if (g_ctx.verbose) {
                     if (gadget_uses_switch2_identity()) {
-                        std::println("[gadget] Done. Exposed {} native S2 Pro2 FunctionFS controller(s) + {} Switch 1 f_hid fallback",
+                        std::println("[gadget] Done. Exposed {} native S2 FunctionFS controller(s) + {} Switch 1 f_hid fallback controller(s)",
                                      ffs_count, legacy_count);
                     } else {
                         std::println("[gadget] Done. Exposed {} upstream-style f_hid interface(s) (/dev/hidg*)",
