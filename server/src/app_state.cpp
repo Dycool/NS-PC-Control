@@ -318,6 +318,13 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
     return needed;
 }
 
+
+static int configured_virtual_port_count() {
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+        return std::clamp(g_ctx.switch2_native_port_count, 1, HID_PORT_COUNT);
+    return HID_PORT_COUNT;
+}
+
 int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
     if (now == 0) now = now_us();
     int used = 0;
@@ -339,12 +346,13 @@ int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
         const int requested = requested_virtual_slots_for_report(c.report, c.pad_present, true);
         used += std::max(assigned, requested);
     }
-    return std::min(used, HID_PORT_COUNT);
+    return std::min(used, configured_virtual_port_count());
 }
 
 int free_virtual_slot_count(uint64_t now, int ignore_client_idx) {
+    const int capacity = configured_virtual_port_count();
     const int used = active_requested_virtual_slots(now, ignore_client_idx);
-    return std::max(0, HID_PORT_COUNT - used);
+    return std::max(0, capacity - used);
 }
 
 uint32_t pack_server_state(uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep) {

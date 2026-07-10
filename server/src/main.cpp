@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <format>
 #include <iostream>
 #include <mutex>
 #include <print>
@@ -297,6 +298,10 @@ int main(int argc, char** argv) {
     //   --hori => legacy HORI USB identity/profile family
     const UsbControllerFamily selected_usb_family = use_s2 ? UsbControllerFamily::Switch2
         : (use_hori ? UsbControllerFamily::Hori : UsbControllerFamily::Switch1);
+    // Switch 2 mode always exposes the full four HID Pro2 interfaces through
+    // the shared-vendor topology.  There is intentionally no public flag to
+    // reduce or debug this: --s2 means "the modern 4-controller S2 path".
+    g_ctx.switch2_native_port_count = HID_PORT_COUNT;
     configure_usb_controller_family(selected_usb_family);
     if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
         std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");
@@ -380,7 +385,7 @@ int main(int argc, char** argv) {
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
     if (use_hori)                         extras.push_back("HORI USB mode");
-    if (use_s2)                           extras.push_back("Switch 2 USB mode");
+    if (use_s2)                           extras.push_back("Switch 2 USB mode (4 Pro2 HID interfaces, shared vendor)");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");

@@ -174,6 +174,7 @@ add_executable(ns-backend
     src/udp_feedback.cpp
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
+    src/switch2_native.cpp
     src/writers.cpp
     src/bluetooth_input.cpp
     src/bluetooth_manager.cpp

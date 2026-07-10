@@ -3,6 +3,7 @@
 #include "gadget_wakeup.hpp"
 #include "virtual_controller.hpp"
 #include "bluetooth_manager.hpp"
+#include "switch2_native.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -59,7 +60,7 @@ static const HIDReport& get_hid_report(const ClientSession& c, int s) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    const int nports = HID_PORT_COUNT;
+    const int nports = functionfs_active_port_count();
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -164,6 +165,8 @@ void writer_thread(std::stop_token stoken, int hz) {
             std::vector<SourceRequest> singles;
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!snaps[c].active) continue;
+
+                bool any_request_for_client = false;
                 for (int s = 0; s < 4; ++s) {
                     const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
                     if (!controller_profile_supported_by_usb_family(profile)) continue;
@@ -172,7 +175,28 @@ void writer_thread(std::stop_token stoken, int hz) {
                         ? (snaps[c].pad_present[s] || macro_active)
                         : (!hid_is_neutral(get_hid_report(snaps[c], s)) || macro_active);
                     if (!active) continue;
-                    (profile_is_pair(profile) ? pairs : singles).push_back({c, s, profile});
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                        singles.push_back({c, s, ns::CONTROLLER_TYPE_PRO_S2});
+                    } else {
+                        (profile_is_pair(profile) ? pairs : singles).push_back({c, s, profile});
+                    }
+                    any_request_for_client = true;
+                }
+
+                if (!any_request_for_client) {
+                    // Identity is configuration, not merely live input.  The
+                    // console reads device-info/SPI during USB bring-up, before
+                    // the player necessarily presses a button.  Old --test5
+                    // worked because the desired Joy-Con identity was already
+                    // active at handshake time; keep that behaviour for the app
+                    // by reserving pad 1's requested profile even while idle.
+                    const uint8_t idle_profile = requested_controller_profile_from_report(get_hid_report(snaps[c], 0));
+                    if (controller_profile_supported_by_usb_family(idle_profile)) {
+                        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                            singles.push_back({c, 0, ns::CONTROLLER_TYPE_PRO_S2});
+                        else
+                            (profile_is_pair(idle_profile) ? pairs : singles).push_back({c, 0, idle_profile});
+                    }
                 }
             }
 
@@ -252,7 +276,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (port < 0 && req.sub_idx < nports && next_slots[req.sub_idx].client_idx == -1) port = req.sub_idx;
                 if (port < 0) port = first_free_port();
                 if (port < 0) continue;
-                next_slots[port] = {req.client_idx, req.sub_idx, virtual_type_for_profile(req.profile), false, false};
+                const uint8_t vtype = (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                    ? NS_TYPE_PRO
+                    : virtual_type_for_profile(req.profile);
+                next_slots[port] = {req.client_idx, req.sub_idx, vtype, false, false};
             }
 
             for (int h = 0; h < nports; ++h) {
@@ -274,7 +301,9 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const int c = hw_slots[h].client_idx;
                     const int s = hw_slots[h].sub_idx;
                     const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
-                    set_controller_type_for_port(h, protocol_for_slot(profile, hw_slots[h].pair_right));
+                    set_controller_type_for_port(h, g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                        ? ns::CONTROLLER_TYPE_PRO_S2
+                        : protocol_for_slot(profile, hw_slots[h].pair_right));
                     if (old.client_idx != c || old.sub_idx != s) {
                         publish_controller_status_event(c, s,
                                                         g_ctx.console_player_leds[h].load(std::memory_order_relaxed),
@@ -404,7 +433,9 @@ void writer_thread(std::stop_token stoken, int hz) {
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     const uint8_t profile = requested_controller_profile_from_report(out_reports[h]);
                     uint8_t eff_profile = profile;
-                    if (profile_is_pair(profile)) {
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                        eff_profile = ns::CONTROLLER_TYPE_PRO_S2;
+                    } else if (profile_is_pair(profile)) {
                         bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
                         eff_profile = hw_slots[h].pair_right ? (is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R) : (is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L);
                     }
@@ -486,7 +517,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 bool is_s2 = g_port_switch2[h];
                                 check_amiibo_expiry(h);
                                 if (is_s2) {
-                                    build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), h, write_buf);
+                                    if (!switch2_native_streaming_enabled(h)) {
+                                        have_report_to_write = false;
+                                        continue;
+                                    }
+                                    const bool imu_on = (switch2_native_enabled_features(h) & 0x04u) != 0;
+                                    build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, imu_on, pro_timer_from_us(now_stamp), h, write_buf);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
                                     build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);
@@ -525,107 +561,16 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint8_t id = read_buf[0];
                     bool is_s2 = g_port_switch2[h];
                     if (is_s2) {
-                        const uint8_t expected_report_id = switch2_output_report_id_for_port(h);
-                        const bool s2_output_report_id = (id == expected_report_id || id == 0x01 || id == 0x02);
-                        size_t cmd_off = s2_output_report_id ? 1 : 0;
-                        if (r >= cmd_off + 8 && read_buf[cmd_off + 1] == 0x91) {
-                            const uint8_t cmd_id = read_buf[cmd_off + 0];
-                            const uint8_t transport = read_buf[cmd_off + 2];
-                            const uint8_t subcmd = read_buf[cmd_off + 3];
-                            const size_t declared_len = read_buf[cmd_off + 5];
-                            const size_t available_len = r > cmd_off + 8 ? (r - cmd_off - 8) : 0;
-                            const size_t data_len = std::min({declared_len, available_len, static_cast<size_t>(56)});
-                            std::span<const uint8_t> cmd_data(read_buf + cmd_off + 8, data_len);
-
-                            uint8_t* cr = rt[h].cmd_response_buf;
-                            std::memset(cr, 0, sizeof(rt[h].cmd_response_buf));
-                            cr[0] = 0x05; // S2 common command-response input report
-                            cr[1] = cmd_id;
-                            cr[2] = 0x01;
-                            cr[3] = transport;
-                            cr[4] = subcmd;
-                            // Response status bytes follow the captures/docs:
-                            //   NFC command 0x01 commonly replies with 00 f8, while the
-                            //   initialisation/feature/LED/rumble/battery paths use 10 78.
-                            if (cmd_id == 0x01) {
-                                cr[5] = 0x00;
-                                cr[6] = 0xF8;
-                            } else {
-                                cr[5] = 0x10;
-                                cr[6] = 0x78;
-                            }
-                            cr[7] = 0x00;
-                            cr[8] = 0x00;
-                            size_t payload_len = 0;
-                            constexpr size_t payload_off = 9;
-
-                            if (cmd_id == 0x03) {
-                                if (subcmd == 0x03) {
-                                    rt[h].full_report_enabled = cmd_data.empty() || cmd_data[0] != 0;
-                                    cr[payload_off] = rt[h].full_report_enabled ? 0x01 : 0x00;
-                                    payload_len = 4;
-                                } else if (subcmd == 0x0A) {
-                                    if (!cmd_data.empty()) rt[h].input_report_mode = cmd_data[0];
-                                } else if (subcmd == 0x0D) {
-                                    rt[h].full_report_enabled = true;
-                                    cr[payload_off] = 0x01;
-                                    payload_len = 4;
-                                }
-                            } else if (cmd_id == 0x0C) {
-                                // Switch 2 feature selection. Motion is feature bit 2
-                                // in the captured PC2 init path; reply shapes mirror the
-                                // PicoSwitch2/ns2-testing handler so the console can finish
-                                // feature setup before reading report 0x09 IMU data.
-                                if (subcmd == 0x01) { // get feature info
-                                    const uint8_t f = !cmd_data.empty() ? cmd_data[0] : 0;
-                                    const bool joycon = controller_type_for_port(h) == NS_TYPE_JOYCON_L || controller_type_for_port(h) == NS_TYPE_JOYCON_R;
-                                    const uint8_t motion_like = joycon ? 0x03 : 0x01;
-                                    cr[payload_off + 4] = (f & 0x01) ? 0x07 : 0x00;
-                                    cr[payload_off + 5] = (f & 0x02) ? 0x07 : 0x00;
-                                    cr[payload_off + 6] = (f & 0x04) ? motion_like : 0x00;
-                                    cr[payload_off + 7] = (f & 0x80) ? motion_like : 0x00;
-                                    cr[payload_off + 8] = (f & 0x10) ? motion_like : 0x00;
-                                    cr[payload_off + 9] = (f & 0x20) ? 0x03 : 0x00;
-                                    payload_len = 12;
-                                } else if (subcmd == 0x06) { // configure feature
-                                    std::memset(cr + payload_off, 0, 40);
-                                    const uint8_t f = !cmd_data.empty() ? cmd_data[0] : 0;
-                                    const bool mentions_motion = (f & 0x04) != 0;
-                                    if (mentions_motion) {
-                                        // Capture/docs example for IMU configure returns 4 zero bytes,
-                                        // length 2, then 00 50 followed by padding.
-                                        cr[payload_off + 4] = 0x02;
-                                        cr[payload_off + 8] = 0x00;
-                                        cr[payload_off + 9] = 0x50;
-                                        rt[h].imu_enabled = true;
-                                    } else if (cmd_data.size() > 4) {
-                                        cr[payload_off + 4] = cmd_data[4];
-                                    }
-                                    payload_len = 40;
-                                } else { // set/clear/enable/disable mask
-                                    if (subcmd == 0x03) {
-                                        // Clear feature mask disables report features until a new mask is set.
-                                        rt[h].imu_enabled = false;
-                                    } else if (!cmd_data.empty()) {
-                                        const bool mentions_motion = (cmd_data[0] & 0x04) != 0;
-                                        if (subcmd == 0x04 && mentions_motion) rt[h].imu_enabled = true;
-                                        else if (subcmd == 0x05 && mentions_motion) rt[h].imu_enabled = false;
-                                        else if (subcmd == 0x02 && !mentions_motion) rt[h].imu_enabled = false;
-                                    }
-                                    payload_len = 4;
-                                }
-                            } else if (cmd_id == 0x01 && controller_port_supports_amiibo(h)) {
-                                payload_len = fill_nfc_response_payload(subcmd, cmd_data, cr + payload_off, h);
-                            }
-
-                            rt[h].cmd_response_len = payload_off + payload_len;
-                            rt[h].pending_cmd_response = true;
+                        // Native S2 Pro Controller uses HID OUT only for rumble report 0x02.
+                        // Init/pairing/feature/memory commands arrive on the vendor-bulk
+                        // endpoint and are processed below via functionfs_poll_vendor_report().
+                        if (id == 0x02) {
+                            switch2_native_note_hid_out(h, std::span<const uint8_t>(read_buf, r));
+                            if (hw_slots[h].client_idx != -1)
+                                publish_s2_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
                             return;
                         }
-                        if (s2_output_report_id) {
-                            if (hw_slots[h].client_idx != -1) publish_s2_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);
-                            return;
-                        }
+                        return;
                     }
                     if (id == RID_OUTPUT_CMD) {
                         if (r <= 10) return;
@@ -676,6 +621,19 @@ void writer_thread(std::stop_token stoken, int hz) {
                     std::vector<unsigned char> out_report;
                     for (int output_reads = 0; output_reads < 16 && functionfs_poll_output_report(h, out_report); ++output_reads) {
                         process_host_output_report(h, out_report.data(), out_report.size());
+                    }
+
+                    if (g_port_switch2[h]) {
+                        std::vector<unsigned char> vendor_cmd;
+                        for (int vendor_reads = 0; vendor_reads < 16 && functionfs_poll_vendor_report(h, vendor_cmd); ++vendor_reads) {
+                            ++g_ctx.host_out_reports;
+                            mark_switch2_usb_activity(now_stamp);
+                            std::vector<uint8_t> vendor_resp;
+                            if (switch2_native_handle_vendor_command(h, std::span<const uint8_t>(vendor_cmd.data(), vendor_cmd.size()), vendor_resp, rt[h])
+                                    && !vendor_resp.empty()) {
+                                functionfs_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
+                            }
+                        }
                     }
                 }
 

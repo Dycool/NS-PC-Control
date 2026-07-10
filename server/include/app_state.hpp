@@ -150,6 +150,10 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     UsbControllerFamily usb_controller_family = UsbControllerFamily::Switch1;
+    // Native Switch 2 mode always exposes four Pro2 HID interfaces with one
+    // shared vendor-bulk channel.  This is the normal S2 topology, not a debug
+    // option, so there is no public S2 port-count limiter.
+    int switch2_native_port_count = HID_PORT_COUNT;
     // Modern USB transport uses FunctionFS instead of /dev/hidg*.
     std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;

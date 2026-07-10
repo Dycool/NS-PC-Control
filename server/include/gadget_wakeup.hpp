@@ -21,8 +21,11 @@ void drain_hid_output_queue(int fd);
 // Modern FunctionFS transport helpers. Legacy mode still uses /dev/hidg*.
 bool functionfs_transport_active();
 bool functionfs_nodes_ready();
+int functionfs_active_port_count();
 std::string functionfs_ep_in_path(int id);
 std::string functionfs_ep_out_path(int id);
+std::string functionfs_ep_vendor_out_path(int id);
+std::string functionfs_ep_vendor_in_path(int id);
 bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_report);
 bool usb_transport_rebuild_ffs_port(int id);
 
@@ -32,3 +35,5 @@ bool functionfs_host_enabled(int id);
 bool functionfs_submit_input_report(int id, const uint8_t* data, size_t len);
 bool functionfs_poll_output_report(int id, std::vector<unsigned char>& out_report);
 void functionfs_drain_output(int id);
+bool functionfs_poll_vendor_report(int id, std::vector<unsigned char>& out_report);
+bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len);
