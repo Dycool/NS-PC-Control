@@ -630,9 +630,10 @@ void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
     // Only create a new event for an actual state transition. Send the same
     // event a few times because this UI control message travels over UDP.
     if (c.amiibo_request_seq[sub_idx] != 0 && c.amiibo_requested[sub_idx] == requested) {
-        if (g_ctx.verbose)
-            std::println("[s2][nfc][ui-event] duplicate suppressed client={} subpad={} requested={} seq={}",
-                         client_idx, sub_idx, requested, c.amiibo_request_seq[sub_idx]);
+        // Periodic assignment reconciliation intentionally reasserts the
+        // current NFC UI state. This is an expected no-op, not a protocol
+        // event, so keep it silent even in verbose mode. Logging every
+        // duplicate hides the command/response trace we actually need.
         return;
     }
     c.amiibo_requested[sub_idx] = requested;
