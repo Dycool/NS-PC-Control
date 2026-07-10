@@ -332,6 +332,7 @@ static uint8_t g_amiibo_nfc_detail[HID_PORT_COUNT] = {0x41, 0x41, 0x41, 0x41};
 enum class NfcHidEventReason : uint8_t {
     None = 0,
     TagPresented,
+    TagRemoved,
     ScanReady,
     OperationReady,
     WriteComplete,
@@ -383,6 +384,7 @@ std::vector<uint8_t> export_amiibo_locked(int port) {
 const char* nfc_hid_event_reason_name(NfcHidEventReason reason) {
     switch (reason) {
     case NfcHidEventReason::TagPresented:   return "tag-presented";
+    case NfcHidEventReason::TagRemoved:     return "tag-removed";
     case NfcHidEventReason::ScanReady:      return "scan-ready";
     case NfcHidEventReason::OperationReady: return "operation-ready";
     case NfcHidEventReason::WriteComplete:  return "write-complete";
@@ -451,6 +453,9 @@ void clear_amiibo_locked(int port) {
     g_amiibo_operation_metadata[port].fill(0);
     g_amiibo_write_staging[port].clear();
     g_amiibo_write_coverage[port].fill(0);
+    // Native reports expose removal as another NFC-state transition. Clearing
+    // only the virtual data leaves the console waiting for that missing edge.
+    signal_amiibo_hid_state_locked(port, NfcHidEventReason::TagRemoved);
 }
 
 } // namespace
