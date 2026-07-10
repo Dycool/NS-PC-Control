@@ -165,9 +165,8 @@ void MainWindow::updateUi() {
     bindingsBtn->setEnabled(true);
     statusLabel->setText(std_to_q(status_message()));
 
-    // NFC belongs to the actual native S2 slot, not merely to the client's
-    // requested controller mode. In --s2 only console port 0 is native; clients
-    // assigned exclusively to S1 fallback slots must never see the scan button.
+    // NFC belongs to the actual native S2 assignment, not merely to the
+    // requested client profile. In --s2 there is only console port 0.
     const ServerAssignmentView assignment = server_assignment_snapshot();
     bool assignedNativeNfc = false;
     for (int s = 0; s < 4; ++s) {
@@ -199,7 +198,8 @@ void MainWindow::updateUi() {
 
     const int desiredHeight = platformHeight();
     if (height() != desiredHeight) setFixedSize(platformWidth(), platformHeight());
-    for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(true);
+    const bool singleS2 = connected && g_switch2ModeEnabled.load(std::memory_order_relaxed);
+    for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(!singleS2 || i == 0);
 
     if (!connected) {
         for (int i = 0; i < 4; i++) g_amiiboScanPending[i].store(false);
@@ -208,11 +208,10 @@ void MainWindow::updateUi() {
         return;
     }
 
-
-
     const RosterView roster = roster_snapshot();
     int playerNum = 1;
-    for (int i = 0; i < 4; ++i) {
+    const int visiblePorts = singleS2 ? 1 : 4;
+    for (int i = 0; i < visiblePorts; ++i) {
         if (roster.valid && roster.ports[i].present == 2) {
             padLabels[i]->setVisible(false);
             continue;

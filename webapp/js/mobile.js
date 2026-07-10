@@ -38,7 +38,7 @@ if (controllerType !== CONTROLLER_PRO) {
 }
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
 const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341, CLIENT_ASSIGNMENT_SIZE = 16;
-const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
+const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02, CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
 const CLIENT_NAMES_MAGIC = 0x4E53434E, SERVER_INFO_VERSION = 1;
 const ROSTER_NAME_CAP = 48, ROSTER_ENTRY_SIZE = 50, CLIENT_NAMES_SIZE = 224;
 const PAD_PRESENT = 1;
@@ -73,6 +73,12 @@ function handleTouchWsBinaryMessage(ev) {
     const view = new DataView(ev.data);
     if (view.byteLength !== CLIENT_ASSIGNMENT_SIZE || view.getUint32(0, true) !== CLIENT_ASSIGNMENT_MAGIC) return;
     const flags = view.getUint8(5);
+    if (flags & CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED) {
+        resetTouchConnectionUi('Switch 2 mode does not support Joy-Con L + R');
+        try { if (ws) ws.close(); } catch (_) {}
+        alert('Switch 2 mode supports one controller only; Joy-Con L + R is not supported.');
+        return;
+    }
     if (flags & CLIENT_ASSIGNMENT_FLAG_SERVER_FULL) {
         serverFull = true;
         resetTouchConnectionUi('Server full');

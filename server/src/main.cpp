@@ -298,9 +298,8 @@ int main(int argc, char** argv) {
     //   --hori => legacy HORI USB identity/profile family
     const UsbControllerFamily selected_usb_family = use_s2 ? UsbControllerFamily::Switch2
         : (use_hori ? UsbControllerFamily::Hori : UsbControllerFamily::Switch1);
-    // One Raspberry Pi UDC is one USB device. Device-recipient S2 identity
-    // traffic reaches only the first FunctionFS function, so --s2 deliberately
-    // uses one native S2 controller plus three independent Switch 1 fallbacks.
+    // One Raspberry Pi UDC is one USB device. --s2 therefore exposes one
+    // native Switch 2 controller only; multiplayer remains available in S1 mode.
     configure_usb_controller_family(selected_usb_family);
     if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
         std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");
@@ -384,7 +383,7 @@ int main(int argc, char** argv) {
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
     if (use_hori)                         extras.push_back("HORI USB mode");
-    if (use_s2)                           extras.push_back("Switch 2 USB mode (1 native S2 + 3 Switch 1 fallbacks)");
+    if (use_s2)                           extras.push_back("Switch 2 USB mode (single native controller)");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");
@@ -459,12 +458,12 @@ int main(int argc, char** argv) {
                     if (g_ctx.usb_controller_family == UsbControllerFamily::Hori) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_HORI_MODE;
                     }
-                    if (free_slots_now <= 0 || active_now >= MAX_CLIENTS) {
+                    if (free_slots_now <= 0 || active_now >= configured_client_capacity()) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SERVER_FULL;
                     }
-                    reply.reserved[1] = static_cast<uint8_t>(std::clamp(active_now, 0, MAX_CLIENTS));
-                    reply.reserved[2] = static_cast<uint8_t>(MAX_CLIENTS);
-                    reply.reserved[3] = static_cast<uint8_t>(std::clamp(free_slots_now, 0, HID_PORT_COUNT));
+                    reply.reserved[1] = static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity()));
+                    reply.reserved[2] = static_cast<uint8_t>(configured_client_capacity());
+                    reply.reserved[3] = static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count()));
                     sendto(sock, &reply, sizeof(reply), 0,
                            reinterpret_cast<const sockaddr*>(&sender), slen);
                     continue;
@@ -614,6 +613,13 @@ int main(int argc, char** argv) {
             bool        pad_present[4] = {};
             if (!parse_client_packet(udp_rx.data(), bytes, flags, seq, report, pad_present)) continue;
 
+            // Native S2 mode has one source/input only. New clients already send
+            // P1 exclusively, but enforce it server-side for compatibility.
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                report.p2.reset(); report.p3.reset(); report.p4.reset();
+                pad_present[1] = pad_present[2] = pad_present[3] = false;
+            }
+
             // --- Disconnect ---
             if (flags & FLAG_DISCONNECT) {
                 int cidx = -1;
@@ -653,6 +659,17 @@ int main(int argc, char** argv) {
             }
 
             const bool dormant_endpoint = sleeping && switch2_dormant_udp_endpoint_matches(sender);
+            const bool unsupported_s2_pair = report_requests_unsupported_s2_pair(report, pad_present, true);
+            if (cidx >= 0 && unsupported_s2_pair) {
+                ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
+                    sleeping);
+                sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                reset_client_session(cidx);
+                if (g_ctx.verbose) std::println("[udp] refused Joy-Con L+R: native S2 mode supports one controller only");
+                continue;
+            }
             if (cidx == -1) {
                 if (dormant_endpoint) {
                     // This endpoint belonged to a pre-sleep client. Keep dropping
@@ -662,16 +679,35 @@ int main(int argc, char** argv) {
                     continue;
                 }
 
-                const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
                 const int free_slots_now = free_virtual_slot_count(now);
                 const int active_now = active_client_count(now);
-                if (required_slots > free_slots_now || active_now >= MAX_CLIENTS) {
+                // Profile errors take priority over capacity errors so an L+R
+                // client always receives the actionable S2-mode explanation.
+                if (unsupported_s2_pair) {
+                    ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
+                        sleeping);
+                    sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                    if (g_ctx.verbose) std::println("[udp] refused Joy-Con L+R: native S2 mode supports one controller only");
+                    continue;
+                }
+                if (free_slots_now <= 0 || active_now >= configured_client_capacity()) {
                     ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
-                        static_cast<uint8_t>(std::clamp(active_now, 0, MAX_CLIENTS)),
-                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, HID_PORT_COUNT)),
+                        static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                    if (g_ctx.verbose) std::println("server is full, refused UDP client (required_slots={}, free_slots={})", required_slots, free_slots_now);
+                    if (g_ctx.verbose) std::println("server is full, refused UDP client");
+                    continue;
+                }
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
+                if (required_slots > free_slots_now) {
+                    ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
+                        sleeping);
+                    sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
                     continue;
                 }
 
@@ -685,8 +721,8 @@ int main(int argc, char** argv) {
 
             if (cidx == -1) {
                 ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
-                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, MAX_CLIENTS)),
-                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, HID_PORT_COUNT)),
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
                     sleeping);
                 sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
                 if (g_ctx.verbose) std::println("server is full, dropped");

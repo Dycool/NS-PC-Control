@@ -153,9 +153,8 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     UsbControllerFamily usb_controller_family = UsbControllerFamily::Switch1;
-    // Switch 2 mode always exposes one native S2 FunctionFS controller on
-    // console port 0. Ports 1..3 are standard Switch 1 f_hid fallbacks.
-    // FunctionFS transport is used only for native S2 controllers.
+    // Switch 2 mode exposes exactly one native S2 FunctionFS controller on
+    // console port 0. There are no S1 fallback interfaces in this mode.
     std::atomic<bool> functionfs_transport_active{false};
     bool bluetooth_input_disabled = false;
     bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
@@ -222,7 +221,10 @@ void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 int active_client_count(uint64_t now = 0);
+int configured_client_capacity();
+int configured_virtual_port_count();
 int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle = true);
+bool report_requests_unsupported_s2_pair(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle = true);
 bool controller_profile_supported_by_usb_family(uint8_t profile);
 UsbControllerFamily usb_family_for_profile(uint8_t profile);
 uint8_t coerce_profile_to_family(uint8_t profile, UsbControllerFamily family);

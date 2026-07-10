@@ -19,8 +19,8 @@ void flush_feedback_to_udp(int sock, int client_idx) {
     ns::ControllerStatusPacket pending_status[4]{};
     bool has_status[4]{};
     const uint64_t state_seq = refresh_server_state_seq();
-    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
-    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
+    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, configured_client_capacity()));
+    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, configured_virtual_port_count()));
     const bool switch_asleep = switch2_sleep_confirmed();
     const uint64_t roster_seq = refresh_roster_seq();
     ns::RosterPacket roster_pkt{};
@@ -52,7 +52,7 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 if (pending_assignment[s].console_port_mask != 0) pending_assignment[s].flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
                 if (switch_asleep) pending_assignment[s].flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
                 pending_assignment[s].active_clients = active_clients;
-                pending_assignment[s].max_clients = MAX_CLIENTS;
+                pending_assignment[s].max_clients = static_cast<uint8_t>(configured_client_capacity());
                 pending_assignment[s].free_virtual_slots = free_slots;
                 c.udp_last_client_assignment_seq[s] = assignment_seq;
                 has_assignment[s] = true;
@@ -101,7 +101,7 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 if (pending_assignment[0].console_port_mask != 0) pending_assignment[0].flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
                 if (switch_asleep) pending_assignment[0].flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
                 pending_assignment[0].active_clients = active_clients;
-                pending_assignment[0].max_clients = MAX_CLIENTS;
+                pending_assignment[0].max_clients = static_cast<uint8_t>(configured_client_capacity());
                 pending_assignment[0].free_virtual_slots = free_slots;
                 has_assignment[0] = true;
             }

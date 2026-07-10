@@ -43,13 +43,14 @@ unzip ns-pc-control-raspberry-pi.zip
 * Enable USB gadget, check the [Raspberry Pi setup](docs/raspberry-pi-setup.md) for more details.
 * Start the backend: `sudo chrt -f 99 ./ns-backend`
   * Switch 2 USB mode: `sudo chrt -f 99 ./ns-backend --s2`
+    * S2 mode exposes one native controller on P1. Pro Controller 2 and individual Joy-Con 2 L/R are supported; L+R pair mode is rejected.
   * Legacy HORI USB mode: `sudo chrt -f 99 ./ns-backend --hori`
 
 **2. 💻 PC / Mobile (Client):**
 * **Desktop** — Download the zip for your OS (Windows, Mac, or Linux), launch `ns-client`, enter your Pi's IP.
 * **Android** — Download `NS-mobile.apk` from the release and install it.
 * **iOS** — Download `NS-mobile.ipa` from the release (sideload via iloader).
-* **Up to 4 controllers** are supported simultaneously on a single client.
+* **Up to 4 controllers** are supported simultaneously in Switch 1/HORI mode. Native Switch 2 mode intentionally supports one P1 controller only.
 > Mobile clients do not support rumble with touch controls.
 
 **3. 🌐 Web App (Optional):**

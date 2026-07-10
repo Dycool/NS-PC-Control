@@ -921,9 +921,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        let closeReason = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let message: String
+        if closeReason.localizedCaseInsensitiveContains("S2 does not support L+R") {
+            message = "Switch 2 mode does not support Joy-Con L + R"
+        } else if closeReason.localizedCaseInsensitiveContains("server full") {
+            message = "Server full"
+        } else {
+            message = "Disconnected"
+        }
         DispatchQueue.main.async { [weak self, weak webSocketTask] in
             guard let self, let task = webSocketTask, self.webSocket === task else { return }
-            self.handleWsClosed(text: "Disconnected")
+            self.handleWsClosed(text: message)
         }
     }
 

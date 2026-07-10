@@ -72,12 +72,6 @@ static bool profile_is_pair(uint8_t profile) {
            profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
 }
 
-// Every non-native port in the --s2 gadget speaks the Switch 1 protocol, so
-// map the requested S2-shaped profile onto its Switch 1 equivalent.
-static uint8_t s1_fallback_profile(uint8_t profile) {
-    return coerce_profile_to_family(profile, UsbControllerFamily::Switch1);
-}
-
 static const HIDReport& get_hid_report(const ClientSession& c, int s) {
     if (s == 0) return c.report.p1;
     if (s == 1) return c.report.p2;
@@ -90,8 +84,7 @@ static bool port_uses_s2_functionfs(int port) {
 }
 
 static int legacy_hidg_index_for_port(int port) {
-    // In S2 mode logical ports 1..3 are the three sequential f_hid nodes.
-    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? (port - 1) : port;
+    return port;
 }
 
 static bool port_uses_hori_hidg(int port) {
@@ -116,9 +109,9 @@ static bool write_all_nonblock_drop(int fd, const uint8_t* data, size_t len) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    // S2: one native FunctionFS controller on port 0 plus three Switch 1
-    // f_hid fallbacks on ports 1..3. S1/HORI drive all four legacy ports.
-    const int nports = HID_PORT_COUNT;
+    // S2 exposes exactly one native FunctionFS controller. S1/HORI retain
+    // the established four-port legacy layout.
+    const int nports = configured_virtual_port_count();
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -198,8 +191,7 @@ void writer_thread(std::stop_token stoken, int hz) {
 
         if (g_ctx.verbose) {
             if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                std::println("1 native S2 FunctionFS port + {} S1 fallback port(s) opened",
-                             nports - 1);
+                std::println("1 native S2 FunctionFS port opened");
             else
                 std::println("{}x legacy /dev/hidg* opened", nports);
         }
@@ -253,10 +245,8 @@ void writer_thread(std::stop_token stoken, int hz) {
         };
 
         // Reconcile the complete source-pad layout in one pass. In S2 mode
-        // the first active source request owns the only native controller. If
-        // that request is an L+R pair, port 0 is the NFC-capable Joy-Con 2 R and
-        // the L half is placed on the first S1 fallback port. Every later source
-        // is represented entirely by Switch 1 fallback controllers.
+        // only the first single-controller request can own native port 0.
+        // Joy-Con L+R is rejected by the connection layer before it reaches here.
         auto reconcile_hw_slots = [&](const ClientSession snaps[MAX_CLIENTS], uint64_t stamp) {
             std::vector<SourceRequest> ordered;
             std::vector<SourceRequest> pairs;
@@ -310,17 +300,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
                 return -1;
             };
-            auto existing_pair_ports = [&](const SourceRequest& req, int begin, int& left, int& right) {
-                left = right = -1;
-                for (int h = begin; h < nports; ++h) {
-                    if (hw_slots[h].client_idx != req.client_idx
-                            || hw_slots[h].sub_idx != req.sub_idx
-                            || !hw_slots[h].pair_member || !free_port(h)) continue;
-                    if (hw_slots[h].pair_right) right = h;
-                    else left = h;
-                }
-                if (left < begin || right < begin || left == right) left = right = -1;
-            };
             auto assign_single = [&](const SourceRequest& req, int port) {
                 if (!free_port(port)) return false;
                 next_slots[port] = {req.client_idx, req.sub_idx,
@@ -335,58 +314,8 @@ void writer_thread(std::stop_token stoken, int hz) {
             };
 
             if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-                size_t first_fallback_request = 0;
-                if (!ordered.empty()) {
-                    const SourceRequest& native = ordered.front();
-                    if (profile_is_pair(native.profile)) {
-                        // The right half owns the one native S2 slot because it
-                        // is the half with NFC. Keep the left half on S1.
-                        int left_port = -1;
-                        for (int h = 1; h < nports; ++h) {
-                            if (hw_slots[h].client_idx == native.client_idx
-                                    && hw_slots[h].sub_idx == native.sub_idx
-                                    && hw_slots[h].pair_member
-                                    && !hw_slots[h].pair_right && free_port(h)) {
-                                left_port = h;
-                                break;
-                            }
-                        }
-                        if (left_port < 0) left_port = first_free_port(1);
-                        if (left_port >= 0 && free_port(0)) {
-                            next_slots[0] = {native.client_idx, native.sub_idx, NS_TYPE_JOYCON_R, true, true};
-                            next_slots[left_port] = {native.client_idx, native.sub_idx, NS_TYPE_JOYCON_L, true, false};
-                        }
-                    } else {
-                        assign_single(native, 0);
-                    }
-                    first_fallback_request = 1;
-                }
-
-                for (size_t i = first_fallback_request; i < ordered.size(); ++i) {
-                    const SourceRequest& req = ordered[i];
-                    if (profile_is_pair(req.profile)) {
-                        int left = -1, right = -1;
-                        existing_pair_ports(req, 1, left, right);
-                        if (left < 0 || right < 0) {
-                            left = first_free_port(1);
-                            right = -1;
-                            if (left >= 0) {
-                                for (int h = left + 1; h < nports; ++h) {
-                                    if (free_port(h)) { right = h; break; }
-                                }
-                                if (right < 0) {
-                                    for (int h = 1; h < left; ++h) {
-                                        if (free_port(h)) { right = h; break; }
-                                    }
-                                }
-                            }
-                        }
-                        if (left >= 0 && right >= 0) assign_pair(req, left, right);
-                    } else {
-                        int port = existing_single_port(req, 1);
-                        if (port < 0) port = first_free_port(1);
-                        if (port >= 0) assign_single(req, port);
-                    }
+                if (!ordered.empty() && !profile_is_pair(ordered.front().profile)) {
+                    assign_single(ordered.front(), 0);
                 }
             } else {
                 // Preserve the established all-S1/HORI behavior: pairs consume
@@ -450,9 +379,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
                     if (profile_is_pair(profile))
                         profile = protocol_for_slot(profile, hw_slots[h].pair_right);
-                    if (!port_uses_s2_functionfs(h)
-                            && g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                        profile = s1_fallback_profile(profile);
                     set_controller_type_for_port(h, profile);
                     if (old.client_idx != c || old.sub_idx != s) {
                         publish_controller_status_event(c, s,
@@ -530,20 +456,19 @@ void writer_thread(std::stop_token stoken, int hz) {
             reconcile_hw_slots(snap, now_stamp);
 
             // The console latches each port's type (device info/SPI) once per
-            // USB session, so a changed S1 identity needs one re-enumeration
+            // USB session, so a changed controller identity needs one re-enumeration
             // to become visible — otherwise Joy-Con profiles keep showing up
             // as the Pro identity latched at plug-in. Debounced in
-            // s1_identity_reenumeration_due() so a pair allocation or a quick
-            // profile flip costs a single reconnect blip. In --s2 this covers
-            // the S1 fallback port; the rebuild also blips the native S2
-            // players, who re-pair automatically on re-enumeration.
+            // s1_identity_reenumeration_due() so a quick profile flip costs a
+            // single reconnect blip. In --s2 this is also how the console is
+            // made to re-read the native Pro2/Joy-Con2 split identity.
             if (s1_identity_reenumeration_due(now_stamp)) {
                 if (g_ctx.verbose)
-                    std::println("S1 controller type changed; re-enumerating USB gadget so the console re-reads identity");
+                    std::println("Controller type changed; re-enumerating USB gadget so the console re-reads identity");
                 mark_s1_identity_enumerated();
                 clear_switch2_usb_activity();
                 close_all_fds();
-                run_gadget_setup_if_needed(true, "S1 controller type changed; console must re-read device identity");
+                run_gadget_setup_if_needed(true, "controller type changed; console must re-read device identity");
                 break;
             }
 
@@ -569,12 +494,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (assignment_primary[c][s] == ns::CONTROLLER_CONSOLE_PORT_NONE) assignment_primary[c][s] = static_cast<uint8_t>(h);
                 const bool actual_s2 = port_uses_s2_functionfs(h);
                 if (hw_slots[h].pair_member) {
-                    // A hybrid pair is advertised as S2-capable if either half
-                    // is the native S2 port. This lets the client expose NFC for
-                    // the right half while still showing both assigned ports.
-                    if (actual_s2) assignment_virtual[c][s] = ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
-                    else if (assignment_virtual[c][s] != ns::CONTROLLER_TYPE_JOYCON_PAIR_S2)
-                        assignment_virtual[c][s] = ns::CONTROLLER_TYPE_JOYCON_PAIR;
+                    assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2
+                                                         : ns::CONTROLLER_TYPE_JOYCON_PAIR;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
                     assignment_virtual[c][s] = ns::CONTROLLER_TYPE_HORI;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
@@ -613,9 +534,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint8_t eff_profile = profile;
                     if (profile_is_pair(eff_profile))
                         eff_profile = protocol_for_slot(eff_profile, hw_slots[h].pair_right);
-                    if (!port_uses_s2_functionfs(h)
-                            && g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                        eff_profile = s1_fallback_profile(eff_profile);
                     set_controller_type_for_port(h, eff_profile);
                     apply_controller_type_input(hw_slots[h].virtual_type, out_reports[h], hw_slots[h].pair_member);
                 }
@@ -625,8 +543,8 @@ void writer_thread(std::stop_token stoken, int hz) {
             for (int h = 0; h < nports; ++h) {
                 const bool port_needed = (hw_slots[h].client_idx != -1);
                     if (port_uses_s2_functionfs(h)) {
-                        // Only logical port 0 is native S2. Its FunctionFS
-                        // vendor channel owns the streaming/feature state.
+                        // The only logical S2 port is native FunctionFS port 0.
+                        // Its vendor channel owns the streaming/feature state.
                         rt[h].full_report_enabled = switch2_native_streaming_enabled(h);
                         rt[h].input_report_mode = switch2_native_selected_report(h);
                         const uint32_t enabled_features = switch2_native_enabled_features(h);

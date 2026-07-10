@@ -307,7 +307,13 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    runOnUiThread { handleWsClosed(webSocket, "Disconnected") }
+                    val message = when {
+                        reason.contains("S2 does not support L+R", ignoreCase = true) ->
+                            "Switch 2 mode does not support Joy-Con L + R"
+                        reason.contains("server full", ignoreCase = true) -> "Server full"
+                        else -> "Disconnected"
+                    }
+                    runOnUiThread { handleWsClosed(webSocket, message) }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {

@@ -86,6 +86,11 @@ void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet) {
         g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
         set_status_message("Server full");
     }
+    if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED) {
+        g_serverProfileUnsupportedDisconnect.store(true, std::memory_order_relaxed);
+        g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
+        set_status_message("Switch 2 mode does not support Joy-Con L + R");
+    }
 }
 
 ServerAssignmentView server_assignment_snapshot() {
@@ -148,6 +153,10 @@ static uint8_t requested_controller_profile_for_frame() {
 
     int mode = g_controllerType.load(std::memory_order_relaxed);
     const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
+    // S2 single-keyboard mode is always one full Pro Controller 2 input on P1;
+    // physical SDL controllers and any selected Joy-Con-pair profile are ignored.
+    if (s2 && g_keyboardMode.load(std::memory_order_relaxed) == KB_SINGLE)
+        return ns::CONTROLLER_TYPE_PRO_S2;
     if (s2) {
         switch (mode) {
             case ns::CONTROLLER_TYPE_PRO:         mode = ns::CONTROLLER_TYPE_PRO_S2; break;
@@ -187,6 +196,51 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     frame.reset();
     auto sdl = g_sdlInput.snapshot();
     const uint64_t filter_now = ns::now_us();
+    const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
+
+    if (s2) {
+        // Native S2 mode is deliberately one input only. Keyboard single owns
+        // P1 completely; otherwise the first connected SDL controller is mapped
+        // to P1 and every additional controller is ignored.
+        if (keyboard_mode == KB_SINGLE) {
+            apply_keyboard_to_report(frame.reports[0], false);
+            frame.present[0] = true;
+            frame.active_count = 1;
+            return;
+        }
+
+        int source = -1;
+        for (int i = 0; i < 4; ++i) {
+            if (sdl[i].connected) { source = i; break; }
+        }
+        if (source >= 0) {
+            for (int i = 0; i < 4; ++i) {
+                if (i != source) filters[i].reset();
+            }
+            frame.reports[0] = sdl[source].input;
+            filters[source].apply(frame.reports[0], filter_now);
+            for (int j = 0; j < 3; ++j) frame.motion[0][j] = sdl[source].motion_samples[j];
+            frame.present[0] = true;
+            frame.has_motion[0] = send_motion && sdl[source].has_motion;
+            frame.controller_for_slot[0] = source;
+            frame.battery_percent[0] = sdl[source].battery_percent;
+            frame.battery_charging[0] = sdl[source].battery_charging;
+            frame.active_count = 1;
+        } else {
+            for (int i = 0; i < 4; ++i) filters[i].reset();
+        }
+
+        if (keyboard_mode == KB_OVERRIDE) {
+            apply_keyboard_to_report(frame.reports[0], true);
+            frame.present[0] = true;
+            frame.active_count = 1;
+        }
+        if (g_joyconHorizontalMode.load(std::memory_order_relaxed) && frame.present[0]) {
+            apply_joycon_horizontal_transform(frame.reports[0], g_controllerType.load(std::memory_order_relaxed));
+        }
+        return;
+    }
+
     const bool joycon_pair_mode = !g_horiModeEnabled.load(std::memory_order_relaxed)
         && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
     const int source_slots = joycon_pair_mode ? 2 : 4;
@@ -210,7 +264,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     if (keyboard_mode == KB_SINGLE) {
         if (frame.present[0]) {
             int target = -1;
-            for (int s = 1; s < source_slots && target < 0; ++s) if (!frame.present[s]) target = s;
+            for (int sidx = 1; sidx < source_slots && target < 0; ++sidx) if (!frame.present[sidx]) target = sidx;
             if (target >= 0) {
                 frame.reports[target] = frame.reports[0];
                 std::copy_n(frame.motion[0], 3, frame.motion[target]);
@@ -288,21 +342,43 @@ static void set_roster_name(ns::RosterEntry& e, const std::string& name) {
 static void build_local_roster_entries(int keyboard_mode, ns::RosterEntry out[4]) {
     for (int i = 0; i < 4; ++i) out[i] = ns::RosterEntry{};
     auto sdl = g_sdlInput.snapshot();
+    const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
+    auto set_entry = [&](int i, bool has_gyro, const std::string& name) {
+        out[i].present = 1;
+        out[i].has_gyro = has_gyro ? 1 : 0;
+        set_roster_name(out[i], name);
+    };
+
+    if (s2) {
+        if (keyboard_mode == KB_SINGLE) {
+            set_entry(0, false, "Keyboard");
+            return;
+        }
+        int source = -1;
+        for (int i = 0; i < 4; ++i) if (sdl[i].connected) { source = i; break; }
+        if (keyboard_mode == KB_OVERRIDE) {
+            if (source >= 0) {
+                const std::string base = sdl[source].name.empty() ? std::string("Controller") : sdl[source].name;
+                set_entry(0, sdl[source].has_motion, base + " + Keyboard");
+            } else {
+                set_entry(0, false, "Keyboard");
+            }
+        } else if (source >= 0) {
+            set_entry(0, sdl[source].has_motion, sdl[source].name.empty() ? "Controller" : sdl[source].name);
+        }
+        return;
+    }
+
     const bool joycon_pair = !g_horiModeEnabled.load(std::memory_order_relaxed)
         && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_PAIR;
     const int source_slots = joycon_pair ? 2 : 4;
 
     int shifted_p1_target = -1;
     if (keyboard_mode == KB_SINGLE && sdl[0].connected) {
-        for (int s = 1; s < source_slots; ++s) {
-            if (!sdl[s].connected) { shifted_p1_target = s; break; }
+        for (int sidx = 1; sidx < source_slots; ++sidx) {
+            if (!sdl[sidx].connected) { shifted_p1_target = sidx; break; }
         }
     }
-    auto set_entry = [&](int i, bool has_gyro, const std::string& name) {
-        out[i].present = 1;
-        out[i].has_gyro = has_gyro ? 1 : 0;
-        set_roster_name(out[i], name);
-    };
     for (int i = 0; i < source_slots; ++i) {
         if (i == 0 && keyboard_mode != KB_OFF) {
             if (keyboard_mode == KB_SINGLE) {
@@ -340,6 +416,9 @@ static void send_client_names_if_changed(SOCKET sock, const sockaddr_in& dest, c
 }
 
 int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running, std::string* err_out) {
+    g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
+    g_serverFullDisconnect.store(false, std::memory_order_relaxed);
+    g_serverProfileUnsupportedDisconnect.store(false, std::memory_order_relaxed);
     if (!cfg.hmac_key) return (err_out ? *err_out = "Missing HMAC key." : ""), 1;
     raise_sender_priority();
     if (!g_sdlInput.start()) return (err_out ? *err_out = "SDL3 input failed: " + g_sdlInput.error() : ""), 1;
@@ -401,7 +480,13 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
-            set_status_message(g_serverFullDisconnect.load(std::memory_order_relaxed) ? "Server full" : "Disconnected");
+            if (g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed)) {
+                const std::string message = "Switch 2 mode does not support Joy-Con L + R. Use an individual Joy-Con or Pro Controller.";
+                set_status_message(message);
+                if (err_out) *err_out = message;
+            } else {
+                set_status_message(g_serverFullDisconnect.load(std::memory_order_relaxed) ? "Server full" : "Disconnected");
+            }
             running.store(false, std::memory_order_relaxed);
             break;
         }
@@ -435,7 +520,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     rumble.stop_all();
     send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++);
     closesocket(sock);
-    return 0;
+    return g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port) {
@@ -474,6 +559,7 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     g_serverLastReplyUs.store(0);
     g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
     g_serverFullDisconnect.store(false, std::memory_order_relaxed);
+    g_serverProfileUnsupportedDisconnect.store(false, std::memory_order_relaxed);
     reset_server_assignment_state();
     reset_roster_state();
     mouse_input_reset();

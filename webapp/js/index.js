@@ -14,6 +14,7 @@ const CLIENT_ASSIGNMENT_SIZE = 16;
 const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01;
 const CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
 const CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
+const CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
 const CLIENT_NAMES_MAGIC = 0x4E53434E;
 const ROSTER_MAGIC = 0x4E53524F;
 const SERVER_INFO_VERSION = 1;
@@ -73,7 +74,11 @@ function handleAssignmentPacket(view) {
         serverAssignment.masks[subpad] = view.getUint8(8);
         serverAssignment.primary[subpad] = view.getUint8(9);
     }
-    if (serverAssignment.serverFull) {
+    if (flags & CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED) {
+        resetMainConnectionUi('Switch 2 mode does not support Joy-Con L + R');
+        try { if (ws) ws.close(); } catch (_) {}
+        alert('Switch 2 mode supports one controller only; Joy-Con L + R is not supported.');
+    } else if (serverAssignment.serverFull) {
         resetMainConnectionUi('Server full');
         try { if (ws) ws.close(); } catch (_) {}
         alert('Server full: all virtual controller slots are in use.');

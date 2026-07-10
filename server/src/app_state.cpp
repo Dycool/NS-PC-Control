@@ -327,8 +327,26 @@ uint8_t coerce_profile_to_family(uint8_t profile, UsbControllerFamily family) {
     }
 }
 
+static uint8_t raw_profile_from_wire_report(const ns::HIDReport& report) {
+    switch (report.reserved[2]) {
+        case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_R:
+        case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+        case ns::CONTROLLER_TYPE_HORI:
+        case ns::CONTROLLER_TYPE_PRO_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
+            return report.reserved[2];
+        case ns::CONTROLLER_TYPE_DEFAULT:
+        default:
+            return ns::CONTROLLER_TYPE_PRO;
+    }
+}
+
 static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
-    return coerce_profile_to_family(report.reserved[2], g_ctx.usb_controller_family);
+    return coerce_profile_to_family(raw_profile_from_wire_report(report), g_ctx.usb_controller_family);
 }
 
 UsbControllerFamily usb_family_for_profile(uint8_t profile) {
@@ -353,6 +371,23 @@ bool controller_profile_supported_by_usb_family(uint8_t /*profile*/) {
     return true;
 }
 
+bool report_requests_unsupported_s2_pair(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle) {
+    if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2) return false;
+    const ns::HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    bool any_present = false;
+    for (int s = 0; s < 4; ++s) {
+        if (pad_present && !pad_present[s]) continue;
+        any_present = true;
+        const uint8_t raw = raw_profile_from_wire_report(*pads[s]);
+        if (raw == ns::CONTROLLER_TYPE_JOYCON_PAIR || raw == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) return true;
+    }
+    if (!any_present && reserve_when_idle) {
+        const uint8_t raw = raw_profile_from_wire_report(report.p1);
+        return raw == ns::CONTROLLER_TYPE_JOYCON_PAIR || raw == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+    }
+    return false;
+}
+
 int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle) {
     const ns::HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
     int needed = 0;
@@ -361,8 +396,8 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
         const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
         if (!controller_profile_supported_by_usb_family(profile)) continue;
         if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-            // A Joy-Con pair always consumes two console slots. In --s2 the first
-            // pair may be hybrid (native S2 right + S1 left); later pairs are S1.
+            // A pair still requests two logical halves, which deliberately exceeds
+            // the single native S2 slot and is rejected by the connection layer.
             needed += profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2 ? 2 : 1;
         } else {
             needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
@@ -376,19 +411,18 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
                 : ((profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1);
         }
     }
-    // Do not clamp here. Callers use a value larger than HID_PORT_COUNT to
-    // reject a request that can only be partially mapped (for example, three
-    // Joy-Con pairs).
+    // Do not clamp here. Callers use a value larger than the configured
+    // capacity to reject requests that cannot be mapped completely.
     return needed;
 }
 
 
-static int configured_virtual_port_count() {
-    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-        // One native S2 slot plus three S1 fallbacks still provides four total
-        // virtual controller slots. A first L+R pair uses native R + fallback L.
-        return HID_PORT_COUNT;
-    return HID_PORT_COUNT;
+int configured_virtual_port_count() {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? 1 : HID_PORT_COUNT;
+}
+
+int configured_client_capacity() {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? 1 : MAX_CLIENTS;
 }
 
 int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
@@ -434,8 +468,8 @@ uint64_t refresh_server_state_seq(uint64_t now, bool force) {
         return g_ctx.server_state_seq.load(std::memory_order_relaxed);
     }
     g_ctx.server_state_last_refresh_us.store(now, std::memory_order_relaxed);
-    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(now), 0, MAX_CLIENTS));
-    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, HID_PORT_COUNT));
+    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity()));
+    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count()));
     const bool asleep = switch2_sleep_confirmed(now);
     const uint32_t packed = pack_server_state(active_clients, free_slots, asleep);
     uint32_t old = g_ctx.server_state_packed.load(std::memory_order_relaxed);
@@ -540,7 +574,7 @@ bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_cl
     if (packet.console_port_mask != 0) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
     if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
     packet.active_clients = active_clients;
-    packet.max_clients = MAX_CLIENTS;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
     packet.free_virtual_slots = free_virtual_slots;
     return true;
 }
@@ -690,7 +724,7 @@ ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_cli
     packet.console_port_mask = 0;
     packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
     packet.active_clients = active_clients;
-    packet.max_clients = MAX_CLIENTS;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
     packet.free_virtual_slots = free_virtual_slots;
     return packet;
 }
@@ -706,7 +740,7 @@ ns::ClientAssignmentPacket make_server_profile_unsupported_assignment_packet(uin
     packet.console_port_mask = 0;
     packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
     packet.active_clients = active_clients;
-    packet.max_clients = MAX_CLIENTS;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
     packet.free_virtual_slots = free_virtual_slots;
     return packet;
 }
@@ -821,7 +855,7 @@ int server_macro_client_for_sender(const sockaddr_in& sender) {
             g_ctx.clients[i].last_rx_us = now; return i;
         }
     }
-    if (active_client_count(now) >= MAX_CLIENTS || free_virtual_slot_count(now) <= 0) return -1;
+    if (active_client_count(now) >= configured_client_capacity() || free_virtual_slot_count(now) <= 0) return -1;
     return allocate_client_session(now, &sender, false, InputSource::Udp);
 }
 
@@ -963,8 +997,9 @@ bool client_session_is_source(int client_idx, InputSource source) {
 
 int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,
                             InputSource source, int preferred_client_idx) {
+    const int capacity = configured_client_capacity();
     auto try_slot = [&](int i) -> bool {
-        if (i < 0 || i >= MAX_CLIENTS) return false;
+        if (i < 0 || i >= capacity) return false;
 
         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
         repair_future_client_timestamp(g_ctx.clients[i], now);
@@ -986,11 +1021,11 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         return true;
     };
 
-    if (source == InputSource::Bluetooth && preferred_client_idx >= 0 && preferred_client_idx < MAX_CLIENTS) {
+    if (source == InputSource::Bluetooth && preferred_client_idx >= 0 && preferred_client_idx < capacity) {
         if (try_slot(preferred_client_idx)) return preferred_client_idx;
     }
 
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+    for (int i = 0; i < capacity; ++i) {
         if (i == preferred_client_idx) continue;
         if (try_slot(i)) return i;
     }

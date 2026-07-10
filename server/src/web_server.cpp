@@ -40,6 +40,7 @@ struct SessionData {
     bool has_pending_roster = false;
     uint64_t last_roster_seq = 0;
     bool close_after_write = false;
+    bool close_profile_unsupported = false;
     uint64_t assigned_sleep_seq = 0;
     bool had_slot = false;
 };
@@ -109,6 +110,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->has_pending_roster = false;
             sd->last_roster_seq = 0;
             sd->close_after_write = false;
+            sd->close_profile_unsupported = false;
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
             break;
@@ -129,7 +131,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (text.starts_with("MACRO_RUN:")) {
                     uint64_t now = now_us();
                     if (sd->ws_slot < 0) {
-                        if (active_client_count(now) < MAX_CLIENTS && free_virtual_slot_count(now) > 0) {
+                        if (active_client_count(now) < configured_client_capacity() && free_virtual_slot_count(now) > 0) {
                             sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                         }
                         if (sd->ws_slot >= 0) {
@@ -170,7 +172,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (magic == ns::macro::UDP_CHUNK_MAGIC) {
                     if (sd->ws_slot < 0) {
                         const uint64_t now = now_us();
-                        if (active_client_count(now) < MAX_CLIENTS && free_virtual_slot_count(now) > 0) {
+                        if (active_client_count(now) < configured_client_capacity() && free_virtual_slot_count(now) > 0) {
                             sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                         }
                         if (sd->ws_slot >= 0) {
@@ -189,6 +191,12 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             bool pad_present[4] = {};
             if (!parse_client_packet(payload, len, flags, seq, report, pad_present)) break;
 
+            const bool unsupported_s2_pair = report_requests_unsupported_s2_pair(report, pad_present, true);
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                report.p2.reset(); report.p3.reset(); report.p4.reset();
+                pad_present[1] = pad_present[2] = pad_present[3] = false;
+            }
+
             if (!sd->ws_first && !(flags & FLAG_RESET) && (int32_t)(seq - sd->ws_seq) < 0) break;
             sd->ws_first = false; sd->ws_seq = seq + 1;
 
@@ -198,18 +206,35 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) sd->ws_slot = -1;
             }
+            if (unsupported_s2_pair) {
+                if (sd->ws_slot >= 0) {
+                    reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
+                    sd->ws_slot = -1;
+                }
+                ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
+                    switch2_sleep_confirmed(now));
+                std::memcpy(sd->pending_assignment[0], &unsupported, sizeof(unsupported));
+                sd->has_pending_assignment[0] = true;
+                sd->close_after_write = true;
+                sd->close_profile_unsupported = true;
+                if (g_ctx.verbose) std::println("[ws] refused Joy-Con L+R in native S2 single-controller mode");
+                lws_callback_on_writable(wsi);
+                break;
+            }
             if (sd->ws_slot < 0) {
                 const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
                 const int free_slots_now = free_virtual_slot_count(now);
-                if (required_slots > free_slots_now) {
+                if (required_slots > free_slots_now || active_client_count(now) >= configured_client_capacity()) {
                     ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
-                        static_cast<uint8_t>(std::clamp(active_client_count(now), 0, MAX_CLIENTS)),
-                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, HID_PORT_COUNT)),
+                        static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         switch2_sleep_confirmed(now));
                     std::memcpy(sd->pending_assignment[0], &full, sizeof(full));
                     sd->has_pending_assignment[0] = true;
                     sd->close_after_write = true;
-                    if (g_ctx.verbose) std::println("[ws] server virtual controller slots full, refusing client");
+                    if (g_ctx.verbose) std::println("[ws] server virtual controller slot full, refusing client");
                     lws_callback_on_writable(wsi);
                     break;
                 }
@@ -297,8 +322,13 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) &&
                     !std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) &&
                     !std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) {
-                lws_close_reason(wsi, static_cast<lws_close_status>(1013),
-                                 (unsigned char*)"server full", 11);
+                if (sd->close_profile_unsupported) {
+                    static unsigned char reason[] = "S2 does not support L+R";
+                    lws_close_reason(wsi, static_cast<lws_close_status>(1008), reason, sizeof(reason) - 1);
+                } else {
+                    static unsigned char reason[] = "server full";
+                    lws_close_reason(wsi, static_cast<lws_close_status>(1013), reason, sizeof(reason) - 1);
+                }
                 return -1;
             }
             if (sd->has_pending_roster ||
@@ -325,8 +355,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 bool new_assignment = false;
                 bool new_roster = false;
                 const uint64_t state_seq = refresh_server_state_seq();
-                const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, MAX_CLIENTS));
-                const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, HID_PORT_COUNT));
+                const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, configured_client_capacity()));
+                const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, configured_virtual_port_count()));
                 const bool switch_asleep = switch2_sleep_confirmed();
                 const uint64_t roster_seq = refresh_roster_seq();
                 ns::RosterPacket roster_pkt{};
@@ -350,7 +380,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         if (ap.console_port_mask != 0) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
                         if (switch_asleep) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
                         ap.active_clients = active_clients;
-                        ap.max_clients = MAX_CLIENTS;
+                        ap.max_clients = static_cast<uint8_t>(configured_client_capacity());
                         ap.free_virtual_slots = free_slots;
                         memcpy(sd->pending_assignment[s], &ap, sizeof(ap));
                         sd->last_assignment_seq[s] = assignment_seq;
@@ -396,7 +426,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         if (ap.console_port_mask != 0) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
                         if (switch_asleep) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
                         ap.active_clients = active_clients;
-                        ap.max_clients = MAX_CLIENTS;
+                        ap.max_clients = static_cast<uint8_t>(configured_client_capacity());
                         ap.free_virtual_slots = free_slots;
                         memcpy(sd->pending_assignment[0], &ap, sizeof(ap));
                         sd->has_pending_assignment[0] = true;

@@ -301,12 +301,10 @@ static constexpr int switch2_virtual_port_count() {
 }
 
 static int legacy_hidg_node_count_for_family() {
-    // Fill every virtual slot not occupied by a native FunctionFS controller
-    // with an upstream f_hid Switch 1 controller. This preserves reliable
-    // multi-controller support while port 0 uses the native S2 protocol.
-    return gadget_uses_switch2_identity()
-        ? HID_PORT_COUNT - switch2_virtual_port_count()
-        : HID_PORT_COUNT;
+    // A native S2 USB device is exposed as one controller only. Mixing S1 f_hid
+    // interfaces into the same S2 device identity is not accepted reliably by
+    // the console, so --s2 creates no legacy fallback nodes.
+    return gadget_uses_switch2_identity() ? 0 : HID_PORT_COUNT;
 }
 
 static int functionfs_function_count_for_family() {
@@ -2330,8 +2328,8 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     if (g_ctx.verbose) {
         if (gadget_uses_switch2_identity()) {
-            std::println("[gadget] {}; creating {} native S2 FunctionFS controller(s) plus {} Switch 1 f_hid fallback controller(s)",
-                         reason ? reason : "USB gadget not ready", ffs_count, legacy_count);
+            std::println("[gadget] {}; creating one native S2 FunctionFS controller (single-controller mode)",
+                         reason ? reason : "USB gadget not ready");
         } else if (gadget_uses_hori_identity()) {
             std::println("[gadget] {}; creating upstream-style 4-interface f_hid HORI gadget",
                          reason ? reason : "USB gadget not ready");
@@ -2442,8 +2440,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             if (nodes_ready()) {
                 if (g_ctx.verbose) {
                     if (gadget_uses_switch2_identity()) {
-                        std::println("[gadget] Done. Exposed {} native S2 FunctionFS controller(s) + {} Switch 1 f_hid fallback controller(s)",
-                                     ffs_count, legacy_count);
+                        std::println("[gadget] Done. Exposed one native S2 FunctionFS controller");
                     } else {
                         std::println("[gadget] Done. Exposed {} upstream-style f_hid interface(s) (/dev/hidg*)",
                                      legacy_count);

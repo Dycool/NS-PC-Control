@@ -234,7 +234,7 @@ void bluetooth_input_thread(std::stop_token stoken) {
                 if (dormant_until_input[i] && switch_sleeping && !real_bt_input) {
                     continue;
                 }
-                if (active_client_count(now) >= MAX_CLIENTS || free_virtual_slot_count(now) <= 0) {
+                if (active_client_count(now) >= configured_client_capacity() || free_virtual_slot_count(now) <= 0) {
                     any_waiting = true;
                     continue;
                 }

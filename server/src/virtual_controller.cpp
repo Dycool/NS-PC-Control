@@ -298,16 +298,27 @@ void configure_usb_controller_family(UsbControllerFamily family) {
 
 void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     if (port < 0 || port >= HID_PORT_COUNT || !data) return;
-    if (!controller_port_supports_amiibo(port)) return;
+    if (!controller_port_supports_amiibo(port)) {
+        if (g_ctx.verbose) std::fprintf(stderr, "[s2][nfc] rejected amiibo upload: port %d has no native NFC\n", port);
+        return;
+    }
     constexpr size_t AMIIBO_SIZE = 540;
     // A short/overlong image cannot be exposed as a raw NTAG215 dump without
     // changing its page layout, UID, lock bytes, or configuration pages.
-    if (len != AMIIBO_SIZE) return;
+    if (len != AMIIBO_SIZE) {
+        if (g_ctx.verbose) std::fprintf(stderr, "[s2][nfc] rejected amiibo upload: expected 540 bytes, got %zu\n", len);
+        return;
+    }
     {
         std::lock_guard<std::mutex> lk(g_amiibo_mtx);
         g_amiibo_data[port].assign(data, data + AMIIBO_SIZE);
-        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(15);
         g_amiibo_modified[port] = false;
+    }
+    if (g_ctx.verbose) {
+        std::fprintf(stdout,
+                     "[s2][nfc] amiibo loaded on port %d: uid=%02x%02x%02x%02x%02x%02x%02x\n",
+                     port, data[0], data[1], data[2], data[4], data[5], data[6], data[7]);
     }
     // Selecting a tag satisfies the outstanding UI request immediately.
     publish_amiibo_request_for_port(port, false);
@@ -417,9 +428,9 @@ void mark_s1_identity_enumerated() {
 }
 
 bool s1_identity_reenumeration_due(uint64_t now) {
-    // Hori has a fixed identity; Switch1 and Switch2 (its S1 fallback port)
-    // both carry latched S1 identities. Native S2 ports never change type, so
-    // the snapshot comparison below only ever differs on S1-visible ports.
+    // Hori has a fixed identity. Switch 1 identity and the native Switch 2
+    // EP0/factory identity are both latched by the console during enumeration,
+    // so either family must re-enumerate after a settled Pro/L/R type change.
     if (g_ctx.usb_controller_family == UsbControllerFamily::Hori) return false;
     const uint64_t changed = g_s1_identity_change_us.load(std::memory_order_relaxed);
     if (changed == 0) return false;
@@ -1108,90 +1119,145 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
 bool rumble_half_is_all_zero(const uint8_t* f) { return f[0] == 0 && f[1] == 0 && f[2] == 0 && f[3] == 0; }
 bool rumble_half_is_neutral_carrier(const uint8_t* f) { return f[0] == 0x00 && f[1] == 0x01 && f[2] == 0x40 && f[3] == 0x40; }
 
-// Accurate NFC command 0x01 responses per commands.md from research (called for raw header path).
-// Builds payload after the standard 8-byte command response header (caller sets 01 01 xx sub 00 f8/.. 00 00).
+// Native Switch 2 NFC command 0x01 responses.
+//
+// These replies travel over the vendor bulk endpoint, so they are not limited
+// to the 64-byte HID report size. The observed 0x05 status response contains a
+// 60-byte payload, and the observed 0x15 buffer response contains a 73-byte
+// payload. Returning short, HID-sized approximations causes the console to
+// abort the NFC transaction after it sees the tag UID.
+namespace {
+constexpr size_t S2_AMIIBO_RAW_SIZE = 540;
+constexpr size_t S2_NFC_MAX_RESPONSE_PAYLOAD = 120;
+constexpr size_t S2_NFC_READ_CHUNK_SIZE = 69;
+
+// The controller's NFC staging buffer starts with a two-byte 0x07D0 prefix,
+// followed by the raw NTAG215 image. This is visible in captured 0x14 Write
+// Buffer traffic: [offset_le][length_le] d0 07 04 <UID...>.
+std::vector<uint8_t> make_s2_nfc_staging_buffer(const std::vector<uint8_t>& raw) {
+    std::vector<uint8_t> staging;
+    staging.reserve(2 + S2_AMIIBO_RAW_SIZE);
+    staging.push_back(0xD0);
+    staging.push_back(0x07);
+    staging.insert(staging.end(), raw.begin(), raw.end());
+    if (staging.size() < 2 + S2_AMIIBO_RAW_SIZE)
+        staging.resize(2 + S2_AMIIBO_RAW_SIZE, 0);
+    return staging;
+}
+}
+
+// Builds the payload after the standard eight-byte command-response header.
 size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data, uint8_t* payload, int port) {
-    constexpr size_t AMIIBO_SIZE = 540;
     if (port < 0 || port >= HID_PORT_COUNT) port = 0;
-    std::memset(payload, 0, 56);
+    std::memset(payload, 0, S2_NFC_MAX_RESPONSE_PAYLOAD);
     if (!controller_port_supports_amiibo(port)) {
         publish_amiibo_request_for_port(port, false);
         return 0;
     }
+
     std::unique_lock<std::mutex> amiibo_lk(g_amiibo_mtx);
     auto& adata = g_amiibo_data[port];
-    bool placed = !adata.empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
-    // Keep a tag present for the whole console transaction. The upload starts
-    // a short removal timer, and every status/read/write command refreshes it;
-    // writeback is therefore sent shortly after the final NFC command.
-    if (placed) {
-        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    }
+    const auto now = std::chrono::steady_clock::now();
+    bool placed = adata.size() == S2_AMIIBO_RAW_SIZE && now < g_amiibo_expiry[port];
+
+    // Keep the virtual tag present for the complete multi-command transaction.
+    // Five seconds was occasionally short enough to race game/UI delays.
+    if (placed) g_amiibo_expiry[port] = now + std::chrono::seconds(15);
+
     size_t plen = 0;
     int request_state = -1;
+
     switch (nfc_sub) {
     case 0x03: // Enter NFC scan mode.
         request_state = placed ? 0 : 1;
         break;
+
     case 0x04: // Leave NFC scan mode.
         request_state = 0;
         break;
-    case 0x05: { // Get status - match captured structure from PC2_Write_Amiibo.pcapng
-        // Tag-present status carries a seven-byte ISO14443A UID. In a raw
-        // NTAG215 image byte 3 is BCC0, not part of that UID.
-        payload[0] = 0x09; payload[1] = 0x00; payload[2] = 0x00; payload[3] = 0x00;
-        payload[4] = 0x01; payload[5] = 0x01; payload[6] = 0x02; payload[7] = 0x00;
-        if (placed && adata.size() >= 8) {
+
+    case 0x05: { // Get status.
+        // Captured response payload is exactly 60 bytes:
+        // 09 00 00 00 01 01 02 00 07 04 <7-byte UID> <zero padding>.
+        payload[0] = 0x09;
+        payload[4] = 0x01;
+        payload[5] = 0x01;
+        payload[6] = 0x02;
+        if (placed) {
             payload[8] = 0x07; // UID length
             payload[9] = 0x04; // ISO14443A / Type 2 tag
-            payload[10] = adata[0]; payload[11] = adata[1]; payload[12] = adata[2];
-            payload[13] = adata[4]; payload[14] = adata[5]; payload[15] = adata[6];
+            // Raw NTAG215 page 0 stores UID0..2, BCC0, UID3..6.
+            payload[10] = adata[0];
+            payload[11] = adata[1];
+            payload[12] = adata[2];
+            payload[13] = adata[4];
+            payload[14] = adata[5];
+            payload[15] = adata[6];
             payload[16] = adata[7];
         }
         request_state = placed ? 0 : 1;
-        plen = 32;
+        plen = 60;
         break;
     }
-    case 0x06: {
-        // Read device: per research this only initiates the read; the response
-        // is header-only (01 01 00 06 00 f8 00 00). The tag bytes are pulled by
-        // the console afterwards with repeated 0x15 (read buffer) requests.
+
+    case 0x06: // Read device: starts the read, response is header-only.
+    case 0x08: // Write device: observed as a header-only ACK.
         plen = 0;
         break;
-    }
-    case 0x15: { // Read buffer: [4 unknown][2 offset LE][up to 64 data bytes]
+
+    case 0x15: { // Read buffer.
         if (placed && cmd_data.size() >= 2) {
-            uint16_t off = cmd_data[0] | (cmd_data[1] << 8);
-            // cmd_response_buf has 64 bytes total; after report ID + 8-byte
-            // response header, payload has 55 bytes. This format needs 6 bytes
-            // of metadata, leaving 49 tag bytes per response without overflow.
-            size_t to_copy = (off < adata.size()) ? std::min(adata.size() - off, (size_t)49) : 0;
-            payload[0] = payload[1] = payload[2] = payload[3] = 0x00; // 4 unknown
-            payload[4] = cmd_data[0]; payload[5] = cmd_data[1];        // 2 offset (LE)
-            if (to_copy) std::memcpy(payload + 6, adata.data() + off, to_copy);
-            plen = 6 + to_copy;
+            const uint16_t off = static_cast<uint16_t>(cmd_data[0])
+                               | (static_cast<uint16_t>(cmd_data[1]) << 8);
+            const std::vector<uint8_t> staging = make_s2_nfc_staging_buffer(adata);
+
+            // Captured response prefix for request offset 0x0046 is
+            //   00 46 00 0f
+            // followed by 69 bytes of staging-buffer data. Keep that exact
+            // framing and pad the final chunk with zeroes.
+            payload[0] = 0x00;
+            payload[1] = static_cast<uint8_t>(off);
+            payload[2] = static_cast<uint8_t>(off >> 8);
+            const size_t remaining = off < staging.size() ? staging.size() - off : 0;
+            payload[3] = static_cast<uint8_t>(std::min<size_t>(0xFF, (remaining + 31) / 32));
+
+            if (remaining != 0) {
+                const size_t to_copy = std::min(remaining, S2_NFC_READ_CHUNK_SIZE);
+                std::memcpy(payload + 4, staging.data() + off, to_copy);
+            }
+            plen = 4 + S2_NFC_READ_CHUNK_SIZE;
         }
         break;
     }
-    case 0x14: { // Write buffer (accurate format from pcap: [off_le 2B] 00 [size 2B] + data)
+
+    case 0x14: { // Write buffer: [offset LE][length LE] + staging data.
         if (placed && cmd_data.size() >= 4) {
-            uint16_t off = cmd_data[0] | (cmd_data[1] << 8);
-            size_t wstart = 4;
-            size_t wlen = cmd_data.size() - wstart;
-            if (off + wlen > adata.size()) wlen = adata.size() > off ? adata.size() - off : 0;
-            if (wlen) {
-                std::memcpy(adata.data() + off, cmd_data.data() + wstart, wlen);
+            const uint16_t off = static_cast<uint16_t>(cmd_data[0])
+                               | (static_cast<uint16_t>(cmd_data[1]) << 8);
+            const uint16_t declared = static_cast<uint16_t>(cmd_data[2])
+                                    | (static_cast<uint16_t>(cmd_data[3]) << 8);
+            const size_t available = cmd_data.size() - 4;
+            const size_t incoming = std::min<size_t>(declared, available);
+
+            std::vector<uint8_t> staging = make_s2_nfc_staging_buffer(adata);
+            if (off < staging.size() && incoming != 0) {
+                const size_t to_copy = std::min(incoming, staging.size() - off);
+                std::memcpy(staging.data() + off, cmd_data.data() + 4, to_copy);
+
+                // Staging bytes 0..1 are transport metadata. Persist only the
+                // raw 540-byte NTAG215 image back to the selected .bin.
+                std::copy_n(staging.begin() + 2, S2_AMIIBO_RAW_SIZE, adata.begin());
                 g_amiibo_modified[port] = true;
             }
         }
-        // Write buffer: per research the response is header-only
-        // (01 01 00 14 00 f8 00 00); the staged bytes are applied above.
         plen = 0;
         break;
     }
-    default: break;
+
+    default:
+        break;
     }
-    if (placed && adata.size() != AMIIBO_SIZE) adata.resize(AMIIBO_SIZE, 0);
+
     amiibo_lk.unlock();
     if (request_state >= 0) publish_amiibo_request_for_port(port, request_state != 0);
     return plen;

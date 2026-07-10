@@ -521,11 +521,13 @@ bool switch2_native_handle_vendor_command(int port,
             break;
         case 0x01: // NFC
             if (sub == 0x0C) {
-                static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x10};
+                static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x0D};
+                r[4] = 0x10;
+                r[5] = 0x78;
                 std::memcpy(d, nfc, sizeof(nfc));
                 dl = sizeof(nfc);
             } else if (sub == 0x03 || sub == 0x04 || sub == 0x05
-                    || sub == 0x06 || sub == 0x14 || sub == 0x15) {
+                    || sub == 0x06 || sub == 0x08 || sub == 0x14 || sub == 0x15) {
                 // The native S2 NFC transport uses the vendor command channel,
                 // not the legacy 0x21 HID-subcommand wrapper. Keep the exact
                 // eight-byte command header above and append the tag payload
@@ -557,6 +559,12 @@ bool switch2_native_handle_vendor_command(int port,
         std::fprintf(stdout, "[s2] native port 0 streaming enabled\n");
 
     response.assign(r.begin(), r.begin() + 8 + dl);
+    if (g_ctx.verbose && id == 0x01) {
+        std::fprintf(stdout, "[s2][nfc] sub=0x%02x request_data=%zu response_len=%zu response=",
+                     sub, c.size() - 8, response.size());
+        for (uint8_t byte : response) std::fprintf(stdout, "%02x", byte);
+        std::fputc('\n', stdout);
+    }
     return true;
 }
 
