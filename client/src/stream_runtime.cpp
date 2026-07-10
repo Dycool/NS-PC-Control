@@ -234,6 +234,13 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         frame.present[0] = true;
         frame.active_count = std::max(frame.active_count, 1);
     }
+
+    if (g_joyconHorizontalMode.load(std::memory_order_relaxed)) {
+        const int controller_type = g_controllerType.load(std::memory_order_relaxed);
+        for (int i = 0; i < 4; ++i) {
+            if (frame.present[i]) apply_joycon_horizontal_transform(frame.reports[i], controller_type);
+        }
+    }
 }
 
 void sendAmiiboData(uint8_t subpad, const QByteArray& data) {
@@ -517,4 +524,3 @@ NetworkRuntime::~NetworkRuntime() {
 }
 
 bool NetworkRuntime::good() const { return ok; }
-

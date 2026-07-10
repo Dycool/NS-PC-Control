@@ -806,6 +806,7 @@ void server_macro_apply(int client_idx, int subpad, HoriHIDReport& live) {
     ns::macro::Step step{};
     if (!ns::macro::step_at(rt.steps, (now_us() - rt.start_us) / 1000ULL, step)) { rt.running = false; return; }
     live.buttons |= step.buttons;
+    live.vendor |= step.extra_buttons;
     if (step.hat != HAT_NEUTRAL && live.hat == HAT_NEUTRAL) live.hat = step.hat;
     if (step.has_lstick) { live.lx = step.lx; live.ly = step.ly; }
     if (step.has_rstick) { live.rx = step.rx; live.ry = step.ry; }

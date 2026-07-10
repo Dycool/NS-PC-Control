@@ -32,6 +32,7 @@ protected:
 class BindingsDialog : public QDialog {
 public:
     explicit BindingsDialog(QWidget* parent = nullptr);
+    ~BindingsDialog() override;
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -58,12 +59,14 @@ private:
     QCheckBox* homeShortcutBox = nullptr;
     QCheckBox* captureShortcutBox = nullptr;
     QComboBox* controllerTypeBox = nullptr;
+    QCheckBox* joyconHorizontalBox = nullptr;
     QCheckBox* mouseModeBox = nullptr;
     QLabel* mouseSensitivityLabel = nullptr;
     QSlider* mouseSensitivitySlider = nullptr;
     QLabel* mouseSensitivityValue = nullptr;
 
     void updateMouseModeControls();
+    void updateJoyconHorizontalControl();
     void saveSettings();
 };
 

@@ -340,7 +340,7 @@ void apply_controller_type_input(uint8_t type, HIDReport& r, bool pair_member) {
     }
 }
 
-void apply_controller_type_report(uint8_t type, uint8_t* buf) {
+void apply_controller_type_report(uint8_t type, uint8_t extra_buttons, uint8_t* buf) {
     if (type != NS_TYPE_JOYCON_L && type != NS_TYPE_JOYCON_R) return;
     // buf is a 0x30/0x21 report: conn_info at [2], buttons at [3..5].
     // conn_info low nibble 0xF = Joy-Con ((v >> 1) & 3 == 3) + USB-powered bit.
@@ -350,6 +350,8 @@ void apply_controller_type_report(uint8_t type, uint8_t* buf) {
     uint8_t& side = type == NS_TYPE_JOYCON_R ? buf[3] : buf[5];
     if (side & 0x40) side |= 0x10;
     if (side & 0x80) side |= 0x20;
+    if (extra_buttons & EXT_BUTTON_SR) side |= 0x10;
+    if (extra_buttons & EXT_BUTTON_SL) side |= 0x20;
 }
 
 void apply_s2_controller_type_report(uint8_t type, uint8_t* buf) {
@@ -615,6 +617,7 @@ static void build_s2_joycon_report(const HIDReport& src,
     out[2] = s2_power_info_from_hid(src);
 
     const uint16_t btn = src.input.buttons;
+    const uint8_t extra = static_cast<uint8_t>(src.input.vendor & EXT_BUTTON_MASK);
     const uint8_t hat = src.input.hat;
     if (right) {
         out[3] = (btn & BTN_RSTICK ? 0x80 : 0) | (btn & BTN_PLUS ? 0x40 : 0) |
@@ -624,7 +627,8 @@ static void build_s2_joycon_report(const HIDReport& src,
         // Expose SL/SR through the same physical shoulder pair so the normal
         // single Joy-Con registration gesture is available over USB.
         out[4] = (btn & BTN_ZR ? 0x80 : 0) | (btn & BTN_R ? 0x40 : 0) |
-                 (btn & BTN_HOME ? 0x01 : 0);
+                 (extra & EXT_BUTTON_SL ? 0x80 : 0) | (extra & EXT_BUTTON_SR ? 0x40 : 0) |
+                 (extra & EXT_BUTTON_C ? 0x10 : 0) | (btn & BTN_HOME ? 0x01 : 0);
         pack_stick_12(out + 6, src.input.rx, src.input.ry);
     } else {
         out[3] = (btn & BTN_LSTICK ? 0x80 : 0) | (btn & BTN_MINUS ? 0x40 : 0) |
@@ -634,6 +638,7 @@ static void build_s2_joycon_report(const HIDReport& src,
                  ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) |
                  ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);
         out[4] = (btn & BTN_ZL ? 0x80 : 0) | (btn & BTN_L ? 0x40 : 0) |
+                 (extra & EXT_BUTTON_SL ? 0x80 : 0) | (extra & EXT_BUTTON_SR ? 0x40 : 0) |
                  (btn & BTN_CAPTURE ? 0x01 : 0);
         pack_stick_12(out + 6, src.input.lx, src.input.ly);
     }
@@ -661,6 +666,7 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
 
     // Buttons per research hid_reports.md for 0x09.
     uint16_t btn = src.input.buttons;
+    const uint8_t extra = static_cast<uint8_t>(src.input.vendor & EXT_BUTTON_MASK);
     uint8_t hat = src.input.hat;
     out[3] = (btn & BTN_RSTICK ? 0x80 : 0) | (btn & BTN_PLUS ? 0x40 : 0) |
              (btn & BTN_ZR ? 0x20 : 0) | (btn & BTN_R ? 0x10 : 0) |
@@ -672,7 +678,9 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
              ((hat == HAT_W || hat == HAT_NW || hat == HAT_SW) ? 0x04 : 0) |
              ((hat == HAT_E || hat == HAT_NE || hat == HAT_SE) ? 0x02 : 0) |
              ((hat == HAT_S || hat == HAT_SE || hat == HAT_SW) ? 0x01 : 0);
-    out[5] = (btn & BTN_CAPTURE ? 0x02 : 0) | (btn & BTN_HOME ? 0x01 : 0);
+    out[5] = (btn & BTN_CAPTURE ? 0x02 : 0) | (btn & BTN_HOME ? 0x01 : 0) |
+             (extra & EXT_BUTTON_GR ? 0x04 : 0) | (extra & EXT_BUTTON_GL ? 0x08 : 0) |
+             (extra & EXT_BUTTON_C ? 0x10 : 0);
 
     pack_stick_12(out + 6, src.input.lx, src.input.ly);
     pack_stick_12(out + 9, src.input.rx, src.input.ry);
@@ -831,6 +839,12 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     }
     auto& adata = g_amiibo_data[port];
     bool placed = !adata.empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
+    // Keep a tag present for the whole console transaction. The upload starts
+    // a short removal timer, and every status/read/write command refreshes it;
+    // writeback is therefore sent shortly after the final NFC command.
+    if (placed) {
+        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    }
     size_t plen = 0;
     switch (nfc_sub) {
     case 0x05: { // Get status - match captured structure from PC2_Write_Amiibo.pcapng
@@ -918,15 +932,9 @@ uint8_t rumble_decode_half_to_u8(const uint8_t* f) {
     return (uint8_t)std::clamp(strength > 0 ? std::max((int)RUMBLE_MIN_NONZERO, strength) : 0, 0, 255);
 }
 
-static void publish_rumble_event_from_bytes(int client_idx, int sub_idx, const uint8_t* rb, bool publish_neutral) {
-    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || !rb) return;
-    DecodedPrecisionRumbleHalf left = rumble_decode_half_precision_to_dual(rb), right = rumble_decode_half_precision_to_dual(rb + 4);
-    uint8_t low = std::max(left.low, right.low), high = std::max(left.high, right.high);
-
-    if (low == 0 && high == 0 && !(rumble_half_is_all_zero(rb) || rumble_half_is_neutral_carrier(rb)) && !(rumble_half_is_all_zero(rb + 4) || rumble_half_is_neutral_carrier(rb + 4))) {
-        low = rumble_decode_half_to_u8(rb); high = rumble_decode_half_to_u8(rb + 4);
-    }
-
+static void publish_decoded_rumble_event(int client_idx, int sub_idx, uint8_t low, uint8_t high,
+                                         bool publish_neutral, const uint8_t* precision = nullptr) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
     bool neutral = (low == 0 && high == 0);
     if (neutral && !publish_neutral) return;
 
@@ -940,10 +948,22 @@ static void publish_rumble_event_from_bytes(int client_idx, int sub_idx, const u
     PrecisionRumblePacket& precision_ev = g_ctx.clients[client_idx].precision_rumble[sub_idx];
     precision_ev.magic = PRECISION_RUMBLE_MAGIC; precision_ev.subpad = (uint8_t)sub_idx;
     precision_ev.low_freq = ev.low_freq; precision_ev.high_freq = ev.high_freq; precision_ev.duration_10ms = ev.duration_10ms;
-    memcpy(precision_ev.precision, rb, sizeof(precision_ev.precision));
+    if (precision) memcpy(precision_ev.precision, precision, sizeof(precision_ev.precision));
+    else std::ranges::fill(precision_ev.precision, 0);
 
     g_ctx.clients[client_idx].rumble_active[sub_idx] = !neutral;
     g_ctx.clients[client_idx].rumble_seq[sub_idx]++;
+}
+
+static void publish_rumble_event_from_bytes(int client_idx, int sub_idx, const uint8_t* rb, bool publish_neutral) {
+    if (!rb) return;
+    DecodedPrecisionRumbleHalf left = rumble_decode_half_precision_to_dual(rb), right = rumble_decode_half_precision_to_dual(rb + 4);
+    uint8_t low = std::max(left.low, right.low), high = std::max(left.high, right.high);
+
+    if (low == 0 && high == 0 && !(rumble_half_is_all_zero(rb) || rumble_half_is_neutral_carrier(rb)) && !(rumble_half_is_all_zero(rb + 4) || rumble_half_is_neutral_carrier(rb + 4))) {
+        low = rumble_decode_half_to_u8(rb); high = rumble_decode_half_to_u8(rb + 4);
+    }
+    publish_decoded_rumble_event(client_idx, sub_idx, low, high, publish_neutral, rb);
 }
 
 void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral) {
@@ -952,9 +972,23 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
 }
 
 void publish_s2_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral) {
-    if (len < 9 || !packet) return;
-    // Switch 2 output report 0x01/0x02 carries 16 bytes of HD-rumble data
-    // immediately after the report ID. Reuse the first two 4-byte actuator
-    // slices for the existing client feedback path.
-    publish_rumble_event_from_bytes(client_idx, sub_idx, packet + 1, publish_neutral);
+    if (!packet || len < 7 || (packet[0] != 0x01 && packet[0] != 0x02)) return;
+
+    // S2 LRA data is not the Switch 1 four-byte HD-rumble encoding.  Each 16-byte
+    // motor block begins with a counter byte followed by a 40-bit little-endian
+    // value: frequency0(10) | amplitude0(10) | frequency1(10) | amplitude1(10).
+    // Frequency fields remain non-zero at rest, so decoding them as intensity causes
+    // a persistent idle buzz.  Use the peak of the two amplitude fields instead.
+    const auto motor_amplitude = [](const uint8_t* p) -> uint8_t {
+        const uint64_t packed = (uint64_t)p[0] | ((uint64_t)p[1] << 8)
+            | ((uint64_t)p[2] << 16) | ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32);
+        const uint16_t amplitude = std::max<uint16_t>((packed >> 10) & 0x3FF, (packed >> 30) & 0x3FF);
+        return rumble_scale_capture_delta(amplitude >> 2); // 10-bit amplitude -> SDL's 8-bit range
+    };
+
+    const uint8_t left = motor_amplitude(packet + 2); // skip report ID and LRA counter
+    // Pro Controller 2 has a second 16-byte LRA block; a Joy-Con 2 has only its
+    // one actuator, so feed that amplitude to both SDL channels.
+    const uint8_t right = (packet[0] == 0x02 && len >= 23) ? motor_amplitude(packet + 18) : left;
+    publish_decoded_rumble_event(client_idx, sub_idx, left, right, publish_neutral);
 }

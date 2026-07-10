@@ -41,6 +41,7 @@ enum class UploadKind : std::uint8_t {
 
 struct Step {
     std::uint16_t buttons = 0;
+    std::uint8_t extra_buttons = 0;
     std::uint8_t hat = ns::HAT_NEUTRAL;
     std::uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
     bool has_lstick = false;
@@ -151,6 +152,7 @@ bool parse_entries_text(const std::string& raw,
 
 struct RecordFrame {
     std::uint16_t buttons = 0;
+    std::uint8_t extra_buttons = 0;
     std::uint8_t hat = ns::HAT_NEUTRAL;
     std::int8_t lx = 0, ly = 0, rx = 0, ry = 0;
     bool operator==(const RecordFrame&) const = default;

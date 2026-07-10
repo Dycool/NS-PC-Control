@@ -157,7 +157,7 @@ uint8_t switch2_input_report_id_for_port(int ctrl);
 uint8_t switch2_output_report_id_for_port(int ctrl);
 bool controller_port_supports_amiibo(int ctrl);
 void apply_controller_type_input(uint8_t type, ns::HIDReport& r, bool pair_member = false);
-void apply_controller_type_report(uint8_t type, uint8_t* buf);
+void apply_controller_type_report(uint8_t type, uint8_t extra_buttons, uint8_t* buf);
 void apply_s2_controller_type_report(uint8_t type, uint8_t* buf);
 
 bool is_amiibo_placed(int port);

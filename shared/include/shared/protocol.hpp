@@ -99,9 +99,18 @@ enum Flags : uint8_t {
     FLAG_DISCONNECT = 0x08, // Authenticated UDP client is leaving; free its slot now.
 };
 
-// Extended clients set this in HoriHIDReport::vendor inside HIDReport.
-// Server code should clear vendor before writing legacy 8-byte reports.
+// Extended clients set these in HoriHIDReport::vendor inside HIDReport.
+// Server code clears vendor before writing legacy 8-byte reports. Keeping the
+// extra controls here preserves the established 8-byte input report and its
+// 16-bit Switch 1 button field.
 static constexpr uint8_t EXT_PAD_PRESENT = 0x01;
+static constexpr uint8_t EXT_BUTTON_C     = 0x02;
+static constexpr uint8_t EXT_BUTTON_GL    = 0x04;
+static constexpr uint8_t EXT_BUTTON_GR    = 0x08;
+static constexpr uint8_t EXT_BUTTON_SL    = 0x10;
+static constexpr uint8_t EXT_BUTTON_SR    = 0x20;
+static constexpr uint8_t EXT_BUTTON_MASK  = EXT_BUTTON_C | EXT_BUTTON_GL | EXT_BUTTON_GR
+                                          | EXT_BUTTON_SL | EXT_BUTTON_SR;
 // Extended HIDReport::reserved[1] status flags. Older clients leave these zero.
 static constexpr uint8_t EXT_STATUS_BATTERY_VALID = 0x01;
 static constexpr uint8_t EXT_STATUS_BATTERY_CHARGING = 0x02;

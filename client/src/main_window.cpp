@@ -45,7 +45,7 @@ MainWindow::MainWindow() {
     g_keyboardMode.store(savedMode);
     keyboardCombo->setCurrentIndex(savedMode);
     bindingsBtn = new QPushButton("Bindings...", this);
-    bindingsBtn->setEnabled(savedMode != KB_OFF);
+    bindingsBtn->setEnabled(true);
     grid->addWidget(kbLabel, 2, 0);
     grid->addWidget(keyboardCombo, 2, 1, 1, 2);
     grid->addWidget(bindingsBtn, 2, 3);
@@ -82,7 +82,7 @@ MainWindow::MainWindow() {
     connect(keyboardCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int idx) {
         g_keyboardMode.store(idx);
         save_keyboard_mode(idx);
-        bindingsBtn->setEnabled(idx != KB_OFF && !g_connected.load());
+        bindingsBtn->setEnabled(true);
     });
     connect(bindingsBtn, &QPushButton::clicked, this, [this] {
         BindingsDialog dlg(this);
@@ -162,7 +162,7 @@ void MainWindow::updateUi() {
     connectBtn->setText(connected ? "Disconnect" : "Connect");
     ipEdit->setEnabled(!connected);
     keyboardCombo->setEnabled(!connected);
-    bindingsBtn->setEnabled(!connected && g_keyboardMode.load() != KB_OFF);
+    bindingsBtn->setEnabled(true);
     statusLabel->setText(std_to_q(status_message()));
 
     bool s2Mode = g_switch2ModeEnabled.load();
@@ -258,5 +258,3 @@ void MainWindow::onScanAmiiboClicked() {
     g_amiiboScanPending[subpad].store(false);
     updateUi();
 }
-
-

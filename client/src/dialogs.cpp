@@ -47,6 +47,8 @@ void KeyCaptureDialog::keyPressEvent(QKeyEvent* event) {
 }
 
 BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
+    // Do not let keys used to edit bindings reach the connected controller.
+    g_keyboardInputSuspended.store(true, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
         editBindings = g_keyBindings;
@@ -59,10 +61,12 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
     grid->setHorizontalSpacing(4);
     grid->setVerticalSpacing(4);
     auto keys = binding_keys();
-    int half = (int)keys.size() / 2;
-    for (int i = 0; i < half; ++i) {
+    const int rows = static_cast<int>((keys.size() + 1) / 2);
+    for (int i = 0; i < rows; ++i) {
         addRow(grid, i, 0, i, keys[i].first);
-        addRow(grid, i, 3, i + half, keys[i + half].first);
+        if (i + rows < static_cast<int>(keys.size())) {
+            addRow(grid, i, 3, i + rows, keys[i + rows].first);
+        }
     }
     outer->addLayout(grid);
 
@@ -93,6 +97,10 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
     add_btn("Cancel", &QDialog::reject);
     outer->addLayout(buttons);
     refresh();
+}
+
+BindingsDialog::~BindingsDialog() {
+    g_keyboardInputSuspended.store(false, std::memory_order_relaxed);
 }
 
 void BindingsDialog::keyPressEvent(QKeyEvent* event) {
@@ -228,6 +236,10 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     controllerRow->addWidget(controllerTypeBox, 0, 1);
     outer->addLayout(controllerRow);
 
+    joyconHorizontalBox = new QCheckBox("Horizontal mode", this);
+    joyconHorizontalBox->setChecked(g_joyconHorizontalMode.load());
+    outer->addWidget(joyconHorizontalBox);
+
 
     auto* buttons = new QGridLayout();
     QPushButton* save = new QPushButton("Save", this);
@@ -242,6 +254,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         controllerTypeBox->setToolTip(connected
             ? QStringLiteral("Disconnect to change the emulated controller type.")
             : QString());
+        updateJoyconHorizontalControl();
     });
     connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
@@ -254,6 +267,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
 
     updateMouseModeControls();
+    updateJoyconHorizontalControl();
 }
 
 void SettingsDialog::updateMouseModeControls() {
@@ -270,6 +284,17 @@ void SettingsDialog::updateMouseModeControls() {
     if (mouseSensitivityValue) mouseSensitivityValue->setEnabled(sensEnabled);
 }
 
+void SettingsDialog::updateJoyconHorizontalControl() {
+    if (!joyconHorizontalBox || !controllerTypeBox) return;
+    const int type = controllerTypeBox->currentData().toInt();
+    const bool supported = type == ns::CONTROLLER_TYPE_JOYCON_L || type == ns::CONTROLLER_TYPE_JOYCON_R;
+    if (!supported) joyconHorizontalBox->setChecked(false);
+    joyconHorizontalBox->setEnabled(supported);
+    joyconHorizontalBox->setToolTip(supported
+        ? QString()
+        : QStringLiteral("Horizontal mode is available only for a single Joy-Con (L) or Joy-Con (R)."));
+}
+
 
 
 void SettingsDialog::saveSettings() {
@@ -282,9 +307,12 @@ void SettingsDialog::saveSettings() {
     const bool mouseMode = mouseModeBox->isChecked();
     g_mouseModeEnabled.store(mouseMode);
     g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
+    const int controllerType = controllerTypeBox->currentData().toInt();
+    const bool joycon = controllerType == ns::CONTROLLER_TYPE_JOYCON_L || controllerType == ns::CONTROLLER_TYPE_JOYCON_R;
     if (!g_connected.load()) {
-        g_controllerType.store(controllerTypeBox->currentData().toInt());
+        g_controllerType.store(controllerType);
     }
+    g_joyconHorizontalMode.store(joycon && joyconHorizontalBox->isChecked());
     save_feature_toggles();
     if (!mouseMode) clear_mouse_button_inputs();
     sync_sdl_input_options();

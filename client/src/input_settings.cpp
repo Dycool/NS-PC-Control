@@ -12,6 +12,7 @@
 #include <QCoreApplication>
 
 std::atomic<int> g_keyboardMode{KB_OFF};
+std::atomic<bool> g_keyboardInputSuspended{false};
 std::atomic<bool> g_gyroEnabled{true};
 std::atomic<bool> g_rumbleEnabled{true};
 std::atomic<bool> g_homeShortcutEnabled{true};
@@ -19,6 +20,7 @@ std::atomic<bool> g_captureShortcutEnabled{true};
 std::atomic<bool> g_mouseModeEnabled{false};
 std::atomic<double> g_mouseSensitivity{1.0};
 std::atomic<int> g_controllerType{ns::CONTROLLER_TYPE_PRO};
+std::atomic<bool> g_joyconHorizontalMode{false};
 std::atomic<bool> g_switch2ModeEnabled{false}; // Runtime server-selected mode, not saved locally.
 std::atomic<bool> g_horiModeEnabled{false};    // Runtime server-selected mode, not saved locally.
 std::unordered_map<std::string, std::string> g_keyBindings;
@@ -52,13 +54,14 @@ std::vector<std::pair<std::string, std::string>> binding_keys() {
         {"L", "Q"}, {"R", "E"}, {"ZL", "1"}, {"ZR", "2"},
         {"MINUS", "3"}, {"PLUS", "4"},
         {"LSTICK", "LSHIFT"}, {"RSTICK", "RSHIFT"},
-        {"HOME", "HOME"}, {"LSTICK_UP", "W"}, {"LSTICK_DOWN", "S"},
+        {"HOME", "HOME"}, {"CAPTURE", "SNAPSHOT"},
+        {"C", "F1"}, {"GL", "F2"}, {"GR", "F3"}, {"SL", "F4"}, {"SR", "F5"},
+        {"LSTICK_UP", "W"}, {"LSTICK_DOWN", "S"},
         {"LSTICK_LEFT", "A"}, {"LSTICK_RIGHT", "D"},
         {"RSTICK_UP", "I"}, {"RSTICK_DOWN", "K"},
         {"RSTICK_LEFT", "J"}, {"RSTICK_RIGHT", "L"},
         {"DPAD_UP", "UP"}, {"DPAD_DOWN", "DOWN"},
-        {"DPAD_LEFT", "LEFT"}, {"DPAD_RIGHT", "RIGHT"},
-        {"CAPTURE", "SNAPSHOT"}
+        {"DPAD_LEFT", "LEFT"}, {"DPAD_RIGHT", "RIGHT"}
     };
 }
 
@@ -79,7 +82,8 @@ bool is_mouse_button_name(const std::string& name) {
 
 bool mouse_mode_active() {
     return g_mouseModeEnabled.load(std::memory_order_relaxed)
-        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF;
+        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
+        && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
 }
 
 bool is_valid_key_code(const std::string& s) {
@@ -171,6 +175,9 @@ void load_saved_feature_toggles() {
         controllerType = ns::CONTROLLER_TYPE_PRO;
     }
     g_controllerType.store(controllerType);
+    const bool single_joycon = controllerType == ns::CONTROLLER_TYPE_JOYCON_L
+        || controllerType == ns::CONTROLLER_TYPE_JOYCON_R;
+    g_joyconHorizontalMode.store(single_joycon && settings.value("JoyconHorizontalMode", false).toBool());
     sync_sdl_input_options();
 }
 
@@ -183,6 +190,7 @@ void save_feature_toggles() {
     settings.setValue("MouseModeEnabled", g_mouseModeEnabled.load());
     settings.setValue("MouseSensitivity", g_mouseSensitivity.load());
     settings.setValue("ControllerType", g_controllerType.load());
+    settings.setValue("JoyconHorizontalMode", g_joyconHorizontalMode.load());
 }
 
 void clear_mouse_button_inputs() {
@@ -312,6 +320,7 @@ bool key_is_down(const std::string& name_raw) {
 }
 
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
+    if (g_keyboardInputSuspended.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     auto get = [](const std::string& btn) -> std::string {
         auto it = g_keyBindings.find(btn);
@@ -326,6 +335,14 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     };
     for (const auto& m : btn_map) {
         if (auto k = get(m.name); !k.empty() && key_is_down(k)) rep.buttons |= m.flag;
+    }
+    struct ExtraBtnMap { const char* name; uint8_t flag; };
+    static const ExtraBtnMap extra_btn_map[] = {
+        {"C", ns::EXT_BUTTON_C}, {"GL", ns::EXT_BUTTON_GL}, {"GR", ns::EXT_BUTTON_GR},
+        {"SL", ns::EXT_BUTTON_SL}, {"SR", ns::EXT_BUTTON_SR},
+    };
+    for (const auto& m : extra_btn_map) {
+        if (auto k = get(m.name); !k.empty() && key_is_down(k)) rep.vendor |= m.flag;
     }
 
     bool du = !get("DPAD_UP").empty() && key_is_down(get("DPAD_UP"));
@@ -358,4 +375,51 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     apply_axis("RSTICK_UP", "RSTICK_DOWN", rep.ry);
 
     if (g_mouseModeEnabled.load(std::memory_order_relaxed)) mouse_apply_right_stick(rep.rx, rep.ry);
+}
+
+void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_type) {
+    const bool left = controller_type == ns::CONTROLLER_TYPE_JOYCON_L;
+    const bool right = controller_type == ns::CONTROLLER_TYPE_JOYCON_R;
+    if (!left && !right) return;
+
+    // Rotate both sticks around their 8-bit centre. The two Joy-Con halves are
+    // held in opposite directions when used horizontally.
+    const auto rotate_stick = [left](uint8_t& x, uint8_t& y) {
+        const uint8_t old_x = x;
+        const uint8_t old_y = y;
+        if (left) { x = static_cast<uint8_t>(255 - old_y); y = old_x; }
+        else      { x = old_y; y = static_cast<uint8_t>(255 - old_x); }
+    };
+    rotate_stick(rep.lx, rep.ly);
+    rotate_stick(rep.rx, rep.ry);
+
+    const auto rotate_hat = [left](uint8_t hat) {
+        if (hat == ns::HAT_NEUTRAL) return hat;
+        static constexpr uint8_t clockwise[] = {
+            ns::HAT_E, ns::HAT_SE, ns::HAT_S, ns::HAT_SW,
+            ns::HAT_W, ns::HAT_NW, ns::HAT_N, ns::HAT_NE,
+        };
+        static constexpr uint8_t counter_clockwise[] = {
+            ns::HAT_W, ns::HAT_NW, ns::HAT_N, ns::HAT_NE,
+            ns::HAT_E, ns::HAT_SE, ns::HAT_S, ns::HAT_SW,
+        };
+        return hat <= ns::HAT_NW ? (left ? clockwise[hat] : counter_clockwise[hat]) : hat;
+    };
+    rep.hat = rotate_hat(rep.hat);
+
+    // Rotate the ABXY diamond too, so a physical layout remains consistent
+    // when the right Joy-Con is held sideways.
+    const uint16_t face = rep.buttons & (ns::BTN_A | ns::BTN_B | ns::BTN_X | ns::BTN_Y);
+    rep.buttons &= static_cast<uint16_t>(~(ns::BTN_A | ns::BTN_B | ns::BTN_X | ns::BTN_Y));
+    if (left) {
+        if (face & ns::BTN_X) rep.buttons |= ns::BTN_A;
+        if (face & ns::BTN_A) rep.buttons |= ns::BTN_B;
+        if (face & ns::BTN_B) rep.buttons |= ns::BTN_Y;
+        if (face & ns::BTN_Y) rep.buttons |= ns::BTN_X;
+    } else {
+        if (face & ns::BTN_B) rep.buttons |= ns::BTN_A;
+        if (face & ns::BTN_Y) rep.buttons |= ns::BTN_B;
+        if (face & ns::BTN_X) rep.buttons |= ns::BTN_Y;
+        if (face & ns::BTN_A) rep.buttons |= ns::BTN_X;
+    }
 }

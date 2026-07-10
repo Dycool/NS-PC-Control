@@ -658,7 +658,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                             if (g_port_switch2[h]) {
                                 apply_s2_controller_type_report(controller_type_for_port(h), write_buf);
                             } else {
-                                apply_controller_type_report(controller_type_for_port(h), write_buf);
+                                const uint8_t extra_buttons = port_needed ? out_reports[h].input.vendor : 0;
+                                apply_controller_type_report(controller_type_for_port(h), extra_buttons, write_buf);
                             }
                         }
                         if (port_submit_input(h, write_buf, write_len)) {
@@ -677,10 +678,11 @@ void writer_thread(std::stop_token stoken, int hz) {
                     uint8_t id = read_buf[0];
                     bool is_s2 = g_port_switch2[h];
                     if (is_s2) {
-                        // Native S2 Pro Controller uses HID OUT only for rumble report 0x02.
+                        // Native S2 HID OUT is rumble: report 0x02 for Pro Controller 2,
+                        // report 0x01 for either Joy-Con 2 half.
                         // Init/pairing/feature/memory commands arrive on the vendor-bulk
                         // endpoint and are processed below via functionfs_poll_vendor_report().
-                        if (id == 0x02) {
+                        if (id == switch2_output_report_id_for_port(h)) {
                             switch2_native_note_hid_out(h, std::span<const uint8_t>(read_buf, r));
                             if (hw_slots[h].client_idx != -1)
                                 publish_s2_rumble_event(hw_slots[h].client_idx, hw_slots[h].sub_idx, read_buf, r, true);

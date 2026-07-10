@@ -15,6 +15,7 @@
 enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
 
 extern std::atomic<int> g_keyboardMode;
+extern std::atomic<bool> g_keyboardInputSuspended;
 extern std::atomic<bool> g_gyroEnabled;
 extern std::atomic<bool> g_rumbleEnabled;
 extern std::atomic<bool> g_homeShortcutEnabled;
@@ -22,6 +23,7 @@ extern std::atomic<bool> g_captureShortcutEnabled;
 extern std::atomic<bool> g_mouseModeEnabled;
 extern std::atomic<double> g_mouseSensitivity;
 extern std::atomic<int> g_controllerType;
+extern std::atomic<bool> g_joyconHorizontalMode;
 extern std::atomic<bool> g_switch2ModeEnabled;
 extern std::atomic<bool> g_horiModeEnabled;
 extern std::unordered_map<std::string, std::string> g_keyBindings;
@@ -58,6 +60,7 @@ bool pressed_key_cache_contains(const std::string& key);
 void update_keyboard_state_cache();
 bool key_is_down(const std::string& name_raw);
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode);
+void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_type);
 
 bool is_mouse_button_name(const std::string& name);
 bool mouse_mode_active();

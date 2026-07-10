@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <mutex>
 #include <openssl/evp.h>
@@ -15,6 +18,10 @@ namespace {
 
 constexpr uint32_t FACTORY_BASE = 0x13000u;
 constexpr uint32_t FACTORY_SIZE = 0x160u;
+constexpr uint32_t USER_MOTION_CAL_BASE = 0x1FC000u;
+constexpr size_t USER_MOTION_CAL_SIZE = 0x40u;
+constexpr const char* USER_MOTION_CAL_PATH = "/var/lib/ns-pc-control/switch2_motion_calibration.bin";
+constexpr std::array<uint8_t, 8> USER_MOTION_CAL_MAGIC = {'N', 'S', '2', 'C', 'A', 'L', 1, 0};
 constexpr uint8_t FEATURE_BUTTONS = 0x01;
 constexpr uint8_t FEATURE_STICKS  = 0x02;
 constexpr uint8_t FEATURE_IMU     = 0x04;
@@ -31,6 +38,7 @@ struct NativeState {
     uint8_t stage = 0;
     std::array<uint8_t, 16> ltk{};
     std::array<uint8_t, FACTORY_SIZE> factory{};
+    std::array<uint8_t, USER_MOTION_CAL_SIZE> user_motion_cal{};
     std::array<uint8_t, 64> identity{};
     std::array<uint8_t, 16> ctrl_info{};
     std::array<uint8_t, 9> pairing_info{};
@@ -101,6 +109,59 @@ void build_factory(NativeState& s, int port) {
     std::memcpy(s.identity.data(), s.factory.data(), 0x25);
 }
 
+void load_user_motion_calibration() {
+    for (auto& s : g_state) s.user_motion_cal.fill(0xFF);
+
+    std::ifstream in(USER_MOTION_CAL_PATH, std::ios::binary);
+    if (!in) return;
+
+    std::array<uint8_t, 8> magic{};
+    in.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+    if (!in || magic != USER_MOTION_CAL_MAGIC) return;
+
+    for (auto& s : g_state) {
+        in.read(reinterpret_cast<char*>(s.user_motion_cal.data()),
+                static_cast<std::streamsize>(s.user_motion_cal.size()));
+        if (!in) {
+            // A truncated/corrupt file must not leave a partially restored record.
+            for (auto& reset : g_state) reset.user_motion_cal.fill(0xFF);
+            return;
+        }
+    }
+}
+
+bool save_user_motion_calibration() {
+    namespace fs = std::filesystem;
+    const fs::path path(USER_MOTION_CAL_PATH);
+    const fs::path temporary = path.string() + ".tmp";
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out.write(reinterpret_cast<const char*>(USER_MOTION_CAL_MAGIC.data()),
+                  static_cast<std::streamsize>(USER_MOTION_CAL_MAGIC.size()));
+        for (const auto& s : g_state) {
+            out.write(reinterpret_cast<const char*>(s.user_motion_cal.data()),
+                      static_cast<std::streamsize>(s.user_motion_cal.size()));
+        }
+        out.flush();
+        if (!out) return false;
+    }
+
+    fs::rename(temporary, path, ec);
+    if (ec) {
+        std::error_code ignored;
+        fs::remove(temporary, ignored);
+        return false;
+    }
+    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, ec);
+    return true;
+}
+
 void init_all() {
     for (size_t i = 0; i < g_state.size(); ++i) {
         auto& s = g_state[i];
@@ -112,6 +173,7 @@ void init_all() {
         s.stage = 0;
         s.ltk.fill(0);
     }
+    load_user_motion_calibration();
 }
 
 NativeState& state_for_port(int port) {
@@ -171,9 +233,26 @@ void mem_read(const NativeState& s, uint32_t addr, uint8_t len, uint8_t* out) {
     for (uint8_t i = 0; i < len; ++i) {
         const uint32_t a = addr + i;
         if (a >= FACTORY_BASE && a < FACTORY_BASE + FACTORY_SIZE) out[i] = s.factory[a - FACTORY_BASE];
+        else if (a >= USER_MOTION_CAL_BASE && a < USER_MOTION_CAL_BASE + USER_MOTION_CAL_SIZE)
+            out[i] = s.user_motion_cal[a - USER_MOTION_CAL_BASE];
         else if (a == 0x1FA000) out[i] = 0x00;
         else out[i] = 0xFF;
     }
+}
+
+bool mem_write_user_motion_cal(NativeState& s, uint32_t addr,
+                               std::span<const uint8_t> data) {
+    bool changed = false;
+    for (size_t i = 0; i < data.size(); ++i) {
+        const uint64_t a = static_cast<uint64_t>(addr) + i;
+        if (a < USER_MOTION_CAL_BASE || a >= USER_MOTION_CAL_BASE + USER_MOTION_CAL_SIZE) continue;
+        uint8_t& dst = s.user_motion_cal[static_cast<size_t>(a - USER_MOTION_CAL_BASE)];
+        if (dst != data[i]) {
+            dst = data[i];
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 void update_stage(NativeState& s, uint8_t id, uint8_t sub) {
@@ -356,6 +435,11 @@ bool switch2_native_handle_vendor_command(int port,
         }
         case 0x02: { // memory
             const uint32_t addr = read_le32_at(c, 12);
+            if (sub == 0x01 || sub == 0x04 || sub == 0x05) {
+                // Data-bearing flash replies observed in the USB captures.
+                r[4] = 0x10;
+                r[5] = 0x78;
+            }
             if (sub == 0x04) {
                 uint8_t len = c.size() > 8 ? c[8] : 0;
                 if (len > 0x50) len = 0x50;
@@ -370,6 +454,24 @@ bool switch2_native_handle_vendor_command(int port,
                 dl = 8 + 0x40;
             } else if (sub == 0x05) {
                 if (c.size() >= 16) std::memcpy(d + 4, c.data() + 12, 4);
+                // Captured gyro calibration writes use a 72-byte command payload:
+                // four opaque bytes, destination address 0x1FC000, then the 64-byte
+                // user motion-calibration record. Reset-to-default writes all 0xFF;
+                // a completed calibration begins B2 A1 and is otherwise currently
+                // opaque. Preserve it byte-for-byte and let the report path remain
+                // independent until the record's axis semantics are understood.
+                if (c.size() > 16) {
+                    const size_t declared_data = c.size() > 5 && c[5] >= 8
+                        ? static_cast<size_t>(c[5] - 8) : 0;
+                    const size_t available_data = c.size() - 16;
+                    const size_t write_len = std::min(declared_data, available_data);
+                    if (write_len != 0 && mem_write_user_motion_cal(s, addr, c.subspan(16, write_len))) {
+                        if (!save_user_motion_calibration() && g_ctx.verbose) {
+                            std::fprintf(stderr, "[s2] warning: could not persist motion calibration to %s\n",
+                                         USER_MOTION_CAL_PATH);
+                        }
+                    }
+                }
                 dl = 8;
             }
             break;
@@ -393,8 +495,26 @@ bool switch2_native_handle_vendor_command(int port,
                 std::memcpy(d, r11_03, sizeof(r11_03)); dl = sizeof(r11_03);
             }
             break;
-        case 0x01: // NFC/MCU minimal status; fuller Amiibo path can be layered later.
-            if (sub == 0x0C) { static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x10}; std::memcpy(d, nfc, sizeof(nfc)); dl = sizeof(nfc); }
+        case 0x01: // NFC
+            if (sub == 0x0C) {
+                static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x10};
+                std::memcpy(d, nfc, sizeof(nfc));
+                dl = sizeof(nfc);
+            } else if (sub == 0x05 || sub == 0x06 || sub == 0x14 || sub == 0x15) {
+                // The native S2 NFC transport uses the vendor command channel,
+                // not the legacy 0x21 HID-subcommand wrapper. Keep the exact
+                // eight-byte command header above and append the tag payload
+                // produced by the shared Amiibo state machine.
+                const std::span<const uint8_t> nfc_data = c.subspan(8);
+                dl = fill_nfc_response_payload(sub, nfc_data, d, port);
+
+                // Captured Read Buffer replies use the data-bearing ACK form
+                // (10 78) rather than the ordinary header-only ACK (00 f8).
+                if (sub == 0x15 && dl != 0) {
+                    r[4] = 0x10;
+                    r[5] = 0x78;
+                }
+            }
             break;
         case 0x18:
             if (sub == 0x01) { static constexpr uint8_t v[] = {0, 0, 0x40, 0xF0, 0, 0, 0x60, 0}; std::memcpy(d, v, sizeof(v)); dl = sizeof(v); }
