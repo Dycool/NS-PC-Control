@@ -1251,22 +1251,26 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         payload[5] = 0x01;
         payload[6] = 0x02;
         if (placed) {
-            payload[8] = 0x07; // UID length
-            payload[9] = 0x04; // ISO14443A / Type 2 tag
+            // In the captured response, byte 8 is the UID length and the
+            // seven UID bytes begin immediately at byte 9. 0x04 is UID0
+            // (the NXP manufacturer byte), not a separate tag-type field.
+            // The previous implementation inserted an extra 0x04 before
+            // the UID, shifting/truncating the identity seen by the console.
+            payload[8] = 0x07;
             // Raw NTAG215 page 0 stores UID0..2, BCC0, UID3..6.
-            payload[10] = adata[0];
-            payload[11] = adata[1];
-            payload[12] = adata[2];
-            payload[13] = adata[4];
-            payload[14] = adata[5];
-            payload[15] = adata[6];
-            payload[16] = adata[7];
+            payload[9]  = adata[0];
+            payload[10] = adata[1];
+            payload[11] = adata[2];
+            payload[12] = adata[4];
+            payload[13] = adata[5];
+            payload[14] = adata[6];
+            payload[15] = adata[7];
         }
         request_state = placed ? 0 : 1;
         plen = 60;
         if (g_ctx.verbose) {
             if (placed) {
-                std::println("[s2][nfc][parse] sub=0x05 get-status tag_present=true uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} payload_len={}",
+                std::println("[s2][nfc][parse] sub=0x05 get-status tag_present=true uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} uid_offset=9 payload_len={}",
                              adata[0], adata[1], adata[2], adata[4], adata[5], adata[6], adata[7], plen);
             } else {
                 std::println("[s2][nfc][parse] sub=0x05 get-status tag_present=false payload_len={} ui_scan_requested=true", plen);

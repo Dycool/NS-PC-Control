@@ -484,11 +484,17 @@ int main(int argc, char** argv) {
                 if (mmagic == ns::AMIIBO_DATA_MAGIC) {
                     ns::AmiiboDataPacket ad{};
                     memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
+                    // AmiiboDataPacket is packed for the UDP wire format. Copy
+                    // multi-byte members before formatting/using them so C++ does
+                    // not try to bind a reference to a potentially unaligned field.
+                    const uint16_t amiibo_data_len = ad.data_len;
                     if (g_ctx.verbose) {
                         char addrbuf[INET_ADDRSTRLEN] = {};
                         inet_ntop(AF_INET, &sender.sin_addr, addrbuf, sizeof(addrbuf));
                         std::println("[s2][nfc][udp-rx] t_us={} from={}:{} packet_bytes={} subpad={} declared_data_len={}",
-                                     now_us(), addrbuf, ntohs(sender.sin_port), bytes, ad.subpad, ad.data_len);
+                                     now_us(), addrbuf, ntohs(sender.sin_port), bytes,
+                                     static_cast<unsigned>(ad.subpad),
+                                     static_cast<unsigned>(amiibo_data_len));
                     }
                     int client_idx = -1;
                     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -529,8 +535,9 @@ int main(int argc, char** argv) {
                     if (port_for_source >= 0) {
                         if (g_ctx.verbose)
                             std::println("[s2][nfc][udp-rx] forwarding upload client={} subpad={} -> port={} len={}",
-                                         client_idx, ad.subpad, port_for_source, ad.data_len);
-                        set_amiibo_data_for_port(port_for_source, ad.data, ad.data_len);
+                                         client_idx, static_cast<unsigned>(ad.subpad), port_for_source,
+                                         static_cast<unsigned>(amiibo_data_len));
+                        set_amiibo_data_for_port(port_for_source, ad.data, amiibo_data_len);
                     } else if (g_ctx.verbose) {
                         std::println(stderr,
                                      "[s2][nfc][udp-rx] upload dropped: no assigned NFC-capable port client={} subpad={}",
