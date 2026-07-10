@@ -72,12 +72,12 @@ static bool profile_is_pair(uint8_t profile) {
            profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
 }
 
-// The f_hid fallback port inside the --s2 gadget speaks the Switch 1 protocol;
-// map the S2-coerced request back onto its S1 equivalent. Pairs cannot span
-// the single fallback slot, so they degrade to one S1 Pro.
+// The f_hid fallback port inside the --s2 gadget speaks the Switch 1 protocol,
+// so map an S2 request onto its S1 equivalent. A pair may use this as its
+// right-hand slot when the first pair already occupies the first two native
+// S2 functions.
 static uint8_t s1_fallback_profile(uint8_t profile) {
-    profile = coerce_profile_to_family(profile, UsbControllerFamily::Switch1);
-    return profile_is_pair(profile) ? ns::CONTROLLER_TYPE_PRO : profile;
+    return coerce_profile_to_family(profile, UsbControllerFamily::Switch1);
 }
 
 static const HIDReport& get_hid_report(const ClientSession& c, int s) {
@@ -290,8 +290,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                 }
             }
 
-            const int pair_port_limit = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-                ? std::min(g_ctx.switch2_native_port_count, nports) : nports;
+            // S2's second pair deliberately spans ports 2 (native S2 L) and
+            // 3 (Switch 1 fallback R). The per-port protocol conversion below
+            // gives each half the correct generation-specific identity.
+            const int pair_port_limit = nports;
             auto existing_pair_base = [&](const SourceRequest& req) {
                 for (int base = 0; base + 1 < pair_port_limit; base += 2) {
                     const HwSlot& left = hw_slots[base];
@@ -356,7 +358,10 @@ void writer_thread(std::stop_token stoken, int hz) {
             for (const SourceRequest& req : pairs) {
                 int base = existing_pair_base(req);
                 if (!pair_base_free(base)) base = -1;
-                const int preferred_base = req.sub_idx * 2;
+                // Prefer the all-native pair first in S2 mode. The second
+                // pair then takes the deliberate S2-L/S1-R hybrid group.
+                const int preferred_base = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                    ? 0 : req.sub_idx * 2;
                 if (base < 0 && preferred_base + 1 < pair_port_limit
                         && pair_base_free(preferred_base))
                     base = preferred_base;

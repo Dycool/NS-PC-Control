@@ -329,7 +329,10 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
 
 static int configured_virtual_port_count() {
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-        return std::clamp(g_ctx.switch2_native_port_count, 1, 3);
+        // Three native S2 functions plus one S1 f_hid fallback make up the
+        // complete hybrid gadget. This permits a second Joy-Con pair to use
+        // the final native S2 port for L and the fallback port for R.
+        return HID_PORT_COUNT;
     return HID_PORT_COUNT;
 }
 
