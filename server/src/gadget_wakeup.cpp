@@ -1010,20 +1010,33 @@ static void ffs_vendor_writer_loop(int id) {
             }
             continue;
         }
-        ssize_t w = write(fd, report.data(), report.size());
+        size_t written_total = 0;
+        int write_errno = 0;
+        while (written_total < report.size() && st.io_running.load(std::memory_order_relaxed)) {
+            const ssize_t w = write(fd, report.data() + written_total, report.size() - written_total);
+            if (w > 0) {
+                written_total += static_cast<size_t>(w);
+                continue;
+            }
+            if (w < 0 && errno == EINTR) continue;
+            if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            write_errno = w < 0 ? errno : EIO;
+            break;
+        }
         if (g_ctx.verbose && report[0] == 0x01) {
-            if (w < 0) {
+            if (written_total != report.size()) {
                 std::println(stderr,
-                             "[s2][nfc][usb-write] t_us={} port={} requested={} written=-1 errno={} ({}) raw={}",
-                             now_us(), id, report.size(), errno, std::strerror(errno), bytes_to_hex(report));
+                             "[s2][nfc][usb-write] t_us={} port={} requested={} written={} complete=false errno={} ({}) raw={}",
+                             now_us(), id, report.size(), written_total, write_errno,
+                             write_errno != 0 ? std::strerror(write_errno) : "short write", bytes_to_hex(report));
             } else {
-                std::println("[s2][nfc][usb-write] t_us={} port={} requested={} written={} complete={} raw={}",
-                             now_us(), id, report.size(), w,
-                             w == static_cast<ssize_t>(report.size()), bytes_to_hex(report));
+                std::println("[s2][nfc][usb-write] t_us={} port={} requested={} written={} complete=true raw={}",
+                             now_us(), id, report.size(), written_total, bytes_to_hex(report));
             }
         }
-        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
-        (void)w;
     }
     st.vendor_writer_exited.store(true, std::memory_order_release);
 }

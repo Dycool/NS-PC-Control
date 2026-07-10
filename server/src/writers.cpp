@@ -634,7 +634,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         continue;
                                     }
                                     const bool imu_on = (switch2_native_enabled_features(h) & 0x04u) != 0;
-                                    build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, imu_on, pro_timer_from_us(now_stamp), h, write_buf);
+                                    build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, imu_on, pro_timer_from_us(now_stamp), now_stamp, h, write_buf);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
                                     build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);

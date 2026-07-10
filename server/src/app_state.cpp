@@ -661,12 +661,14 @@ void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, 
                          client_idx, c.active, input_source_name(c.source), len);
         return;
     }
+    const uint16_t safe_len = static_cast<uint16_t>(
+        std::min<size_t>(len, ns::AMIIBO_EXTENDED_DUMP_SIZE));
     c.amiibo_writeback_pending[sub_idx] = true;
-    c.amiibo_writeback_len[sub_idx] = len;
-    std::memcpy(c.amiibo_writeback_data[sub_idx], data, std::min<size_t>(len, 540));
+    c.amiibo_writeback_len[sub_idx] = safe_len;
+    std::memcpy(c.amiibo_writeback_data[sub_idx], data, safe_len);
     if (g_ctx.verbose)
         std::println("[s2][nfc][writeback] t_us={} queued client={} subpad={} len={}",
-                     now_us(), client_idx, sub_idx, len);
+                     now_us(), client_idx, sub_idx, safe_len);
 }
 
 void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet) {

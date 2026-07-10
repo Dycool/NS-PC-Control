@@ -21,6 +21,10 @@ MainWindow::MainWindow() {
     grid->setContentsMargins(16, 12, 16, 14);
     grid->setHorizontalSpacing(10);
     grid->setVerticalSpacing(8);
+    // Keep the form anchored to the top while rows are hidden/shown. Without
+    // this, a fixed-height window redistributes the spare vertical space and
+    // makes the remaining S2 controls look vertically centred.
+    grid->setAlignment(Qt::AlignTop);
 
     title = new QLabel("NS PC Control", this);
     QFont titleFont = title->font();
@@ -196,10 +200,19 @@ void MainWindow::updateUi() {
         for (int i = 0; i < 4; i++) g_amiiboScanPending[i].store(false);
     }
 
-    const int desiredHeight = platformHeight();
-    if (height() != desiredHeight) setFixedSize(platformWidth(), platformHeight());
     const bool singleS2 = connected && g_switch2ModeEnabled.load(std::memory_order_relaxed);
     for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(!singleS2 || i == 0);
+
+    // In S2 mode only P1 exists. Resize after hiding P2-P4 so the layout's
+    // preferred height reflects the visible controls instead of leaving a
+    // large empty area that Qt distributes between rows. Restore the original
+    // platform-specific height when disconnected or connected to an S1 server.
+    if (layout()) layout()->activate();
+    const int desiredHeight = singleS2
+        ? layout()->sizeHint().height()
+        : platformHeight();
+    if (width() != platformWidth() || height() != desiredHeight)
+        setFixedSize(platformWidth(), desiredHeight);
 
     if (!connected) {
         for (int i = 0; i < 4; i++) g_amiiboScanPending[i].store(false);
@@ -243,11 +256,12 @@ void MainWindow::onScanAmiiboClicked() {
     if (path.isEmpty()) return;
 
     QFileInfo fileInfo(path);
-    constexpr qint64 AMIIBO_FILE_SIZE = 540;
-    if (fileInfo.size() != AMIIBO_FILE_SIZE) {
+    constexpr qint64 AMIIBO_RAW_FILE_SIZE = static_cast<qint64>(ns::AMIIBO_RAW_DUMP_SIZE);
+    constexpr qint64 AMIIBO_EXTENDED_FILE_SIZE = static_cast<qint64>(ns::AMIIBO_EXTENDED_DUMP_SIZE);
+    if (fileInfo.size() != AMIIBO_RAW_FILE_SIZE && fileInfo.size() != AMIIBO_EXTENDED_FILE_SIZE) {
         QMessageBox::warning(this, "Invalid Amiibo File",
-            QString("Selected file is %1 bytes. A raw NTAG215 Amiibo dump must be exactly %2 bytes.")
-                .arg(fileInfo.size()).arg(AMIIBO_FILE_SIZE));
+            QString("Selected file is %1 bytes. Use a 540-byte raw NTAG215 dump, or a 572-byte dump with the 32-byte originality signature appended.")
+                .arg(fileInfo.size()));
         return;
     }
 

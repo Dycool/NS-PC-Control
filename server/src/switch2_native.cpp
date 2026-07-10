@@ -408,7 +408,9 @@ bool switch2_native_handle_vendor_command(int port,
                      s2_hex(c.first(8)), s2_hex(c.subspan(8)));
     }
 
-    std::array<uint8_t, 128> r{};
+    // NFC Read Buffer replies are 630 bytes in the real USB capture.
+    // Use dynamic storage so the complete vendor transfer is queued intact.
+    std::vector<uint8_t> r(8 + 622, 0);
     r[0] = id;
     r[1] = 0x01;
     r[2] = transport;
@@ -559,12 +561,9 @@ bool switch2_native_handle_vendor_command(int port,
                 const std::span<const uint8_t> nfc_data = c.subspan(8);
                 dl = fill_nfc_response_payload(sub, nfc_data, d, port);
 
-                // Captured Read Buffer replies use the data-bearing ACK form
-                // (10 78) rather than the ordinary header-only ACK (00 f8).
-                if (sub == 0x15 && dl != 0) {
-                    r[4] = 0x10;
-                    r[5] = 0x78;
-                }
+                // Real NFC replies, including the 630-byte 0x15 response,
+                // retain the ordinary 00 F8 ACK. USB bulk packetisation is
+                // handled by FunctionFS and must not alter the command header.
             }
             break;
         case 0x18:

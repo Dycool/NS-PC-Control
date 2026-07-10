@@ -5,6 +5,7 @@
 #include "stream_runtime.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <thread>
 #include <span>
@@ -139,17 +140,21 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
                     g_amiiboScanPending[ar.subpad] = requested;
                 }
             }
-        } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= (int)(sizeof(ns::AmiiboDataPacket) - 540 + 4)) {
+        } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= static_cast<int>(offsetof(ns::AmiiboDataPacket, data))) {
             ns::AmiiboDataPacket ad{};
             std::memcpy(&ad, buf, std::min((size_t)n, sizeof(ad)));
-            if (ad.subpad < 4) {
-                // Writeback from server (modified amiibo after game wrote via NFC 0x14) -> persist to .bin
+            const uint16_t amiibo_data_len = ad.data_len;
+            constexpr size_t amiibo_packet_header = offsetof(ns::AmiiboDataPacket, data);
+            const bool supported_size = amiibo_data_len == ns::AMIIBO_RAW_DUMP_SIZE
+                || amiibo_data_len == ns::AMIIBO_EXTENDED_DUMP_SIZE;
+            const bool complete_packet = static_cast<size_t>(n) >= amiibo_packet_header + amiibo_data_len;
+            if (ad.subpad < 4 && supported_size && complete_packet) {
+                // Writeback from server (modified Amiibo after NFC 0x14/0x08) -> persist to the selected dump.
                 QString p = g_amiiboPaths[ad.subpad];
-                if (!p.isEmpty() && ad.data_len > 0) {
+                if (!p.isEmpty()) {
                     QFile f(p);
                     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                        size_t wlen = std::min<size_t>(ad.data_len, 540);
-                        f.write(reinterpret_cast<const char*>(ad.data), wlen);
+                        f.write(reinterpret_cast<const char*>(ad.data), amiibo_data_len);
                         f.close();
                     }
                 }

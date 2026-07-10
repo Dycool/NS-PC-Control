@@ -304,7 +304,7 @@ void sendAmiiboData(uint8_t subpad, const QByteArray& data) {
     ns::AmiiboDataPacket pkt{};
     pkt.magic = ns::AMIIBO_DATA_MAGIC;
     pkt.subpad = subpad;
-    size_t dl = std::min<size_t>(data.size(), 540);
+    size_t dl = std::min<size_t>(data.size(), ns::AMIIBO_EXTENDED_DUMP_SIZE);
     pkt.data_len = static_cast<uint16_t>(dl);
     if (dl > 0) std::memcpy(pkt.data, data.constData(), dl);
     // Server accepts directly on magic match (no hmac verification for this control packet)

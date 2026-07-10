@@ -126,7 +126,7 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 pending_amiibo_data[s] = ns::AmiiboDataPacket{};
                 pending_amiibo_data[s].subpad = static_cast<uint8_t>(s);
                 pending_amiibo_data[s].data_len = c.amiibo_writeback_len[s];
-                std::memcpy(pending_amiibo_data[s].data, c.amiibo_writeback_data[s], std::min<size_t>(c.amiibo_writeback_len[s], 540));
+                std::memcpy(pending_amiibo_data[s].data, c.amiibo_writeback_data[s], std::min<size_t>(c.amiibo_writeback_len[s], ns::AMIIBO_EXTENDED_DUMP_SIZE));
                 has_amiibo_data[s] = true;
                 c.amiibo_writeback_pending[s] = false;
                 if (g_ctx.verbose)

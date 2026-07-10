@@ -292,12 +292,18 @@ struct AmiiboRequestPacket {
 } NS_PACKED_ATTR;
 
 static constexpr uint32_t AMIIBO_DATA_MAGIC = 0x4E534144u; // 'NSAD'
+static constexpr std::size_t AMIIBO_RAW_DUMP_SIZE = 540;
+static constexpr std::size_t AMIIBO_SIGNATURE_SIZE = 32;
+static constexpr std::size_t AMIIBO_EXTENDED_DUMP_SIZE = AMIIBO_RAW_DUMP_SIZE + AMIIBO_SIGNATURE_SIZE;
 struct AmiiboDataPacket {
     uint32_t magic = AMIIBO_DATA_MAGIC;
     uint8_t subpad = 0;
     uint16_t data_len = 0;
-    uint8_t data[540]{}; // NTAG215 Amiibo data
+    // 540-byte raw NTAG215 image, optionally followed by the 32-byte NTAG
+    // READ_SIG originality signature (the established 572-byte dump format).
+    uint8_t data[AMIIBO_EXTENDED_DUMP_SIZE]{};
 } NS_PACKED_ATTR;
+static_assert(sizeof(AmiiboDataPacket) == 4 + 1 + 2 + AMIIBO_EXTENDED_DUMP_SIZE);
 // ── Unified UDP packet ───────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;

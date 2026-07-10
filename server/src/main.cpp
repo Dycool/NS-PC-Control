@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -488,6 +489,11 @@ int main(int argc, char** argv) {
                     // multi-byte members before formatting/using them so C++ does
                     // not try to bind a reference to a potentially unaligned field.
                     const uint16_t amiibo_data_len = ad.data_len;
+                    constexpr size_t amiibo_packet_header = offsetof(ns::AmiiboDataPacket, data);
+                    const bool amiibo_size_supported = amiibo_data_len == ns::AMIIBO_RAW_DUMP_SIZE
+                        || amiibo_data_len == ns::AMIIBO_EXTENDED_DUMP_SIZE;
+                    const bool amiibo_packet_complete = bytes >= 0
+                        && static_cast<size_t>(bytes) >= amiibo_packet_header + amiibo_data_len;
                     if (g_ctx.verbose) {
                         char addrbuf[INET_ADDRSTRLEN] = {};
                         inet_ntop(AF_INET, &sender.sin_addr, addrbuf, sizeof(addrbuf));
@@ -495,6 +501,15 @@ int main(int argc, char** argv) {
                                      now_us(), addrbuf, ntohs(sender.sin_port), bytes,
                                      static_cast<unsigned>(ad.subpad),
                                      static_cast<unsigned>(amiibo_data_len));
+                    }
+                    if (!amiibo_size_supported || !amiibo_packet_complete) {
+                        if (g_ctx.verbose) {
+                            std::println(stderr,
+                                         "[s2][nfc][udp-rx] upload rejected before routing: supported_size={} complete_packet={} header_bytes={} declared_data_len={} packet_bytes={}",
+                                         amiibo_size_supported, amiibo_packet_complete,
+                                         amiibo_packet_header, static_cast<unsigned>(amiibo_data_len), bytes);
+                        }
+                        continue;
                     }
                     int client_idx = -1;
                     for (int i = 0; i < MAX_CLIENTS; ++i) {

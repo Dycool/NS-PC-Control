@@ -122,7 +122,7 @@ struct ClientSession {
     uint16_t amiibo_request_seq[4] = {};
     bool amiibo_writeback_pending[4] = {};
     uint16_t amiibo_writeback_len[4] = {};
-    uint8_t amiibo_writeback_data[4][540] = {};
+    uint8_t amiibo_writeback_data[4][ns::AMIIBO_EXTENDED_DUMP_SIZE] = {};
 };
 
 
