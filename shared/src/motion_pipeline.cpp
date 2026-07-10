@@ -131,7 +131,7 @@ uint64_t MotionPipeline::interpolation_delay_us() const {
     if (gyro_.available) fastest_rate = std::max(fastest_rate, gyro_.rate_hz);
     if (fastest_rate <= 0.0f) return OUTPUT_SAMPLE_INTERVAL_US;
     const uint64_t period = static_cast<uint64_t>(1'000'000.0f / fastest_rate);
-    return std::clamp(period, 2'000ULL, 10'000ULL);
+    return std::clamp<uint64_t>(period, 2'000, 10'000);
 }
 
 bool MotionPipeline::sample(uint64_t now_us, MotionReport out[3]) {

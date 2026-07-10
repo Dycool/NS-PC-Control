@@ -320,14 +320,6 @@ static int s2_vendor_endpoint_number_for_port(int port) {
     return port * 2 + 2;
 }
 
-static int s2_port_for_interface(uint16_t w_index) {
-    // Each S2 FunctionFS instance has its own local HID/vendor interface pair.
-    // FunctionFS passes local interface numbers to this handler, so route EP0
-    // requests to the function id supplied by the caller.
-    (void)w_index;
-    return 0;
-}
-
 static const char* gadget_id_vendor() {
     return gadget_uses_hori_identity() ? "0x0F0D" : "0x057e";
 }
