@@ -29,10 +29,10 @@ constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
 // Number of slots to probe when the primary hash slot holds a different IP.
 constexpr int RATE_PROBE = 4;
-// Switch activity is confirmed only by host-originated HID OUT/protocol RX.
-// The Switch answers the Pro Controller protocol frequently while awake; when
-// that RX stream stops after having been active, treat the console as suspended.
-// Writes to /dev/hidg* are intentionally not used as wake/sleep evidence.
+// Debounce for native S2 FunctionFS suspend/disable events. It is also retained
+// for the legacy host-originated HID OUT/protocol-RX fallback used without the
+// native lifecycle signal. Writes to the gadget remain intentionally excluded
+// from wake/sleep evidence.
 constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 1'500'000ULL;
 // A few RX packets can appear while the Switch is entering sleep. Do not re-arm
 // suspend disconnects until the Switch has answered continuously for this long.
@@ -168,6 +168,12 @@ struct ServerContext {
     std::atomic<bool> switch2_wake_adv_running{false};
     std::atomic<uint64_t> switch2_last_wake_adv_us{0};
     std::atomic<bool> switch2_usb_host_connected{false};
+    // Native S2 FunctionFS reports the USB bus lifecycle directly.  Do not
+    // infer suspend from an idle HID/vendor OUT stream: an awake S2 can be
+    // completely quiet after its initial handshake.
+    std::atomic<bool> switch2_usb_lifecycle_seen{false};
+    std::atomic<bool> switch2_usb_host_suspended{false};
+    std::atomic<uint64_t> switch2_usb_inactive_since_us{0};
     std::atomic<uint64_t> switch2_last_usb_activity_us{0};
     std::atomic<uint64_t> switch2_rx_stream_since_us{0};
     std::atomic<bool> switch2_rx_stream_stable{false};
@@ -202,6 +208,7 @@ extern ServerContext g_ctx;
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then);
 bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit);
 void mark_switch2_usb_activity(uint64_t now = 0);
+void mark_switch2_usb_host_resumed(uint64_t now = 0);
 void clear_switch2_usb_activity();
 void mark_switch2_usb_host_disconnected();
 void rearm_switch2_wake_after_client_disconnect();

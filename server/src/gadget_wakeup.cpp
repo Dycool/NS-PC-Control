@@ -181,6 +181,7 @@ struct FfsPortState {
     int ep0_fd = -1;
     bool descriptors_written = false;
     bool host_enabled = false;
+    bool host_suspended = false;
     uint8_t idle_rate = 0;
     uint8_t protocol = 1;
     std::deque<std::vector<uint8_t>> control_reports;
@@ -558,6 +559,7 @@ static void close_functionfs_ep0s() {
         p.ep0_fd = -1;
         p.descriptors_written = false;
         p.host_enabled = false;
+        p.host_suspended = false;
         p.control_reports.clear();
         p.idle_rate = 0;
         p.protocol = 1;
@@ -844,6 +846,16 @@ static void pump_functionfs_ep0_events(int id) {
         if (r == 0) return;
         const size_t count = static_cast<size_t>(r) / sizeof(usb_functionfs_event);
         for (size_t e = 0; e < count; ++e) {
+            auto refresh_s2_host_state = [] {
+                if (!gadget_uses_switch2_identity()) return;
+                bool any_awake = false;
+                for (int p = 0; p < switch2_virtual_port_count(); ++p) {
+                    any_awake = any_awake || (g_ffs_ports[p].host_enabled
+                                               && !g_ffs_ports[p].host_suspended);
+                }
+                if (any_awake) mark_switch2_usb_host_resumed();
+                else mark_switch2_usb_host_disconnected();
+            };
             switch (events[e].type) {
                 case FUNCTIONFS_SETUP:
                     handle_functionfs_setup(id, events[e].u.setup);
@@ -853,25 +865,39 @@ static void pump_functionfs_ep0_events(int id) {
                     if (g_ctx.verbose && g_ffs_ports[id].host_enabled)
                         std::println("[ffs] port {} host {}", id + 1,
                                      events[e].type == FUNCTIONFS_DISABLE ? "disabled interface" : "unbound gadget");
-                    if (gadget_uses_switch2_identity()) {
-                        for (int p = 0; p < switch2_virtual_port_count(); ++p) g_ffs_ports[p].host_enabled = false;
-                    } else {
-                        g_ffs_ports[id].host_enabled = false;
-                    }
-                    mark_switch2_usb_host_disconnected();
+                    g_ffs_ports[id].host_enabled = false;
+                    g_ffs_ports[id].host_suspended = false;
+                    refresh_s2_host_state();
                     break;
                 case FUNCTIONFS_ENABLE:
                     if (g_ctx.verbose && !g_ffs_ports[id].host_enabled)
                         std::println("[ffs] port {} host enabled interface (configuration set)", id + 1);
-                    if (gadget_uses_switch2_identity()) {
-                        for (int p = 0; p < switch2_virtual_port_count(); ++p) g_ffs_ports[p].host_enabled = true;
-                    } else {
-                        g_ffs_ports[id].host_enabled = true;
-                    }
+                    g_ffs_ports[id].host_enabled = true;
+                    g_ffs_ports[id].host_suspended = false;
+                    refresh_s2_host_state();
                     break;
                 case FUNCTIONFS_BIND:
+                    break;
                 case FUNCTIONFS_SUSPEND:
+                    // USB suspend/resume is device-wide even though each
+                    // FunctionFS instance receives its own notification.
+                    if (gadget_uses_switch2_identity()) {
+                        for (int p = 0; p < switch2_virtual_port_count(); ++p)
+                            g_ffs_ports[p].host_suspended = true;
+                    } else {
+                        g_ffs_ports[id].host_suspended = true;
+                    }
+                    refresh_s2_host_state();
+                    break;
                 case FUNCTIONFS_RESUME:
+                    if (gadget_uses_switch2_identity()) {
+                        for (int p = 0; p < switch2_virtual_port_count(); ++p)
+                            g_ffs_ports[p].host_suspended = false;
+                    } else {
+                        g_ffs_ports[id].host_suspended = false;
+                    }
+                    refresh_s2_host_state();
+                    break;
                 default:
                     break;
             }
