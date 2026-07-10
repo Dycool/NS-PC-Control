@@ -169,6 +169,7 @@ void apply_controller_type_report(uint8_t type, uint8_t extra_buttons, uint8_t* 
 void apply_s2_controller_type_report(uint8_t type, uint8_t* buf);
 
 bool is_amiibo_placed(int port);
+uint8_t amiibo_nfc_report_state(int port);
 void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len);
 void check_amiibo_expiry(int port);
 

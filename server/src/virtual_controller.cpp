@@ -319,6 +319,25 @@ static bool g_amiibo_modified[HID_PORT_COUNT] = {};
 //   0x05 = write committed, 0x07 + detail 0x41 = no tag / terminal state.
 static uint8_t g_amiibo_nfc_status[HID_PORT_COUNT] = {0x07, 0x07, 0x07, 0x07};
 static uint8_t g_amiibo_nfc_detail[HID_PORT_COUNT] = {0x41, 0x41, 0x41, 0x41};
+// Report 0x09 byte 13 (and Joy-Con 2 R report 0x08 byte 15) is not a
+// boolean "tag present" bit. The real controller exposes a 3-bit NFC event
+// state that advances modulo 8 whenever the NFC processor reaches a new
+// stage. The console waits for these transitions before issuing 0x05 status
+// requests. Keeping this byte fixed at 0x01 lets discovery succeed once, then
+// stalls the second scan forever.
+enum class NfcHidEventReason : uint8_t {
+    None = 0,
+    TagPresented,
+    ScanReady,
+    OperationReady,
+    WriteComplete,
+    Error,
+};
+static uint8_t g_amiibo_hid_state[HID_PORT_COUNT] = {};
+static bool g_amiibo_hid_event_pending[HID_PORT_COUNT] = {};
+static std::chrono::steady_clock::time_point g_amiibo_hid_event_due[HID_PORT_COUNT];
+static NfcHidEventReason g_amiibo_hid_event_reason[HID_PORT_COUNT] = {};
+static bool g_amiibo_scan_active[HID_PORT_COUNT] = {};
 static bool g_amiibo_write_mode[HID_PORT_COUNT] = {};
 static bool g_amiibo_write_committed[HID_PORT_COUNT] = {};
 static std::array<uint8_t, 9> g_amiibo_operation_metadata[HID_PORT_COUNT]{};
@@ -357,6 +376,52 @@ std::vector<uint8_t> export_amiibo_locked(int port) {
     return out;
 }
 
+const char* nfc_hid_event_reason_name(NfcHidEventReason reason) {
+    switch (reason) {
+    case NfcHidEventReason::TagPresented:   return "tag-presented";
+    case NfcHidEventReason::ScanReady:      return "scan-ready";
+    case NfcHidEventReason::OperationReady: return "operation-ready";
+    case NfcHidEventReason::WriteComplete:  return "write-complete";
+    case NfcHidEventReason::Error:          return "error";
+    case NfcHidEventReason::None:           return "none";
+    }
+    return "unknown";
+}
+
+void advance_amiibo_hid_state_locked(int port, NfcHidEventReason reason) {
+    const uint8_t previous = g_amiibo_hid_state[port];
+    g_amiibo_hid_state[port] = static_cast<uint8_t>((previous + 1u) & 0x07u);
+    g_amiibo_hid_event_pending[port] = false;
+    g_amiibo_hid_event_reason[port] = NfcHidEventReason::None;
+    if (g_ctx.verbose) {
+        std::println("[s2][nfc][hid-state] t_us={} port={} transition={}→{} reason={}",
+                     now_us(), port, previous, g_amiibo_hid_state[port],
+                     nfc_hid_event_reason_name(reason));
+    }
+}
+
+void signal_amiibo_hid_state_locked(int port, NfcHidEventReason reason) {
+    advance_amiibo_hid_state_locked(port, reason);
+}
+
+void schedule_amiibo_hid_state_locked(int port, std::chrono::milliseconds delay,
+                                      NfcHidEventReason reason) {
+    g_amiibo_hid_event_pending[port] = true;
+    g_amiibo_hid_event_due[port] = std::chrono::steady_clock::now() + delay;
+    g_amiibo_hid_event_reason[port] = reason;
+    if (g_ctx.verbose) {
+        std::println("[s2][nfc][hid-state] t_us={} port={} scheduled current={} next={} delay_ms={} reason={}",
+                     now_us(), port, g_amiibo_hid_state[port],
+                     static_cast<unsigned>((g_amiibo_hid_state[port] + 1u) & 0x07u),
+                     delay.count(), nfc_hid_event_reason_name(reason));
+    }
+}
+
+void cancel_amiibo_hid_state_event_locked(int port) {
+    g_amiibo_hid_event_pending[port] = false;
+    g_amiibo_hid_event_reason[port] = NfcHidEventReason::None;
+}
+
 void reset_amiibo_transaction_locked(int port) {
     g_amiibo_nfc_status[port] = 0x09;
     g_amiibo_nfc_detail[port] = 0x00;
@@ -368,6 +433,8 @@ void reset_amiibo_transaction_locked(int port) {
 }
 
 void clear_amiibo_locked(int port) {
+    cancel_amiibo_hid_state_event_locked(port);
+    g_amiibo_scan_active[port] = false;
     g_amiibo_data[port].clear();
     g_amiibo_signature[port].fill(0);
     g_amiibo_signature_from_file[port] = false;
@@ -388,6 +455,17 @@ bool is_amiibo_placed(int port) {
     if (port < 0 || port >= HID_PORT_COUNT) return false;
     std::lock_guard<std::mutex> lk(g_amiibo_mtx);
     return !g_amiibo_data[port].empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
+}
+
+uint8_t amiibo_nfc_report_state(int port) {
+    if (port < 0 || port >= HID_PORT_COUNT) return 0;
+    std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+    if (g_amiibo_hid_event_pending[port]
+            && std::chrono::steady_clock::now() >= g_amiibo_hid_event_due[port]) {
+        const auto reason = g_amiibo_hid_event_reason[port];
+        advance_amiibo_hid_state_locked(port, reason);
+    }
+    return g_amiibo_hid_state[port];
 }
 constexpr size_t SPI_FLASH_SIZE = 0x200000; // 2MB per research for S2, 64k for S1 compatibility
 uint8_t g_spi_flash[4][SPI_FLASH_SIZE];
@@ -470,6 +548,9 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
         g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(15);
         g_amiibo_modified[port] = false;
         reset_amiibo_transaction_locked(port);
+        // Physical placement is the first NFC processor event. This transition
+        // is what caused the console to issue the first 0x05 in the capture.
+        signal_amiibo_hid_state_locked(port, NfcHidEventReason::TagPresented);
     }
     if (g_ctx.verbose) {
         const auto uid = ns::s2nfc::uid_from_raw(raw);
@@ -1102,7 +1183,8 @@ static void build_s2_joycon_report(const HIDReport& src,
 
     out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
     out[9] = 0x00; // unknown; mouse data at 0x0A..0x0E intentionally disabled for now
-    out[15] = (right && controller_port_supports_amiibo(port) && is_amiibo_placed(port)) ? 0x01 : 0x00;
+    out[15] = (right && controller_port_supports_amiibo(port))
+        ? amiibo_nfc_report_state(port) : 0x00;
     write_s2_joycon_motion_block(out, 16, 17, motion_samples, has_motion,
                                   imu_enabled, motion_time_us, port, right);
 }
@@ -1153,7 +1235,8 @@ void build_s2_pro_report(const HIDReport& src,
     pack_stick_12(out + 9, src.input.rx, src.input.ry);
 
     out[12] = 0x30;
-    out[13] = (controller_port_supports_amiibo(port) && is_amiibo_placed(port)) ? 0x01 : 0x00;
+    out[13] = controller_port_supports_amiibo(port)
+        ? amiibo_nfc_report_state(port) : 0x00;
     out[14] = 0x00;
     write_s2_pro_motion_block(out, 15, 16, motion_samples, has_motion,
                               imu_enabled, motion_time_us, port);
@@ -1396,9 +1479,11 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     }
 
     if (g_ctx.verbose) {
-        std::println("[s2][nfc][state] t_us={} port={} sub=0x{:02x} request_len={} request_data={} placed={} raw_size={} status=0x{:02x} detail=0x{:02x} mode={} committed={} coverage={}/{} expiry_remaining_ms={} modified={} signature_source={}",
+        std::println("[s2][nfc][state] t_us={} port={} sub=0x{:02x} request_len={} request_data={} placed={} raw_size={} status=0x{:02x} detail=0x{:02x} hid_state={} hid_event_pending={} hid_event_reason={} mode={} committed={} coverage={}/{} expiry_remaining_ms={} modified={} signature_source={}",
                      now_us(), port, nfc_sub, cmd_data.size(), nfc_hex(cmd_data), placed,
                      raw.size(), g_amiibo_nfc_status[port], g_amiibo_nfc_detail[port],
+                     g_amiibo_hid_state[port], g_amiibo_hid_event_pending[port],
+                     nfc_hid_event_reason_name(g_amiibo_hid_event_reason[port]),
                      g_amiibo_write_mode[port] ? "write" : "read",
                      g_amiibo_write_committed[port], write_coverage_count(port),
                      ns::s2nfc::WRITE_STAGING_SIZE, nfc_expiry_remaining_ms(port, now),
@@ -1416,9 +1501,14 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
 
     switch (nfc_sub) {
     case 0x03: { // Enter NFC scan mode.
+        g_amiibo_scan_active[port] = true;
         if (placed && !g_amiibo_write_mode[port] && !g_amiibo_write_committed[port]) {
             g_amiibo_nfc_status[port] = 0x09;
             g_amiibo_nfc_detail[port] = 0x00;
+            // In the successful PC2 capture, the HID NFC state advances about
+            // 40 ms after this scan command. The console then issues 0x05.
+            schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(40),
+                                             NfcHidEventReason::ScanReady);
         }
         request_state = placed ? 0 : 1;
         if (g_ctx.verbose) {
@@ -1429,6 +1519,11 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     }
 
     case 0x04: { // Leave NFC scan mode.
+        g_amiibo_scan_active[port] = false;
+        if (g_amiibo_hid_event_pending[port]
+                && g_amiibo_hid_event_reason[port] == NfcHidEventReason::ScanReady) {
+            cancel_amiibo_hid_state_event_locked(port);
+        }
         request_state = 0;
         // The first 0x04 in the observed flow only closes tag discovery while
         // status is still 0x09. A later 0x04 closes an actual read (0x04) or
@@ -1497,6 +1592,11 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             g_amiibo_nfc_detail[port] = 0x00;
             g_amiibo_write_mode[port] = write_mode;
             g_amiibo_write_committed[port] = false;
+            // The NFC processor signals that the read/write operation is ready
+            // by advancing the HID NFC state. The host waits for this before
+            // polling 0x05 and requesting 0x15.
+            schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(40),
+                                             NfcHidEventReason::OperationReady);
             std::copy_n(cmd_data.begin() + 10, 9, g_amiibo_operation_metadata[port].begin());
             g_amiibo_write_staging[port].assign(ns::s2nfc::WRITE_STAGING_SIZE, 0);
             g_amiibo_write_coverage[port].fill(0);
@@ -1504,6 +1604,8 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             g_amiibo_nfc_status[port] = 0x07;
             g_amiibo_nfc_detail[port] = 0x41;
             g_amiibo_write_mode[port] = false;
+            schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(1),
+                                             NfcHidEventReason::Error);
         }
         if (g_ctx.verbose) {
             std::println("[s2][nfc][parse] sub=0x06 begin-operation header-only-ack valid={} placed={} mode={} status=0x{:02x}{:02x} request={}{}",
@@ -1616,6 +1718,11 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
                 g_amiibo_write_mode[port] = false;
                 g_amiibo_write_committed[port] = true;
                 g_amiibo_modified[port] = true;
+                // Real tag writes take substantially longer than scan/read
+                // setup. The capture advances the HID state roughly 700 ms
+                // after 0x08, at which point the console polls status=0x05.
+                schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(700),
+                                                 NfcHidEventReason::WriteComplete);
                 immediate_writeback = export_amiibo_locked(port);
             } else {
                 g_amiibo_nfc_status[port] = 0x07;

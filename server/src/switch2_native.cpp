@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -60,6 +61,14 @@ struct NativeState {
 std::array<NativeState, HID_PORT_COUNT> g_state;
 std::once_flag g_init_once;
 std::mutex g_mtx;
+
+bool bench_stream_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NS_S2_BENCH_STREAM");
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
 
 constexpr std::array<uint8_t, 16> kDeviceKeyB1 = {
     0x5C, 0xF6, 0xEE, 0x79, 0x2C, 0xDF, 0x05, 0xE1,
@@ -595,6 +604,7 @@ bool switch2_native_handle_vendor_command(int port,
 }
 
 bool switch2_native_streaming_enabled(int port) {
+    if (bench_stream_enabled()) return true;
     std::lock_guard<std::mutex> lk(g_mtx);
     return state_for_port(port).streaming;
 }
@@ -605,6 +615,7 @@ uint8_t switch2_native_selected_report(int port) {
 }
 
 uint32_t switch2_native_enabled_features(int port) {
+    if (bench_stream_enabled()) return DEFAULT_FEATURE_MASK;
     std::lock_guard<std::mutex> lk(g_mtx);
     return state_for_port(port).enabled_features;
 }
