@@ -143,9 +143,10 @@ int32_t accel_q16(double raw_counts) {
     return static_cast<int32_t>(std::clamp(rounded, min_q16, max_q16));
 }
 
-int64_t joycon2_candidate_from_gyro(double gyro_raw, double raw_per_code) {
-    return std::llround(gyro_raw / raw_per_code);
-}
+// Native Joy-Con 2 gyro shares the raw sensor unit with MotionReport
+// (16.384 counts per degree/second measured as ~16.4 by gravity-integration),
+// so gyro values pass through 1:1. The transmitted fields clamp at +/-500 dps.
+constexpr int64_t JOYCON2_GYRO_CLAMP_COUNTS = 8191;  // int14 full scale
 
 void mark_s2_motion_inactive(int port) {
     std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
@@ -784,7 +785,6 @@ static void write_s2_joycon_motion_block(uint8_t* out,
         return;
     }
 
-    const S2AveragedMotion motion = average_s2_motion(motion_samples, has_motion);
     const int motion_port = s2_motion_port(port);
     const uint8_t type = right ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L;
 
@@ -806,23 +806,61 @@ static void write_s2_joycon_motion_block(uint8_t* out,
     std::memcpy(dst + 0x04, JOYCON2_STATIONARY_PAYLOAD.data(), JOYCON2_STATIONARY_PAYLOAD.size());
     uint8_t* payload = dst + 0x04;
 
-    // Confirmed by a synchronized Right-native/Left-common grip capture.
-    put_bits_lsb(payload, 36, 68, 14, pack_signed_field(std::llround(motion.accel[0]), 14));
-    put_bits_lsb(payload, 36, 82, 14, pack_signed_field(std::llround(motion.accel[1]), 14));
-    put_bits_lsb(payload, 36, 96, 14, pack_signed_field(std::llround(motion.accel[2]), 14));
+    // Decoded native Joy-Con 2 layout (validated against synchronized
+    // dual-controller grip captures and guided single-axis captures at
+    // cross-sensor correlation 0.996-0.999; see
+    // docs/switch2_native_motion_map_v2.md in the RE workspace):
+    //
+    //   bit   1        1 = normal rate, 0 = gyro at/near the +/-500 dps clamp
+    //   bits 68..110   accel sample A (oldest)  3 x int14, 4096 counts/g
+    //   bits 110..149  gyro  sample M (middle)  3 x int13, value = counts/2
+    //   bits 149..188  accel sample B (middle)  3 x int13, value = counts/2
+    //   bits 188..230  gyro  sample G (newest)  3 x int14, 16.4 counts/dps
+    //   bits 230..272  accel sample C (newest)  3 x int14
+    //
+    // The three client MotionReport samples map naturally onto the three
+    // sample slots (oldest / middle / newest). MotionReport already uses the
+    // raw sensor units (4096 counts/g, 16.384 counts/dps), so values pass
+    // through 1:1 apart from the half-resolution middle fields.
+    const MotionReport* s = motion_samples;
+    MotionReport zero{};
+    MotionReport smp[3];
+    if (has_motion && s) {
+        smp[0] = s[0]; smp[1] = s[1]; smp[2] = s[2];
+    } else {
+        zero.az = 4096;  // 1 g face-up so a motionless client reads as resting
+        smp[0] = zero; smp[1] = zero; smp[2] = zero;
+    }
 
-    // Experimental gyro localization. These bit ranges correlate strongly
-    // with the common gyro stream, but the complete predictor/delta codec is
-    // not yet decoded. Keep the writes narrow so unknown state stays intact.
-    constexpr double X_RAW_PER_CODE = 5.85762954;
-    constexpr double Y_RAW_PER_CODE = 0.85240071;
-    constexpr double Z_RAW_PER_CODE = 3.45282736;
-    put_bits_lsb(payload, 36, 112, 9,
-                 pack_signed_field(joycon2_candidate_from_gyro(motion.gyro[0], X_RAW_PER_CODE), 9));
-    put_bits_lsb(payload, 36, 202, 10,
-                 pack_signed_field(joycon2_candidate_from_gyro(motion.gyro[1], Y_RAW_PER_CODE), 10));
-    put_bits_lsb(payload, 36, 218, 10,
-                 pack_signed_field(joycon2_candidate_from_gyro(motion.gyro[2], Z_RAW_PER_CODE), 10));
+    const int16_t acc_a[3] = {smp[0].ax, smp[0].ay, smp[0].az};
+    const int16_t acc_b[3] = {smp[1].ax, smp[1].ay, smp[1].az};
+    const int16_t acc_c[3] = {smp[2].ax, smp[2].ay, smp[2].az};
+    const int16_t gyr_m[3] = {smp[1].gx, smp[1].gy, smp[1].gz};
+    const int16_t gyr_g[3] = {smp[2].gx, smp[2].gy, smp[2].gz};
+
+    bool clipped = false;
+    for (size_t axis = 0; axis < 3; ++axis) {
+        // accel A (int14 @68), gyro M (int13 @110, counts/2),
+        // accel B (int13 @149, counts/2), gyro G (int14 @188), accel C (int14 @230)
+        put_bits_lsb(payload, 36, 68u + 14u * axis, 14,
+                     pack_signed_field(acc_a[axis], 14));
+        put_bits_lsb(payload, 36, 110u + 13u * axis, 13,
+                     pack_signed_field(std::llround(gyr_m[axis] / 2.0), 13));
+        put_bits_lsb(payload, 36, 149u + 13u * axis, 13,
+                     pack_signed_field(std::llround(acc_b[axis] / 2.0), 13));
+        put_bits_lsb(payload, 36, 188u + 14u * axis, 14,
+                     pack_signed_field(gyr_g[axis], 14));
+        put_bits_lsb(payload, 36, 230u + 14u * axis, 14,
+                     pack_signed_field(acc_c[axis], 14));
+        if (std::abs(static_cast<int64_t>(gyr_g[axis])) >= JOYCON2_GYRO_CLAMP_COUNTS ||
+            std::abs(static_cast<int64_t>(gyr_m[axis])) >= JOYCON2_GYRO_CLAMP_COUNTS) {
+            clipped = true;
+        }
+    }
+
+    // bit 0 is always 1 in captures; bit 1 flags proximity to the gyro clamp.
+    put_bits_lsb(payload, 36, 0, 1, 1u);
+    put_bits_lsb(payload, 36, 1, 1, clipped ? 0u : 1u);
 }
 
 static void build_s2_joycon_report(const HIDReport& src,
