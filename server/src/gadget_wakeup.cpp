@@ -645,6 +645,11 @@ static bool read_ep0_payload(int fd, std::vector<uint8_t>& payload, size_t len) 
     return true;
 }
 
+// FunctionFS ep0 semantics: a wrong-direction I/O on a pending setup is how
+// userspace requests a STALL. The status stage of an IN setup is completed by
+// the data write; a zero-length OUT setup must be acked with a zero-length
+// READ — writing there stalls the request (the console retries 4x, then
+// silently abandons the controller).
 static bool ep0_write_status(int fd) {
     for (int attempts = 0; attempts < 4; ++attempts) {
         ssize_t w = write(fd, "", 0);
@@ -657,6 +662,25 @@ static bool ep0_write_status(int fd) {
         return false;
     }
     return false;
+}
+
+static bool ep0_read_status(int fd) {
+    for (int attempts = 0; attempts < 4; ++attempts) {
+        ssize_t r = read(fd, nullptr, 0);
+        if (r >= 0) return true;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            struct pollfd pfd{fd, POLLIN, 0};
+            if (poll(&pfd, 1, 50) > 0) continue;
+        }
+        return false;
+    }
+    return false;
+}
+
+// Ack a setup with no data stage to transfer, honoring the setup's direction.
+static bool ep0_ack_status(int fd, bool dir_in) {
+    return dir_in ? ep0_write_status(fd) : ep0_read_status(fd);
 }
 
 static bool ep0_write_data(int fd, const uint8_t* data, size_t len, size_t limit) {
@@ -696,12 +720,19 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
         std::vector<uint8_t> response;
         bool status_only = false;
         if (switch2_native_handle_ep0_request(id, ctrl, response, status_only)) {
-            if (!dir_in && length > 0) {
-                std::vector<uint8_t> discard;
-                read_ep0_payload(st.ep0_fd, discard, length);
+            (void)status_only;
+            if (!dir_in) {
+                // Reading the data stage (or a zero-length read for wLength=0)
+                // completes an OUT setup; writing here would STALL it.
+                if (length > 0) {
+                    std::vector<uint8_t> discard;
+                    read_ep0_payload(st.ep0_fd, discard, length);
+                } else {
+                    ep0_read_status(st.ep0_fd);
+                }
+            } else {
+                ep0_write_data(st.ep0_fd, response.data(), response.size(), length);
             }
-            if (status_only) ep0_write_status(st.ep0_fd);
-            else ep0_write_data(st.ep0_fd, response.data(), response.size(), length);
             return;
         }
     }
@@ -745,7 +776,7 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
         }
         // SET_INTERFACE / CLEAR_FEATURE / SET_FEATURE etc. are safe to ack here
         // because the composite core owns the real configuration state.
-        ep0_write_status(st.ep0_fd);
+        ep0_ack_status(st.ep0_fd, dir_in);
         return;
     }
 
@@ -773,19 +804,19 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
                     if (read_ep0_payload(st.ep0_fd, payload, length)) queue_control_report(target_port, value, payload);
                     return;
                 }
-                ep0_write_status(st.ep0_fd);
+                ep0_read_status(st.ep0_fd);
                 return;
             }
             case 0x0A: // SET_IDLE
                 st.idle_rate = static_cast<uint8_t>(value >> 8);
-                ep0_write_status(st.ep0_fd);
+                ep0_read_status(st.ep0_fd);
                 return;
             case 0x0B: // SET_PROTOCOL
                 st.protocol = static_cast<uint8_t>(value & 0xFF);
-                ep0_write_status(st.ep0_fd);
+                ep0_read_status(st.ep0_fd);
                 return;
             default:
-                ep0_write_status(st.ep0_fd);
+                ep0_ack_status(st.ep0_fd, dir_in);
                 return;
         }
     }
@@ -795,7 +826,7 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
         read_ep0_payload(st.ep0_fd, discard, length);
         return;
     }
-    ep0_write_status(st.ep0_fd);
+    ep0_ack_status(st.ep0_fd, dir_in);
 }
 
 static void pump_functionfs_ep0_events(int id) {
