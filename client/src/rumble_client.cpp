@@ -1,4 +1,5 @@
 #include "rumble_client.hpp"
+#include "audio_client.hpp"
 #include "input_settings.hpp"
 #include "udp_protocol.hpp"
 #include "macro_client.hpp"
@@ -18,6 +19,8 @@ static void apply_server_info_reply(const ns::ServerInfoReply& reply) {
     g_serverLastReplyUs.store(ns::now_us());
     g_switch2ModeEnabled.store((reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH2_MODE) != 0,
                                std::memory_order_relaxed);
+    g_switch2AudioSupported.store((reply.reserved[0] & ns::SERVER_INFO_FLAG_S2_AUDIO) != 0,
+                                  std::memory_order_relaxed);
     g_horiModeEnabled.store((reply.reserved[0] & ns::SERVER_INFO_FLAG_HORI_MODE) != 0,
                             std::memory_order_relaxed);
     if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
@@ -84,7 +87,8 @@ void RumbleManager::set_output(int slot, uint8_t low, uint8_t high, uint32_t dur
     states[slot].last_controller = pad_idx;
 }
 
-void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_for_slot[4]) {
+void pump_udp_replies(SOCKET sock, RumbleManager& rumble, S2AudioClient& audio,
+                      const uint8_t hmac_key[32], const int controller_for_slot[4]) {
     uint8_t buf[1024];
     for (;;) {
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, nullptr, nullptr);
@@ -93,6 +97,10 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
 
         uint32_t magic = 0;
         std::memcpy(&magic, buf, sizeof(magic));
+
+        if (audio.handle_packet(buf, static_cast<size_t>(n), hmac_key)) {
+            continue;
+        }
 
         if (magic == ns::SERVER_INFO_MAGIC && n == sizeof(ns::ServerInfoReply)) {
             ns::ServerInfoReply reply{};

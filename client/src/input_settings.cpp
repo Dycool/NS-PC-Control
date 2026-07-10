@@ -1,6 +1,7 @@
 #include "input_settings.hpp"
 #include "macro_client.hpp"
 #include "mouse_input.hpp"
+#include "stream_runtime.hpp"
 #include "shared/macros.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -15,13 +16,22 @@ std::atomic<int> g_keyboardMode{KB_OFF};
 std::atomic<bool> g_keyboardInputSuspended{false};
 std::atomic<bool> g_gyroEnabled{true};
 std::atomic<bool> g_rumbleEnabled{true};
+std::atomic<bool> g_switch2AudioEnabled{false};
+std::atomic<bool> g_switch2MicrophoneEnabled{false};
 std::atomic<bool> g_homeShortcutEnabled{true};
 std::atomic<bool> g_captureShortcutEnabled{true};
 std::atomic<bool> g_mouseModeEnabled{false};
+std::atomic<bool> g_joyconMouseModeEnabled{false};
 std::atomic<double> g_mouseSensitivity{1.0};
 std::atomic<int> g_controllerType{ns::CONTROLLER_TYPE_PRO};
 std::atomic<bool> g_joyconHorizontalMode{false};
 std::atomic<bool> g_switch2ModeEnabled{false}; // Runtime server-selected mode, not saved locally.
+std::atomic<bool> g_switch2AudioSupported{false}; // Runtime server capability, not saved locally.
+namespace {
+std::mutex g_switch2AudioDeviceMutex;
+std::string g_switch2PlaybackDevice = S2_AUDIO_DEVICE_DEFAULT;
+std::string g_switch2MicrophoneDevice = S2_AUDIO_DEVICE_DEFAULT;
+}
 std::atomic<bool> g_horiModeEnabled{false};    // Runtime server-selected mode, not saved locally.
 std::unordered_map<std::string, std::string> g_keyBindings;
 std::mutex g_keyBindingsMutex;
@@ -35,6 +45,20 @@ std::atomic<bool> g_serverProfileUnsupportedDisconnect{false};
 std::atomic<bool> g_serverProbeFull{false};
 std::mutex g_kbCacheMutex;
 std::unordered_map<std::string, bool> g_kbStateCache;
+
+
+std::pair<std::string, std::string> switch2_audio_device_selections() {
+    std::lock_guard<std::mutex> lk(g_switch2AudioDeviceMutex);
+    return {g_switch2PlaybackDevice, g_switch2MicrophoneDevice};
+}
+
+void set_switch2_audio_device_selections(std::string playback, std::string microphone) {
+    if (playback.empty()) playback = S2_AUDIO_DEVICE_DEFAULT;
+    if (microphone.empty()) microphone = S2_AUDIO_DEVICE_DEFAULT;
+    std::lock_guard<std::mutex> lk(g_switch2AudioDeviceMutex);
+    g_switch2PlaybackDevice = std::move(playback);
+    g_switch2MicrophoneDevice = std::move(microphone);
+}
 
 void sync_sdl_input_options() {
     g_sdlInput.set_motion_enabled(g_gyroEnabled.load());
@@ -87,8 +111,44 @@ bool is_mouse_button_name(const std::string& name) {
 
 bool mouse_mode_active() {
     return g_mouseModeEnabled.load(std::memory_order_relaxed)
+        && !joycon_mouse_mode_active()
         && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
+}
+
+bool joycon_mouse_mode_supported() {
+    const int type = g_controllerType.load(std::memory_order_relaxed);
+    return mouse_input_native_joycon_supported()
+        && g_connected.load(std::memory_order_relaxed)
+        && g_switch2ModeEnabled.load(std::memory_order_relaxed)
+        && (type == ns::CONTROLLER_TYPE_JOYCON_L
+            || type == ns::CONTROLLER_TYPE_JOYCON_R);
+}
+
+bool joycon_mouse_mode_active() {
+    return g_joyconMouseModeEnabled.load(std::memory_order_relaxed)
+        && joycon_mouse_mode_supported()
+        && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
+}
+
+bool mouse_capture_active() {
+    return mouse_mode_active() || joycon_mouse_mode_active();
+}
+
+void apply_joycon_mouse_buttons(ns::HoriHIDReport& rep) {
+    if (!joycon_mouse_mode_active()) return;
+    bool left = false, right = false;
+    mouse_joycon_button_state(left, right);
+    const int type = g_controllerType.load(std::memory_order_relaxed);
+    if (type == ns::CONTROLLER_TYPE_JOYCON_R) {
+        // Physical Joy-Con 2 mouse posture: R is the primary click and ZR the
+        // secondary click. Preserve any controller/keyboard buttons by ORing.
+        if (left) rep.buttons |= ns::BTN_R;
+        if (right) rep.buttons |= ns::BTN_ZR;
+    } else if (type == ns::CONTROLLER_TYPE_JOYCON_L) {
+        if (left) rep.buttons |= ns::BTN_L;
+        if (right) rep.buttons |= ns::BTN_ZL;
+    }
 }
 
 bool is_valid_key_code(const std::string& s) {
@@ -165,10 +225,20 @@ void load_saved_feature_toggles() {
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
     g_gyroEnabled.store(settings.value("GyroEnabled", true).toBool());
     g_rumbleEnabled.store(settings.value("RumbleEnabled", true).toBool());
+    g_switch2AudioEnabled.store(settings.value("Switch2AudioEnabled", false).toBool());
+    g_switch2MicrophoneEnabled.store(settings.value("Switch2MicrophoneEnabled", false).toBool());
+    set_switch2_audio_device_selections(
+        settings.value("Switch2PlaybackDevice", S2_AUDIO_DEVICE_DEFAULT).toString().toStdString(),
+        settings.value("Switch2MicrophoneDevice", S2_AUDIO_DEVICE_DEFAULT).toString().toStdString());
     g_homeShortcutEnabled.store(settings.value("HomeShortcutEnabled", true).toBool());
     g_captureShortcutEnabled.store(settings.value("CaptureShortcutEnabled", true).toBool());
     g_mouseModeEnabled.store(settings.value("MouseModeEnabled", false).toBool());
+    // Native Joy-Con mouse mode is deliberately session-only. Never restore it
+    // after an application restart, and remove keys written by older builds.
+    g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
+    settings.remove("JoyconMouseModeEnabled");
     g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
+    g_switch2AudioSupported.store(false, std::memory_order_relaxed);
     g_horiModeEnabled.store(false, std::memory_order_relaxed);
     double sens = settings.value("MouseSensitivity", 1.0).toDouble();
     g_mouseSensitivity.store((sens >= 0.05 && sens <= 20.0) ? sens : 1.0);
@@ -190,9 +260,17 @@ void save_feature_toggles() {
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
     settings.setValue("GyroEnabled", g_gyroEnabled.load());
     settings.setValue("RumbleEnabled", g_rumbleEnabled.load());
+    settings.setValue("Switch2AudioEnabled", g_switch2AudioEnabled.load());
+    settings.setValue("Switch2MicrophoneEnabled", g_switch2MicrophoneEnabled.load());
+    const auto [playbackDevice, microphoneDevice] = switch2_audio_device_selections();
+    settings.setValue("Switch2PlaybackDevice", QString::fromStdString(playbackDevice));
+    settings.setValue("Switch2MicrophoneDevice", QString::fromStdString(microphoneDevice));
     settings.setValue("HomeShortcutEnabled", g_homeShortcutEnabled.load());
     settings.setValue("CaptureShortcutEnabled", g_captureShortcutEnabled.load());
     settings.setValue("MouseModeEnabled", g_mouseModeEnabled.load());
+    // Deliberately not persisted: the native optical-sensor mode must be
+    // explicitly enabled for each live S2 Joy-Con session.
+    settings.remove("JoyconMouseModeEnabled");
     settings.setValue("MouseSensitivity", g_mouseSensitivity.load());
     settings.setValue("ControllerType", g_controllerType.load());
     settings.setValue("JoyconHorizontalMode", g_joyconHorizontalMode.load());

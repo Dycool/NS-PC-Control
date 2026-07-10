@@ -57,17 +57,21 @@ public:
 private:
     QCheckBox* gyroBox = nullptr;
     QCheckBox* rumbleBox = nullptr;
+    QComboBox* switch2AudioDeviceBox = nullptr;
+    QComboBox* switch2MicrophoneDeviceBox = nullptr;
     QCheckBox* homeShortcutBox = nullptr;
     QCheckBox* captureShortcutBox = nullptr;
     QComboBox* controllerTypeBox = nullptr;
     QCheckBox* joyconHorizontalBox = nullptr;
     QCheckBox* mouseModeBox = nullptr;
+    QCheckBox* joyconMouseModeBox = nullptr;
     QLabel* mouseSensitivityLabel = nullptr;
     QSlider* mouseSensitivitySlider = nullptr;
     QLabel* mouseSensitivityValue = nullptr;
 
     void updateMouseModeControls();
     void updateJoyconHorizontalControl();
+    bool joyconMouseModeAvailable() const;
     void saveSettings();
 };
 

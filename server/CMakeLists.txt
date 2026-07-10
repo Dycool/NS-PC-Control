@@ -172,6 +172,7 @@ add_executable(ns-backend
     src/app_state.cpp
     src/web_server.cpp
     src/udp_feedback.cpp
+    src/udp_audio.cpp
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
     src/switch2_native.cpp

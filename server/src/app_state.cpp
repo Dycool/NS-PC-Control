@@ -982,6 +982,13 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.amiibo_request_seq[s] = 0;
         c.amiibo_writeback_pending[s] = false;
         c.amiibo_writeback_len[s] = 0;
+        c.joycon_mouse_active[s] = false;
+        c.joycon_mouse_first_packet[s] = true;
+        c.joycon_mouse_last_seq[s] = 0;
+        c.joycon_mouse_last_rx_us[s] = 0;
+        c.joycon_mouse_pending_x[s] = 0;
+        c.joycon_mouse_pending_y[s] = 0;
+        c.joycon_mouse_surface[s] = 0;
     }
     c.udp_last_server_state_seq = 0;
 }
@@ -1027,6 +1034,85 @@ bool client_session_is_source(int client_idx, InputSource source) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS) return false;
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     return g_ctx.clients[client_idx].active && g_ctx.clients[client_idx].source == source;
+}
+
+bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& packet, uint64_t now) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || packet.subpad >= 4) return false;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active || c.source != InputSource::Udp) return false;
+
+    const int subpad = packet.subpad;
+    const uint32_t seq = packet.seq;
+    if (!c.joycon_mouse_first_packet[subpad]
+            && static_cast<int32_t>(seq - c.joycon_mouse_last_seq[subpad]) <= 0) {
+        return false;
+    }
+    c.joycon_mouse_first_packet[subpad] = false;
+    c.joycon_mouse_last_seq[subpad] = seq;
+    c.joycon_mouse_last_rx_us[subpad] = now;
+    c.joycon_mouse_surface[subpad] = packet.surface;
+
+    const bool active = (packet.flags & ns::JOYCON_MOUSE_FLAG_ACTIVE) != 0;
+    const bool was_active = c.joycon_mouse_active[subpad];
+    c.joycon_mouse_active[subpad] = active;
+    if (g_ctx.verbose && active != was_active) {
+        std::println("[s2][mouse] UDP stream {} for client {} subpad {}",
+                     active ? "enabled" : "disabled", client_idx, subpad);
+    }
+    if (!active) {
+        c.joycon_mouse_pending_x[subpad] = 0;
+        c.joycon_mouse_pending_y[subpad] = 0;
+        return true;
+    }
+
+    // Bound hostile/corrupt input without losing any realistic mouse motion.
+    constexpr int64_t MAX_PENDING = 1LL << 30;
+    c.joycon_mouse_pending_x[subpad] = std::clamp<int64_t>(
+        c.joycon_mouse_pending_x[subpad] + packet.delta_x,
+        -MAX_PENDING, MAX_PENDING);
+    c.joycon_mouse_pending_y[subpad] = std::clamp<int64_t>(
+        c.joycon_mouse_pending_y[subpad] + packet.delta_y,
+        -MAX_PENDING, MAX_PENDING);
+    return true;
+}
+
+JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
+                                              uint64_t now, bool feature_enabled) {
+    JoyconMouseSample out{};
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return out;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active || c.source != InputSource::Udp) return out;
+
+    if (!c.joycon_mouse_active[subpad]
+            || c.joycon_mouse_last_rx_us[subpad] == 0
+            || elapsed_us_saturated(now, c.joycon_mouse_last_rx_us[subpad]) > JOYCON_MOUSE_TIMEOUT_US) {
+        c.joycon_mouse_active[subpad] = false;
+        c.joycon_mouse_pending_x[subpad] = 0;
+        c.joycon_mouse_pending_y[subpad] = 0;
+        return out;
+    }
+
+    // Do not queue movement while the console has the mouse feature disabled;
+    // otherwise enabling it later would produce a large stale cursor jump.
+    if (!feature_enabled) {
+        c.joycon_mouse_pending_x[subpad] = 0;
+        c.joycon_mouse_pending_y[subpad] = 0;
+        return out;
+    }
+
+    const int64_t dx = std::clamp<int64_t>(c.joycon_mouse_pending_x[subpad],
+                                            INT16_MIN, INT16_MAX);
+    const int64_t dy = std::clamp<int64_t>(c.joycon_mouse_pending_y[subpad],
+                                            INT16_MIN, INT16_MAX);
+    c.joycon_mouse_pending_x[subpad] -= dx;
+    c.joycon_mouse_pending_y[subpad] -= dy;
+    out.dx = static_cast<int16_t>(dx);
+    out.dy = static_cast<int16_t>(dy);
+    out.surface = c.joycon_mouse_surface[subpad];
+    out.active = true;
+    return out;
 }
 
 int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,

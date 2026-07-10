@@ -45,8 +45,26 @@ static constexpr uint32_t CLIENT_ASSIGNMENT_MAGIC = 0x4E534341u; // 'NSCA' serve
 static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
 static constexpr uint32_t CLIENT_NAMES_MAGIC = 0x4E53434Eu; // 'NSCN'
 static constexpr uint32_t ROSTER_MAGIC = 0x4E53524Fu; // 'NSRO'
+static constexpr uint32_t JOYCON_MOUSE_MAGIC = 0x4E534A4Du; // 'NSJM'
+// Desktop-only Switch 2 audio tunnel. These datagrams deliberately use the
+// existing UDP socket/port but remain separate from the fixed 228-byte input
+// packet, so web/mobile protocol implementations stay unchanged.
+static constexpr uint32_t S2_AUDIO_CAPS_MAGIC = 0x4E534143u; // 'NSAC'
+static constexpr uint32_t S2_AUDIO_PCM_MAGIC  = 0x4E534155u; // 'NSAU'
+static constexpr uint8_t  S2_AUDIO_VERSION = 1;
+static constexpr uint8_t  S2_AUDIO_CAP_PLAYBACK = 1u << 0;
+static constexpr uint8_t  S2_AUDIO_CAP_MICROPHONE = 1u << 1;
+static constexpr uint8_t  S2_AUDIO_DIR_CONSOLE_TO_CLIENT = 0;
+static constexpr uint8_t  S2_AUDIO_DIR_CLIENT_TO_CONSOLE = 1;
+static constexpr uint32_t S2_AUDIO_SAMPLE_RATE = 48000;
+static constexpr uint8_t  S2_AUDIO_CHANNELS = 2;
+static constexpr uint8_t  S2_AUDIO_SAMPLE_BYTES = 2;
+static constexpr uint16_t S2_AUDIO_USB_FRAME_BYTES = 192; // 1 ms, stereo S16LE @ 48 kHz
+static constexpr uint16_t S2_AUDIO_UDP_FRAMES = 1;        // 1 ms per datagram: exactly one USB isochronous frame
+static constexpr uint16_t S2_AUDIO_PCM_BYTES = S2_AUDIO_USB_FRAME_BYTES * S2_AUDIO_UDP_FRAMES;
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
+static constexpr uint8_t  JOYCON_MOUSE_VERSION = 1;
 
 enum ServerBackend : uint8_t {
     SERVER_BACKEND_UNKNOWN = 0,
@@ -60,6 +78,7 @@ static constexpr uint8_t SERVER_INFO_FLAG_SERVER_FULL   = 1u << 1;
 // Switch 2 protocol variants and to expose Switch 2-only UI such as Amiibo.
 static constexpr uint8_t SERVER_INFO_FLAG_SWITCH2_MODE  = 1u << 2;
 static constexpr uint8_t SERVER_INFO_FLAG_HORI_MODE     = 1u << 3;
+static constexpr uint8_t SERVER_INFO_FLAG_S2_AUDIO      = 1u << 4;
 
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {
@@ -147,6 +166,7 @@ static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SERVER_FULL      = 0x02;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP    = 0x04;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
+static constexpr uint8_t JOYCON_MOUSE_FLAG_ACTIVE = 0x01;
 
 
 // ── Legacy input reports ─────────────────────────────────────────────────────
@@ -286,6 +306,49 @@ struct RosterPacket {
     RosterEntry ports[4];
 } NS_PACKED_ATTR;
 
+struct S2AudioCapabilitiesPacket {
+    uint32_t magic = S2_AUDIO_CAPS_MAGIC;
+    uint8_t  version = S2_AUDIO_VERSION;
+    uint8_t  flags = 0;
+    uint16_t reserved = 0;
+    uint32_t seq = 0;
+    uint64_t ts_us = 0;
+    uint8_t  hmac[HMAC_TAG_SIZE]{};
+} NS_PACKED_ATTR;
+
+struct S2AudioPcmPacket {
+    uint32_t magic = S2_AUDIO_PCM_MAGIC;
+    uint8_t  version = S2_AUDIO_VERSION;
+    uint8_t  direction = S2_AUDIO_DIR_CONSOLE_TO_CLIENT;
+    uint16_t payload_bytes = S2_AUDIO_PCM_BYTES;
+    uint32_t seq = 0;
+    uint64_t ts_us = 0;
+    uint8_t  pcm[S2_AUDIO_PCM_BYTES]{};
+    uint8_t  hmac[HMAC_TAG_SIZE]{};
+} NS_PACKED_ATTR;
+
+static constexpr std::size_t S2_AUDIO_CAPS_AUTH_SIZE = sizeof(S2AudioCapabilitiesPacket) - HMAC_TAG_SIZE;
+static constexpr std::size_t S2_AUDIO_PCM_AUTH_SIZE = sizeof(S2AudioPcmPacket) - HMAC_TAG_SIZE;
+static constexpr std::size_t S2_AUDIO_PACKET_SIZE = sizeof(S2AudioPcmPacket);
+
+// Dedicated low-latency mouse-motion datagram used only by the desktop
+// ns-client. Keeping it separate preserves the established 228-byte controller
+// packet used by web/mobile clients. Deltas are signed 32-bit accumulators so a
+// delayed sender tick cannot overflow before the server splits them into the
+// Joy-Con 2 report's signed 16-bit fields.
+struct JoyconMousePacket {
+    uint32_t magic = JOYCON_MOUSE_MAGIC;
+    uint8_t  version = JOYCON_MOUSE_VERSION;
+    uint8_t  flags = 0;
+    uint8_t  subpad = 0;
+    uint8_t  surface = 0; // Report 0x07/0x08 trailing mouse byte; 0 = contact/default.
+    uint32_t seq = 0;
+    int32_t  delta_x = 0;
+    int32_t  delta_y = 0;
+    uint64_t ts_us = 0;
+    uint8_t  hmac[HMAC_TAG_SIZE]{};
+} NS_PACKED_ATTR;
+
 static constexpr uint32_t AMIIBO_REQUEST_MAGIC = 0x4E534152u; // 'NSAR'
 struct AmiiboRequestPacket {
     uint32_t magic = AMIIBO_REQUEST_MAGIC;
@@ -327,6 +390,7 @@ static constexpr std::size_t PACKET_AUTH_SIZE = PACKET_SIZE - HMAC_TAG_SIZE;
 static constexpr std::size_t REPORT_SIZE   = sizeof(HIDReport);
 static constexpr std::size_t WEB_PACKET_SIZE   = PACKET_AUTH_SIZE;
 static constexpr std::size_t CLIENT_NAMES_AUTH_SIZE = sizeof(ClientNamesPacket) - HMAC_TAG_SIZE;
+static constexpr std::size_t JOYCON_MOUSE_AUTH_SIZE = sizeof(JoyconMousePacket) - HMAC_TAG_SIZE;
 
 // ── Hard wire-layout checks ──────────────────────────────────────────────────
 static_assert(sizeof(HoriHIDReport) == 8,
@@ -353,6 +417,13 @@ static_assert(sizeof(ClientNamesPacket) == 224,
               "ClientNamesPacket wire layout changed");
 static_assert(sizeof(RosterPacket) == 208,
               "RosterPacket wire layout changed");
+static_assert(sizeof(JoyconMousePacket) == 44,
+              "JoyconMousePacket wire layout changed");
+
+static_assert(sizeof(S2AudioCapabilitiesPacket) == 36,
+              "S2AudioCapabilitiesPacket wire layout changed");
+static_assert(sizeof(S2AudioPcmPacket) == 36 + S2_AUDIO_PCM_BYTES,
+              "S2AudioPcmPacket wire layout changed");
 
 static_assert(sizeof(ServerInfoProbe) == 8,
               "ServerInfoProbe wire layout changed");

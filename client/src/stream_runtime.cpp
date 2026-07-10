@@ -1,4 +1,5 @@
 #include "stream_runtime.hpp"
+#include "audio_client.hpp"
 #include "input_settings.hpp"
 #include "macro_client.hpp"
 #include "mouse_input.hpp"
@@ -174,7 +175,8 @@ static uint8_t requested_controller_profile_for_frame() {
     const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
     // S2 single-keyboard mode is always one full Pro Controller 2 input on P1;
     // physical SDL controllers and any selected Joy-Con-pair profile are ignored.
-    if (s2 && g_keyboardMode.load(std::memory_order_relaxed) == KB_SINGLE)
+    if (s2 && g_keyboardMode.load(std::memory_order_relaxed) == KB_SINGLE
+            && !joycon_mouse_mode_active())
         return ns::CONTROLLER_TYPE_PRO_S2;
     if (s2) {
         switch (mode) {
@@ -219,11 +221,13 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
 
     if (s2) {
+        const bool native_mouse = joycon_mouse_mode_active();
         // Native S2 mode is deliberately one input only. Keyboard single owns
         // P1 completely; otherwise the first connected SDL controller is mapped
         // to P1 and every additional controller is ignored.
         if (keyboard_mode == KB_SINGLE) {
             apply_keyboard_to_report(frame.reports[0], false);
+            if (native_mouse) apply_joycon_mouse_buttons(frame.reports[0]);
             frame.present[0] = true;
             frame.active_count = 1;
             return;
@@ -258,6 +262,17 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         }
         if (g_joyconHorizontalMode.load(std::memory_order_relaxed) && frame.present[0]) {
             apply_joycon_horizontal_transform(frame.reports[0], g_controllerType.load(std::memory_order_relaxed));
+        }
+        if (native_mouse) {
+            // Native mouse movement is useful without a physical SDL pad too.
+            // Keep a neutral Joy-Con source alive and map PC mouse clicks onto
+            // the real Joy-Con 2 mouse-posture shoulder buttons.
+            if (!frame.present[0]) {
+                frame.reports[0].reset();
+                frame.present[0] = true;
+                frame.active_count = 1;
+            }
+            apply_joycon_mouse_buttons(frame.reports[0]);
         }
         return;
     }
@@ -356,6 +371,49 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
         dst->reserved[2] = requested_controller_profile_for_frame();
     }
     sign_and_send(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
+}
+
+static void send_joycon_mouse_update(SOCKET sock,
+                                     const sockaddr_in& dest,
+                                     const uint8_t hmac_key[32],
+                                     uint32_t& seq,
+                                     uint64_t& last_send_us,
+                                     bool& was_active,
+                                     bool force_disable = false) {
+    const bool active = !force_disable && joycon_mouse_mode_active();
+    int32_t dx = 0, dy = 0;
+    if (active) mouse_consume_joycon_delta(dx, dy);
+
+    const uint64_t now = ns::now_us();
+    constexpr uint64_t KEEPALIVE_US = 50'000ULL;
+    const bool state_changed = active != was_active;
+    if (!state_changed && dx == 0 && dy == 0
+            && last_send_us != 0 && now - last_send_us < KEEPALIVE_US) {
+        return;
+    }
+    if (!active && !was_active && !force_disable) return;
+
+    ns::JoyconMousePacket pkt{};
+    pkt.flags = active ? ns::JOYCON_MOUSE_FLAG_ACTIVE : 0;
+    pkt.subpad = 0;
+    // The public report map still labels this byte unknown/likely LOD. A zero
+    // value is the neutral/contact value used by the initial implementation;
+    // it is isolated here for easy adjustment after hardware capture testing.
+    pkt.surface = 0;
+    pkt.seq = seq++;
+    pkt.delta_x = dx;
+    pkt.delta_y = dy;
+    pkt.ts_us = now;
+
+    uint8_t full_hmac[32];
+    hmac_sha256(std::span(hmac_key, 32),
+                std::span(reinterpret_cast<const uint8_t*>(&pkt), ns::JOYCON_MOUSE_AUTH_SIZE),
+                std::span<uint8_t, 32>(full_hmac));
+    std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+    send_all_udp(sock, dest,
+                 std::span(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
+    last_send_us = now;
+    was_active = active;
 }
 
 static void set_roster_name(ns::RosterEntry& e, const std::string& name) {
@@ -464,12 +522,19 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     detect_server_is_legacy(sock, dest);
     if (g_serverLastReplyUs.load() == 0) return (err_out ? *err_out = "Server not reachable." : ""), closesocket(sock), 1;
     uint32_t seq = 0;
+    uint32_t joycon_mouse_seq = 0;
+    uint64_t joycon_mouse_last_send_us = 0;
+    bool joycon_mouse_was_active = false;
     RumbleManager rumble;
+    S2AudioClient audio;
     DigitalReleaseFilter sdl_filters[4];
     bool no_controllers_printed = false;
     uint64_t last_probe_us = 0, last_kb_poll_us = 0;
     ns::ClientNamesPacket last_names{};
     uint64_t last_names_send_us = 0;
+    ClientFrame frame;
+    frame.reset();
+    uint64_t next_input_frame_us = 0;
 
     while (running.load(std::memory_order_relaxed)) {
         const uint64_t loop_start_us = ns::now_us();
@@ -484,31 +549,55 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             last_kb_poll_us = loop_start_us;
         }
 
-        g_sdlInput.poll();
-        ClientFrame frame;
-        build_client_frame(frame, sdl_filters, true, g_keyboardMode.load());
+        const bool input_frame_due = next_input_frame_us == 0
+            || loop_start_us >= next_input_frame_us;
+        if (input_frame_due) {
+            // Keep controller traffic at the established 250 Hz even while the
+            // loop polls audio every millisecond. This avoids wasting UDP/CPU
+            // budget and leaves headroom under the server's packet-rate limit.
+            next_input_frame_us = loop_start_us
+                + static_cast<uint64_t>(ns::LEGACY_UDP_INTERVAL_MS) * 1000ULL;
+            g_sdlInput.poll();
+            build_client_frame(frame, sdl_filters, true, g_keyboardMode.load());
 
-        if (cfg.gui_features) {
-            if (g_macro_recording.load(std::memory_order_relaxed)) macro_record_sample(frame.reports[0]);
-            if (g_macro_running.load(std::memory_order_relaxed)) {
-                if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) {
-                    frame.active_count = 1;
-                    for (int i = 0; i < 4; ++i) {
-                        if (!frame.has_motion[i]) frame.motion_sample_fresh[i] = false;
+            if (cfg.gui_features) {
+                if (g_macro_recording.load(std::memory_order_relaxed)) macro_record_sample(frame.reports[0]);
+                if (g_macro_running.load(std::memory_order_relaxed)) {
+                    if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) {
+                        frame.active_count = 1;
+                        for (int i = 0; i < 4; ++i) {
+                            if (!frame.has_motion[i]) frame.motion_sample_fresh[i] = false;
+                        }
                     }
                 }
             }
-        }
 
-        // Keep the packet as a source-controller frame. For Joy-Con L+R mode
-        // the client sends one physical pad with CONTROLLER_TYPE_JOYCON_PAIR;
-        // the server owns the virtual L/R expansion and USB identities.
-        send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
+            // Keep the packet as a source-controller frame. For Joy-Con L+R mode
+            // the client sends one physical pad with CONTROLLER_TYPE_JOYCON_PAIR;
+            // the server owns the virtual L/R expansion and USB identities.
+            send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
+            send_joycon_mouse_update(sock, dest, cfg.hmac_key,
+                                     joycon_mouse_seq, joycon_mouse_last_send_us,
+                                     joycon_mouse_was_active);
+            ++g_packetCount;
+        }
+        // Audio capability negotiation deliberately follows the first normal
+        // input frame. The server only accepts desktop-audio datagrams from an
+        // already authenticated/active UDP ClientSession, which keeps web and
+        // mobile peers outside this path without changing their protocols.
+        const auto [playbackDevice, microphoneDevice] = switch2_audio_device_selections();
+        const bool switch2ProAudio = g_switch2ModeEnabled.load(std::memory_order_relaxed)
+            && g_switch2AudioSupported.load(std::memory_order_relaxed)
+            && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_PRO;
+        audio.update(sock, dest, cfg.hmac_key, switch2ProAudio,
+                     g_switch2AudioEnabled.load(std::memory_order_relaxed),
+                     g_switch2MicrophoneEnabled.load(std::memory_order_relaxed),
+                     playbackDevice, microphoneDevice);
         send_client_names_if_changed(sock, dest, cfg.hmac_key, g_keyboardMode.load(), last_names, last_names_send_us);
         // Typed uploads are sent after the live input frame so the server has
         // already seen the current controller type.
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
-        pump_udp_replies(sock, rumble, frame.controller_for_slot);
+        pump_udp_replies(sock, rumble, audio, cfg.hmac_key, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
             if (g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed)) {
                 const std::string message = "Switch 2 mode does not support Joy-Con L + R. Use an individual Joy-Con or Pro Controller.";
@@ -521,7 +610,6 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             break;
         }
         rumble.update_timeouts(frame.controller_for_slot);
-        ++g_packetCount;
 
         const uint64_t now = ns::now_us();
         if (now - last_probe_us >= 5000000ULL) {
@@ -535,9 +623,13 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             break;
         }
 
-        if (frame.active_count > 0) {
+        if (frame.active_count > 0 || audio.active()) {
             no_controllers_printed = false;
-            sleep_while_running(running, std::chrono::milliseconds(ns::LEGACY_UDP_INTERVAL_MS));
+            // Audio uses 1 ms datagrams. Poll the socket/capture stream every
+            // millisecond so packetisation, not the old 4 ms controller tick,
+            // is the dominant software latency.
+            const int sleep_ms = audio.active() ? 1 : ns::LEGACY_UDP_INTERVAL_MS;
+            sleep_while_running(running, std::chrono::milliseconds(sleep_ms));
         } else {
             if (cfg.print_cli_waiting_messages && !no_controllers_printed) {
                 std::println("No controllers detected - waiting for connections...");
@@ -547,7 +639,13 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         }
     }
 
+    audio.shutdown(sock, dest, cfg.hmac_key);
     rumble.stop_all();
+    if (joycon_mouse_was_active) {
+        send_joycon_mouse_update(sock, dest, cfg.hmac_key,
+                                 joycon_mouse_seq, joycon_mouse_last_send_us,
+                                 joycon_mouse_was_active, true);
+    }
     send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++);
     closesocket(sock);
     return g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed) ? 1 : 0;
@@ -563,6 +661,8 @@ void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t p
         set_status_message(error);
         g_connecting.store(false, std::memory_order_relaxed);
         g_connected.store(false, std::memory_order_relaxed);
+        g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
+        mouse_input_reset();
         running.store(false, std::memory_order_relaxed);
         return;
     }
@@ -576,6 +676,8 @@ void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t p
         set_status_message(error);
         g_connecting.store(false, std::memory_order_relaxed);
         g_connected.store(false, std::memory_order_relaxed);
+        g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
+        mouse_input_reset();
         running.store(false, std::memory_order_relaxed);
         return;
     }
@@ -598,6 +700,8 @@ void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t p
     }
     g_connected.store(false);
     g_connecting.store(false, std::memory_order_relaxed);
+    g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
+    mouse_input_reset();
     running.store(false, std::memory_order_relaxed);
 }
 
@@ -608,7 +712,9 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     if (!parse_host_port(target, host, port)) return std::unexpected("Please enter a Raspberry Pi IP address.");
     g_serverProbeFull.store(false, std::memory_order_relaxed);
     g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
+    g_switch2AudioSupported.store(false, std::memory_order_relaxed);
     g_horiModeEnabled.store(false, std::memory_order_relaxed);
+    g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
     derive_key(ns::DEFAULT_SECRET, g_hmacKey);
     save_last_ip(target);
     load_macro_entries();
@@ -650,7 +756,10 @@ void stop_connection() {
     reset_server_assignment_state();
     reset_roster_state();
     g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
+    g_switch2AudioSupported.store(false, std::memory_order_relaxed);
     g_horiModeEnabled.store(false, std::memory_order_relaxed);
+    g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
+    mouse_input_reset();
     for (int i = 0; i < 4; ++i) {
         g_amiiboScanPending[i].store(false, std::memory_order_relaxed);
         g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);

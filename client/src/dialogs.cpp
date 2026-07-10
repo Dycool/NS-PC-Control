@@ -1,14 +1,19 @@
 #include "dialogs.hpp"
 #include "input_settings.hpp"
+#include "audio_client.hpp"
 #include "macro_client.hpp"
+#include "mouse_input.hpp"
 #include "qt_helpers.hpp"
 #include "stream_runtime.hpp"
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QInputDialog>
+#include <QFormLayout>
+#include <QGroupBox>
 #include <QMessageBox>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QWidget>
 #include <algorithm>
 #include <fstream>
@@ -276,9 +281,69 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     };
     gyroBox = add_box("Gyro / motion", g_gyroEnabled.load());
     rumbleBox = add_box("Rumble", g_rumbleEnabled.load());
+
+    const bool showSwitch2Audio = g_connected.load(std::memory_order_relaxed)
+        && g_switch2ModeEnabled.load(std::memory_order_relaxed)
+        && g_switch2AudioSupported.load(std::memory_order_relaxed)
+        && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_PRO;
+    if (showSwitch2Audio) {
+        const auto [savedPlayback, savedMicrophone] = switch2_audio_device_selections();
+
+        auto populateDeviceBox = [&](QComboBox* box, bool recording, bool enabled,
+                                     const std::string& savedDevice) {
+            box->addItem("Disabled", QStringLiteral("@disabled"));
+            box->addItem("System default", QStringLiteral("@default"));
+            for (const std::string& device : enumerate_s2_audio_devices(recording)) {
+                box->addItem(QString::fromUtf8(device.c_str()), QString::fromStdString(device));
+            }
+
+            const QString wanted = enabled
+                ? QString::fromStdString(savedDevice.empty() ? S2_AUDIO_DEVICE_DEFAULT : savedDevice)
+                : QStringLiteral("@disabled");
+            int selected = box->findData(wanted);
+            if (selected < 0 && enabled) {
+                box->addItem(QString::fromStdString(savedDevice + " (unavailable)"), wanted);
+                selected = box->count() - 1;
+            }
+            box->setCurrentIndex(selected < 0 ? 0 : selected);
+        };
+
+        auto* audioGroup = new QGroupBox("Switch 2 headset", this);
+        auto* audioForm = new QFormLayout(audioGroup);
+        switch2AudioDeviceBox = new QComboBox(audioGroup);
+        switch2MicrophoneDeviceBox = new QComboBox(audioGroup);
+        populateDeviceBox(switch2AudioDeviceBox, false,
+                          g_switch2AudioEnabled.load(std::memory_order_relaxed), savedPlayback);
+        populateDeviceBox(switch2MicrophoneDeviceBox, true,
+                          g_switch2MicrophoneEnabled.load(std::memory_order_relaxed), savedMicrophone);
+        switch2AudioDeviceBox->setToolTip(
+            "Disabled reports that no headphones are attached to the emulated Pro Controller 2.");
+        switch2MicrophoneDeviceBox->setToolTip(
+            "Disabled reports that the attached headphones have no microphone.");
+        audioForm->addRow("Audio output", switch2AudioDeviceBox);
+        audioForm->addRow("Microphone", switch2MicrophoneDeviceBox);
+        auto updateMicrophoneAvailability = [this] {
+            const bool headphonesAttached = switch2AudioDeviceBox
+                && switch2AudioDeviceBox->currentData().toString() != QStringLiteral("@disabled");
+            if (switch2MicrophoneDeviceBox) {
+                switch2MicrophoneDeviceBox->setEnabled(headphonesAttached);
+                if (!headphonesAttached) {
+                    const int disabled = switch2MicrophoneDeviceBox->findData(
+                        QStringLiteral("@disabled"));
+                    switch2MicrophoneDeviceBox->setCurrentIndex(disabled < 0 ? 0 : disabled);
+                }
+            }
+        };
+        connect(switch2AudioDeviceBox, qOverload<int>(&QComboBox::currentIndexChanged),
+                this, [updateMicrophoneAvailability](int) { updateMicrophoneAvailability(); });
+        updateMicrophoneAvailability();
+        outer->addWidget(audioGroup);
+    }
+
     homeShortcutBox = add_box("Home shortcut (LStick + RStick)", g_homeShortcutEnabled.load());
     captureShortcutBox = add_box("Capture shortcut (Minus + Plus)", g_captureShortcutEnabled.load());
     mouseModeBox = add_box("Mouse Mode (mouse aims right stick; mouse buttons bindable)", g_mouseModeEnabled.load());
+    joyconMouseModeBox = add_box("Joycon Mouse Mode", g_joyconMouseModeEnabled.load());
 
     auto* mouseSensRow = new QGridLayout();
     mouseSensitivityLabel = new QLabel("Mouse sensitivity", this);
@@ -298,7 +363,22 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         mouseSensitivityValue->setText(QString::number(v / 10.0, 'f', 1));
     });
     mouseSensitivityValue->setText(QString::number(mouseSensitivitySlider->value() / 10.0, 'f', 1));
-    connect(mouseModeBox, &QCheckBox::toggled, this, [this] { updateMouseModeControls(); });
+    connect(mouseModeBox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked && joyconMouseModeBox && joyconMouseModeBox->isChecked()) {
+            const QSignalBlocker blocker(joyconMouseModeBox);
+            joyconMouseModeBox->setChecked(false);
+        }
+        updateMouseModeControls();
+        updateJoyconHorizontalControl();
+    });
+    connect(joyconMouseModeBox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked && mouseModeBox && mouseModeBox->isChecked()) {
+            const QSignalBlocker blocker(mouseModeBox);
+            mouseModeBox->setChecked(false);
+        }
+        updateMouseModeControls();
+        updateJoyconHorizontalControl();
+    });
 
     auto* controllerRow = new QGridLayout();
     controllerRow->addWidget(new QLabel("Emulated controller", this), 0, 0);
@@ -332,6 +412,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
             ? QStringLiteral("Disconnect or cancel the connection attempt to change the emulated controller type.")
             : QString());
         updateJoyconHorizontalControl();
+        updateMouseModeControls();
     });
     connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
@@ -356,27 +437,59 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
 void SettingsDialog::updateMouseModeControls() {
     const bool keyboardActive = g_keyboardMode.load() != KB_OFF;
-    if (mouseModeBox) {
-        mouseModeBox->setEnabled(keyboardActive);
-        mouseModeBox->setToolTip(keyboardActive
-            ? QString()
-            : "Turn on a Keyboard Mode first — mouse mode drives the keyboard player.");
+    const bool joyconNativeAvailable = joyconMouseModeAvailable();
+    const bool nativeChecked = joyconNativeAvailable
+        && joyconMouseModeBox && joyconMouseModeBox->isChecked();
+    const bool normalChecked = mouseModeBox && mouseModeBox->isChecked();
+
+    if (joyconMouseModeBox) {
+        joyconMouseModeBox->setVisible(joyconNativeAvailable);
+        joyconMouseModeBox->setEnabled(joyconNativeAvailable && !normalChecked);
+        joyconMouseModeBox->setToolTip(normalChecked
+            ? QStringLiteral("Disable Mouse Mode first.")
+            : QStringLiteral("Send native Joy-Con 2 mouse movement. Left click maps to L/R; right click maps to ZL/ZR."));
     }
-    const bool sensEnabled = keyboardActive && mouseModeBox && mouseModeBox->isChecked();
+    if (mouseModeBox) {
+        mouseModeBox->setEnabled(!nativeChecked && (keyboardActive || normalChecked));
+        if (nativeChecked) {
+            mouseModeBox->setToolTip(QStringLiteral("Disable Joycon Mouse Mode first."));
+        } else {
+            mouseModeBox->setToolTip(keyboardActive
+                ? QString()
+                : QStringLiteral("Turn on a Keyboard Mode first — mouse mode drives the keyboard player."));
+        }
+    }
+    const bool sensEnabled = nativeChecked || (keyboardActive && normalChecked);
     if (mouseSensitivityLabel) mouseSensitivityLabel->setEnabled(sensEnabled);
     if (mouseSensitivitySlider) mouseSensitivitySlider->setEnabled(sensEnabled);
     if (mouseSensitivityValue) mouseSensitivityValue->setEnabled(sensEnabled);
+}
+
+bool SettingsDialog::joyconMouseModeAvailable() const {
+    if (!controllerTypeBox) return false;
+    const int type = controllerTypeBox->currentData().toInt();
+    return mouse_input_native_joycon_supported()
+        && g_connected.load(std::memory_order_relaxed)
+        && g_switch2ModeEnabled.load(std::memory_order_relaxed)
+        && (type == ns::CONTROLLER_TYPE_JOYCON_L
+            || type == ns::CONTROLLER_TYPE_JOYCON_R);
 }
 
 void SettingsDialog::updateJoyconHorizontalControl() {
     if (!joyconHorizontalBox || !controllerTypeBox) return;
     const int type = controllerTypeBox->currentData().toInt();
     const bool supported = type == ns::CONTROLLER_TYPE_JOYCON_L || type == ns::CONTROLLER_TYPE_JOYCON_R;
-    if (!supported) joyconHorizontalBox->setChecked(false);
-    joyconHorizontalBox->setEnabled(supported);
-    joyconHorizontalBox->setToolTip(supported
-        ? QString()
-        : QStringLiteral("Horizontal mode is available only for a single Joy-Con (L) or Joy-Con (R)."));
+    const bool nativeMouse = joyconMouseModeAvailable()
+        && joyconMouseModeBox && joyconMouseModeBox->isChecked();
+    if (!supported || nativeMouse) joyconHorizontalBox->setChecked(false);
+    joyconHorizontalBox->setEnabled(supported && !nativeMouse);
+    if (nativeMouse) {
+        joyconHorizontalBox->setToolTip(QStringLiteral("Joycon Mouse Mode controls the native mouse posture."));
+    } else {
+        joyconHorizontalBox->setToolTip(supported
+            ? QString()
+            : QStringLiteral("Horizontal mode is available only for a single Joy-Con (L) or Joy-Con (R)."));
+    }
 }
 
 
@@ -386,19 +499,38 @@ void SettingsDialog::saveSettings() {
     const bool rumble = rumbleBox->isChecked();
     g_gyroEnabled.store(gyro);
     g_rumbleEnabled.store(rumble);
+    if (switch2AudioDeviceBox && switch2MicrophoneDeviceBox) {
+        constexpr const char* disabledValue = "@disabled";
+        const std::string playback = switch2AudioDeviceBox->currentData().toString().toStdString();
+        const std::string microphone = switch2MicrophoneDeviceBox->currentData().toString().toStdString();
+        g_switch2AudioEnabled.store(playback != disabledValue, std::memory_order_relaxed);
+        g_switch2MicrophoneEnabled.store(microphone != disabledValue, std::memory_order_relaxed);
+        const auto [oldPlayback, oldMicrophone] = switch2_audio_device_selections();
+        set_switch2_audio_device_selections(
+            playback == disabledValue ? oldPlayback : playback,
+            microphone == disabledValue ? oldMicrophone : microphone);
+    }
     g_homeShortcutEnabled.store(homeShortcutBox->isChecked());
     g_captureShortcutEnabled.store(captureShortcutBox->isChecked());
-    const bool mouseMode = mouseModeBox->isChecked();
+    const bool nativeAvailable = joyconMouseModeAvailable();
+    bool mouseMode = mouseModeBox->isChecked();
+    // Session-only: if the control is not currently available/visible, force
+    // native Joy-Con mouse mode off rather than retaining a stale state.
+    bool joyconMouseMode = nativeAvailable && joyconMouseModeBox->isChecked();
+    if (mouseMode) joyconMouseMode = false;
+    if (joyconMouseMode && nativeAvailable) mouseMode = false;
     g_mouseModeEnabled.store(mouseMode);
+    g_joyconMouseModeEnabled.store(joyconMouseMode);
     g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
     const int controllerType = controllerTypeBox->currentData().toInt();
     const bool joycon = controllerType == ns::CONTROLLER_TYPE_JOYCON_L || controllerType == ns::CONTROLLER_TYPE_JOYCON_R;
     if (!g_connected.load() && !g_connecting.load(std::memory_order_relaxed)) {
         g_controllerType.store(controllerType);
     }
-    g_joyconHorizontalMode.store(joycon && joyconHorizontalBox->isChecked());
+    g_joyconHorizontalMode.store(joycon && !joyconMouseMode && joyconHorizontalBox->isChecked());
     save_feature_toggles();
-    if (!mouseMode) clear_mouse_button_inputs();
+    if (!mouseMode && !joyconMouseMode) clear_mouse_button_inputs();
+    mouse_input_reset();
     sync_sdl_input_options();
     g_sdlInput.set_gyro_enabled(gyro);
     if (!rumble) g_sdlInput.stop_all_rumble();

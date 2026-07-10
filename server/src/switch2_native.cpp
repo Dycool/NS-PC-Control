@@ -62,6 +62,11 @@ struct NativeState {
     std::array<uint8_t, 9> pairing_info{};
 };
 
+bool state_is_joycon(const NativeState& s) {
+    return s.selected_report == 0x07 || s.selected_report == 0x08
+        || s.factory[0x14] == 0x66 || s.factory[0x14] == 0x67;
+}
+
 std::array<NativeState, HID_PORT_COUNT> g_state;
 std::once_flag g_init_once;
 std::mutex g_mtx;
@@ -351,6 +356,15 @@ void switch2_native_set_port_pid(int port, uint8_t pid_lo) {
     std::memcpy(s.identity.data(), s.factory.data(), 0x25);
     s.selected_report = pid_lo == 0x67 ? 0x07
         : (pid_lo == 0x66 ? 0x08 : 0x09);
+    if (pid_lo == 0x66 || pid_lo == 0x67) {
+        // A Joy-Con 2 advertises the native mouse feature. Keep it in the
+        // default mask so the console can enable bit 0x10 even if it does not
+        // send an explicit full-mask command first.
+        s.feature_mask |= FEATURE_MOUSE;
+    } else {
+        s.feature_mask &= ~FEATURE_MOUSE;
+        s.enabled_features &= ~FEATURE_MOUSE;
+    }
 
     // A secondary native interface may acquire its Joy-Con/Pro identity after
     // the primary interface has already completed the device-wide feature
@@ -493,11 +507,12 @@ bool switch2_native_handle_vendor_command(int port,
         case 0x0C: { // feature select
             if (sub == 0x01) {
                 const uint8_t f = c.size() > 8 ? c[8] : 0;
+                const bool joycon = state_is_joycon(s);
                 d[4] = (f & FEATURE_BUTTONS) ? 0x07 : 0x00;
                 d[5] = (f & FEATURE_STICKS)  ? 0x07 : 0x00;
-                d[6] = (f & FEATURE_IMU)     ? 0x01 : 0x00;
-                d[7] = (f & FEATURE_MAG)     ? 0x01 : 0x00;
-                d[8] = (f & FEATURE_MOUSE)   ? 0x01 : 0x00;
+                d[6] = (f & FEATURE_IMU)     ? (joycon ? 0x03 : 0x01) : 0x00;
+                d[7] = (f & FEATURE_MAG)     ? (joycon ? 0x03 : 0x01) : 0x00;
+                d[8] = (f & FEATURE_MOUSE)   ? (joycon ? 0x03 : 0x01) : 0x00;
                 d[9] = (f & FEATURE_RUMBLE)  ? 0x03 : 0x00;
                 dl = 12;
             } else if (sub == 0x06) {
@@ -506,7 +521,13 @@ bool switch2_native_handle_vendor_command(int port,
                 dl = 40;
             } else {
                 const uint32_t mask = read_le32_at(c, 8);
+                const bool mouse_was_enabled = (s.enabled_features & FEATURE_MOUSE) != 0;
                 set_feature_state(s, sub, mask, rt);
+                const bool mouse_is_enabled = (s.enabled_features & FEATURE_MOUSE) != 0;
+                if (g_ctx.verbose && mouse_was_enabled != mouse_is_enabled) {
+                    std::println("[s2][mouse] console feature {} on port {}",
+                                 mouse_is_enabled ? "enabled" : "disabled", port);
+                }
                 dl = 4;
             }
             break;

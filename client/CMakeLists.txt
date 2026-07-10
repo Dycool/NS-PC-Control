@@ -92,6 +92,7 @@ FetchContent_MakeAvailable(cli11)
 set(NS_CLIENT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/main.cpp")
 set(NS_CLIENT_EXTRA_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/dialogs.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/audio_client.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/input_settings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/macro_client.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/main_window.cpp"

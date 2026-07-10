@@ -551,16 +551,17 @@ void writer_thread(std::stop_token stoken, int hz) {
             bool ok = true;
             for (int h = 0; h < nports; ++h) {
                 const bool port_needed = (hw_slots[h].client_idx != -1);
-                    if (port_uses_s2_functionfs(h)) {
+                uint32_t enabled_features_for_port = 0;
+                if (port_uses_s2_functionfs(h)) {
                         // The only logical S2 port is native FunctionFS port 0.
                         // Its vendor channel owns the streaming/feature state.
                         rt[h].full_report_enabled = switch2_native_streaming_enabled(h);
                         rt[h].input_report_mode = switch2_native_selected_report(h);
-                        const uint32_t enabled_features = switch2_native_enabled_features(h);
-                        rt[h].imu_enabled = (enabled_features & 0x04u) != 0;
-                        rt[h].vibration_enabled = (enabled_features & 0x20u) != 0;
-                    }
-                    uint8_t write_buf[HIDG_MAX_REPORT_SIZE] = {};
+                    enabled_features_for_port = switch2_native_enabled_features(h);
+                    rt[h].imu_enabled = (enabled_features_for_port & 0x04u) != 0;
+                    rt[h].vibration_enabled = (enabled_features_for_port & 0x20u) != 0;
+                }
+                uint8_t write_buf[HIDG_MAX_REPORT_SIZE] = {};
                     size_t write_len = PRO_REPORT_SIZE;
                     bool have_report_to_write = false, wrote_subcmd_reply = false, wrote_cmd_response = false;
 
@@ -667,10 +668,28 @@ void writer_thread(std::stop_token stoken, int hz) {
                                     }
                                     // Keep the native S2 motion implementation available, but
                                     // ignore client motion until S2 motion is ready to be enabled.
+                                    S2JoyconMouseInput native_mouse{};
+                                    const S2JoyconMouseInput* native_mouse_ptr = nullptr;
+                                    if (port_needed
+                                            && (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L
+                                                || hw_slots[h].virtual_type == NS_TYPE_JOYCON_R)) {
+                                        const bool mouse_feature_enabled =
+                                            (enabled_features_for_port & 0x10u) != 0;
+                                        const JoyconMouseSample sample = consume_joycon_mouse_stream(
+                                            hw_slots[h].client_idx, hw_slots[h].sub_idx,
+                                            now_stamp, mouse_feature_enabled);
+                                        if (sample.active) {
+                                            native_mouse.dx = sample.dx;
+                                            native_mouse.dy = sample.dy;
+                                            native_mouse.surface = sample.surface;
+                                            native_mouse.active = true;
+                                            native_mouse_ptr = &native_mouse;
+                                        }
+                                    }
                                     build_s2_pro_report(report_for_port, nullptr,
                                                         false, false,
                                                         pro_timer_from_us(now_stamp), now_stamp,
-                                                        h, write_buf);
+                                                        h, write_buf, native_mouse_ptr);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
                                     build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);

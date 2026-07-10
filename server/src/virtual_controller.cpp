@@ -4,6 +4,7 @@
 #include "gadget_wakeup.hpp"
 #include "switch2_native.hpp"
 #include "s2_nfc_codec.hpp"
+#include "udp_audio.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
@@ -1174,7 +1175,8 @@ static void build_s2_joycon_report(const HIDReport& src,
                                    uint64_t motion_time_us,
                                    int port,
                                    uint8_t* out,
-                                   bool right) {
+                                   bool right,
+                                   const S2JoyconMouseInput* mouse) {
     memset(out, 0, PRO_REPORT_SIZE);
     out[0] = right ? 0x08 : 0x07;
     out[1] = timer;
@@ -1208,7 +1210,18 @@ static void build_s2_joycon_report(const HIDReport& src,
     }
 
     out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
-    out[9] = 0x00; // unknown; mouse data at 0x0A..0x0E intentionally disabled for now
+    out[9] = 0x00; // payload offset 0x08 remains unknown in public captures.
+    if (mouse && mouse->active) {
+        const uint16_t dx = static_cast<uint16_t>(mouse->dx);
+        const uint16_t dy = static_cast<uint16_t>(mouse->dy);
+        // hid_reports.md offsets are relative to the payload after report ID:
+        // 0x09 = Delta X, 0x0B = Delta Y, 0x0D = unknown/likely LOD.
+        out[0x0A] = static_cast<uint8_t>(dx & 0xFFu);
+        out[0x0B] = static_cast<uint8_t>(dx >> 8);
+        out[0x0C] = static_cast<uint8_t>(dy & 0xFFu);
+        out[0x0D] = static_cast<uint8_t>(dy >> 8);
+        out[0x0E] = mouse->surface;
+    }
     out[15] = (right && controller_port_supports_amiibo(port))
         ? amiibo_nfc_report_state(port) : 0x00;
     write_s2_joycon_motion_block(out, 16, 17, motion_samples, has_motion,
@@ -1225,12 +1238,13 @@ void build_s2_pro_report(const HIDReport& src,
                          uint8_t timer,
                          uint64_t motion_time_us,
                          int port,
-                         uint8_t* out) {
+                         uint8_t* out,
+                         const S2JoyconMouseInput* mouse) {
     const uint8_t ns_type = controller_type_for_port(port);
     if (ns_type == NS_TYPE_JOYCON_L || ns_type == NS_TYPE_JOYCON_R) {
         build_s2_joycon_report(src, motion_samples, has_motion, imu_enabled,
                                 timer, motion_time_us, port, out,
-                                ns_type == NS_TYPE_JOYCON_R);
+                                ns_type == NS_TYPE_JOYCON_R, mouse);
         return;
     }
 
@@ -1267,7 +1281,7 @@ void build_s2_pro_report(const HIDReport& src,
     out[12] = (imu_enabled && has_motion) ? 0x38 : 0x30;
     out[13] = controller_port_supports_amiibo(port)
         ? amiibo_nfc_report_state(port) : 0x00;
-    out[14] = 0x00;
+    out[14] = s2_udp_audio_headset_state(timer);
     write_s2_pro_motion_block(out, 15, 16, motion_samples, has_motion,
                               imu_enabled, motion_time_us, port);
 }

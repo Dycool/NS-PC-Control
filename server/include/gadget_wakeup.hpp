@@ -1,9 +1,12 @@
 #pragma once
 
+#include "shared/protocol.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <array>
+#include <chrono>
 
 bool load_switch2_wakeup_config(bool quiet_if_missing);
 void enter_switch2_wake_runtime_mode();
@@ -26,6 +29,8 @@ std::string functionfs_ep_in_path(int id);
 std::string functionfs_ep_out_path(int id);
 std::string functionfs_ep_vendor_out_path(int id);
 std::string functionfs_ep_vendor_in_path(int id);
+std::string functionfs_ep_audio_out_path(int id);
+std::string functionfs_ep_audio_in_path(int id);
 bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_report);
 bool usb_transport_rebuild_ffs_port(int id);
 
@@ -37,3 +42,8 @@ bool functionfs_poll_output_report(int id, std::vector<unsigned char>& out_repor
 void functionfs_drain_output(int id);
 bool functionfs_poll_vendor_report(int id, std::vector<unsigned char>& out_report);
 bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len);
+bool functionfs_wait_console_audio(
+    int id,
+    std::array<unsigned char, ns::S2_AUDIO_USB_FRAME_BYTES>& audio_frame,
+    std::chrono::milliseconds timeout);
+bool functionfs_submit_microphone_audio(int id, const uint8_t* data, size_t len);

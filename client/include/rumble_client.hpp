@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <string>
 
+class S2AudioClient;
+
 class RumbleManager {
 public:
     void apply_precision_packet(const ns::PrecisionRumblePacket& rp, const int controller_for_slot[4]);
@@ -25,6 +27,7 @@ private:
     void set_output(int slot, uint8_t low, uint8_t high, uint32_t duration_ms, int pad_idx);
 };
 
-void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_for_slot[4]);
+void pump_udp_replies(SOCKET sock, RumbleManager& rumble, S2AudioClient& audio,
+                      const uint8_t hmac_key[32], const int controller_for_slot[4]);
 bool detect_server_is_legacy(SOCKET sock, const sockaddr_in& dest);
 bool probe_server_sync(const std::string& host, int port);

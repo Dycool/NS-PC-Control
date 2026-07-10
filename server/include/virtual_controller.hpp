@@ -135,6 +135,13 @@ void build_standard_report(const ns::HIDReport& src,
                            ProInputReport30& out,
                            bool is_switch2 = false);
 
+struct S2JoyconMouseInput {
+    int16_t dx = 0;
+    int16_t dy = 0;
+    uint8_t surface = 0;
+    bool active = false;
+};
+
 void build_s2_pro_report(const ns::HIDReport& src,
                          const ns::MotionReport motion_samples[3],
                          bool has_motion,
@@ -142,7 +149,8 @@ void build_s2_pro_report(const ns::HIDReport& src,
                          uint8_t timer,
                          uint64_t motion_time_us,
                          int port,
-                         uint8_t* out);
+                         uint8_t* out,
+                         const S2JoyconMouseInput* mouse = nullptr);
 void reset_s2_motion_state(int port);
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);

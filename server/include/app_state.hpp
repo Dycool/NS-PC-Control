@@ -19,6 +19,7 @@ using ms = std::chrono::milliseconds;
 
 constexpr uint64_t CLIENT_TIMEOUT_US = 30'000'000ULL;
 constexpr uint64_t CLIENT_STALE_NEUTRAL_US = 350'000ULL;
+constexpr uint64_t JOYCON_MOUSE_TIMEOUT_US = 250'000ULL;
 constexpr uint8_t RUMBLE_MIN_NONZERO = 1;
 constexpr int RUMBLE_GAIN_PERCENT = 40;
 constexpr uint32_t RUMBLE_BT_MIN_DURATION_MS = 40;
@@ -119,6 +120,17 @@ struct ClientSession {
     uint64_t udp_last_roster_seq = 0;
     uint64_t udp_last_roster_send_us = 0;
 
+    // Desktop ns-client native Joy-Con 2 mouse stream. Movement is kept as a
+    // lossless accumulator until the 250 Hz USB writer consumes signed 16-bit
+    // chunks for report 0x07/0x08.
+    bool joycon_mouse_active[4]{};
+    bool joycon_mouse_first_packet[4]{true, true, true, true};
+    uint32_t joycon_mouse_last_seq[4]{};
+    uint64_t joycon_mouse_last_rx_us[4]{};
+    int64_t joycon_mouse_pending_x[4]{};
+    int64_t joycon_mouse_pending_y[4]{};
+    uint8_t joycon_mouse_surface[4]{};
+
     // Amiibo support
     bool amiibo_request_pending[4] = {};
     bool amiibo_requested[4] = {};
@@ -127,6 +139,13 @@ struct ClientSession {
     bool amiibo_writeback_pending[4] = {};
     uint16_t amiibo_writeback_len[4] = {};
     uint8_t amiibo_writeback_data[4][ns::AMIIBO_EXTENDED_DUMP_SIZE] = {};
+};
+
+struct JoyconMouseSample {
+    int16_t dx = 0;
+    int16_t dy = 0;
+    uint8_t surface = 0;
+    bool active = false;
 };
 
 
@@ -269,6 +288,9 @@ void reset_client_session_locked(ClientSession& c);
 void reset_client_session(int client_idx);
 bool reset_client_session_if_source(int client_idx, InputSource source);
 bool client_session_is_source(int client_idx, InputSource source);
+bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& packet, uint64_t now);
+JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
+                                              uint64_t now, bool feature_enabled);
 int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,
                             InputSource source, int preferred_client_idx = -1);
 bool parse_client_packet(const uint8_t* data, size_t len,

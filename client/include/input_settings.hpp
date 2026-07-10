@@ -18,13 +18,21 @@ extern std::atomic<int> g_keyboardMode;
 extern std::atomic<bool> g_keyboardInputSuspended;
 extern std::atomic<bool> g_gyroEnabled;
 extern std::atomic<bool> g_rumbleEnabled;
+extern std::atomic<bool> g_switch2AudioEnabled;
+extern std::atomic<bool> g_switch2MicrophoneEnabled;
 extern std::atomic<bool> g_homeShortcutEnabled;
 extern std::atomic<bool> g_captureShortcutEnabled;
 extern std::atomic<bool> g_mouseModeEnabled;
+extern std::atomic<bool> g_joyconMouseModeEnabled;
 extern std::atomic<double> g_mouseSensitivity;
 extern std::atomic<int> g_controllerType;
 extern std::atomic<bool> g_joyconHorizontalMode;
 extern std::atomic<bool> g_switch2ModeEnabled;
+extern std::atomic<bool> g_switch2AudioSupported;
+
+inline constexpr const char* S2_AUDIO_DEVICE_DEFAULT = "@default";
+std::pair<std::string, std::string> switch2_audio_device_selections();
+void set_switch2_audio_device_selections(std::string playback, std::string microphone);
 extern std::atomic<bool> g_horiModeEnabled;
 extern std::unordered_map<std::string, std::string> g_keyBindings;
 extern std::mutex g_keyBindingsMutex;
@@ -65,4 +73,8 @@ void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_ty
 
 bool is_mouse_button_name(const std::string& name);
 bool mouse_mode_active();
+bool joycon_mouse_mode_supported();
+bool joycon_mouse_mode_active();
+bool mouse_capture_active();
+void apply_joycon_mouse_buttons(ns::HoriHIDReport& rep);
 void clear_mouse_button_inputs();

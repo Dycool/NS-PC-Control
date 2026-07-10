@@ -57,6 +57,7 @@ static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxe
 #include "writers.hpp"
 #include "web_server.hpp"
 #include "udp_feedback.hpp"
+#include "udp_audio.hpp"
 #include "bluetooth_input.hpp"
 #include "bluetooth_manager.hpp"
 
@@ -361,6 +362,8 @@ int main(int argc, char** argv) {
         perror("bind"); close(sock); return 1;
     }
 
+    s2_udp_audio_start(sock);
+
     // -----------------------------------------------------------------------
     // Worker threads
     // -----------------------------------------------------------------------
@@ -406,8 +409,9 @@ int main(int argc, char** argv) {
     // Main UDP receive loop
     // -----------------------------------------------------------------------
     std::vector<uint8_t> udp_rx(
-        std::max(UDP_RX_MAX_PACKET_SIZE,
-                 ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
+        std::max({UDP_RX_MAX_PACKET_SIZE,
+                  ns::S2_AUDIO_PACKET_SIZE,
+                  ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE}));
 
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
@@ -455,6 +459,7 @@ int main(int argc, char** argv) {
                     }
                     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH2_MODE;
+                        reply.reserved[0] |= SERVER_INFO_FLAG_S2_AUDIO;
                     }
                     if (g_ctx.usb_controller_family == UsbControllerFamily::Hori) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_HORI_MODE;
@@ -471,8 +476,47 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // --- Native Joy-Con 2 mouse motion (desktop ns-client only) ---
+            if (bytes == static_cast<ssize_t>(sizeof(ns::JoyconMousePacket))) {
+                uint32_t mouse_magic = 0;
+                std::memcpy(&mouse_magic, udp_rx.data(), sizeof(mouse_magic));
+                if (mouse_magic == ns::JOYCON_MOUSE_MAGIC) {
+                    if (hmac_verify({g_ctx.hmac_key, 32},
+                                    {udp_rx.data(), ns::JOYCON_MOUSE_AUTH_SIZE},
+                                    {udp_rx.data() + ns::JOYCON_MOUSE_AUTH_SIZE, HMAC_TAG_SIZE}) != 0) {
+                        if (g_ctx.verbose) std::println("bad Joy-Con mouse HMAC, dropped");
+                        continue;
+                    }
+                    if (!rate_allow(sender.sin_addr.s_addr)) continue;
+
+                    ns::JoyconMousePacket mouse{};
+                    std::memcpy(&mouse, udp_rx.data(), sizeof(mouse));
+                    if (mouse.version != ns::JOYCON_MOUSE_VERSION || mouse.subpad >= 4) continue;
+
+                    int client_idx = -1;
+                    for (int i = 0; i < MAX_CLIENTS; ++i) {
+                        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                        if (g_ctx.clients[i].active
+                                && g_ctx.clients[i].source == InputSource::Udp
+                                && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr
+                                && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                            client_idx = i;
+                            break;
+                        }
+                    }
+                    if (client_idx >= 0) {
+                        update_joycon_mouse_stream(client_idx, mouse, now_us());
+                    }
+                    continue;
+                }
+            }
 
 
+
+            if (s2_udp_audio_handle_packet(
+                    std::span<const uint8_t>(udp_rx.data(), static_cast<size_t>(bytes)), sender)) {
+                continue;
+            }
 
             // --- Macro chunk ---
             if (bytes >= 4) {
@@ -674,6 +718,7 @@ int main(int argc, char** argv) {
                     }
                 }
                 forget_switch2_dormant_udp_endpoint(sender);
+                s2_udp_audio_forget_endpoint(sender);
                 if (cidx >= 0) {
                     reset_client_session(cidx);
                     rearm_switch2_wake_after_client_disconnect();
@@ -835,6 +880,7 @@ int main(int argc, char** argv) {
 
     g_ctx.running.store(false, std::memory_order_relaxed);
     upnp_remove_mapping(port);
+    s2_udp_audio_stop();
     close(sock);
     std::cout << "." << std::flush;
 
