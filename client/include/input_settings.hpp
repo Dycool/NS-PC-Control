@@ -40,6 +40,7 @@ extern std::atomic<bool> g_serverProbeFull;
 void sync_sdl_input_options();
 std::string macros_path();
 std::vector<std::pair<std::string, std::string>> binding_keys();
+std::vector<std::pair<std::string, std::string>> s2_binding_keys();
 std::unordered_map<std::string, std::string> default_key_bindings();
 std::string normalize_key_name(std::string s);
 bool is_valid_key_code(const std::string& s);

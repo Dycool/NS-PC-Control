@@ -84,11 +84,14 @@ class MainActivity : AppCompatActivity() {
     private var hasLatestPhoneGyro = false
     private val latestMotionSamples = Array(Protocol.MOTION_SAMPLE_COUNT) { ByteArray(Protocol.MOTION_SAMPLE_SIZE) }
     private var latestMotionSampleCount = 0
+    private var phoneMotionRevision = 0L
+    private var sentPhoneMotionRevision = -1L
 
     @Volatile private var touchHid: ByteArray? = null
     @Volatile private var touchFrame: ByteArray? = null
     @Volatile private var lastTouchFrameMs: Long = 0
     @Volatile private var touchControllerType: Int = 3
+    @Volatile private var touchExtraButtons: Int = 0
     @Volatile private var lastBridgeFrameParseMs: Long = 0
 
     private enum class Page { MAIN_MENU, TOUCH_CONTROLS, EDITOR }
@@ -116,6 +119,8 @@ class MainActivity : AppCompatActivity() {
         var rumbleLastSetMs: Long = 0L
         val motionSamples: Array<ByteArray> = Array(Protocol.MOTION_SAMPLE_COUNT) { Protocol.neutralMotion() }
         var motionSampleCount: Int = 0
+        var motionRevision: Long = 0
+        var sentMotionRevision: Long = -1
 
         fun reset() {
             deviceId = -1
@@ -135,6 +140,8 @@ class MainActivity : AppCompatActivity() {
             rumbleUntilMs = 0L
             rumbleLastSetMs = 0L
             motionSampleCount = 0
+            motionRevision = 0
+            sentMotionRevision = -1
             for (i in 0 until Protocol.MOTION_SAMPLE_COUNT) motionSamples[i].fill(0)
         }
 
@@ -526,8 +533,12 @@ class MainActivity : AppCompatActivity() {
                         Protocol.neutralHid()
                     }
                     Protocol.setFrameHid(frame, 0, hid)
+                    frame[20 + 7] = (frame[20 + 7].toInt() or touchExtraButtons).toByte()
                     Protocol.setFrameControllerType(frame, 0, touchControllerType)
-                    phoneMotionSamples()?.let { Protocol.setFrameMotionSamples(frame, 0, it) }
+                    phoneMotionSamples()?.let { batch ->
+                        Protocol.setFrameMotionSamples(frame, 0, batch.samples)
+                        Protocol.setFrameMotionFresh(frame, 0, batch.fresh)
+                    }
                     phoneBatteryStatus()?.let { (percent, charging) -> Protocol.setFrameBatteryPercent(frame, 0, percent, charging) }
                 }
                 activeClientMode == ClientMode.PHYSICAL && !forceNeutral -> {
@@ -538,6 +549,8 @@ class MainActivity : AppCompatActivity() {
                             Protocol.setFrameHid(frame, i, pad.hid())
                             if (pad.hasMotion && pad.motionSampleCount >= Protocol.MOTION_SAMPLE_COUNT) {
                                 Protocol.setFrameMotionSamples(frame, i, Array(Protocol.MOTION_SAMPLE_COUNT) { j -> pad.motionSamples[j].copyOf() })
+                                Protocol.setFrameMotionFresh(frame, i, pad.motionRevision != pad.sentMotionRevision)
+                                pad.sentMotionRevision = pad.motionRevision
                             }
                         }
                     }
@@ -567,12 +580,17 @@ class MainActivity : AppCompatActivity() {
         latestMotionSamples[1] = latestMotionSamples[2]
         latestMotionSamples[2] = sample
         if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) latestMotionSampleCount++
+        phoneMotionRevision++
     }
 
-    private fun phoneMotionSamples(): Array<ByteArray>? {
+    private data class MotionBatch(val samples: Array<ByteArray>, val fresh: Boolean)
+
+    private fun phoneMotionSamples(): MotionBatch? {
         synchronized(phoneSensorLock) {
             if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) return null
-            return Array(Protocol.MOTION_SAMPLE_COUNT) { i -> latestMotionSamples[i].copyOf() }
+            val fresh = phoneMotionRevision != sentPhoneMotionRevision
+            sentPhoneMotionRevision = phoneMotionRevision
+            return MotionBatch(Array(Protocol.MOTION_SAMPLE_COUNT) { i -> latestMotionSamples[i].copyOf() }, fresh)
         }
     }
 
@@ -828,6 +846,11 @@ class MainActivity : AppCompatActivity() {
         fun onTouchControllerType(controllerType: Int) {
             // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
             touchControllerType = if (controllerType in 1..3) controllerType else 3
+        }
+
+        @JavascriptInterface
+        fun onTouchExtraButtons(extraButtons: Int) {
+            touchExtraButtons = extraButtons and (0x10 or 0x20)
         }
 
         @JavascriptInterface
@@ -1183,6 +1206,7 @@ class MainActivity : AppCompatActivity() {
         pad.motionSamples[2] = sample
         if (pad.motionSampleCount < Protocol.MOTION_SAMPLE_COUNT) pad.motionSampleCount++
         pad.hasMotion = pad.motionSampleCount >= Protocol.MOTION_SAMPLE_COUNT
+        pad.motionRevision++
     }
 
     private fun stopPhysicalControllerSensors() {

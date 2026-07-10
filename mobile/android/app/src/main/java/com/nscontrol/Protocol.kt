@@ -23,6 +23,8 @@ object Protocol {
     private const val PAD_PRESENT = 0x01
     private const val EXT_STATUS_BATTERY_VALID = 0x01
     private const val EXT_STATUS_BATTERY_CHARGING = 0x02
+    private const val EXT_STATUS_MOTION_FRESH = 0x04
+    private const val EXT_STATUS_MOTION_FRESH_VALID = 0x08
 
     const val BTN_Y       = 1 shl 0
     const val BTN_B       = 1 shl 1
@@ -107,6 +109,15 @@ object Protocol {
     fun setFrameMotionSamples(frame: ByteArray, padIndex: Int, samples: Array<ByteArray>) {
         if (samples.size < MOTION_SAMPLE_COUNT) return
         NativeProtocol.nativeSetFrameMotionSamples(frame, padIndex, samples[0], samples[1], samples[2])
+    }
+
+    fun setFrameMotionFresh(frame: ByteArray, padIndex: Int, fresh: Boolean) {
+        if (padIndex !in 0 until PAD_COUNT) return
+        val base = 20 + padIndex * EXT_PAD_SIZE
+        if (frame.size < base + EXT_PAD_SIZE) return
+        var flags = frame[base + 46].toInt() or EXT_STATUS_MOTION_FRESH_VALID
+        flags = if (fresh) flags or EXT_STATUS_MOTION_FRESH else flags and EXT_STATUS_MOTION_FRESH.inv()
+        frame[base + 46] = flags.toByte()
     }
 
     fun setFrameBatteryPercent(frame: ByteArray, padIndex: Int, percent: Int, charging: Boolean = false) {

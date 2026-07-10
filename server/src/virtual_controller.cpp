@@ -1433,6 +1433,8 @@ bool rumble_half_is_neutral_carrier(const uint8_t* f) { return f[0] == 0x00 && f
 // USB packetisation is handled by FunctionFS; these are application lengths.
 namespace {
 constexpr size_t S2_NFC_MAX_RESPONSE_PAYLOAD = ns::s2nfc::READ_PAYLOAD_SIZE;
+constexpr auto S2_NFC_READ_HOLD = std::chrono::seconds(3);
+constexpr auto S2_NFC_WRITE_HOLD = std::chrono::seconds(5);
 
 void fill_s2_nfc_identity(uint8_t* payload, const std::vector<uint8_t>& raw,
                           size_t uid_len_offset) {
@@ -1521,10 +1523,6 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
                      g_amiibo_signature_from_file[port] ? "572-byte-file" : "fixed-emulator-fallback");
     }
 
-    // Keep a selected virtual tag present for a complete multi-command NFC
-    // transaction. The UI selection represents holding the tag on the reader.
-    if (placed) g_amiibo_expiry[port] = now + std::chrono::seconds(15);
-
     size_t payload_len = 0;
     int request_state = -1;
     bool clear_after_command = false;
@@ -1563,6 +1561,11 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         clear_after_command = placed
             && g_amiibo_nfc_status[port] == 0x05
             && g_amiibo_write_committed[port];
+        if (placed && !clear_after_command && !g_amiibo_write_mode[port]) {
+            // A read may be the prerequisite for an immediate format/write,
+            // so leave a short physical-presentation window before removal.
+            g_amiibo_expiry[port] = now + S2_NFC_READ_HOLD;
+        }
         if (g_ctx.verbose) {
             std::println("[s2][nfc][parse] sub=0x04 leave-scan ui_scan_requested=false completed_transaction={} auto_eject={}",
                          clear_after_command, clear_after_command);
@@ -1623,6 +1626,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             g_amiibo_nfc_detail[port] = 0x00;
             g_amiibo_write_mode[port] = write_mode;
             g_amiibo_write_committed[port] = false;
+            if (write_mode) g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
             // The NFC processor signals that the read/write operation is ready
             // by advancing the HID NFC state. The host waits for this before
             // polling 0x05 and requesting 0x15.
@@ -1690,6 +1694,30 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     }
 
     case 0x14: { // Receive one chunk of the 454-byte write staging image.
+        bool promoted_format_write = false;
+        // Formatting flows observed in the attached trace use a zero-UID
+        // 0x06/read descriptor, then transition directly into the normal
+        // offset-zero write staging stream. Promote only when that first
+        // chunk has a valid D0 07 header and the selected tag's exact UID.
+        if (placed && !g_amiibo_write_mode[port] && g_amiibo_nfc_status[port] == 0x04
+                && cmd_data.size() >= 13) {
+            const uint16_t offset = static_cast<uint16_t>(cmd_data[0])
+                                  | (static_cast<uint16_t>(cmd_data[1]) << 8);
+            const uint16_t declared = static_cast<uint16_t>(cmd_data[2])
+                                    | (static_cast<uint16_t>(cmd_data[3]) << 8);
+            const size_t available = cmd_data.size() - 4;
+            const auto staging_data = cmd_data.subspan(4);
+            if (offset == 0 && declared >= 9 && declared <= available
+                    && staging_data[0] == 0xD0 && staging_data[1] == 0x07
+                    && request_uid_matches(staging_data, raw)) {
+                g_amiibo_write_mode[port] = true;
+                g_amiibo_write_committed[port] = false;
+                g_amiibo_write_staging[port].assign(ns::s2nfc::WRITE_STAGING_SIZE, 0);
+                g_amiibo_write_coverage[port].fill(0);
+                g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
+                promoted_format_write = true;
+            }
+        }
         if (placed && g_amiibo_write_mode[port] && g_amiibo_nfc_status[port] == 0x04
                 && cmd_data.size() >= 4) {
             const uint16_t offset = static_cast<uint16_t>(cmd_data[0])
@@ -1700,6 +1728,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             bool valid = declared <= available
                       && offset <= ns::s2nfc::WRITE_STAGING_SIZE
                       && static_cast<size_t>(offset) + declared <= ns::s2nfc::WRITE_STAGING_SIZE;
+            if (valid) g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
             bool conflicting_retry = false;
             if (valid) {
                 auto& staging = g_amiibo_write_staging[port];
@@ -1723,8 +1752,8 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
                 g_amiibo_nfc_detail[port] = 0x41;
             }
             if (g_ctx.verbose) {
-                std::println("[s2][nfc][parse] sub=0x14 write-buffer valid={} offset=0x{:04x} declared={} available={} conflicting_retry={} coverage={}/{}",
-                             valid, offset, declared, available, conflicting_retry,
+                std::println("[s2][nfc][parse] sub=0x14 write-buffer valid={} promoted_format_write={} offset=0x{:04x} declared={} available={} conflicting_retry={} coverage={}/{}",
+                             valid, promoted_format_write, offset, declared, available, conflicting_retry,
                              write_coverage_count(port), ns::s2nfc::WRITE_STAGING_SIZE);
                 if (declared <= available)
                     std::println("[s2][nfc][buffer] write_data={}", nfc_hex(cmd_data.subspan(4, declared)));
@@ -1749,6 +1778,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
                 g_amiibo_write_mode[port] = false;
                 g_amiibo_write_committed[port] = true;
                 g_amiibo_modified[port] = true;
+                g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
                 // Real tag writes take substantially longer than scan/read
                 // setup. The capture advances the HID state roughly 700 ms
                 // after 0x08, at which point the console polls status=0x05.

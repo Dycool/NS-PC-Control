@@ -75,6 +75,8 @@ MainWindow::MainWindow() {
     grid->addWidget(sep, 5, 0, 1, 4);
 
     statusLabel = new QLabel("Ready", this);
+    statusLabel->setWordWrap(true);
+    statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     grid->addWidget(statusLabel, 6, 0, 1, 4);
 
     for (int i = 0; i < 4; ++i) {
@@ -94,10 +96,16 @@ MainWindow::MainWindow() {
     });
     connect(macrosBtn, &QPushButton::clicked, this, [this] {
         if (!g_connected.load()) { QMessageBox::information(this, "Macros", "Not connected to server."); return; }
+        if (macroDialog) {
+            macroDialog->showNormal();
+            macroDialog->raise();
+            macroDialog->activateWindow();
+            return;
+        }
         load_macro_entries();
-        auto* dlg = new MacroDialog(this);
-        dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->show();
+        macroDialog = new MacroDialog(this);
+        macroDialog->setAttribute(Qt::WA_DeleteOnClose);
+        macroDialog->show();
     });
     connect(settingsBtn, &QPushButton::clicked, this, [this] {
         SettingsDialog dlg(this);
@@ -105,6 +113,7 @@ MainWindow::MainWindow() {
         updateUi();
     });
     connect(connectBtn, &QPushButton::clicked, this, [this] { toggleConnection(); });
+    connect(ipEdit, &QLineEdit::returnPressed, this, [this] { toggleConnection(); });
     connect(scanAmiiboBtn, &QPushButton::clicked, this, [this] { onScanAmiiboClicked(); });
     connect(quitBtn, &QPushButton::clicked, qApp, &QApplication::quit);
 
@@ -172,6 +181,9 @@ void MainWindow::updateUi() {
     ipEdit->setEnabled(!connected && !connecting);
     keyboardCombo->setEnabled(!connected && !connecting);
     bindingsBtn->setEnabled(true);
+    macrosBtn->setEnabled(connected && !connecting);
+    settingsBtn->setEnabled(!connecting);
+    if (!connected && macroDialog) macroDialog->close();
     statusLabel->setText(std_to_q(status_message()));
 
     // NFC belongs to the actual native S2 assignment, not merely to the
@@ -208,14 +220,13 @@ void MainWindow::updateUi() {
     const bool singleS2 = connected && g_switch2ModeEnabled.load(std::memory_order_relaxed);
     for (int i = 0; i < 4; ++i) padLabels[i]->setVisible(!singleS2 || i == 0);
 
-    // In S2 mode only P1 exists. Resize after hiding P2-P4 so the layout's
-    // preferred height reflects the visible controls instead of leaving a
-    // large empty area that Qt distributes between rows. Restore the original
-    // platform-specific height when disconnected or connected to an S1 server.
+    // Resize after hiding rows (S2 mode collapses to P1 only; a pad that's
+    // merged into another port's assignment, i.e. present == 2 below, hides
+    // its own row too) so the layout's preferred height reflects the visible
+    // controls instead of leaving a dead gap that Qt would otherwise
+    // distribute below the last visible row.
     if (layout()) layout()->activate();
-    const int desiredHeight = singleS2
-        ? layout()->sizeHint().height()
-        : platformHeight();
+    const int desiredHeight = layout()->sizeHint().height();
     if (width() != platformWidth() || height() != desiredHeight)
         setFixedSize(platformWidth(), desiredHeight);
 
@@ -276,8 +287,14 @@ void MainWindow::onScanAmiiboClicked() {
         return;
     }
     QByteArray data = f.readAll();
+    const QString readError = f.errorString();
     f.close();
-    g_amiiboPaths[subpad] = path;
+    if (data.size() != AMIIBO_RAW_FILE_SIZE && data.size() != AMIIBO_EXTENDED_FILE_SIZE) {
+        QMessageBox::warning(this, "Error",
+            readError.isEmpty() ? "The Amiibo file changed while it was being read." : readError);
+        return;
+    }
+    set_amiibo_path(static_cast<uint8_t>(subpad), path);
     // send to server
     sendAmiiboData(subpad, data);
     // local pending clear after click? server will handle timeout

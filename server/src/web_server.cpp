@@ -267,6 +267,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (c.first_pkt || memcmp(&c.report, &report, sizeof(MultiReport)) != 0) {
                     c.report = report;
                     c.has_new_report = true; c.first_pkt = false;
+                    ++c.report_generation;
                     enable_udp_rumble_state(c);
                 }
 

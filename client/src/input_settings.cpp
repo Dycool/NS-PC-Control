@@ -55,7 +55,7 @@ std::vector<std::pair<std::string, std::string>> binding_keys() {
         {"MINUS", "3"}, {"PLUS", "4"},
         {"LSTICK", "LSHIFT"}, {"RSTICK", "RSHIFT"},
         {"HOME", "HOME"}, {"CAPTURE", "SNAPSHOT"},
-        {"C", "F1"}, {"GL", "F2"}, {"GR", "F3"}, {"SL", "F4"}, {"SR", "F5"},
+        {"SL", "F4"}, {"SR", "F5"},
         {"LSTICK_UP", "W"}, {"LSTICK_DOWN", "S"},
         {"LSTICK_LEFT", "A"}, {"LSTICK_RIGHT", "D"},
         {"RSTICK_UP", "I"}, {"RSTICK_DOWN", "K"},
@@ -65,9 +65,14 @@ std::vector<std::pair<std::string, std::string>> binding_keys() {
     };
 }
 
+std::vector<std::pair<std::string, std::string>> s2_binding_keys() {
+    return {{"C", "F1"}, {"GL", "F2"}, {"GR", "F3"}};
+}
+
 std::unordered_map<std::string, std::string> default_key_bindings() {
     std::unordered_map<std::string, std::string> out;
     for (const auto& kv : binding_keys()) out[kv.first] = kv.second;
+    for (const auto& kv : s2_binding_keys()) out[kv.first] = kv.second;
     return out;
 }
 
@@ -381,6 +386,14 @@ void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_ty
     const bool left = controller_type == ns::CONTROLLER_TYPE_JOYCON_L;
     const bool right = controller_type == ns::CONTROLLER_TYPE_JOYCON_R;
     if (!left && !right) return;
+
+    // A sideways Joy-Con exposes its rail buttons as the two shoulders. Treat
+    // either left-side shoulder input as SL and either right-side input as SR,
+    // then remove the full-controller shoulder bits from the Joy-Con report.
+    const uint16_t shoulders = rep.buttons & (ns::BTN_L | ns::BTN_ZL | ns::BTN_R | ns::BTN_ZR);
+    if (shoulders & (ns::BTN_L | ns::BTN_ZL)) rep.vendor |= ns::EXT_BUTTON_SL;
+    if (shoulders & (ns::BTN_R | ns::BTN_ZR)) rep.vendor |= ns::EXT_BUTTON_SR;
+    rep.buttons &= static_cast<uint16_t>(~(ns::BTN_L | ns::BTN_ZL | ns::BTN_R | ns::BTN_ZR));
 
     // Rotate both sticks around their 8-bit centre. The two Joy-Con halves are
     // held in opposite directions when used horizontally.

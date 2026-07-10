@@ -33,6 +33,8 @@ private enum ProtocolWire {
     static let flagSinglePad = 0x04
     static let extStatusBatteryValid = 0x01
     static let extStatusBatteryCharging = 0x02
+    static let extStatusMotionFresh = 0x04
+    static let extStatusMotionFreshValid = 0x08
 
     static let btnY       = 1 << 0
     static let btnB       = 1 << 1
@@ -171,6 +173,18 @@ private enum ProtocolWire {
         }
     }
 
+    static func setFrameMotionFresh(_ frame: inout [UInt8], pad: Int, fresh: Bool) {
+        guard pad >= 0 && pad < padCount else { return }
+        let base = 20 + pad * 48
+        guard frame.count >= base + 48 else { return }
+        frame[base + 46] |= UInt8(extStatusMotionFreshValid)
+        if fresh {
+            frame[base + 46] |= UInt8(extStatusMotionFresh)
+        } else {
+            frame[base + 46] &= ~UInt8(extStatusMotionFresh)
+        }
+    }
+
     static func setFrameBatteryPercent(_ frame: inout [UInt8], pad: Int, percent: Int, charging: Bool = false) {
         guard pad >= 0 && pad < padCount && percent >= 0 && percent <= 100 else { return }
         let base = 20 + pad * 48
@@ -236,6 +250,8 @@ private final class PhysicalPad {
     var hapticPlayer: CHHapticPatternPlayer?
     var motionSamples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
     var motionSampleCount = 0
+    var motionRevision: UInt64 = 0
+    var sentMotionRevision: UInt64 = .max
 
     func reset() {
         cleanupRumble()
@@ -256,6 +272,8 @@ private final class PhysicalPad {
         rumbleUntilMs = 0
         rumbleLastSetMs = 0
         motionSampleCount = 0
+        motionRevision = 0
+        sentMotionRevision = .max
         motionSamples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
     }
 
@@ -320,12 +338,15 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private struct PhoneMotionState {
         var samples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
         var count = 0
+        var revision: UInt64 = 0
+        var sentRevision: UInt64 = .max
     }
 
     private var touchHid: [UInt8]?
     private var touchFrame: [UInt8]?
     private var lastTouchFrameMs: UInt64 = 0
     private var touchControllerType = 3
+    private var touchExtraButtons = 0
     private var lastBridgeFrameParseMs: UInt64 = 0
 
     private let physicalPads = Locked((0..<ProtocolWire.padCount).map { _ in PhysicalPad() })
@@ -455,6 +476,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             onBinary:function(json){post('onBinary',[json]);},
             onTouchState:function(buttons,hat,lx,ly,rx,ry){post('onTouchState',[buttons,hat,lx,ly,rx,ry]);},
             onTouchControllerType:function(controllerType){post('onTouchControllerType',[controllerType]);},
+            onTouchExtraButtons:function(extraButtons){post('onTouchExtraButtons',[extraButtons]);},
             onClose:function(){post('onClose');},
             onPhysicalStart:function(){post('onPhysicalStart');},
             onPhysicalStop:function(){post('onPhysicalStop');},
@@ -739,6 +761,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             if let first = args.first {
                 touchControllerType = ViewController.normalizedControllerType(intArg(first))
             }
+        case "onTouchExtraButtons":
+            if let first = args.first { touchExtraButtons = intArg(first) & (0x10 | 0x20) }
         case "onClose":
             deactivateControlClient()
         case "onPhysicalStart":
@@ -1050,9 +1074,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 hid = ProtocolWire.neutralHid()
             }
             ProtocolWire.setFrameHid(&frame, pad: 0, hid: hid)
+            frame[20 + 7] |= UInt8(touchExtraButtons)
             ProtocolWire.setFrameControllerType(&frame, pad: 0, controllerType: touchControllerType)
-            if let samples = phoneMotionSamples() {
-                ProtocolWire.setFrameMotionSamples(&frame, pad: 0, samples: samples)
+            if let batch = phoneMotionSamples() {
+                ProtocolWire.setFrameMotionSamples(&frame, pad: 0, samples: batch.samples)
+                ProtocolWire.setFrameMotionFresh(&frame, pad: 0, fresh: batch.fresh)
             }
             if let status = phoneBatteryStatus() {
                 ProtocolWire.setFrameBatteryPercent(&frame, pad: 0, percent: status.percent, charging: status.charging)
@@ -1065,6 +1091,9 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                     ProtocolWire.setFrameHid(&frame, pad: i, hid: pad.hid())
                     if pad.hasMotion && pad.motionSampleCount >= ProtocolWire.motionSampleCount {
                         ProtocolWire.setFrameMotionSamples(&frame, pad: i, samples: pad.motionSamples)
+                        ProtocolWire.setFrameMotionFresh(&frame, pad: i,
+                                                         fresh: pad.motionRevision != pad.sentMotionRevision)
+                        pad.sentMotionRevision = pad.motionRevision
                     }
                 }
             }
@@ -1166,13 +1195,16 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             state.samples[1] = state.samples[2]
             state.samples[2] = sample
             if state.count < ProtocolWire.motionSampleCount { state.count += 1 }
+            state.revision &+= 1
         }
     }
 
-    private func phoneMotionSamples() -> [[UInt8]]? {
+    private func phoneMotionSamples() -> (samples: [[UInt8]], fresh: Bool)? {
         phoneMotion.withLock { state in
             guard state.count >= ProtocolWire.motionSampleCount else { return nil }
-            return state.samples
+            let fresh = state.revision != state.sentRevision
+            state.sentRevision = state.revision
+            return (state.samples, fresh)
         }
     }
 
@@ -1324,6 +1356,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pad.motionSamples[2] = sample
                 if pad.motionSampleCount < ProtocolWire.motionSampleCount { pad.motionSampleCount += 1 }
                 pad.hasMotion = pad.motionSampleCount >= ProtocolWire.motionSampleCount
+                pad.motionRevision &+= 1
             }
         }
     }

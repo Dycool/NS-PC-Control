@@ -6,8 +6,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPointer>
 #include <QTimer>
 #include <QWidget>
+
+class MacroDialog;
 
 class MainWindow : public QWidget {
 public:
@@ -31,6 +34,7 @@ private:
     QLabel* statusLabel = nullptr;
     QLabel* padLabels[4]{};
     QTimer* timer = nullptr;
+    QPointer<MacroDialog> macroDialog;
 
     static int platformWidth();
     static int platformHeight();

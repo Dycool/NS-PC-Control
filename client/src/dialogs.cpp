@@ -46,6 +46,80 @@ void KeyCaptureDialog::keyPressEvent(QKeyEvent* event) {
     if (!keyName.isEmpty()) accept();
 }
 
+void KeyCaptureDialog::mousePressEvent(QMouseEvent* event) {
+    if (!g_mouseModeEnabled.load(std::memory_order_relaxed)) {
+        QDialog::mousePressEvent(event);
+        return;
+    }
+    keyName = std_to_q(mouse_button_name_from_event(event));
+    if (!keyName.isEmpty()) accept();
+}
+
+static void open_s2_bindings_dialog(QWidget* parent,
+                                    std::unordered_map<std::string, std::string>& edit_bindings) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle("S2 Bindings");
+    dialog.setModal(true);
+    dialog.setMinimumWidth(310);
+    auto* outer = new QVBoxLayout(&dialog);
+    auto* grid = new QGridLayout();
+    grid->setHorizontalSpacing(4);
+    grid->setVerticalSpacing(4);
+    const auto keys = s2_binding_keys();
+    std::vector<QLabel*> values;
+    const QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+
+    auto refresh = [&] {
+        for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
+            const auto it = edit_bindings.find(keys[i].first);
+            values[i]->setText(it == edit_bindings.end() ? "" : std_to_q(it->second));
+        }
+    };
+
+    for (int i = 0; i < static_cast<int>(keys.size()); ++i) {
+        auto* label = new QLabel(std_to_q(keys[i].first), &dialog);
+        label->setAlignment(Qt::AlignCenter);
+        label->setFont(mono);
+        auto* value = new QLabel(&dialog);
+        value->setFrameShape(QFrame::StyledPanel);
+        value->setAlignment(Qt::AlignCenter);
+        value->setMinimumWidth(104);
+        value->setFont(mono);
+        auto* change = new QPushButton("Change", &dialog);
+        change->setMinimumWidth(66);
+        values.push_back(value);
+        QObject::connect(change, &QPushButton::clicked, &dialog, [&, i] {
+            KeyCaptureDialog capture(&dialog);
+            if (capture.exec() != QDialog::Accepted) return;
+            const std::string name = normalize_key_name(q_to_std(capture.keyName));
+            if (!name.empty() && macro_entry_hotkey_conflicts(name, -1)) {
+                QMessageBox::information(&dialog, "Key Conflict",
+                    std_to_q("The key " + name + " is already used by a macro."));
+                return;
+            }
+            if (!name.empty()) {
+                for (auto& binding : edit_bindings) {
+                    if (normalize_key_name(binding.second) == name) binding.second.clear();
+                }
+            }
+            edit_bindings[keys[i].first] = name;
+            refresh();
+        });
+        grid->addWidget(label, i, 0);
+        grid->addWidget(value, i, 1);
+        grid->addWidget(change, i, 2);
+    }
+    outer->addLayout(grid);
+    auto* buttons = new QHBoxLayout();
+    buttons->addStretch();
+    auto* close = new QPushButton("Close", &dialog);
+    QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    buttons->addWidget(close);
+    outer->addLayout(buttons);
+    refresh();
+    dialog.exec();
+}
+
 BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
     // Do not let keys used to edit bindings reach the connected controller.
     g_keyboardInputSuspended.store(true, std::memory_order_relaxed);
@@ -86,10 +160,12 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
     add_btn("Clear", [this] {
         setupMode = false; listeningIndex = -1;
         for (const auto& kv : binding_keys()) editBindings[kv.first].clear();
+        for (const auto& kv : s2_binding_keys()) editBindings[kv.first].clear();
         refresh();
     });
     add_btn("Reset", [this] { editBindings = default_key_bindings(); refresh(); });
     buttons->addStretch();
+    add_btn("S2", [this] { open_s2_bindings_dialog(this, editBindings); });
     add_btn("Save", [this] {
         { std::lock_guard<std::mutex> lk(g_keyBindingsMutex); g_keyBindings = editBindings; }
         save_bindings(); accept();
@@ -250,9 +326,10 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     connect(controllerTypeBox, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         const bool connected = g_connected.load();
-        controllerTypeBox->setEnabled(!connected);
-        controllerTypeBox->setToolTip(connected
-            ? QStringLiteral("Disconnect to change the emulated controller type.")
+        const bool connecting = g_connecting.load(std::memory_order_relaxed);
+        controllerTypeBox->setEnabled(!connected && !connecting);
+        controllerTypeBox->setToolTip(connected || connecting
+            ? QStringLiteral("Disconnect or cancel the connection attempt to change the emulated controller type.")
             : QString());
         updateJoyconHorizontalControl();
     });
@@ -260,9 +337,16 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
 
     const bool connected = g_connected.load();
-    controllerTypeBox->setEnabled(!connected);
-    controllerTypeBox->setToolTip(connected
-        ? QStringLiteral("Disconnect to change the emulated controller type.")
+    const bool connecting = g_connecting.load(std::memory_order_relaxed);
+    const bool switch2Connected = connected
+        && g_switch2ModeEnabled.load(std::memory_order_relaxed);
+    controllerTypeBox->setEnabled(!connected && !connecting);
+    controllerTypeBox->setToolTip(connected || connecting
+        ? QStringLiteral("Disconnect or cancel the connection attempt to change the emulated controller type.")
+        : QString());
+    gyroBox->setEnabled(!switch2Connected);
+    gyroBox->setToolTip(switch2Connected
+        ? QStringLiteral("Motion input is temporarily disabled for Switch 2 mode.")
         : QString());
 
 
@@ -309,7 +393,7 @@ void SettingsDialog::saveSettings() {
     g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
     const int controllerType = controllerTypeBox->currentData().toInt();
     const bool joycon = controllerType == ns::CONTROLLER_TYPE_JOYCON_L || controllerType == ns::CONTROLLER_TYPE_JOYCON_R;
-    if (!g_connected.load()) {
+    if (!g_connected.load() && !g_connecting.load(std::memory_order_relaxed)) {
         g_controllerType.store(controllerType);
     }
     g_joyconHorizontalMode.store(joycon && joyconHorizontalBox->isChecked());

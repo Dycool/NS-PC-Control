@@ -27,6 +27,7 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
 };
 
 class BindingsDialog : public QDialog {

@@ -1,6 +1,7 @@
 const defLayout = {
     'btn-zl': {l:4, t:4, w:14, h:8}, 'btn-l': {l:4, t:14, w:14, h:8},
     'btn-zr': {l:82, t:4, w:14, h:8}, 'btn-r': {l:82, t:14, w:14, h:8},
+    'btn-sl': {l:38, t:29, w:9, h:7}, 'btn-sr': {l:53, t:29, w:9, h:7},
     'btn-minus': {l:38, t:5, w:6}, 'btn-plus': {l:56, t:5, w:6},
     'btn-capture': {l:42, t:18, w:5}, 'btn-home': {l:53, t:18, w:5},
     'lstick': {l:6, t:35, w:16}, 'btn-ls': {l:2, t:65, w:5},
@@ -26,15 +27,18 @@ function applyLayout() {
 }
 applyLayout();
 const CONTROLLER_JOYCON_L = 1, CONTROLLER_JOYCON_R = 2, CONTROLLER_PRO = 3;
+// Joy-Con selection is a native-app feature. A normal browser is a generic
+// Pro source and lets the server choose S1 Pro, S2 Pro, or HORI.
+const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
 let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || String(CONTROLLER_PRO));
 if (![CONTROLLER_JOYCON_L, CONTROLLER_JOYCON_R, CONTROLLER_PRO].includes(controllerType)) controllerType = CONTROLLER_PRO;
-const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad']);
-const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy']);
-if (controllerType !== CONTROLLER_PRO) {
-    const allowed = controllerType === CONTROLLER_JOYCON_L ? joyconLeftOnly : joyconRightOnly;
-    for (const id of Object.keys(defLayout)) {
-        if (!allowed.has(id)) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
-    }
+if (!nativeMobileHost) controllerType = CONTROLLER_PRO;
+const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
+const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
+for (const id of Object.keys(defLayout)) {
+    const joyconAllowed = controllerType === CONTROLLER_JOYCON_L ? joyconLeftOnly : joyconRightOnly;
+    const allowed = controllerType === CONTROLLER_PRO ? id !== 'btn-sl' && id !== 'btn-sr' : joyconAllowed.has(id);
+    if (!allowed) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
 }
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
 const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341, CLIENT_ASSIGNMENT_SIZE = 16;
@@ -45,6 +49,9 @@ const PAD_PRESENT = 1;
 const FLAG_SINGLE_PAD = 0x04;
 const EXT_STATUS_BATTERY_VALID = 0x01;
 const EXT_STATUS_BATTERY_CHARGING = 0x02;
+const EXT_STATUS_MOTION_FRESH = 0x04;
+const EXT_STATUS_MOTION_FRESH_VALID = 0x08;
+const EXT_BUTTON_SL = 0x10, EXT_BUTTON_SR = 0x20;
 const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
 const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
 const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
@@ -103,6 +110,7 @@ let touchBatteryPercent = null;
 let touchBatteryCharging = false;
 let motionSamples = [];
 let motionEnabled = false;
+let motionRevision = 0, sentMotionRevision = -1;
 const clampI16 = v => Math.max(-32768, Math.min(32767, Math.round(v || 0)));
 function screenRemap(x, y, z) {
     const angle = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) % 360;
@@ -125,6 +133,7 @@ function onDeviceMotion(e) {
     ];
     for (let i=3; i<6; i++) if (Math.abs(sample[i]) <= 32) sample[i] = 0;
     motionSamples.push(sample); if (motionSamples.length > 3) motionSamples.shift();
+    motionRevision++;
 }
 async function enableMotion() {
     if (motionEnabled || typeof DeviceMotionEvent === 'undefined') return;
@@ -160,12 +169,15 @@ function resetTouchConnectionUi(text) {
     if (text) window._connectionFailed = (text === 'Connection failed' || text === 'Server full');
 }
 window.__nsTouchDisconnected = resetTouchConnectionUi;
-let state = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };
-const buttonControls = Array.from(document.querySelectorAll('.btn-map,.btn-dpad'));
+let state = { buttons: 0, extraButtons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };
+const buttonControls = Array.from(document.querySelectorAll('.btn-map,.btn-extra,.btn-dpad'));
 const activeTouchControls = new Map();
 const allTouchButtonBits = buttonControls
     .filter(el => el.classList.contains('btn-map'))
     .reduce((mask, el) => mask | parseInt(el.dataset.btn), 0);
+const allTouchExtraBits = buttonControls
+    .filter(el => el.classList.contains('btn-extra'))
+    .reduce((mask, el) => mask | parseInt(el.dataset.extra), 0);
 const dpad = { u:false, d:false, l:false, r:false };
 function updateHat() {
     if (dpad.u && dpad.r) state.hat = 1; else if (dpad.u && dpad.l) state.hat = 7;
@@ -176,6 +188,7 @@ function updateHat() {
 function controlForElement(el) {
     if (!el) return null;
     if (el.classList.contains('btn-map')) return { el, kind:'button', bit:parseInt(el.dataset.btn) };
+    if (el.classList.contains('btn-extra')) return { el, kind:'extra', bit:parseInt(el.dataset.extra) };
     if (el.classList.contains('btn-dpad')) return { el, kind:'dpad', dir:el.dataset.dir };
     return null;
 }
@@ -190,7 +203,7 @@ function pointInElementId(id, x, y) {
 function getControlAt(x, y) {
     const stack = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
     for (const node of stack) {
-        const el = node.closest && node.closest('.btn-map,.btn-dpad');
+        const el = node.closest && node.closest('.btn-map,.btn-extra,.btn-dpad');
         if (el) return controlForElement(el);
     }
     if (pointInElementId('lstick', x, y) || pointInElementId('rstick', x, y)) return null;
@@ -212,12 +225,14 @@ function getControlAt(x, y) {
 }
 function recomputeTouchControls() {
     state.buttons &= ~allTouchButtonBits;
+    state.extraButtons &= ~allTouchExtraBits;
     dpad.u = dpad.d = dpad.l = dpad.r = false;
     buttonControls.forEach(el => el.classList.remove('active'));
     for (const info of activeTouchControls.values()) {
         if (!info) continue;
         info.el.classList.add('active');
         if (info.kind === 'button') state.buttons |= info.bit;
+        else if (info.kind === 'extra') state.extraButtons |= info.bit;
         else if (info.kind === 'dpad') dpad[info.dir] = true;
     }
     updateHat();
@@ -312,12 +327,20 @@ function normalizeSystemShortcuts(buttons) {
     return buttons;
 }
 let publishedControllerType = null;
+let publishedExtraButtons = null;
 function publishControllerType() {
     if (publishedControllerType === controllerType) return;
     publishedControllerType = controllerType;
     // Newer apps expose a dedicated method; older apps just default to Pro.
     if (window.NSBridge && typeof NSBridge.onTouchControllerType === 'function') {
         try { NSBridge.onTouchControllerType(controllerType); } catch (_) {}
+    }
+}
+function publishExtraButtons() {
+    if (publishedExtraButtons === state.extraButtons) return;
+    publishedExtraButtons = state.extraButtons;
+    if (window.NSBridge && typeof NSBridge.onTouchExtraButtons === 'function') {
+        try { NSBridge.onTouchExtraButtons(state.extraButtons); } catch (_) {}
     }
 }
 function publishTouchState() {
@@ -327,6 +350,7 @@ function publishTouchState() {
         // methods by argument count, so adding a 7th argument breaks touch
         // input on APKs that predate controller-type support.
         publishControllerType();
+        publishExtraButtons();
         NSBridge.onTouchState(sendButtons, state.hat, state.lx, state.ly, state.rx, state.ry);
         return true;
     }
@@ -350,6 +374,10 @@ function sendPacket() {
     if (motionSamples.length === 3) {
         for (let s=0; s<3; s++) for (let v=0; v<6; v++) view.setInt16(off + 8 + s*12 + v*2, motionSamples[s][v], true);
         view.setUint8(off + 44, 1);
+        let motionFlags = view.getUint8(off + 46) | EXT_STATUS_MOTION_FRESH_VALID;
+        if (motionRevision !== sentMotionRevision) motionFlags |= EXT_STATUS_MOTION_FRESH;
+        view.setUint8(off + 46, motionFlags);
+        sentMotionRevision = motionRevision;
     }
     if (touchBatteryPercent !== null) {
         view.setUint8(off + 45, touchBatteryPercent);
@@ -357,7 +385,8 @@ function sendPacket() {
         if (touchBatteryCharging) batteryFlags |= EXT_STATUS_BATTERY_CHARGING;
         view.setUint8(off + 46, batteryFlags);
     }
-    view.setUint8(off + 47, controllerType);
+    view.setUint8(off + 7, PAD_PRESENT | state.extraButtons);
+    view.setUint8(off + 47, CONTROLLER_PRO);
     for(let p=1; p<4; p++) {
         off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);
         view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);

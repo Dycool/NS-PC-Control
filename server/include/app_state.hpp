@@ -95,6 +95,10 @@ struct ClientSession {
     bool first_pkt = true;
     ns::MultiReport report{};
     bool has_new_report = false;
+    // Incremented whenever the source publishes a report. The USB writer uses
+    // this to consume a fresh gyro sample at most once even when it polls the
+    // latest client snapshot more often than the client publishes packets.
+    uint64_t report_generation = 0;
     ns::RumblePacket rumble[4]{};
     ns::PrecisionRumblePacket precision_rumble[4]{};
     uint32_t rumble_seq[4]{};

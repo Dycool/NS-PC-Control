@@ -797,6 +797,7 @@ int main(int argc, char** argv) {
                         c.udp_rumble_enabled = true;
                         c.report             = report;
                         c.has_new_report     = true;
+                        ++c.report_generation;
 
                         const HIDReport* src_pads[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
                         HIDReport*       dst_pads[4] = { &c.report.p1, &c.report.p2, &c.report.p3, &c.report.p4 };

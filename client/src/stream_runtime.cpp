@@ -24,7 +24,8 @@ std::atomic<uint64_t> g_amiiboScanDeadlineUs[4]{};
 SOCKET g_sendSock = INVALID_SOCKET;
 sockaddr_in g_sendDest{};
 uint8_t g_sendHmac[32]{};
-QString g_amiiboPaths[4];
+static std::mutex g_amiiboPathMutex;
+static QString g_amiiboPaths[4];
 std::thread g_senderThread;
 std::atomic<bool> g_senderRunning{false};
 uint8_t g_hmacKey[32]{};
@@ -36,6 +37,23 @@ std::mutex g_assignmentMutex;
 ServerAssignmentView g_serverAssignment;
 std::mutex g_rosterMutex;
 RosterView g_roster;
+
+void set_amiibo_path(uint8_t subpad, const QString& path) {
+    if (subpad >= 4) return;
+    std::lock_guard<std::mutex> lk(g_amiiboPathMutex);
+    g_amiiboPaths[subpad] = path;
+}
+
+QString amiibo_path_snapshot(uint8_t subpad) {
+    if (subpad >= 4) return {};
+    std::lock_guard<std::mutex> lk(g_amiiboPathMutex);
+    return g_amiiboPaths[subpad];
+}
+
+void clear_amiibo_paths() {
+    std::lock_guard<std::mutex> lk(g_amiiboPathMutex);
+    for (QString& path : g_amiiboPaths) path.clear();
+}
 
 static void sleep_while_running(std::atomic<bool>& running, std::chrono::milliseconds duration) {
     constexpr auto SLICE = std::chrono::milliseconds(20);
@@ -601,6 +619,12 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     g_serverProfileUnsupportedDisconnect.store(false, std::memory_order_relaxed);
     reset_server_assignment_state();
     reset_roster_state();
+    for (int i = 0; i < 4; ++i) {
+        g_amiiboScanPending[i].store(false, std::memory_order_relaxed);
+        g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);
+        g_amiiboScanDeadlineUs[i].store(0, std::memory_order_relaxed);
+    }
+    clear_amiibo_paths();
     mouse_input_reset();
     g_lastError.clear();
     if (g_senderThread.joinable()) {
@@ -632,6 +656,7 @@ void stop_connection() {
         g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);
         g_amiiboScanDeadlineUs[i].store(0, std::memory_order_relaxed);
     }
+    clear_amiibo_paths();
     if (was_connected || was_connecting) set_status_message("Disconnected");
 }
 

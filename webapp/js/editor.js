@@ -1,6 +1,7 @@
 const defLayout = {
     'btn-zl': {l:4, t:4, w:14, h:8}, 'btn-l': {l:4, t:14, w:14, h:8},
     'btn-zr': {l:82, t:4, w:14, h:8}, 'btn-r': {l:82, t:14, w:14, h:8},
+    'btn-sl': {l:38, t:29, w:9, h:7}, 'btn-sr': {l:53, t:29, w:9, h:7},
     'btn-minus': {l:38, t:5, w:6}, 'btn-plus': {l:56, t:5, w:6},
     'btn-capture': {l:42, t:18, w:5}, 'btn-home': {l:53, t:18, w:5},
     'lstick': {l:6, t:35, w:16}, 'btn-ls': {l:2, t:65, w:5},
@@ -11,10 +12,11 @@ const defLayout = {
 let layout = JSON.parse(localStorage.getItem('nswc_layout')) || defLayout;
 let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || '3');
 if (![1,2,3].includes(controllerType)) controllerType = 3;
-const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad']);
-const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy']);
+const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
+const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
 function allowedForController(id) {
-    return controllerType === 3 || (controllerType === 1 ? joyconLeftOnly.has(id) : joyconRightOnly.has(id));
+    if (controllerType === 3) return id !== 'btn-sl' && id !== 'btn-sr';
+    return controllerType === 1 ? joyconLeftOnly.has(id) : joyconRightOnly.has(id);
 }
 function applyLayout() {
     for(let id in defLayout) {

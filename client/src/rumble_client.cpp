@@ -2,6 +2,7 @@
 #include "input_settings.hpp"
 #include "udp_protocol.hpp"
 #include "macro_client.hpp"
+#include "qt_helpers.hpp"
 #include "stream_runtime.hpp"
 #include <algorithm>
 #include <chrono>
@@ -9,7 +10,8 @@
 #include <cstring>
 #include <thread>
 #include <span>
-#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
 
 
 static void apply_server_info_reply(const ns::ServerInfoReply& reply) {
@@ -150,12 +152,21 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             const bool complete_packet = static_cast<size_t>(n) >= amiibo_packet_header + amiibo_data_len;
             if (ad.subpad < 4 && supported_size && complete_packet) {
                 // Writeback from server (modified Amiibo after NFC 0x14/0x08) -> persist to the selected dump.
-                QString p = g_amiiboPaths[ad.subpad];
-                if (!p.isEmpty()) {
-                    QFile f(p);
-                    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                        f.write(reinterpret_cast<const char*>(ad.data), amiibo_data_len);
-                        f.close();
+                const QString path = amiibo_path_snapshot(ad.subpad);
+                if (path.isEmpty()) {
+                    set_status_message("Amiibo write completed, but no destination file is selected.");
+                } else {
+                    QSaveFile file(path);
+                    const bool opened = file.open(QIODevice::WriteOnly);
+                    const qint64 written = opened
+                        ? file.write(reinterpret_cast<const char*>(ad.data), amiibo_data_len)
+                        : -1;
+                    const bool saved = opened && written == amiibo_data_len && file.commit();
+                    if (saved) {
+                        set_status_message("Amiibo saved to " + q_to_std(QFileInfo(path).fileName()));
+                    } else {
+                        if (opened && written != amiibo_data_len) file.cancelWriting();
+                        set_status_message("Failed to save Amiibo: " + q_to_std(file.errorString()));
                     }
                 }
                 g_amiiboScanPending[ad.subpad] = false;

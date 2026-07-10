@@ -988,7 +988,7 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
 
 void reset_client_session_locked(ClientSession& c) {
     c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
-    c.report.reset(); c.has_new_report = false;
+    c.report.reset(); c.has_new_report = false; c.report_generation = 0;
     clear_all_motion(c);
     c.uses_pad_presence = c.udp_rumble_enabled = false;
     for (int s = 0; s < 4; ++s) c.source_pads[s] = ns::RosterEntry{};
