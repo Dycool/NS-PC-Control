@@ -298,9 +298,12 @@ int main(int argc, char** argv) {
     //   --hori => legacy HORI USB identity/profile family
     const UsbControllerFamily selected_usb_family = use_s2 ? UsbControllerFamily::Switch2
         : (use_hori ? UsbControllerFamily::Hori : UsbControllerFamily::Switch1);
-    // S2 uses three native Pro2 controllers plus one Switch 1 f_hid fallback.
-    // There is no public debug/topology flag.
-    g_ctx.switch2_native_port_count = 3;
+    // S2 exposes a single faithful native Pro Controller 2 (HID + vendor-bulk
+    // interface pair, PicoSwitch2's proven 2-interface layout). The S2
+    // identity handshake runs on device-scoped EP0 vendor requests, so one USB
+    // device can only ever be one S2 controller; the earlier 3+1 composite
+    // enumerated but the console never spoke to it.
+    g_ctx.switch2_native_port_count = 1;
     configure_usb_controller_family(selected_usb_family);
     if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
         std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");

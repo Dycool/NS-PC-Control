@@ -117,7 +117,11 @@ static bool write_all_nonblock_drop(int fd, const uint8_t* data, size_t len) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    const int nports = HID_PORT_COUNT;
+    // S2 exposes only the native FunctionFS Pro2 port(s); the Pro Controller 2
+    // device carries no f_hid fallback. S1/HORI drive all four legacy ports.
+    const int nports = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+        ? std::clamp(g_ctx.switch2_native_port_count, 1, HID_PORT_COUNT)
+        : HID_PORT_COUNT;
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -197,7 +201,7 @@ void writer_thread(std::stop_token stoken, int hz) {
 
         if (g_ctx.verbose) {
             if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                std::println("3x native S2 FunctionFS + 1x Switch 1 /dev/hidg fallback opened");
+                std::println("{}x native S2 FunctionFS port(s) opened", nports);
             else
                 std::println("{}x legacy /dev/hidg* opened", nports);
         }
