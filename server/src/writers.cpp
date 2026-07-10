@@ -646,9 +646,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         have_report_to_write = false;
                                         continue;
                                     }
-                                    const bool imu_on = (switch2_native_enabled_features(h) & 0x04u) != 0;
-                                    build_s2_pro_report(report_for_port, motion_for_port,
-                                                        motion_fresh_for_port, imu_on,
+                                    // Keep the native S2 motion implementation available, but
+                                    // ignore client motion until S2 motion is ready to be enabled.
+                                    build_s2_pro_report(report_for_port, nullptr,
+                                                        false, false,
                                                         pro_timer_from_us(now_stamp), now_stamp,
                                                         h, write_buf);
                                     write_len = PRO_REPORT_SIZE;

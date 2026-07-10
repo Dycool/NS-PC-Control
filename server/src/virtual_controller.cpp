@@ -1550,13 +1550,14 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             cancel_amiibo_hid_state_event_locked(port);
         }
         request_state = 0;
-        // The first 0x04 in the observed flow only closes tag discovery while
-        // status is still 0x09. A later 0x04 closes an actual read (0x04) or
-        // committed write (0x05). Treat that as lifting the virtual Amiibo off
-        // the reader so a future scan asks the client for a tag again.
+        // Keep the virtual tag present after a read. The captured write flow
+        // closes the prerequisite read with 0x04, immediately re-enters scan,
+        // and then starts a UID-bearing write operation against the same tag.
+        // Ejecting after the read prevents the console from reaching that
+        // write phase. A committed write is the end of the full transaction.
         clear_after_command = placed
-            && ((g_amiibo_nfc_status[port] == 0x04 && !g_amiibo_write_mode[port])
-                || (g_amiibo_nfc_status[port] == 0x05 && g_amiibo_write_committed[port]));
+            && g_amiibo_nfc_status[port] == 0x05
+            && g_amiibo_write_committed[port];
         if (g_ctx.verbose) {
             std::println("[s2][nfc][parse] sub=0x04 leave-scan ui_scan_requested=false completed_transaction={} auto_eject={}",
                          clear_after_command, clear_after_command);
