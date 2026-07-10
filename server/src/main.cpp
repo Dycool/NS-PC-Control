@@ -298,12 +298,12 @@ int main(int argc, char** argv) {
     //   --hori => legacy HORI USB identity/profile family
     const UsbControllerFamily selected_usb_family = use_s2 ? UsbControllerFamily::Switch2
         : (use_hori ? UsbControllerFamily::Hori : UsbControllerFamily::Switch1);
-    // S2 exposes a single faithful native Pro Controller 2 (HID + vendor-bulk
-    // interface pair, PicoSwitch2's proven 2-interface layout). The S2
-    // identity handshake runs on device-scoped EP0 vendor requests, so one USB
-    // device can only ever be one S2 controller; the earlier 3+1 composite
-    // enumerated but the console never spoke to it.
-    g_ctx.switch2_native_port_count = 1;
+    // S2 exposes three native Pro Controller 2 functions plus one Switch 1
+    // f_hid fallback. Note: the device-scoped EP0 identity requests are routed
+    // to the first function only by the composite layer, so if the console
+    // drives only one controller, that is why (single-function mode was the
+    // configuration verified working on real hardware on 2026-07-10).
+    g_ctx.switch2_native_port_count = 3;
     configure_usb_controller_family(selected_usb_family);
     if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
         std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");
@@ -387,7 +387,7 @@ int main(int argc, char** argv) {
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
     if (use_hori)                         extras.push_back("HORI USB mode");
-    if (use_s2)                           extras.push_back("Switch 2 USB mode (1 native Pro Controller 2)");
+    if (use_s2)                           extras.push_back("Switch 2 USB mode (3 native Pro2 + 1 Switch 1 fallback)");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");

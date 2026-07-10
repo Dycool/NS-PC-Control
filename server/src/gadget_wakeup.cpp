@@ -291,11 +291,8 @@ static int switch2_virtual_port_count() {
 }
 
 static int legacy_hidg_node_count_for_family() {
-    // S2: none. The Pro Controller 2 device must contain only its own
-    // HID + vendor function pair — with a foreign f_hid interface (and two
-    // extra Pro2 pairs) in the same configuration the console completed
-    // enumeration but never sent a single request.
-    return gadget_uses_switch2_identity() ? 0 : HID_PORT_COUNT;
+    // S2: three native Pro2 functions plus one Switch 1 f_hid fallback.
+    return gadget_uses_switch2_identity() ? 1 : HID_PORT_COUNT;
 }
 
 static int functionfs_function_count_for_family() {
@@ -2212,8 +2209,8 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     if (g_ctx.verbose) {
         if (gadget_uses_switch2_identity()) {
-            std::println("[gadget] {}; creating {} native S2 FunctionFS Pro2 controller(s)",
-                         reason ? reason : "USB gadget not ready", ffs_count);
+            std::println("[gadget] {}; creating {} native S2 FunctionFS Pro2 controller(s) plus {} Switch 1 f_hid fallback",
+                         reason ? reason : "USB gadget not ready", ffs_count, legacy_count);
         } else if (gadget_uses_hori_identity()) {
             std::println("[gadget] {}; creating upstream-style 4-interface f_hid HORI gadget",
                          reason ? reason : "USB gadget not ready");
@@ -2320,8 +2317,8 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             if (nodes_ready()) {
                 if (g_ctx.verbose) {
                     if (gadget_uses_switch2_identity()) {
-                        std::println("[gadget] Done. Exposed {} native S2 Pro2 FunctionFS controller(s)",
-                                     ffs_count);
+                        std::println("[gadget] Done. Exposed {} native S2 Pro2 FunctionFS controller(s) + {} Switch 1 f_hid fallback",
+                                     ffs_count, legacy_count);
                     } else {
                         std::println("[gadget] Done. Exposed {} upstream-style f_hid interface(s) (/dev/hidg*)",
                                      legacy_count);

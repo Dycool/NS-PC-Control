@@ -2,6 +2,7 @@
 #include "app_state.hpp"
 #include "bluetooth_manager.hpp"
 #include "gadget_wakeup.hpp"
+#include "switch2_native.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
@@ -245,21 +246,26 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
     g_spi_initialized[ctrl] = false;
     init_spi_flash(ctrl);
 
+    // Native S2 ports carry the split identity in switch2_native's factory
+    // block (memory 0x13014 + ep0 identity), which the console reads instead
+    // of the S1 SPI image. Keep it in sync with the selected type.
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+            && ctrl < g_ctx.switch2_native_port_count) {
+        uint8_t pid_lo = 0x69; // Pro Controller 2
+        if (ns_type == NS_TYPE_JOYCON_R) pid_lo = 0x66;
+        else if (ns_type == NS_TYPE_JOYCON_L) pid_lo = 0x67;
+        switch2_native_set_port_pid(ctrl, pid_lo);
+    }
+
     // The USB descriptor and device identity are fixed by UsbControllerFamily
     // at startup; rebuilding the gadget here directly used to disconnect every
     // player whenever any source appeared, disappeared, or changed profile.
-    // But the console reads device info/SPI only during the USB handshake
-    // (test5 finding), so an S1 type change stays invisible until the gadget
-    // re-enumerates. Note the change; the writer forces one debounced
-    // re-enumeration once the layout settles. This applies to every port that
-    // speaks the S1 protocol to the console: all four in Switch1 mode, and the
-    // /dev/hidg fallback port in --s2 (native S2 ports are pinned to Pro2 and
-    // never change).
-    const bool s1_console_visible =
-        g_ctx.usb_controller_family == UsbControllerFamily::Switch1
-        || (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-            && ctrl >= g_ctx.switch2_native_port_count);
-    if (ns_type != prev_ns_type && s1_console_visible) {
+    // But the console reads identity only during the USB handshake — S1
+    // device info/SPI and the S2 ep0 identity / factory 0x13014 alike — so a
+    // type change stays invisible until the gadget re-enumerates. Note the
+    // change; the writer forces one debounced re-enumeration once the layout
+    // settles. Hori is the only fixed-identity family.
+    if (ns_type != prev_ns_type && g_ctx.usb_controller_family != UsbControllerFamily::Hori) {
         g_s1_identity_change_us.store(now_us(), std::memory_order_relaxed);
     }
 }
@@ -563,12 +569,14 @@ void build_standard_report(const ns::HIDReport& src, const ns::MotionReport moti
 static uint8_t s2_power_info_from_hid(const HIDReport& src) {
     // S2 power info bitfield (research): [0] external, [1] charging,
     // [2:5] battery level 0-9, [6:7] reserved.
-    uint8_t pwr = 0x01;
+    // Without client battery info default to a full battery like the S1 path;
+    // level 0 makes the console show a low-battery controller.
+    uint8_t lvl = 9;
     if (src.reserved[1] & EXT_STATUS_BATTERY_VALID) {
         int pct = std::clamp<int>(src.reserved[0], 0, 100);
-        uint8_t lvl = static_cast<uint8_t>(std::min(9, pct / 11));
-        pwr = static_cast<uint8_t>((lvl << 2) | 0x01);
+        lvl = static_cast<uint8_t>(std::min(9, pct / 11));
     }
+    uint8_t pwr = static_cast<uint8_t>((lvl << 2) | 0x01);
     if (src.reserved[1] & EXT_STATUS_BATTERY_CHARGING) pwr |= 0x02;
     return pwr;
 }

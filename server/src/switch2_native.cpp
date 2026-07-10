@@ -213,6 +213,16 @@ void switch2_native_init() {
     std::call_once(g_init_once, init_all);
 }
 
+void switch2_native_set_port_pid(int port, uint8_t pid_lo) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    NativeState& s = state_for_port(port);
+    // 0x13014/0x13015 relative to FACTORY_BASE; ep0 identity mirrors the
+    // first 0x25 factory bytes, so refresh it too.
+    s.factory[0x14] = pid_lo;
+    s.factory[0x15] = 0x20;
+    std::memcpy(s.identity.data(), s.factory.data(), 0x25);
+}
+
 void switch2_native_reset_port(int port) {
     std::lock_guard<std::mutex> lk(g_mtx);
     NativeState& s = state_for_port(port);
@@ -288,7 +298,7 @@ bool switch2_native_handle_vendor_command(int port,
             if (sub == 0x0D) { d[0] = 0x01; dl = 4; }
             else if (sub == 0x03) { d[0] = 0x01; dl = 4; }
             else if (sub == 0x0A) {
-                if (c.size() > 8 && (c[8] == 0x05 || c[8] == 0x09)) s.selected_report = c[8];
+                if (c.size() > 8 && (c[8] == 0x05 || c[8] == 0x07 || c[8] == 0x08 || c[8] == 0x09)) s.selected_report = c[8];
                 s.streaming = true;
                 rt.full_report_enabled = true;
                 rt.input_report_mode = s.selected_report;

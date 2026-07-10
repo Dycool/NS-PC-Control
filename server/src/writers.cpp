@@ -39,18 +39,11 @@ static uint8_t raw_controller_profile_from_report(const HIDReport& report) {
     }
 }
 
-static uint8_t switch1_profile_from_report(const HIDReport& report) {
-    return coerce_profile_to_family(raw_controller_profile_from_report(report), UsbControllerFamily::Switch1);
-}
-
-// Profile actually requested by the source pad.  For native S2 ports this will
-// be forced to Pro2 later, but the slot-3 fallback in --s2 intentionally keeps
-// the source's Switch 1 shape so P4 can be a full S1 Pro/Joy-Con path instead
-// of an 8-byte HORI-style compatibility pad.
+// Profile actually requested by the source pad, coerced onto the active USB
+// family. In --s2 the native port follows the request too: Joy-Con 2 identity
+// is the same split-identity trick as S1 — USB PID stays Pro2 (0x2069) while
+// factory memory 0x13014 / the ep0 identity block claim the Joy-Con 2 PID.
 static uint8_t requested_controller_profile_from_report(const HIDReport& report) {
-    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-        return switch1_profile_from_report(report);
-    }
     return coerce_profile_to_family(raw_controller_profile_from_report(report), g_ctx.usb_controller_family);
 }
 
@@ -77,6 +70,20 @@ static uint8_t virtual_type_for_profile(uint8_t profile, bool pair_right_side = 
 static bool profile_is_pair(uint8_t profile) {
     return profile == ns::CONTROLLER_TYPE_JOYCON_PAIR ||
            profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+}
+
+// A native S2 port is a single controller, so a Joy-Con pair request cannot
+// span two ports; it degrades to one Pro2 slot.
+static uint8_t s2_degrade_pair(uint8_t profile) {
+    return profile_is_pair(profile) ? ns::CONTROLLER_TYPE_PRO_S2 : profile;
+}
+
+// The f_hid fallback port inside the --s2 gadget speaks the Switch 1 protocol;
+// map the S2-coerced request back onto its S1 equivalent. Pairs cannot span
+// the single fallback slot, so they degrade to one S1 Pro.
+static uint8_t s1_fallback_profile(uint8_t profile) {
+    profile = coerce_profile_to_family(profile, UsbControllerFamily::Switch1);
+    return profile_is_pair(profile) ? ns::CONTROLLER_TYPE_PRO : profile;
 }
 
 static const HIDReport& get_hid_report(const ClientSession& c, int s) {
@@ -117,11 +124,9 @@ static bool write_all_nonblock_drop(int fd, const uint8_t* data, size_t len) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    // S2 exposes only the native FunctionFS Pro2 port(s); the Pro Controller 2
-    // device carries no f_hid fallback. S1/HORI drive all four legacy ports.
-    const int nports = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-        ? std::clamp(g_ctx.switch2_native_port_count, 1, HID_PORT_COUNT)
-        : HID_PORT_COUNT;
+    // S2: three native FunctionFS Pro2 ports + one Switch 1 f_hid fallback.
+    // S1/HORI drive all four legacy ports.
+    const int nports = HID_PORT_COUNT;
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -273,12 +278,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                         : (!hid_is_neutral(get_hid_report(snaps[c], s)) || macro_active);
                     if (!active) continue;
                     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-                        // Native S2 ports are always Pro2, but the fourth f_hid
-                        // fallback is a real Switch 1 path.  Keep the source's
-                        // S1 profile shape here and decide per physical port
-                        // after allocation.  Pairs cannot fit in the single
-                        // fallback slot, so they degrade to one S1 Pro slot.
-                        singles.push_back({c, s, static_cast<uint8_t>(profile_is_pair(profile) ? ns::CONTROLLER_TYPE_PRO : profile)});
+                        // Native S2 ports follow the requested S2 profile
+                        // (Pro2 / Joy-Con 2 L / R). Pairs degrade to one Pro2
+                        // slot: one S2 device is one controller.
+                        singles.push_back({c, s, s2_degrade_pair(profile)});
                     } else {
                         (profile_is_pair(profile) ? pairs : singles).push_back({c, s, profile});
                     }
@@ -295,7 +298,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const uint8_t idle_profile = requested_controller_profile_from_report(get_hid_report(snaps[c], 0));
                     if (controller_profile_supported_by_usb_family(idle_profile)) {
                         if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                            singles.push_back({c, 0, static_cast<uint8_t>(profile_is_pair(idle_profile) ? ns::CONTROLLER_TYPE_PRO : idle_profile)});
+                            singles.push_back({c, 0, s2_degrade_pair(idle_profile)});
                         else
                             (profile_is_pair(idle_profile) ? pairs : singles).push_back({c, 0, idle_profile});
                     }
@@ -378,9 +381,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (port < 0 && req.sub_idx < nports && next_slots[req.sub_idx].client_idx == -1) port = req.sub_idx;
                 if (port < 0) port = first_free_port();
                 if (port < 0) continue;
-                const uint8_t vtype = (g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && port_uses_s2_functionfs(port))
-                    ? NS_TYPE_PRO
-                    : virtual_type_for_profile(req.profile);
+                const uint8_t vtype = virtual_type_for_profile(req.profile);
                 next_slots[port] = {req.client_idx, req.sub_idx, vtype, false, false};
             }
 
@@ -402,10 +403,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (hw_slots[h].client_idx != -1) {
                     const int c = hw_slots[h].client_idx;
                     const int s = hw_slots[h].sub_idx;
-                    const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
-                    set_controller_type_for_port(h, port_uses_s2_functionfs(h)
-                        ? ns::CONTROLLER_TYPE_PRO_S2
-                        : protocol_for_slot(profile, hw_slots[h].pair_right));
+                    uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
+                    if (port_uses_s2_functionfs(h)) profile = s2_degrade_pair(profile);
+                    else if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) profile = s1_fallback_profile(profile);
+                    set_controller_type_for_port(h, protocol_for_slot(profile, hw_slots[h].pair_right));
                     if (old.client_idx != c || old.sub_idx != s) {
                         publish_controller_status_event(c, s,
                                                         g_ctx.console_player_leds[h].load(std::memory_order_relaxed),
@@ -552,7 +553,9 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const uint8_t profile = requested_controller_profile_from_report(out_reports[h]);
                     uint8_t eff_profile = profile;
                     if (port_uses_s2_functionfs(h)) {
-                        eff_profile = ns::CONTROLLER_TYPE_PRO_S2;
+                        eff_profile = s2_degrade_pair(profile);
+                    } else if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                        eff_profile = s1_fallback_profile(profile);
                     } else if (profile_is_pair(profile)) {
                         bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
                         eff_profile = hw_slots[h].pair_right ? (is_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2 : ns::CONTROLLER_TYPE_JOYCON_R) : (is_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2 : ns::CONTROLLER_TYPE_JOYCON_L);
