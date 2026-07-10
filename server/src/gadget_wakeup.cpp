@@ -26,6 +26,7 @@
 #include <print>
 #include <signal.h>
 #include <sstream>
+#include <span>
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
@@ -111,6 +112,17 @@ static std::string to_upper_hex_bytes(std::string payload) {
         }
     }
     return out.str();
+}
+
+static std::string bytes_to_hex(std::span<const uint8_t> data) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.resize(data.size() * 2);
+    for (size_t i = 0; i < data.size(); ++i) {
+        out[i * 2] = kHex[data[i] >> 4];
+        out[i * 2 + 1] = kHex[data[i] & 0x0f];
+    }
+    return out;
 }
 
 static bool valid_mac(const std::string& mac) {
@@ -953,9 +965,20 @@ static void ffs_vendor_reader_loop(int id) {
         if (fd < 0) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
         ssize_t r = read(fd, buf.data(), buf.size());
         if (r > 0) {
+            bool dropped_oldest = false;
+            size_t depth_after = 0;
             std::lock_guard<std::mutex> lk(st.vendor_out_mtx);
-            if (st.vendor_out_reports.size() >= 64) st.vendor_out_reports.pop_front();
+            if (st.vendor_out_reports.size() >= 64) {
+                st.vendor_out_reports.pop_front();
+                dropped_oldest = true;
+            }
             st.vendor_out_reports.emplace_back(buf.begin(), buf.begin() + r);
+            depth_after = st.vendor_out_reports.size();
+            if (g_ctx.verbose && buf[0] == 0x01) {
+                std::println("[s2][nfc][usb-read] t_us={} port={} bytes={} depth_after={} dropped_oldest={} raw={}",
+                             now_us(), id, r, depth_after, dropped_oldest,
+                             bytes_to_hex(std::span<const uint8_t>(buf.data(), static_cast<size_t>(r))));
+            }
             continue;
         }
         if (r < 0 && errno == EINTR) continue;
@@ -979,8 +1002,26 @@ static void ffs_vendor_writer_loop(int id) {
             st.vendor_in_reports.pop_front();
         }
         int fd = st.ep_vendor_in_fd;
-        if (fd < 0 || report.empty()) continue;
+        if (fd < 0 || report.empty()) {
+            if (g_ctx.verbose && !report.empty() && report[0] == 0x01) {
+                std::println(stderr,
+                             "[s2][nfc][usb-write] port={} skipped fd={} report_len={} raw={}",
+                             id, fd, report.size(), bytes_to_hex(report));
+            }
+            continue;
+        }
         ssize_t w = write(fd, report.data(), report.size());
+        if (g_ctx.verbose && report[0] == 0x01) {
+            if (w < 0) {
+                std::println(stderr,
+                             "[s2][nfc][usb-write] t_us={} port={} requested={} written=-1 errno={} ({}) raw={}",
+                             now_us(), id, report.size(), errno, std::strerror(errno), bytes_to_hex(report));
+            } else {
+                std::println("[s2][nfc][usb-write] t_us={} port={} requested={} written={} complete={} raw={}",
+                             now_us(), id, report.size(), w,
+                             w == static_cast<ssize_t>(report.size()), bytes_to_hex(report));
+            }
+        }
         if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
         (void)w;
     }
@@ -1318,15 +1359,43 @@ bool functionfs_poll_vendor_report(int id, std::vector<unsigned char>& out_repor
 }
 
 bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len) {
-    if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
-    if (!data || len == 0) return false;
+    const bool is_nfc = data != nullptr && len != 0 && data[0] == 0x01;
+    if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) {
+        if (g_ctx.verbose && is_nfc)
+            std::println(stderr,
+                         "[s2][nfc][tx-queue] rejected: transport_active={} port={} valid_port={} len={}",
+                         functionfs_transport_active(), id, id >= 0 && id < HID_PORT_COUNT, len);
+        return false;
+    }
+    if (!data || len == 0) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][tx-queue] rejected null/empty vendor response port={} len={}", id, len);
+        return false;
+    }
     FfsPortState& st = g_ffs_ports[id];
-    if (!st.host_enabled || !functionfs_io_ready(id) || st.ep_vendor_in_fd < 0) return false;
+    if (!st.host_enabled || !functionfs_io_ready(id) || st.ep_vendor_in_fd < 0) {
+        if (g_ctx.verbose && is_nfc)
+            std::println(stderr,
+                         "[s2][nfc][tx-queue] rejected port={} host_enabled={} io_ready={} vendor_in_fd={} len={} raw={}",
+                         id, st.host_enabled, functionfs_io_ready(id), st.ep_vendor_in_fd,
+                         len, bytes_to_hex(std::span<const uint8_t>(data, len)));
+        return false;
+    }
+    bool dropped_oldest = false;
+    size_t depth_after = 0;
     {
         std::lock_guard<std::mutex> lk(st.vendor_in_mtx);
-        if (st.vendor_in_reports.size() >= 16) st.vendor_in_reports.pop_front();
+        if (st.vendor_in_reports.size() >= 16) {
+            st.vendor_in_reports.pop_front();
+            dropped_oldest = true;
+        }
         st.vendor_in_reports.emplace_back(data, data + len);
+        depth_after = st.vendor_in_reports.size();
     }
+    if (g_ctx.verbose && is_nfc)
+        std::println("[s2][nfc][tx-queue] accepted t_us={} port={} len={} depth_after={} dropped_oldest={} raw={}",
+                     now_us(), id, len, depth_after, dropped_oldest,
+                     bytes_to_hex(std::span<const uint8_t>(data, len)));
     st.vendor_in_cv.notify_one();
     return true;
 }

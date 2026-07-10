@@ -258,6 +258,26 @@ static std::mutex g_amiibo_mtx;
 
 static void publish_amiibo_request_for_port(int port, bool requested);
 
+namespace {
+
+std::string nfc_hex(std::span<const uint8_t> data) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.resize(data.size() * 2);
+    for (size_t i = 0; i < data.size(); ++i) {
+        out[i * 2] = kHex[data[i] >> 4];
+        out[i * 2 + 1] = kHex[data[i] & 0x0f];
+    }
+    return out;
+}
+
+long long nfc_expiry_remaining_ms(int port, std::chrono::steady_clock::time_point now) {
+    if (port < 0 || port >= HID_PORT_COUNT || g_amiibo_data[port].empty()) return 0;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(g_amiibo_expiry[port] - now).count();
+}
+
+} // namespace
+
 bool is_amiibo_placed(int port) {
     if (port < 0 || port >= HID_PORT_COUNT) return false;
     std::lock_guard<std::mutex> lk(g_amiibo_mtx);
@@ -297,16 +317,26 @@ void configure_usb_controller_family(UsbControllerFamily family) {
 }
 
 void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
-    if (port < 0 || port >= HID_PORT_COUNT || !data) return;
+    if (g_ctx.verbose) {
+        std::println("[s2][nfc][upload] t_us={} port={} len={} data_ptr={} supports_nfc={}",
+                     now_us(), port, len, data != nullptr,
+                     port >= 0 && port < HID_PORT_COUNT && controller_port_supports_amiibo(port));
+    }
+    if (port < 0 || port >= HID_PORT_COUNT || !data) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][upload] rejected: invalid port or null data");
+        return;
+    }
     if (!controller_port_supports_amiibo(port)) {
-        if (g_ctx.verbose) std::fprintf(stderr, "[s2][nfc] rejected amiibo upload: port %d has no native NFC\n", port);
+        if (g_ctx.verbose) std::println(stderr, "[s2][nfc][upload] rejected: port {} has no native NFC", port);
         return;
     }
     constexpr size_t AMIIBO_SIZE = 540;
     // A short/overlong image cannot be exposed as a raw NTAG215 dump without
     // changing its page layout, UID, lock bytes, or configuration pages.
     if (len != AMIIBO_SIZE) {
-        if (g_ctx.verbose) std::fprintf(stderr, "[s2][nfc] rejected amiibo upload: expected 540 bytes, got %zu\n", len);
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][upload] rejected: expected 540 bytes, got {}", len);
         return;
     }
     {
@@ -316,9 +346,10 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
         g_amiibo_modified[port] = false;
     }
     if (g_ctx.verbose) {
-        std::fprintf(stdout,
-                     "[s2][nfc] amiibo loaded on port %d: uid=%02x%02x%02x%02x%02x%02x%02x\n",
-                     port, data[0], data[1], data[2], data[4], data[5], data[6], data[7]);
+        std::println("[s2][nfc][upload] accepted t_us={} port={} uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} expiry_ms=15000 modified=false",
+                     now_us(), port, data[0], data[1], data[2], data[4], data[5], data[6], data[7]);
+        std::println("[s2][nfc][upload] raw_bin={}",
+                     nfc_hex(std::span<const uint8_t>(data, AMIIBO_SIZE)));
     }
     // Selecting a tag satisfies the outstanding UI request immediately.
     publish_amiibo_request_for_port(port, false);
@@ -327,20 +358,35 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
 void check_amiibo_expiry(int port) {
     if (port < 0 || port >= HID_PORT_COUNT) return;
     std::vector<uint8_t> writeback;
+    bool expired = false;
+    bool was_modified = false;
     {
         std::lock_guard<std::mutex> lk(g_amiibo_mtx);
         if (g_amiibo_data[port].empty()
                 || std::chrono::steady_clock::now() <= g_amiibo_expiry[port]) return;
-        if (g_amiibo_modified[port]) writeback = g_amiibo_data[port];
+        expired = true;
+        was_modified = g_amiibo_modified[port];
+        if (was_modified) writeback = g_amiibo_data[port];
         g_amiibo_data[port].clear();
         g_amiibo_modified[port] = false;
+    }
+    if (g_ctx.verbose && expired) {
+        std::println("[s2][nfc][expiry] t_us={} port={} expired=true modified={} writeback_len={}",
+                     now_us(), port, was_modified, writeback.size());
+        if (!writeback.empty())
+            std::println("[s2][nfc][expiry] writeback_raw_bin={}", nfc_hex(writeback));
     }
     if (!writeback.empty()) {
         int client_idx = -1;
         int sub_idx = -1;
         if (client_subpad_for_console_port(port, client_idx, sub_idx)) {
+            if (g_ctx.verbose)
+                std::println("[s2][nfc][expiry] routing writeback port={} -> client={} subpad={}",
+                             port, client_idx, sub_idx);
             publish_amiibo_writeback(client_idx, sub_idx, writeback.data(),
                                      static_cast<uint16_t>(writeback.size()));
+        } else if (g_ctx.verbose) {
+            std::println(stderr, "[s2][nfc][expiry] no client/subpad mapping for port {}; writeback dropped", port);
         }
     }
 }
@@ -349,7 +395,12 @@ static void publish_amiibo_request_for_port(int port, bool requested) {
     int client_idx = -1;
     int sub_idx = -1;
     if (client_subpad_for_console_port(port, client_idx, sub_idx)) {
+        if (g_ctx.verbose)
+            std::println("[s2][nfc][ui-route] t_us={} port={} requested={} -> client={} subpad={}",
+                         now_us(), port, requested, client_idx, sub_idx);
         publish_amiibo_request(client_idx, sub_idx, requested);
+    } else if (g_ctx.verbose) {
+        std::println(stderr, "[s2][nfc][ui-route] port={} requested={} has no client/subpad mapping", port, requested);
     }
 }
 
@@ -1151,6 +1202,11 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     if (port < 0 || port >= HID_PORT_COUNT) port = 0;
     std::memset(payload, 0, S2_NFC_MAX_RESPONSE_PAYLOAD);
     if (!controller_port_supports_amiibo(port)) {
+        if (g_ctx.verbose) {
+            std::println(stderr,
+                         "[s2][nfc][state] t_us={} port={} sub=0x{:02x} rejected: controller has no native NFC request_data={}",
+                         now_us(), port, nfc_sub, nfc_hex(cmd_data));
+        }
         publish_amiibo_request_for_port(port, false);
         return 0;
     }
@@ -1159,6 +1215,12 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     auto& adata = g_amiibo_data[port];
     const auto now = std::chrono::steady_clock::now();
     bool placed = adata.size() == S2_AMIIBO_RAW_SIZE && now < g_amiibo_expiry[port];
+
+    if (g_ctx.verbose) {
+        std::println("[s2][nfc][state] t_us={} port={} sub=0x{:02x} request_len={} request_data={} placed={} raw_size={} expiry_remaining_ms={} modified={}",
+                     now_us(), port, nfc_sub, cmd_data.size(), nfc_hex(cmd_data), placed,
+                     adata.size(), nfc_expiry_remaining_ms(port, now), g_amiibo_modified[port]);
+    }
 
     // Keep the virtual tag present for the complete multi-command transaction.
     // Five seconds was occasionally short enough to race game/UI delays.
@@ -1170,10 +1232,15 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     switch (nfc_sub) {
     case 0x03: // Enter NFC scan mode.
         request_state = placed ? 0 : 1;
+        if (g_ctx.verbose)
+            std::println("[s2][nfc][parse] sub=0x03 enter-scan placed={} ui_scan_requested={}",
+                         placed, request_state == 1);
         break;
 
     case 0x04: // Leave NFC scan mode.
         request_state = 0;
+        if (g_ctx.verbose)
+            std::println("[s2][nfc][parse] sub=0x04 leave-scan ui_scan_requested=false");
         break;
 
     case 0x05: { // Get status.
@@ -1197,12 +1264,23 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         }
         request_state = placed ? 0 : 1;
         plen = 60;
+        if (g_ctx.verbose) {
+            if (placed) {
+                std::println("[s2][nfc][parse] sub=0x05 get-status tag_present=true uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} payload_len={}",
+                             adata[0], adata[1], adata[2], adata[4], adata[5], adata[6], adata[7], plen);
+            } else {
+                std::println("[s2][nfc][parse] sub=0x05 get-status tag_present=false payload_len={} ui_scan_requested=true", plen);
+            }
+        }
         break;
     }
 
     case 0x06: // Read device: starts the read, response is header-only.
     case 0x08: // Write device: observed as a header-only ACK.
         plen = 0;
+        if (g_ctx.verbose)
+            std::println("[s2][nfc][parse] sub=0x{:02x} {} header-only-ack placed={}",
+                         nfc_sub, nfc_sub == 0x06 ? "read-device" : "write-device", placed);
         break;
 
     case 0x15: { // Read buffer.
@@ -1224,8 +1302,22 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             if (remaining != 0) {
                 const size_t to_copy = std::min(remaining, S2_NFC_READ_CHUNK_SIZE);
                 std::memcpy(payload + 4, staging.data() + off, to_copy);
+                if (g_ctx.verbose) {
+                    std::println("[s2][nfc][parse] sub=0x15 read-buffer offset=0x{:04x} staging_size={} remaining={} copied={} padded={} descriptor=0x{:02x}",
+                                 off, staging.size(), remaining, to_copy,
+                                 S2_NFC_READ_CHUNK_SIZE - to_copy, payload[3]);
+                    std::println("[s2][nfc][buffer] read_data={}",
+                                 nfc_hex(std::span<const uint8_t>(payload + 4, S2_NFC_READ_CHUNK_SIZE)));
+                }
+            } else if (g_ctx.verbose) {
+                std::println("[s2][nfc][parse] sub=0x15 read-buffer offset=0x{:04x} out_of_range=true staging_size={} copied=0 descriptor=0x{:02x}",
+                             off, staging.size(), payload[3]);
             }
             plen = 4 + S2_NFC_READ_CHUNK_SIZE;
+        } else if (g_ctx.verbose) {
+            std::println(stderr,
+                         "[s2][nfc][parse] sub=0x15 read-buffer cannot-serve placed={} request_len={} required_len=2",
+                         placed, cmd_data.size());
         }
         break;
     }
@@ -1240,26 +1332,49 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             const size_t incoming = std::min<size_t>(declared, available);
 
             std::vector<uint8_t> staging = make_s2_nfc_staging_buffer(adata);
+            size_t copied = 0;
             if (off < staging.size() && incoming != 0) {
                 const size_t to_copy = std::min(incoming, staging.size() - off);
                 std::memcpy(staging.data() + off, cmd_data.data() + 4, to_copy);
+                copied = to_copy;
 
                 // Staging bytes 0..1 are transport metadata. Persist only the
                 // raw 540-byte NTAG215 image back to the selected .bin.
                 std::copy_n(staging.begin() + 2, S2_AMIIBO_RAW_SIZE, adata.begin());
                 g_amiibo_modified[port] = true;
             }
+            if (g_ctx.verbose) {
+                std::println("[s2][nfc][parse] sub=0x14 write-buffer offset=0x{:04x} declared={} available={} accepted={} copied={} truncated={} staging_size={} modified={}",
+                             off, declared, available, incoming, copied, incoming - copied,
+                             staging.size(), g_amiibo_modified[port]);
+                std::println("[s2][nfc][buffer] write_data={}",
+                             nfc_hex(cmd_data.subspan(4, incoming)));
+            }
+        } else if (g_ctx.verbose) {
+            std::println(stderr,
+                         "[s2][nfc][parse] sub=0x14 write-buffer cannot-serve placed={} request_len={} required_len=4",
+                         placed, cmd_data.size());
         }
         plen = 0;
         break;
     }
 
     default:
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][parse] unknown NFC subcommand 0x{:02x}", nfc_sub);
         break;
     }
 
+    const bool modified_after = g_amiibo_modified[port];
+    const long long expiry_after_ms = nfc_expiry_remaining_ms(port, std::chrono::steady_clock::now());
     amiibo_lk.unlock();
     if (request_state >= 0) publish_amiibo_request_for_port(port, request_state != 0);
+    if (g_ctx.verbose) {
+        std::println("[s2][nfc][state] completed sub=0x{:02x} response_payload_len={} ui_state_action={} expiry_remaining_ms={} modified={}",
+                     nfc_sub, plen,
+                     request_state < 0 ? "none" : (request_state != 0 ? "request-scan" : "stop-scan"),
+                     expiry_after_ms, modified_after);
+    }
     return plen;
 }
 

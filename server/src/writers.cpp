@@ -748,7 +748,15 @@ void writer_thread(std::stop_token stoken, int hz) {
                             std::vector<uint8_t> vendor_resp;
                             if (switch2_native_handle_vendor_command(h, std::span<const uint8_t>(vendor_cmd.data(), vendor_cmd.size()), vendor_resp, rt[h])
                                     && !vendor_resp.empty()) {
-                                functionfs_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
+                                const bool queued = functionfs_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
+                                if (g_ctx.verbose && vendor_cmd.size() >= 4 && vendor_cmd[0] == 0x01) {
+                                    std::println("[s2][nfc][tx-queue] t_us={} port={} sub=0x{:02x} response_len={} queued={}",
+                                                 now_us(), h, vendor_cmd[3], vendor_resp.size(), queued);
+                                }
+                            } else if (g_ctx.verbose && vendor_cmd.size() >= 4 && vendor_cmd[0] == 0x01) {
+                                std::println(stderr,
+                                             "[s2][nfc][tx-queue] port={} sub=0x{:02x} no response produced or handler rejected command",
+                                             h, vendor_cmd[3]);
                             }
                         }
                     } else if (!port_uses_hori_hidg(h)) {

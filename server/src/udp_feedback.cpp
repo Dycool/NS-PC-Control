@@ -115,6 +115,10 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 pending_amiibo_request[s].sequence_le[0] = static_cast<uint8_t>(c.amiibo_request_seq[s]);
                 pending_amiibo_request[s].sequence_le[1] = static_cast<uint8_t>(c.amiibo_request_seq[s] >> 8);
                 has_amiibo_request[s] = true;
+                if (g_ctx.verbose)
+                    std::println("[s2][nfc][udp-tx] preparing ui request client={} subpad={} requested={} seq={} repeats_before={}",
+                                 client_idx, s, c.amiibo_requested[s], c.amiibo_request_seq[s],
+                                 c.amiibo_request_repeats[s]);
                 if (c.amiibo_request_repeats[s] != 0) --c.amiibo_request_repeats[s];
                 c.amiibo_request_pending[s] = c.amiibo_request_repeats[s] != 0;
             }
@@ -125,6 +129,9 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 std::memcpy(pending_amiibo_data[s].data, c.amiibo_writeback_data[s], std::min<size_t>(c.amiibo_writeback_len[s], 540));
                 has_amiibo_data[s] = true;
                 c.amiibo_writeback_pending[s] = false;
+                if (g_ctx.verbose)
+                    std::println("[s2][nfc][udp-tx] preparing writeback client={} subpad={} len={}",
+                                 client_idx, s, c.amiibo_writeback_len[s]);
             }
         }
     }
@@ -164,14 +171,33 @@ void flush_feedback_to_udp(int sock, int client_idx) {
         if (has_amiibo_request[s]) {
             ssize_t sent = sendto(sock, &pending_amiibo_request[s], sizeof(ns::AmiiboRequestPacket), 0,
                                   reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-            if (g_ctx.verbose && sent < 0)
-                std::println(stderr, "[udp] failed to send amiibo request: {}", std::strerror(errno));
+            if (g_ctx.verbose) {
+                const uint16_t seq = static_cast<uint16_t>(pending_amiibo_request[s].sequence_le[0])
+                    | (static_cast<uint16_t>(pending_amiibo_request[s].sequence_le[1]) << 8);
+                if (sent < 0) {
+                    std::println(stderr,
+                                 "[s2][nfc][udp-tx] ui request send failed subpad={} requested={} seq={} error={}",
+                                 s, pending_amiibo_request[s].requested != 0, seq, std::strerror(errno));
+                } else {
+                    std::println("[s2][nfc][udp-tx] ui request sent subpad={} requested={} seq={} bytes={}/{}",
+                                 s, pending_amiibo_request[s].requested != 0, seq, sent,
+                                 sizeof(ns::AmiiboRequestPacket));
+                }
+            }
         }
         if (has_amiibo_data[s]) {
             ssize_t sent = sendto(sock, &pending_amiibo_data[s], sizeof(ns::AmiiboDataPacket), 0,
                                   reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-            if (g_ctx.verbose && sent < 0)
-                std::println(stderr, "[udp] failed to send amiibo writeback: {}", std::strerror(errno));
+            if (g_ctx.verbose) {
+                if (sent < 0) {
+                    std::println(stderr,
+                                 "[s2][nfc][udp-tx] writeback send failed subpad={} len={} error={}",
+                                 s, static_cast<unsigned>(pending_amiibo_data[s].data_len), std::strerror(errno));
+                } else {
+                    std::println("[s2][nfc][udp-tx] writeback sent subpad={} len={} packet_bytes={}/{}",
+                                 s, static_cast<unsigned>(pending_amiibo_data[s].data_len), sent, sizeof(ns::AmiiboDataPacket));
+                }
+            }
         }
     }
 }

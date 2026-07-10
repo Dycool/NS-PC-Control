@@ -9,6 +9,8 @@
 #include <fstream>
 #include <initializer_list>
 #include <mutex>
+#include <print>
+#include <string>
 #include <openssl/evp.h>
 #include <linux/usb/ch9.h>
 
@@ -29,6 +31,17 @@ constexpr uint8_t FEATURE_MOUSE   = 0x10;
 constexpr uint8_t FEATURE_RUMBLE  = 0x20;
 constexpr uint8_t FEATURE_MAG     = 0x80;
 constexpr uint32_t DEFAULT_FEATURE_MASK = FEATURE_BUTTONS | FEATURE_STICKS | FEATURE_IMU | FEATURE_RUMBLE; // 0x27
+
+std::string s2_hex(std::span<const uint8_t> data) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.resize(data.size() * 2);
+    for (size_t i = 0; i < data.size(); ++i) {
+        out[i * 2] = kHex[data[i] >> 4];
+        out[i * 2 + 1] = kHex[data[i] & 0x0f];
+    }
+    return out;
+}
 
 struct NativeState {
     bool streaming = false;
@@ -375,7 +388,12 @@ bool switch2_native_handle_vendor_command(int port,
                                           std::vector<uint8_t>& response,
                                           ControllerRuntime& rt) {
     response.clear();
-    if (c.size() < 8) return false;
+    if (c.size() < 8) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][rx] malformed vendor packet port={} len={} raw={}",
+                         port, c.size(), s2_hex(c));
+        return false;
+    }
 
     std::lock_guard<std::mutex> lk(g_mtx);
     NativeState& s = state_for_port(port);
@@ -383,6 +401,12 @@ bool switch2_native_handle_vendor_command(int port,
     const uint8_t transport = c[2];
     const uint8_t sub = c[3];
     update_stage(s, id, sub);
+
+    if (g_ctx.verbose && id == 0x01) {
+        std::println("[s2][nfc][rx] t_us={} port={} id=0x{:02x} transport=0x{:02x} sub=0x{:02x} total_len={} header={} data={}",
+                     now_us(), port, id, transport, sub, c.size(),
+                     s2_hex(c.first(8)), s2_hex(c.subspan(8)));
+    }
 
     std::array<uint8_t, 128> r{};
     r[0] = id;
@@ -560,10 +584,13 @@ bool switch2_native_handle_vendor_command(int port,
 
     response.assign(r.begin(), r.begin() + 8 + dl);
     if (g_ctx.verbose && id == 0x01) {
-        std::fprintf(stdout, "[s2][nfc] sub=0x%02x request_data=%zu response_len=%zu response=",
-                     sub, c.size() - 8, response.size());
-        for (uint8_t byte : response) std::fprintf(stdout, "%02x", byte);
-        std::fputc('\n', stdout);
+        std::println("[s2][nfc][tx-build] t_us={} port={} sub=0x{:02x} request_data_len={} response_len={} ack={:02x}{:02x} header={} payload={} raw={}",
+                     now_us(), port, sub, c.size() - 8, response.size(),
+                     response.size() > 4 ? response[4] : 0,
+                     response.size() > 5 ? response[5] : 0,
+                     s2_hex(std::span<const uint8_t>(response.data(), std::min<size_t>(8, response.size()))),
+                     response.size() > 8 ? s2_hex(std::span<const uint8_t>(response.data() + 8, response.size() - 8)) : std::string{},
+                     s2_hex(response));
     }
     return true;
 }

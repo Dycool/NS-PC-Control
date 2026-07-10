@@ -614,27 +614,58 @@ bool client_subpad_for_console_port(int console_port, int& client_idx, int& sub_
 }
 
 void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
-    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][ui-event] invalid route client={} subpad={} requested={}",
+                         client_idx, sub_idx, requested);
+        return;
+    }
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
-    if (!c.active) return;
+    if (!c.active) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][ui-event] client={} inactive; requested={} dropped", client_idx, requested);
+        return;
+    }
     // Only create a new event for an actual state transition. Send the same
     // event a few times because this UI control message travels over UDP.
-    if (c.amiibo_request_seq[sub_idx] != 0 && c.amiibo_requested[sub_idx] == requested) return;
+    if (c.amiibo_request_seq[sub_idx] != 0 && c.amiibo_requested[sub_idx] == requested) {
+        if (g_ctx.verbose)
+            std::println("[s2][nfc][ui-event] duplicate suppressed client={} subpad={} requested={} seq={}",
+                         client_idx, sub_idx, requested, c.amiibo_request_seq[sub_idx]);
+        return;
+    }
     c.amiibo_requested[sub_idx] = requested;
     c.amiibo_request_pending[sub_idx] = true;
     c.amiibo_request_repeats[sub_idx] = 3;
     if (++c.amiibo_request_seq[sub_idx] == 0) ++c.amiibo_request_seq[sub_idx];
+    if (g_ctx.verbose)
+        std::println("[s2][nfc][ui-event] t_us={} client={} subpad={} requested={} seq={} repeats=3 source={}",
+                     now_us(), client_idx, sub_idx, requested, c.amiibo_request_seq[sub_idx],
+                     input_source_name(c.source));
 }
 
 void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, uint16_t len) {
-    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || !data || len == 0) return;
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || !data || len == 0) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][writeback] invalid publish client={} subpad={} len={} data_ptr={}",
+                         client_idx, sub_idx, len, data != nullptr);
+        return;
+    }
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
-    if (!c.active || c.source != InputSource::Udp) return;
+    if (!c.active || c.source != InputSource::Udp) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][writeback] dropped client={} active={} source={} len={}",
+                         client_idx, c.active, input_source_name(c.source), len);
+        return;
+    }
     c.amiibo_writeback_pending[sub_idx] = true;
     c.amiibo_writeback_len[sub_idx] = len;
     std::memcpy(c.amiibo_writeback_data[sub_idx], data, std::min<size_t>(len, 540));
+    if (g_ctx.verbose)
+        std::println("[s2][nfc][writeback] t_us={} queued client={} subpad={} len={}",
+                     now_us(), client_idx, sub_idx, len);
 }
 
 void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet) {

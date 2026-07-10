@@ -484,6 +484,12 @@ int main(int argc, char** argv) {
                 if (mmagic == ns::AMIIBO_DATA_MAGIC) {
                     ns::AmiiboDataPacket ad{};
                     memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
+                    if (g_ctx.verbose) {
+                        char addrbuf[INET_ADDRSTRLEN] = {};
+                        inet_ntop(AF_INET, &sender.sin_addr, addrbuf, sizeof(addrbuf));
+                        std::println("[s2][nfc][udp-rx] t_us={} from={}:{} packet_bytes={} subpad={} declared_data_len={}",
+                                     now_us(), addrbuf, ntohs(sender.sin_port), bytes, ad.subpad, ad.data_len);
+                    }
                     int client_idx = -1;
                     for (int i = 0; i < MAX_CLIENTS; ++i) {
                         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
@@ -498,6 +504,9 @@ int main(int argc, char** argv) {
                     int port_for_source = client_idx >= 0
                         ? console_port_for_client_subpad(client_idx, ad.subpad)
                         : -1;
+                    if (g_ctx.verbose)
+                        std::println("[s2][nfc][udp-rx] resolved client={} subpad={} initial_port={}",
+                                     client_idx, ad.subpad, port_for_source);
                     // Joy-Con L+R pair exposes NFC on the right virtual port.
                     // If the primary assignment is the left port, route the
                     // uploaded tag to any assigned port that actually has NFC.
@@ -513,9 +522,19 @@ int main(int argc, char** argv) {
                                 break;
                             }
                         }
+                        if (g_ctx.verbose)
+                            std::println("[s2][nfc][udp-rx] NFC-capable fallback lookup mask=0x{:02x} resolved_port={}",
+                                         mask, port_for_source);
                     }
                     if (port_for_source >= 0) {
+                        if (g_ctx.verbose)
+                            std::println("[s2][nfc][udp-rx] forwarding upload client={} subpad={} -> port={} len={}",
+                                         client_idx, ad.subpad, port_for_source, ad.data_len);
                         set_amiibo_data_for_port(port_for_source, ad.data, ad.data_len);
+                    } else if (g_ctx.verbose) {
+                        std::println(stderr,
+                                     "[s2][nfc][udp-rx] upload dropped: no assigned NFC-capable port client={} subpad={}",
+                                     client_idx, ad.subpad);
                     }
                     continue;
                 }
