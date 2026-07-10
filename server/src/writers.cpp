@@ -608,7 +608,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 if (port_needed) report_for_port = out_reports[h];
                                 const MotionReport* motion_for_port = nullptr;
                                 bool has_motion_for_port = false;
-                                MotionReport jc_l_motion[3]{};
+                                MotionReport joycon_motion[3]{};
                                 if (port_needed) {
                                     int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                     motion_for_port = get_hid_report(snap[cidx], sidx).motion;
@@ -617,16 +617,36 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         motion_for_port = nullptr;
                                         has_motion_for_port = false;
                                     }
-                                    if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
+                                    if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_R
+                                            && !g_port_switch2[h]) {
+                                        // A Switch 1 Joy-Con R mounts its IMU with raw Y/Z axes
+                                        // reversed relative to Joy-Con L and Pro Controller. The
+                                        // client sends Pro-normalized motion, so convert it back to
+                                        // the raw Joy-Con R convention expected in report 0x30.
                                         for (int idx = 0; idx < 3; ++idx) {
-                                            jc_l_motion[idx].ax = -motion_for_port[idx].ax;
-                                            jc_l_motion[idx].ay = -motion_for_port[idx].ay;
-                                            jc_l_motion[idx].az = motion_for_port[idx].az;
-                                            jc_l_motion[idx].gx = -motion_for_port[idx].gx;
-                                            jc_l_motion[idx].gy = -motion_for_port[idx].gy;
-                                            jc_l_motion[idx].gz = motion_for_port[idx].gz;
+                                            joycon_motion[idx].ax = motion_for_port[idx].ax;
+                                            joycon_motion[idx].ay = -motion_for_port[idx].ay;
+                                            joycon_motion[idx].az = -motion_for_port[idx].az;
+                                            joycon_motion[idx].gx = motion_for_port[idx].gx;
+                                            joycon_motion[idx].gy = -motion_for_port[idx].gy;
+                                            joycon_motion[idx].gz = -motion_for_port[idx].gz;
                                         }
-                                        motion_for_port = jc_l_motion;
+                                        motion_for_port = joycon_motion;
+                                    } else if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L
+                                            && g_port_switch2[h]) {
+                                        // Switch 1 Joy-Con L already uses the same raw IMU axes as
+                                        // Pro Controller, so it needs no conversion. Keep the
+                                        // existing transform isolated to the still-experimental S2
+                                        // Joy-Con L report path.
+                                        for (int idx = 0; idx < 3; ++idx) {
+                                            joycon_motion[idx].ax = -motion_for_port[idx].ax;
+                                            joycon_motion[idx].ay = -motion_for_port[idx].ay;
+                                            joycon_motion[idx].az = motion_for_port[idx].az;
+                                            joycon_motion[idx].gx = -motion_for_port[idx].gx;
+                                            joycon_motion[idx].gy = -motion_for_port[idx].gy;
+                                            joycon_motion[idx].gz = motion_for_port[idx].gz;
+                                        }
+                                        motion_for_port = joycon_motion;
                                     }
                                 }
                                 ProInputReport30 std_in{};
