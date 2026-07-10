@@ -399,7 +399,13 @@ void writer_thread(std::stop_token stoken, int hz) {
         while (!stoken.stop_requested()) {
             std::this_thread::sleep_until(next);
             auto now = Clock::now();
-            next = std::max(next + tick, now + tick);
+            // Absolute schedule: keep the average period at exactly `tick`.
+            // Re-anchoring to `now + tick` every iteration added the wakeup
+            // latency (~23us on a Pi Zero 2) to each period, making the writer
+            // 0.57% slower than the host's exact 4ms interrupt polling and
+            // dropping one USB slot every ~700ms (visible 8ms motion hiccups).
+            next += tick;
+            if (now > next + 8 * tick) next = now + tick; // resync after long stalls
 
             uint64_t now_stamp = now_us();
             if (last_switch_sleep_poll_us == 0 || elapsed_us_saturated(now_stamp, last_switch_sleep_poll_us) >= 100'000ULL) {

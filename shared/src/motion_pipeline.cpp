@@ -9,7 +9,12 @@ namespace {
 constexpr float TWO_PI = 6.28318530717958647692f;
 constexpr float ACCEL_CUTOFF_HZ = 30.0f;
 constexpr float GYRO_CUTOFF_HZ = 35.0f;
-constexpr float GYRO_SOFT_DEADZONE = 6.0f;       // ~0.37 degrees/second
+// 2.0 counts (~0.12 deg/s) sits above the bias-corrected DS4/DualSense noise
+// floor but no longer bites into slow precision aiming: the previous 6.0
+// (~0.37 deg/s) removed a constant 0.37 deg/s from every rotation, a 7% error
+// at 5 deg/s. The adaptive bias estimator handles drift; the deadzone only
+// needs to gate residual noise.
+constexpr float GYRO_SOFT_DEADZONE = 2.0f;       // ~0.12 degrees/second
 constexpr float GYRO_STATIONARY_LIMIT = 48.0f;  // ~2.93 degrees/second
 constexpr float ACCEL_ONE_G = 4096.0f;
 constexpr float ACCEL_STATIONARY_TOLERANCE = 0.08f * ACCEL_ONE_G;

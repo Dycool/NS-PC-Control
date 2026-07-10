@@ -22,9 +22,13 @@ namespace {
 constexpr uint32_t FACTORY_BASE = 0x13000u;
 constexpr uint32_t FACTORY_SIZE = 0x160u;
 constexpr uint32_t USER_MOTION_CAL_BASE = 0x1FC000u;
-constexpr size_t USER_MOTION_CAL_SIZE = 0x40u;
+// The console reads user motion calibration as TWO 0x40-byte blocks
+// (0x1FC000 and 0x1FC040); the completed-calibration record (magic B2 A1)
+// lives at 0x1FC060 on a real unit. The previous 0x40 window cut the second
+// block off, so those reads returned unmapped 0xFF instead of stored data.
+constexpr size_t USER_MOTION_CAL_SIZE = 0x80u;
 constexpr const char* USER_MOTION_CAL_PATH = "/var/lib/ns-pc-control/switch2_motion_calibration.bin";
-constexpr std::array<uint8_t, 8> USER_MOTION_CAL_MAGIC = {'N', 'S', '2', 'C', 'A', 'L', 1, 0};
+constexpr std::array<uint8_t, 8> USER_MOTION_CAL_MAGIC = {'N', 'S', '2', 'C', 'A', 'L', 2, 0};
 constexpr uint8_t FEATURE_BUTTONS = 0x01;
 constexpr uint8_t FEATURE_STICKS  = 0x02;
 constexpr uint8_t FEATURE_IMU     = 0x04;
@@ -97,7 +101,9 @@ void build_factory(NativeState& s, int port) {
         0xF6, 0x62, 0x2F, 0xF6, 0x62, 0x0A, 0xFF, 0xFF
     };
 
-    s.factory.fill(0x00);
+    // Unwritten flash reads back erased (0xFF) on the real controller, not
+    // zero. Regions that must read as zero are written explicitly below.
+    s.factory.fill(0xFF);
     const uint8_t suffix = static_cast<uint8_t>(0x30 + (port % 10));
     const uint8_t mac_last = static_cast<uint8_t>(0x3C + port);
     const uint8_t serial[16] = {
@@ -118,13 +124,26 @@ void build_factory(NativeState& s, int port) {
     fac_list(s, 0x1301C, {0xA0, 0xA0, 0xA0});
     fac_list(s, 0x1301F, {0xE6, 0xE6, 0xE6});
     fac_list(s, 0x13022, {0x32, 0x32, 0x32});
-    fac_list(s, 0x13040, {0x3B, 0xE0, 0xD3, 0x41, 0xC6, 0x60, 0x6A, 0xBC,
-                         0x4D, 0xD7, 0xA2, 0xBB, 0x71, 0x1E, 0xDD, 0x37});
-    fac_list(s, 0x13060, {0x4C, 0x09, 0x00, 0x00});
+    // IMU factory calibration reference (real PC2_Gyro_*.pcapng capture):
+    // one float temperature reference followed by three float gyro offsets.
+    fac_list(s, 0x13040, {0x16, 0xF4, 0xD3, 0x41, 0x48, 0xCE, 0x85, 0xBA,
+                         0xF1, 0x05, 0x71, 0xBA, 0x1F, 0x27, 0xCB, 0x3B});
+    // 0x13060..0x1307F reads back erased (0xFF) on the real unit — covered by
+    // the global 0xFF fill above. (Captured read: addr=0x13060 len=0x20.)
     fac(s, 0x13080, blk, sizeof(blk));
-    fac_list(s, 0x130A8, {0xB3, 0x67, 0x83, 0x2E, 0x66, 0x5E, 0x3A, 0x06, 0x5F});
+    fac_list(s, 0x130A8, {0xA3, 0xA7, 0x87, 0x35, 0x06, 0x5F, 0x1C, 0xC6, 0x5C});
     fac(s, 0x130C0, blk, sizeof(blk));
-    fac_list(s, 0x130E8, {0x2C, 0x08, 0x84, 0xD1, 0x65, 0x63, 0x2A, 0x26, 0x62});
+    fac_list(s, 0x130E8, {0xB1, 0xA8, 0x83, 0xB6, 0x35, 0x5E, 0x27, 0x26, 0x64});
+    // Motion scale calibration block read by the console during motion init
+    // AND during the gyro-calibration flow (sub=04 addr=0x13100 len=0x18):
+    // twelve zero bytes then three floats (0.0816, 0.01106, 10.01 on the
+    // reference unit). This region was previously left zero-filled, so the
+    // console received 0.0 for all three factors.
+    fac_list(s, 0x13100, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x2D, 0x10, 0xA7, 0x3D,
+                          0xE7, 0x49, 0x35, 0x3C,
+                          0xA4, 0x2D, 0x20, 0x41});
     fac_list(s, 0x13140, {0x00, 0xD7, 0xA3, 0xBC, 0x41, 0xD7, 0xA3, 0xBC, 0x41});
 
     s.identity.fill(0xFF);
@@ -494,11 +513,10 @@ bool switch2_native_handle_vendor_command(int port,
         }
         case 0x02: { // memory
             const uint32_t addr = read_le32_at(c, 12);
-            if (sub == 0x01 || sub == 0x04 || sub == 0x05) {
-                // Data-bearing flash replies observed in the USB captures.
-                r[4] = 0x10;
-                r[5] = 0x78;
-            }
+            // The real Pro Controller 2 acks every 0x02 read/write with the
+            // ordinary 00 F8 status (PC2_Gyro_*.pcapng), including the
+            // data-bearing flash replies. The earlier 10 78 override did not
+            // match the captured hardware behaviour.
             if (sub == 0x04) {
                 uint8_t len = c.size() > 8 ? c[8] : 0;
                 if (len > 0x50) len = 0x50;
@@ -536,7 +554,9 @@ bool switch2_native_handle_vendor_command(int port,
             break;
         }
         case 0x10: {
-            static constexpr uint8_t fw[] = {0x01, 0x01, 0x05, 0x02, 0x0C, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF};
+            // Firmware/version block exactly as reported by the reference
+            // Pro Controller 2 (cmd 0x10 sub 0x01 in PC2_Gyro_*.pcapng).
+            static constexpr uint8_t fw[] = {0x02, 0x00, 0x11, 0x02, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00};
             std::memcpy(d, fw, sizeof(fw)); dl = sizeof(fw);
             break;
         }
@@ -547,18 +567,20 @@ bool switch2_native_handle_vendor_command(int port,
         case 0x11:
             if (sub == 0x01) { d[0] = 0x03; dl = 4; }
             else if (sub == 0x03) {
+                // IMU parameter block from the reference Pro Controller 2
+                // (cmd 0x11 sub 0x03, read during the gyro-calibration flow).
                 static constexpr uint8_t r11_03[29] = {
-                    0x01, 0xC0, 0x03, 0x00, 0x00, 0xE7, 0xD0, 0x1C, 0x3B, 0x79,
-                    0x22, 0xA0, 0x3A, 0x0A, 0xE8, 0x9C, 0x42, 0x58, 0xA0, 0x0B,
+                    0x01, 0x20, 0x03, 0x00, 0x00, 0x0A, 0xE8, 0x1C, 0x3B, 0x79,
+                    0x7D, 0x8B, 0x3A, 0x0A, 0xE8, 0x9C, 0x42, 0x58, 0xA0, 0x0B,
                     0x42, 0x0A, 0xE8, 0x9C, 0x41, 0x58, 0xA0, 0x0B, 0x41};
                 std::memcpy(d, r11_03, sizeof(r11_03)); dl = sizeof(r11_03);
             }
             break;
         case 0x01: // NFC
             if (sub == 0x0C) {
-                static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x0D};
-                r[4] = 0x10;
-                r[5] = 0x78;
+                // Reference Pro Controller 2 answers 01/0C with the ordinary
+                // 00 F8 ack and version bytes 61 12 50 10 (PC2_Gyro_*.pcapng).
+                static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x10};
                 std::memcpy(d, nfc, sizeof(nfc));
                 dl = sizeof(nfc);
             } else if (sub == 0x03 || sub == 0x04 || sub == 0x05

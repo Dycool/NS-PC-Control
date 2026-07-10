@@ -106,23 +106,27 @@ uint16_t advance_s2_motion_clock(S2MotionState& state,
     }
 
     uint32_t ticks = 3;
+    uint32_t tick_advance = 3;
     if (state.last_fresh_motion_us != 0 && now_us > state.last_fresh_motion_us) {
         const double exact_ticks =
             (static_cast<double>(now_us - state.last_fresh_motion_us) * S2_INTERNAL_IMU_HZ
              / 1'000'000.0) + state.tick_fraction;
-        ticks = static_cast<uint32_t>(std::floor(exact_ticks));
-        state.tick_fraction = exact_ticks - static_cast<double>(ticks);
-        // The normal native layout has a four-bit elapsed field. Long stalls
-        // are intentionally capped rather than falsely advertising a catch-up
-        // layout that we cannot yet encode for every controller type.
-        ticks = std::clamp<uint32_t>(ticks, 1u, 15u);
+        tick_advance = static_cast<uint32_t>(std::floor(exact_ticks));
+        state.tick_fraction = exact_ticks - static_cast<double>(tick_advance);
+        // The four-bit sample-count field saturates, but the 12-bit tick
+        // counter must advance by the FULL elapsed time: the reference
+        // captures show catch-up jumps (e.g. dticks 1792 after a 2.2s stall)
+        // while the sample nibble stays small. Freezing the counter during
+        // stalls desynchronised the console's motion clock.
+        ticks = std::clamp<uint32_t>(tick_advance, 1u, 15u);
+        if (tick_advance < 1) tick_advance = 1;
     } else {
         state.tick_fraction = 0.2; // continue the natural 3,3,3,3,4 cadence
     }
 
     state.last_fresh_motion_us = now_us;
     elapsed_ticks = static_cast<uint8_t>(ticks);
-    state.tick = static_cast<uint16_t>((state.tick + ticks) & 0x0FFFu);
+    state.tick = static_cast<uint16_t>((state.tick + tick_advance) & 0x0FFFu);
     state.last_timing = static_cast<uint16_t>((static_cast<uint16_t>(elapsed_ticks) << 12) | state.tick);
     return state.last_timing;
 }
@@ -1016,6 +1020,16 @@ static void write_s2_pro_motion_block(uint8_t* out,
         state.active = true;
     }
 
+    // A real Pro Controller 2 sends held reports (no new IMU sample) with
+    // motion length 0 and an all-zero motion block (11% of the reports in the
+    // reference captures), never a re-stamped copy of the previous block. The
+    // console skips the block; the phase accumulators resume on the next
+    // fresh sample.
+    if (!has_motion && state.last_timing != 0) {
+        out[motion_len_index] = 0;
+        return;
+    }
+
     MotionReport effective_samples[3]{};
     prepare_s2_motion_samples(state, motion_samples, has_motion, effective_samples);
     const S2AveragedMotion motion = average_s2_motion(effective_samples, true);
@@ -1075,6 +1089,13 @@ static void write_s2_joycon_motion_block(uint8_t* out,
     if (!state.active || state.controller_type != type) {
         reset_s2_state_locked(state, type);
         state.active = true;
+    }
+
+    // Mirror the real held-report behaviour observed on the Pro Controller 2
+    // captures: no new IMU sample -> zero motion length, all-zero block.
+    if (!has_motion && state.last_timing != 0) {
+        out[motion_len_index] = 0;
+        return;
     }
 
     MotionReport effective_samples[3]{};
@@ -1234,7 +1255,11 @@ void build_s2_pro_report(const HIDReport& src,
     pack_stick_12(out + 6, src.input.lx, src.input.ly);
     pack_stick_12(out + 9, src.input.rx, src.input.ry);
 
-    out[12] = 0x30;
+    // Real Pro Controller 2 captures (PC2_Gyro_*.pcapng): byte 12 carries a
+    // motion-block-valid flag in bit 0x08. 0x38 accompanies every report that
+    // has a 30-byte motion block; 0x30 accompanies held reports whose motion
+    // length is zero. Always sending 0x30 marked our motion data as invalid.
+    out[12] = (imu_enabled && has_motion) ? 0x38 : 0x30;
     out[13] = controller_port_supports_amiibo(port)
         ? amiibo_nfc_report_state(port) : 0x00;
     out[14] = 0x00;

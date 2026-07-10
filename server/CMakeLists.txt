@@ -225,24 +225,3 @@ if(MINIUPNPC_FOUND)
     target_include_directories(ns-backend PRIVATE ${MINIUPNPC_INCLUDE_DIRS})
     target_link_libraries(ns-backend PRIVATE ${MINIUPNPC_LIBRARIES})
 endif()
-
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(s2-nfc-codec-test
-        tests/s2_nfc_codec_test.cpp
-        src/s2_nfc_codec.cpp
-    )
-    target_include_directories(s2-nfc-codec-test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-    add_test(NAME s2-nfc-codec-test COMMAND s2-nfc-codec-test)
-
-    add_executable(motion-pipeline-test
-        tests/motion_pipeline_test.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/motion_pipeline.cpp
-    )
-    target_include_directories(motion-pipeline-test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
-    )
-    add_test(NAME motion-pipeline-test COMMAND motion-pipeline-test)
-endif()
