@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <print>
@@ -122,6 +123,13 @@ static uint8_t g_port_protocol_type[HID_PORT_COUNT] = {
     ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO, ns::CONTROLLER_TYPE_PRO
 };
 
+// Identity the console last read during a USB handshake, and when the live
+// types last diverged from it. See s1_identity_reenumeration_due().
+static uint8_t g_enumerated_ns_type[HID_PORT_COUNT] = {
+    NS_TYPE_PRO, NS_TYPE_PRO, NS_TYPE_PRO, NS_TYPE_PRO
+};
+static std::atomic<uint64_t> g_s1_identity_change_us{0};
+
 static std::vector<uint8_t> g_amiibo_data[HID_PORT_COUNT];
 static std::chrono::steady_clock::time_point g_amiibo_expiry[HID_PORT_COUNT];
 static bool g_amiibo_modified[HID_PORT_COUNT] = {};
@@ -230,16 +238,51 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
             break;
     }
     
+    const uint8_t prev_ns_type = g_port_controller_type[ctrl];
     g_port_controller_type[ctrl] = ns_type;
     g_port_switch2[ctrl] = is_s2;
     g_port_protocol_type[ctrl] = protocol_type;
     g_spi_initialized[ctrl] = false;
     init_spi_flash(ctrl);
 
-    // The report semantics may vary per interface, but the USB descriptor and
-    // device identity are fixed by UsbControllerFamily at startup. Rebuilding
-    // a composite gadget here used to disconnect every player whenever any
-    // source appeared, disappeared, or changed profile.
+    // The USB descriptor and device identity are fixed by UsbControllerFamily
+    // at startup; rebuilding the gadget here directly used to disconnect every
+    // player whenever any source appeared, disappeared, or changed profile.
+    // But the console reads device info/SPI only during the USB handshake
+    // (test5 finding), so an S1 type change stays invisible until the gadget
+    // re-enumerates. Note the change; the writer forces one debounced
+    // re-enumeration once the layout settles. This applies to every port that
+    // speaks the S1 protocol to the console: all four in Switch1 mode, and the
+    // /dev/hidg fallback port in --s2 (native S2 ports are pinned to Pro2 and
+    // never change).
+    const bool s1_console_visible =
+        g_ctx.usb_controller_family == UsbControllerFamily::Switch1
+        || (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+            && ctrl >= g_ctx.switch2_native_port_count);
+    if (ns_type != prev_ns_type && s1_console_visible) {
+        g_s1_identity_change_us.store(now_us(), std::memory_order_relaxed);
+    }
+}
+
+void mark_s1_identity_enumerated() {
+    std::memcpy(g_enumerated_ns_type, g_port_controller_type, sizeof(g_enumerated_ns_type));
+    g_s1_identity_change_us.store(0, std::memory_order_relaxed);
+}
+
+bool s1_identity_reenumeration_due(uint64_t now) {
+    // Hori has a fixed identity; Switch1 and Switch2 (its S1 fallback port)
+    // both carry latched S1 identities. Native S2 ports never change type, so
+    // the snapshot comparison below only ever differs on S1-visible ports.
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Hori) return false;
+    const uint64_t changed = g_s1_identity_change_us.load(std::memory_order_relaxed);
+    if (changed == 0) return false;
+    if (elapsed_us_saturated(now, changed) < S1_TYPE_REENUM_QUIET_US) return false;
+    if (std::memcmp(g_enumerated_ns_type, g_port_controller_type, sizeof(g_enumerated_ns_type)) == 0) {
+        // Settled back to exactly what the console already read.
+        g_s1_identity_change_us.store(0, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
 }
 
 uint8_t controller_protocol_type_for_port(int ctrl) {

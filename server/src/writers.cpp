@@ -201,6 +201,9 @@ void writer_thread(std::stop_token stoken, int hz) {
             else
                 std::println("{}x legacy /dev/hidg* opened", nports);
         }
+        // The identity live right now is what the console reads in the
+        // handshake that follows this (re)connect.
+        mark_s1_identity_enumerated();
         auto next = Clock::now() + tick;
         bool error_shown = false;
         bool timeout_printed[MAX_CLIENTS] = {};
@@ -473,6 +476,24 @@ void writer_thread(std::stop_token stoken, int hz) {
             // client profile onto g_ctx.usb_controller_family in app_state.cpp.
 
             reconcile_hw_slots(snap, now_stamp);
+
+            // The console latches each port's type (device info/SPI) once per
+            // USB session, so a changed S1 identity needs one re-enumeration
+            // to become visible — otherwise Joy-Con profiles keep showing up
+            // as the Pro identity latched at plug-in. Debounced in
+            // s1_identity_reenumeration_due() so a pair allocation or a quick
+            // profile flip costs a single reconnect blip. In --s2 this covers
+            // the S1 fallback port; the rebuild also blips the native S2
+            // players, who re-pair automatically on re-enumeration.
+            if (s1_identity_reenumeration_due(now_stamp)) {
+                if (g_ctx.verbose)
+                    std::println("S1 controller type changed; re-enumerating USB gadget so the console re-reads identity");
+                mark_s1_identity_enumerated();
+                clear_switch2_usb_activity();
+                close_all_fds();
+                run_gadget_setup_if_needed(true, "S1 controller type changed; console must re-read device identity");
+                break;
+            }
 
             uint8_t assignment_masks[MAX_CLIENTS][4] = {};
             uint8_t assignment_primary[MAX_CLIENTS][4];

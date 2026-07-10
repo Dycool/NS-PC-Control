@@ -335,7 +335,8 @@ static const char* gadget_id_product() {
 }
 
 static const char* gadget_bcd_device() {
-    return "0x0200";
+    // Real Pro Controller 2 reports bcdDevice 4.00 (ndeadly descriptor dump).
+    return gadget_uses_switch2_identity() ? "0x0400" : "0x0200";
 }
 
 static const char* gadget_product_string() {
@@ -451,12 +452,18 @@ static void append_s2_vendor_function_descriptors(std::vector<uint8_t>& out, int
     vendor_intf.iInterface = 0;
     append_obj(out, vendor_intf);
 
+    // The real Pro Controller 2 is a full-speed device with 64-byte bulk
+    // endpoints. The USB spec pins high-speed bulk to exactly 512, so the HS
+    // variant must differ; the gadget also requests max_speed=full-speed to
+    // keep the console on the hardware-faithful FS descriptors.
+    const uint16_t bulk_mps = static_cast<uint16_t>(high_speed ? 512 : PRO_REPORT_SIZE);
+
     usb_endpoint_descriptor_no_audio vendor_out{};
     vendor_out.bLength = USB_DT_ENDPOINT_SIZE;
     vendor_out.bDescriptorType = USB_DT_ENDPOINT;
     vendor_out.bEndpointAddress = static_cast<uint8_t>(s2_vendor_endpoint_number_for_port(id));
     vendor_out.bmAttributes = USB_ENDPOINT_XFER_BULK;
-    vendor_out.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
+    vendor_out.wMaxPacketSize = htole16(bulk_mps);
     vendor_out.bInterval = 0;
     append_obj(out, vendor_out);
 
@@ -465,7 +472,7 @@ static void append_s2_vendor_function_descriptors(std::vector<uint8_t>& out, int
     vendor_in.bDescriptorType = USB_DT_ENDPOINT;
     vendor_in.bEndpointAddress = static_cast<uint8_t>(USB_DIR_IN | s2_vendor_endpoint_number_for_port(id));
     vendor_in.bmAttributes = USB_ENDPOINT_XFER_BULK;
-    vendor_in.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
+    vendor_in.wMaxPacketSize = htole16(bulk_mps);
     vendor_in.bInterval = 0;
     append_obj(out, vendor_in);
 }
@@ -477,8 +484,11 @@ static std::vector<uint8_t> build_functionfs_descriptors(int id) {
     append_u32(out, 0); // patched below
     append_u32(out, FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
     if (gadget_uses_switch2_identity()) {
-        append_u32(out, 8); // FS: IAD+HID IF+HID desc+2 HID EP + IAD+vendor IF+2 bulk EP
-        append_u32(out, 8); // HS: same descriptor topology
+        // 9 descriptors: IAD + HID IF + HID desc + 2 HID EPs + IAD + vendor IF
+        // + 2 bulk EPs. The kernel cross-checks this count against the blob
+        // length and rejects the whole write with EINVAL on any mismatch.
+        append_u32(out, 9); // FS
+        append_u32(out, 9); // HS: same descriptor topology
         append_s2_vendor_function_descriptors(out, id, false);
         append_s2_vendor_function_descriptors(out, id, true);
     } else {
@@ -865,7 +875,9 @@ static void ffs_reader_loop(int id) {
 
 static void ffs_vendor_reader_loop(int id) {
     FfsPortState& st = g_ffs_ports[id];
-    std::vector<uint8_t> buf(HIDG_MAX_REPORT_SIZE);
+    // Bulk reads must cover a whole max packet; the HS descriptors declare
+    // 512-byte bulk endpoints (commands themselves stay <= 64 bytes).
+    std::vector<uint8_t> buf(512);
     while (st.io_running.load(std::memory_order_relaxed)) {
         int fd = st.ep_vendor_out_fd;
         if (fd < 0) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
@@ -2207,6 +2219,14 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
            && write_file(cd / "MaxPower",                   "500")
            && write_file(cd / "bmAttributes",               any_hori ? "0x80" : "0xA0");
     if (!ok) return false;
+
+    if (gadget_uses_switch2_identity()) {
+        // The real Pro Controller 2 (and PicoSwitch2) enumerate at full speed;
+        // 64-byte bulk endpoints are only legal there. Best-effort: older
+        // kernels lack this attribute, and the HS descriptors carry valid
+        // 512-byte bulk endpoints as the fallback.
+        write_file(gd / "max_speed", "full-speed");
+    }
 
     if (gadget_uses_switch2_identity()) switch2_native_init();
     for (int i = 0; i < ffs_count; ++i) {
