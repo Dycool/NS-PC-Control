@@ -300,6 +300,7 @@ void switch2_native_set_port_pid(int port, uint8_t pid_lo) {
     s.factory[0x14] = pid_lo;
     s.factory[0x15] = 0x20;
     std::memcpy(s.identity.data(), s.factory.data(), 0x25);
+    reset_s2_motion_state(port);
 }
 
 void switch2_native_reset_port(int port) {
@@ -311,6 +312,7 @@ void switch2_native_reset_port(int port) {
     s.enabled_features = 0;
     s.stage = 0;
     s.ltk.fill(0);
+    reset_s2_motion_state(port);
 }
 
 bool switch2_native_handle_ep0_request(int port,

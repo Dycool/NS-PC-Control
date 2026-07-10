@@ -13,6 +13,7 @@
 #include <format>
 #include <span>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string_view>
 
@@ -29,15 +30,129 @@ static void write_i16le(uint8_t* dst, int16_t v) {
     write_u16le(dst, static_cast<uint16_t>(v));
 }
 
-static void write_s2_motion_sample(uint8_t* dst, const MotionReport& sample) {
-    // Switch 2 report 0x09 stores each 12-byte sample as:
-    // [gyro_x, accel_x, gyro_y, accel_y, gyro_z, accel_z], all int16 LE.
-    write_i16le(dst + 0,  sample.gx);
-    write_i16le(dst + 2,  sample.ax);
-    write_i16le(dst + 4,  sample.gy);
-    write_i16le(dst + 6,  sample.ay);
-    write_i16le(dst + 8,  sample.gz);
-    write_i16le(dst + 10, sample.az);
+static void write_u32le(uint8_t* dst, uint32_t v) {
+    dst[0] = static_cast<uint8_t>(v & 0xFFu);
+    dst[1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+    dst[2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+    dst[3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
+}
+
+static void write_i32le(uint8_t* dst, int32_t v) {
+    write_u32le(dst, static_cast<uint32_t>(v));
+}
+
+namespace {
+
+struct S2MotionState {
+    uint16_t tick = 0;
+    uint8_t cadence_phase = 0;
+    uint8_t controller_type = 0;
+    bool active = false;
+    std::array<uint32_t, 3> angular_phase{0x00000000u, 0x00000000u, 0x80000000u};
+};
+
+struct S2AveragedMotion {
+    double accel[3]{0.0, 0.0, 4096.0};
+    double gyro[3]{0.0, 0.0, 0.0};
+};
+
+std::array<S2MotionState, HID_PORT_COUNT> g_s2_motion_state{};
+std::mutex g_s2_motion_mtx;
+
+constexpr std::array<uint8_t, 5> S2_IMU_TICK_PATTERN = {3, 3, 3, 3, 4};
+constexpr int16_t S2_DEFAULT_TEMPERATURE = 0x0C00;
+constexpr double S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC = 48000.0;
+constexpr double S2_INTERNAL_IMU_HZ = 800.0;
+constexpr long double S2_PHASE_UNITS_PER_TURN = 4294967296.0L;
+
+// Majority-bit template from a real, stationary, face-up Right Joy-Con 2
+// 40-byte native motion capture. Confirmed sensor fields are overwritten below;
+// unknown codec state is intentionally preserved instead of being zero-filled.
+constexpr std::array<uint8_t, 36> JOYCON2_STATIONARY_PAYLOAD = {
+    0x83, 0x90, 0xF8, 0xA9, 0x84, 0x3C, 0x00, 0xD0, 0xE7,
+    0x02, 0x48, 0xEE, 0x88, 0x4F, 0xFE, 0xEF, 0xFF, 0xFF,
+    0xDF, 0x02, 0x2C, 0x77, 0xE3, 0x03, 0xFF, 0xEB, 0xFF,
+    0xFE, 0xBF, 0x0B, 0x20, 0xB9, 0x33, 0x3E, 0xC0, 0x03
+};
+
+int s2_motion_port(int port) {
+    return (port >= 0 && port < HID_PORT_COUNT) ? port : 0;
+}
+
+void reset_s2_state_locked(S2MotionState& state, uint8_t controller_type) {
+    state = S2MotionState{};
+    state.controller_type = controller_type;
+}
+
+uint16_t advance_s2_motion_clock(S2MotionState& state, uint8_t& elapsed_ticks) {
+    elapsed_ticks = S2_IMU_TICK_PATTERN[state.cadence_phase];
+    state.cadence_phase = static_cast<uint8_t>((state.cadence_phase + 1u) % S2_IMU_TICK_PATTERN.size());
+    state.tick = static_cast<uint16_t>((state.tick + elapsed_ticks) & 0x0FFFu);
+    return static_cast<uint16_t>((static_cast<uint16_t>(elapsed_ticks) << 12) | state.tick);
+}
+
+S2AveragedMotion average_s2_motion(const MotionReport motion_samples[3], bool has_motion) {
+    S2AveragedMotion result{};
+    if (!has_motion || !motion_samples) return result;
+
+    const int32_t accel_sum[3] = {
+        static_cast<int32_t>(motion_samples[0].ax) + motion_samples[1].ax + motion_samples[2].ax,
+        static_cast<int32_t>(motion_samples[0].ay) + motion_samples[1].ay + motion_samples[2].ay,
+        static_cast<int32_t>(motion_samples[0].az) + motion_samples[1].az + motion_samples[2].az,
+    };
+    const int32_t gyro_sum[3] = {
+        static_cast<int32_t>(motion_samples[0].gx) + motion_samples[1].gx + motion_samples[2].gx,
+        static_cast<int32_t>(motion_samples[0].gy) + motion_samples[1].gy + motion_samples[2].gy,
+        static_cast<int32_t>(motion_samples[0].gz) + motion_samples[1].gz + motion_samples[2].gz,
+    };
+    for (size_t axis = 0; axis < 3; ++axis) {
+        result.accel[axis] = static_cast<double>(accel_sum[axis]) / 3.0;
+        result.gyro[axis] = static_cast<double>(gyro_sum[axis]) / 3.0;
+    }
+    return result;
+}
+
+bool put_bits_lsb(uint8_t* dst, size_t dst_len, unsigned start_bit, unsigned width, uint32_t value) {
+    if (!dst || width == 0 || width > 31 || start_bit + width > dst_len * 8u) return false;
+    for (unsigned bit = 0; bit < width; ++bit) {
+        const unsigned absolute = start_bit + bit;
+        const size_t byte_index = absolute / 8u;
+        const uint8_t mask = static_cast<uint8_t>(1u << (absolute % 8u));
+        if ((value >> bit) & 1u) dst[byte_index] |= mask;
+        else dst[byte_index] &= static_cast<uint8_t>(~mask);
+    }
+    return true;
+}
+
+uint32_t pack_signed_field(int64_t value, unsigned width) {
+    const int64_t min_value = -(int64_t{1} << (width - 1u));
+    const int64_t max_value =  (int64_t{1} << (width - 1u)) - 1;
+    const int64_t clipped = std::clamp(value, min_value, max_value);
+    return static_cast<uint32_t>(clipped) & ((uint32_t{1} << width) - 1u);
+}
+
+int32_t accel_q16(double raw_counts) {
+    constexpr int64_t min_q16 = std::numeric_limits<int32_t>::min();
+    constexpr int64_t max_q16 = std::numeric_limits<int32_t>::max();
+    const long double scaled = static_cast<long double>(raw_counts) * 65536.0L;
+    const int64_t rounded = static_cast<int64_t>(std::llround(scaled));
+    return static_cast<int32_t>(std::clamp(rounded, min_q16, max_q16));
+}
+
+int64_t joycon2_candidate_from_gyro(double gyro_raw, double raw_per_code) {
+    return std::llround(gyro_raw / raw_per_code);
+}
+
+void mark_s2_motion_inactive(int port) {
+    std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
+    g_s2_motion_state[s2_motion_port(port)].active = false;
+}
+
+} // namespace
+
+void reset_s2_motion_state(int port) {
+    std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
+    reset_s2_state_locked(g_s2_motion_state[s2_motion_port(port)], 0);
 }
 
 // Plain modern descriptor: reports 0x30/0x21/0x81 and the 0x01/0x10/0x80 outputs,
@@ -564,10 +679,6 @@ void build_standard_report(const ns::HIDReport& src, const ns::MotionReport moti
     out.gyro_y_2  = imu[2].gx; out.gyro_x_2  = imu[2].gy; out.gyro_z_2  = imu[2].gz;
 }
 
-// S2 motion block follows PicoSwitch2 commit be3a731: length 30,
-// timestamp + temperature header, then two 12-byte samples encoded as
-// interleaved [gyro, accel] int16 LE lanes. Offsets include the report ID at
-// out[0]; Pro2 and Joy-Con2 place the block at different body offsets.
 static uint8_t s2_power_info_from_hid(const HIDReport& src) {
     // S2 power info bitfield (research): [0] external, [1] charging,
     // [2:5] battery level 0-9, [6:7] reserved.
@@ -583,24 +694,115 @@ static uint8_t s2_power_info_from_hid(const HIDReport& src) {
     return pwr;
 }
 
-static void write_s2_motion_block(uint8_t* out,
-                                  size_t motion_len_index,
-                                  size_t motion_data_index,
-                                  const MotionReport motion_samples[3],
-                                  bool has_motion,
-                                  bool imu_enabled,
-                                  int port) {
-    if (!imu_enabled || !has_motion || !motion_samples) return;
+// Native Switch 2 motion is controller-specific. Pro Controller 2 uses a
+// byte-aligned 30-byte block. Joy-Con 2 uses a 40-byte packed codec. The two
+// formats share only the timing/temperature prefix and must not be conflated.
+static void write_s2_pro_motion_block(uint8_t* out,
+                                      size_t motion_len_index,
+                                      size_t motion_data_index,
+                                      const MotionReport motion_samples[3],
+                                      bool has_motion,
+                                      bool imu_enabled,
+                                      int port) {
+    if (!out || motion_data_index + 30u > PRO_REPORT_SIZE) return;
+    if (!imu_enabled) {
+        mark_s2_motion_inactive(port);
+        return;
+    }
 
-    static uint16_t s2_motion_timestamp[HID_PORT_COUNT] = {};
-    const int motion_port = (port >= 0 && port < HID_PORT_COUNT) ? port : 0;
-    s2_motion_timestamp[motion_port] = static_cast<uint16_t>(s2_motion_timestamp[motion_port] + 4);
+    const S2AveragedMotion motion = average_s2_motion(motion_samples, has_motion);
+    const int motion_port = s2_motion_port(port);
+
+    std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
+    S2MotionState& state = g_s2_motion_state[motion_port];
+    if (!state.active || state.controller_type != NS_TYPE_PRO) {
+        reset_s2_state_locked(state, NS_TYPE_PRO);
+        state.active = true;
+    }
+
+    uint8_t elapsed_ticks = 0;
+    const uint16_t timing = advance_s2_motion_clock(state, elapsed_ticks);
+
+    // The captured Pro Controller 2 block stores three wrapping 32-bit angular
+    // phase accumulators. The observed scale is one full turn per 2^32 units.
+    // MotionReport gyro values use the common Switch scale: 48000 = 360 deg/s.
+    const long double phase_scale =
+        S2_PHASE_UNITS_PER_TURN /
+        (S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC * S2_INTERNAL_IMU_HZ);
+    for (size_t axis = 0; axis < 3; ++axis) {
+        const int64_t increment = std::llround(
+            static_cast<long double>(motion.gyro[axis]) * elapsed_ticks * phase_scale);
+        state.angular_phase[axis] += static_cast<uint32_t>(increment);
+    }
 
     out[motion_len_index] = 30;
-    write_u16le(out + motion_data_index + 0, s2_motion_timestamp[motion_port]);
-    write_u16le(out + motion_data_index + 2, 0x0C00);
-    write_s2_motion_sample(out + motion_data_index + 4,  motion_samples[1]);
-    write_s2_motion_sample(out + motion_data_index + 16, motion_samples[2]);
+    uint8_t* dst = out + motion_data_index;
+    write_u16le(dst + 0x00, timing);
+    write_i16le(dst + 0x02, S2_DEFAULT_TEMPERATURE);
+    write_u32le(dst + 0x04, state.angular_phase[0]);
+    write_u32le(dst + 0x08, state.angular_phase[1]);
+    write_u32le(dst + 0x0C, state.angular_phase[2]);
+    write_i32le(dst + 0x10, accel_q16(motion.accel[0]));
+    write_i32le(dst + 0x14, accel_q16(motion.accel[1]));
+    write_i32le(dst + 0x18, accel_q16(motion.accel[2]));
+    // This field is real but unresolved. Zero is the dominant value in the
+    // default capture and is safer than inventing a correction algorithm.
+    write_i16le(dst + 0x1C, 0);
+}
+
+static void write_s2_joycon_motion_block(uint8_t* out,
+                                         size_t motion_len_index,
+                                         size_t motion_data_index,
+                                         const MotionReport motion_samples[3],
+                                         bool has_motion,
+                                         bool imu_enabled,
+                                         int port,
+                                         bool right) {
+    if (!out || motion_data_index + 40u > PRO_REPORT_SIZE) return;
+    if (!imu_enabled) {
+        mark_s2_motion_inactive(port);
+        return;
+    }
+
+    const S2AveragedMotion motion = average_s2_motion(motion_samples, has_motion);
+    const int motion_port = s2_motion_port(port);
+    const uint8_t type = right ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L;
+
+    std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
+    S2MotionState& state = g_s2_motion_state[motion_port];
+    if (!state.active || state.controller_type != type) {
+        reset_s2_state_locked(state, type);
+        state.active = true;
+    }
+
+    uint8_t elapsed_ticks = 0;
+    const uint16_t timing = advance_s2_motion_clock(state, elapsed_ticks);
+    (void)elapsed_ticks;
+
+    out[motion_len_index] = 40;
+    uint8_t* dst = out + motion_data_index;
+    write_u16le(dst + 0x00, timing);
+    write_i16le(dst + 0x02, S2_DEFAULT_TEMPERATURE);
+    std::memcpy(dst + 0x04, JOYCON2_STATIONARY_PAYLOAD.data(), JOYCON2_STATIONARY_PAYLOAD.size());
+    uint8_t* payload = dst + 0x04;
+
+    // Confirmed by a synchronized Right-native/Left-common grip capture.
+    put_bits_lsb(payload, 36, 68, 14, pack_signed_field(std::llround(motion.accel[0]), 14));
+    put_bits_lsb(payload, 36, 82, 14, pack_signed_field(std::llround(motion.accel[1]), 14));
+    put_bits_lsb(payload, 36, 96, 14, pack_signed_field(std::llround(motion.accel[2]), 14));
+
+    // Experimental gyro localization. These bit ranges correlate strongly
+    // with the common gyro stream, but the complete predictor/delta codec is
+    // not yet decoded. Keep the writes narrow so unknown state stays intact.
+    constexpr double X_RAW_PER_CODE = 5.85762954;
+    constexpr double Y_RAW_PER_CODE = 0.85240071;
+    constexpr double Z_RAW_PER_CODE = 3.45282736;
+    put_bits_lsb(payload, 36, 112, 9,
+                 pack_signed_field(joycon2_candidate_from_gyro(motion.gyro[0], X_RAW_PER_CODE), 9));
+    put_bits_lsb(payload, 36, 202, 10,
+                 pack_signed_field(joycon2_candidate_from_gyro(motion.gyro[1], Y_RAW_PER_CODE), 10));
+    put_bits_lsb(payload, 36, 218, 10,
+                 pack_signed_field(joycon2_candidate_from_gyro(motion.gyro[2], Z_RAW_PER_CODE), 10));
 }
 
 static void build_s2_joycon_report(const HIDReport& src,
@@ -646,7 +848,7 @@ static void build_s2_joycon_report(const HIDReport& src,
     out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
     out[9] = 0x00; // unknown; mouse data at 0x0A..0x0E intentionally disabled for now
     out[15] = (right && controller_port_supports_amiibo(port) && is_amiibo_placed(port)) ? 0x01 : 0x00;
-    write_s2_motion_block(out, 16, 17, motion_samples, has_motion, imu_enabled, port);
+    write_s2_joycon_motion_block(out, 16, 17, motion_samples, has_motion, imu_enabled, port, right);
 }
 
 // S2 report builder. Pro Controller 2 uses report 0x09; Joy-Con 2 L/R use
@@ -688,7 +890,7 @@ void build_s2_pro_report(const HIDReport& src, const MotionReport motion_samples
     out[12] = 0x30;
     out[13] = (controller_port_supports_amiibo(port) && is_amiibo_placed(port)) ? 0x01 : 0x00;
     out[14] = 0x00;
-    write_s2_motion_block(out, 15, 16, motion_samples, has_motion, imu_enabled, port);
+    write_s2_pro_motion_block(out, 15, 16, motion_samples, has_motion, imu_enabled, port);
 }
 
 

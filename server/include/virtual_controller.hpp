@@ -136,6 +136,7 @@ void build_standard_report(const ns::HIDReport& src,
                            bool is_switch2 = false);
 
 void build_s2_pro_report(const ns::HIDReport& src, const ns::MotionReport motion_samples[3], bool has_motion, bool imu_enabled, uint8_t timer, int port, uint8_t* out);
+void reset_s2_motion_state(int port);
 int handle_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const uint8_t> cmd_data, ProInputReport21* reply);
 size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data, uint8_t* payload, int port);
