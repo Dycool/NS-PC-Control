@@ -486,7 +486,13 @@ static std::vector<uint8_t> build_functionfs_descriptors(int id) {
     append_u32(out, FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
     const size_t length_pos = out.size();
     append_u32(out, 0); // patched below
-    append_u32(out, FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
+    // ALL_CTRL_RECIP is required for S2: the console's identity handshake is
+    // device-recipient vendor EP0 traffic (bmRequestType 0xC0/0x40), which
+    // FunctionFS otherwise rejects with a STALL before userspace ever sees it
+    // (the console then goes silent right after SET_CONFIGURATION).
+    uint32_t ffs_flags = FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC;
+    if (gadget_uses_switch2_identity()) ffs_flags |= FUNCTIONFS_ALL_CTRL_RECIP;
+    append_u32(out, ffs_flags);
     if (gadget_uses_switch2_identity()) {
         // 9 descriptors: IAD + HID IF + HID desc + 2 HID EPs + IAD + vendor IF
         // + 2 bulk EPs. The kernel cross-checks this count against the blob
@@ -684,6 +690,9 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
     const int target_port = id;
 
     if (gadget_uses_switch2_identity() && (bm & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
+        if (g_ctx.verbose)
+            std::println("[s2] ep0 vendor request: bmRequestType={:#04x} bRequest={:#04x} wValue={:#06x} wIndex={:#06x} wLength={}",
+                         bm, req, value, le16toh(ctrl.wIndex), length);
         std::vector<uint8_t> response;
         bool status_only = false;
         if (switch2_native_handle_ep0_request(id, ctrl, response, status_only)) {

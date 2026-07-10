@@ -387,7 +387,7 @@ int main(int argc, char** argv) {
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
     if (use_hori)                         extras.push_back("HORI USB mode");
-    if (use_s2)                           extras.push_back("Switch 2 USB mode (3 native Pro2 + 1 Switch 1 fallback)");
+    if (use_s2)                           extras.push_back("Switch 2 USB mode (1 native Pro Controller 2)");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");
