@@ -112,8 +112,11 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 pending_amiibo_request[s] = ns::AmiiboRequestPacket{};
                 pending_amiibo_request[s].subpad = static_cast<uint8_t>(s);
                 pending_amiibo_request[s].requested = c.amiibo_requested[s] ? 1 : 0;
+                pending_amiibo_request[s].sequence_le[0] = static_cast<uint8_t>(c.amiibo_request_seq[s]);
+                pending_amiibo_request[s].sequence_le[1] = static_cast<uint8_t>(c.amiibo_request_seq[s] >> 8);
                 has_amiibo_request[s] = true;
-                c.amiibo_request_pending[s] = false;
+                if (c.amiibo_request_repeats[s] != 0) --c.amiibo_request_repeats[s];
+                c.amiibo_request_pending[s] = c.amiibo_request_repeats[s] != 0;
             }
             if (c.amiibo_writeback_pending[s]) {
                 pending_amiibo_data[s] = ns::AmiiboDataPacket{};

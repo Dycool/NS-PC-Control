@@ -92,6 +92,8 @@ void send_client_frame(SOCKET sock,
                        uint32_t& seq,
                        const ClientFrame& frame);
 extern std::atomic<bool> g_amiiboScanPending[4];
+extern std::atomic<uint16_t> g_amiiboRequestSequence[4];
+extern std::atomic<uint64_t> g_amiiboScanDeadlineUs[4];
 extern QString g_amiiboPaths[4];
 
 void sendAmiiboData(uint8_t subpad, const QByteArray& data);

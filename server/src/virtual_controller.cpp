@@ -14,6 +14,7 @@
 #include <span>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 
@@ -252,9 +253,13 @@ static std::atomic<uint64_t> g_s1_identity_change_us{0};
 static std::vector<uint8_t> g_amiibo_data[HID_PORT_COUNT];
 static std::chrono::steady_clock::time_point g_amiibo_expiry[HID_PORT_COUNT];
 static bool g_amiibo_modified[HID_PORT_COUNT] = {};
+static std::mutex g_amiibo_mtx;
+
+static void publish_amiibo_request_for_port(int port, bool requested);
 
 bool is_amiibo_placed(int port) {
     if (port < 0 || port >= HID_PORT_COUNT) return false;
+    std::lock_guard<std::mutex> lk(g_amiibo_mtx);
     return !g_amiibo_data[port].empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
 }
 constexpr size_t SPI_FLASH_SIZE = 0x200000; // 2MB per research for S2, 64k for S1 compatibility
@@ -288,26 +293,37 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     if (port < 0 || port >= HID_PORT_COUNT || !data) return;
     if (!controller_port_supports_amiibo(port)) return;
     constexpr size_t AMIIBO_SIZE = 540;
-    g_amiibo_data[port].resize(AMIIBO_SIZE, 0x00);
-    size_t copy = std::min(len, AMIIBO_SIZE);
-    if (copy) std::memcpy(g_amiibo_data[port].data(), data, copy);
-    g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    g_amiibo_modified[port] = false;
+    // A short/overlong image cannot be exposed as a raw NTAG215 dump without
+    // changing its page layout, UID, lock bytes, or configuration pages.
+    if (len != AMIIBO_SIZE) return;
+    {
+        std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+        g_amiibo_data[port].assign(data, data + AMIIBO_SIZE);
+        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        g_amiibo_modified[port] = false;
+    }
+    // Selecting a tag satisfies the outstanding UI request immediately.
+    publish_amiibo_request_for_port(port, false);
 }
 
 void check_amiibo_expiry(int port) {
-    if (port < 0 || port >= HID_PORT_COUNT || g_amiibo_data[port].empty()) return;
-    if (std::chrono::steady_clock::now() > g_amiibo_expiry[port]) {
-        if (g_amiibo_modified[port]) {
-            constexpr size_t AMIIBO_SIZE = 540;
-            int client_idx = -1;
-            int sub_idx = -1;
-            if (client_subpad_for_console_port(port, client_idx, sub_idx)) {
-                publish_amiibo_writeback(client_idx, sub_idx, g_amiibo_data[port].data(),
-                                         static_cast<uint16_t>(AMIIBO_SIZE));
-            }
-        }
+    if (port < 0 || port >= HID_PORT_COUNT) return;
+    std::vector<uint8_t> writeback;
+    {
+        std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+        if (g_amiibo_data[port].empty()
+                || std::chrono::steady_clock::now() <= g_amiibo_expiry[port]) return;
+        if (g_amiibo_modified[port]) writeback = g_amiibo_data[port];
         g_amiibo_data[port].clear();
+        g_amiibo_modified[port] = false;
+    }
+    if (!writeback.empty()) {
+        int client_idx = -1;
+        int sub_idx = -1;
+        if (client_subpad_for_console_port(port, client_idx, sub_idx)) {
+            publish_amiibo_writeback(client_idx, sub_idx, writeback.data(),
+                                     static_cast<uint16_t>(writeback.size()));
+        }
     }
 }
 
@@ -979,20 +995,32 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
         reply->reply_data[5] = 0x01;
         reply->reply_data[6] = 0x02;
         reply->reply_data[7] = 0x00;
-        if (!g_amiibo_data[rt.ctrl].empty() && g_amiibo_data[rt.ctrl].size() >= 8) {
-            std::memcpy(reply->reply_data + 8, g_amiibo_data[rt.ctrl].data(), 8);
+        {
+            std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+            const auto& data = g_amiibo_data[rt.ctrl];
+            if (data.size() >= 8) {
+                reply->reply_data[8] = 0x07;
+                reply->reply_data[9] = 0x04;
+                reply->reply_data[10] = data[0]; reply->reply_data[11] = data[1];
+                reply->reply_data[12] = data[2]; reply->reply_data[13] = data[4];
+                reply->reply_data[14] = data[5]; reply->reply_data[15] = data[6];
+                reply->reply_data[16] = data[7];
+            }
         }
-        publish_amiibo_request_for_port(rt.ctrl, g_amiibo_data[rt.ctrl].empty());
+        publish_amiibo_request_for_port(rt.ctrl, !is_amiibo_placed(rt.ctrl));
         return 32;
     case 0x06: // Read device
         reply->ack = 0x80;
-        if (!g_amiibo_data[rt.ctrl].empty() && g_amiibo_data[rt.ctrl].size() >= 8) {
-            std::memcpy(reply->reply_data, g_amiibo_data[rt.ctrl].data(), 8);
+        {
+            std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+            if (g_amiibo_data[rt.ctrl].size() >= 8)
+                std::memcpy(reply->reply_data, g_amiibo_data[rt.ctrl].data(), 8);
         }
         return 16;
     case 0x15: { // Read buffer - serve the amiibo bin
         reply->ack = 0x80;
         size_t to_copy = 0;
+        std::lock_guard<std::mutex> lk(g_amiibo_mtx);
         if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 2) {
             uint16_t offset = cmd_data[0] | (cmd_data[1] << 8);
             to_copy = (offset < g_amiibo_data[rt.ctrl].size()) ? std::min(g_amiibo_data[rt.ctrl].size() - offset, (size_t)45) : 0;
@@ -1006,20 +1034,23 @@ int handle_s2_subcommand(ControllerRuntime& rt, uint8_t subcmd, std::span<const 
     }
     case 0x14: // Write buffer - write to bin data (accurate per PC2_Write_Amiibo.pcapng + research)
         reply->ack = 0x80;
-        if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 4) {
-            // Format from pcap: after the 8-byte cmd header the data starts with
-            //   [offset (LE, 2 bytes)] 00 [chunk_size-ish (2B)] + real NTAG data
-            // e.g. 00 00 4c 00 <data for off 0>,   4c 00 4c 00 <data for off 0x4c>, etc.
-            // Real data starts at +4; write it at the offset into our 540-byte image.
-            uint16_t offset = cmd_data[0] | (cmd_data[1] << 8);
-            size_t wstart = 4;
-            size_t len = cmd_data.size() - wstart;
-            if (offset + len > g_amiibo_data[rt.ctrl].size()) {
-                len = g_amiibo_data[rt.ctrl].size() > offset ? g_amiibo_data[rt.ctrl].size() - offset : 0;
-            }
-            if (len > 0) {
-                std::memcpy(g_amiibo_data[rt.ctrl].data() + offset, cmd_data.data() + wstart, len);
-                g_amiibo_modified[rt.ctrl] = true;
+        {
+            std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+            if (!g_amiibo_data[rt.ctrl].empty() && cmd_data.size() >= 4) {
+                // Format from pcap: after the 8-byte cmd header the data starts with
+                //   [offset (LE, 2 bytes)] 00 [chunk_size-ish (2B)] + real NTAG data
+                // e.g. 00 00 4c 00 <data for off 0>,   4c 00 4c 00 <data for off 0x4c>, etc.
+                // Real data starts at +4; write it at the offset into our 540-byte image.
+                uint16_t offset = cmd_data[0] | (cmd_data[1] << 8);
+                size_t wstart = 4;
+                size_t len = cmd_data.size() - wstart;
+                if (offset + len > g_amiibo_data[rt.ctrl].size()) {
+                    len = g_amiibo_data[rt.ctrl].size() > offset ? g_amiibo_data[rt.ctrl].size() - offset : 0;
+                }
+                if (len > 0) {
+                    std::memcpy(g_amiibo_data[rt.ctrl].data() + offset, cmd_data.data() + wstart, len);
+                    g_amiibo_modified[rt.ctrl] = true;
+                }
             }
         }
         return 0;
@@ -1043,6 +1074,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         publish_amiibo_request_for_port(port, false);
         return 0;
     }
+    std::unique_lock<std::mutex> amiibo_lk(g_amiibo_mtx);
     auto& adata = g_amiibo_data[port];
     bool placed = !adata.empty() && std::chrono::steady_clock::now() < g_amiibo_expiry[port];
     // Keep a tag present for the whole console transaction. The upload starts
@@ -1052,24 +1084,27 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }
     size_t plen = 0;
+    int request_state = -1;
     switch (nfc_sub) {
     case 0x03: // Enter NFC scan mode.
-        publish_amiibo_request_for_port(port, true);
+        request_state = placed ? 0 : 1;
         break;
     case 0x04: // Leave NFC scan mode.
-        publish_amiibo_request_for_port(port, false);
+        request_state = 0;
         break;
     case 0x05: { // Get status - match captured structure from PC2_Write_Amiibo.pcapng
-        // Observed when tag present: 09 00 00 00 01 01 02 00 <tag-info/UID-ish 8B> 00...
+        // Tag-present status carries a seven-byte ISO14443A UID. In a raw
+        // NTAG215 image byte 3 is BCC0, not part of that UID.
         payload[0] = 0x09; payload[1] = 0x00; payload[2] = 0x00; payload[3] = 0x00;
         payload[4] = 0x01; payload[5] = 0x01; payload[6] = 0x02; payload[7] = 0x00;
         if (placed && adata.size() >= 8) {
-            // insert some tag identifying bytes (real UID area from the placed bin)
-            std::memcpy(payload + 8, adata.data(), 8);
-        } else {
-            // no tag: leave zeros or minimal
+            payload[8] = 0x07; // UID length
+            payload[9] = 0x04; // ISO14443A / Type 2 tag
+            payload[10] = adata[0]; payload[11] = adata[1]; payload[12] = adata[2];
+            payload[13] = adata[4]; payload[14] = adata[5]; payload[15] = adata[6];
+            payload[16] = adata[7];
         }
-        publish_amiibo_request_for_port(port, !placed);
+        request_state = placed ? 0 : 1;
         plen = 32;
         break;
     }
@@ -1113,6 +1148,8 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     default: break;
     }
     if (placed && adata.size() != AMIIBO_SIZE) adata.resize(AMIIBO_SIZE, 0);
+    amiibo_lk.unlock();
+    if (request_state >= 0) publish_amiibo_request_for_port(port, request_state != 0);
     return plen;
 }
 

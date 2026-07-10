@@ -126,7 +126,18 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
             ns::AmiiboRequestPacket ar{};
             std::memcpy(&ar, buf, sizeof(ar));
             if (ar.subpad < 4) {
-                g_amiiboScanPending[ar.subpad] = (ar.requested != 0);
+                const uint16_t seq = static_cast<uint16_t>(ar.sequence_le[0])
+                    | (static_cast<uint16_t>(ar.sequence_le[1]) << 8);
+                const uint16_t previous = g_amiiboRequestSequence[ar.subpad].load();
+                // Sequence zero is accepted for compatibility with an older
+                // backend. Otherwise only a newer event may change the UI.
+                if (seq == 0 || previous == 0 || static_cast<int16_t>(seq - previous) > 0) {
+                    if (seq != 0) g_amiiboRequestSequence[ar.subpad] = seq;
+                    const bool requested = ar.requested != 0;
+                    g_amiiboScanDeadlineUs[ar.subpad] = requested
+                        ? ns::now_us() + 10'000'000ULL : 0;
+                    g_amiiboScanPending[ar.subpad] = requested;
+                }
             }
         } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= (int)(sizeof(ns::AmiiboDataPacket) - 540 + 4)) {
             ns::AmiiboDataPacket ad{};
@@ -143,6 +154,7 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, const int controller_f
                     }
                 }
                 g_amiiboScanPending[ad.subpad] = false;
+                g_amiiboScanDeadlineUs[ad.subpad] = 0;
             }
         }
     }
@@ -188,4 +200,3 @@ bool probe_server_sync(const std::string& host, int port) {
     closesocket(sock);
     return false;
 }
-

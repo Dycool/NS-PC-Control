@@ -174,7 +174,14 @@ void MainWindow::updateUi() {
     if (scanAmiiboBtn) {
         scanAmiiboBtn->setVisible(showScan);
         bool pendingAmiibo = false;
-        for (int i = 0; i < 4; ++i) pendingAmiibo = pendingAmiibo || g_amiiboScanPending[i].load();
+        const uint64_t nowUs = ns::now_us();
+        for (int i = 0; i < 4; ++i) {
+            if (g_amiiboScanPending[i].load() && nowUs >= g_amiiboScanDeadlineUs[i].load()) {
+                g_amiiboScanPending[i].store(false);
+                g_amiiboScanDeadlineUs[i].store(0);
+            }
+            pendingAmiibo = pendingAmiibo || g_amiiboScanPending[i].load();
+        }
         bool canScan = showScan && pendingAmiibo && connected;
         scanAmiiboBtn->setEnabled(canScan);
     }
@@ -229,17 +236,11 @@ void MainWindow::onScanAmiiboClicked() {
     if (path.isEmpty()) return;
 
     QFileInfo fileInfo(path);
-    constexpr qint64 MAX_AMIIBO_FILE_SIZE = 1024; // NTAG215 core is always 540 bytes.
-    // Real dumps vary 532-570 bytes due to different readers/tools.
-    // Game-written data (levels, custom gear, progress etc.) lives *inside* those 540 bytes — it does not make the file larger.
-    // We allow up to 1KB to be very safe against minor headers/overhead from tools like TagMo, Proxmark, N2Elite, etc.
-    if (fileInfo.size() > MAX_AMIIBO_FILE_SIZE) {
+    constexpr qint64 AMIIBO_FILE_SIZE = 540;
+    if (fileInfo.size() != AMIIBO_FILE_SIZE) {
         QMessageBox::warning(this, "Invalid Amiibo File",
-            QString("Selected file is too large (%1 bytes).\n"
-                    "Standard Amiibo .bin files are 540 bytes (NTAG215). "
-                    "Even ones with game data written stay ~540 bytes. "
-                    "Max allowed here is %2 bytes for tool variations.")
-                .arg(fileInfo.size()).arg(MAX_AMIIBO_FILE_SIZE));
+            QString("Selected file is %1 bytes. A raw NTAG215 Amiibo dump must be exactly %2 bytes.")
+                .arg(fileInfo.size()).arg(AMIIBO_FILE_SIZE));
         return;
     }
 
@@ -250,11 +251,11 @@ void MainWindow::onScanAmiiboClicked() {
     }
     QByteArray data = f.readAll();
     f.close();
-    if (data.size() > 540) data.resize(540); // cap to exact NTAG215 image size (server also enforces 540)
     g_amiiboPaths[subpad] = path;
     // send to server
     sendAmiiboData(subpad, data);
     // local pending clear after click? server will handle timeout
     g_amiiboScanPending[subpad].store(false);
+    g_amiiboScanDeadlineUs[subpad].store(0);
     updateUi();
 }

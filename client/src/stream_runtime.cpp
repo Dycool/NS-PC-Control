@@ -18,6 +18,8 @@
 
 std::atomic<bool> g_connected{false};
 std::atomic<bool> g_amiiboScanPending[4]{};
+std::atomic<uint16_t> g_amiiboRequestSequence[4]{};
+std::atomic<uint64_t> g_amiiboScanDeadlineUs[4]{};
 SOCKET g_sendSock = INVALID_SOCKET;
 sockaddr_in g_sendDest{};
 uint8_t g_sendHmac[32]{};
@@ -499,7 +501,11 @@ void stop_connection() {
     reset_roster_state();
     g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
     g_horiModeEnabled.store(false, std::memory_order_relaxed);
-    for (int i = 0; i < 4; ++i) g_amiiboScanPending[i].store(false, std::memory_order_relaxed);
+    for (int i = 0; i < 4; ++i) {
+        g_amiiboScanPending[i].store(false, std::memory_order_relaxed);
+        g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);
+        g_amiiboScanDeadlineUs[i].store(0, std::memory_order_relaxed);
+    }
     if (was_connected) set_status_message("Disconnected");
 }
 

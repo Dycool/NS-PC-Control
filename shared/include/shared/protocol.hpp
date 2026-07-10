@@ -286,7 +286,9 @@ struct AmiiboRequestPacket {
     uint32_t magic = AMIIBO_REQUEST_MAGIC;
     uint8_t subpad = 0;
     uint8_t requested = 0; // 1 = console wants Amiibo scan
-    uint8_t reserved[2]{};
+    // Monotonic little-endian event sequence. This keeps a delayed UDP
+    // "start scan" event from overriding a newer "stop scan" event.
+    uint8_t sequence_le[2]{};
 } NS_PACKED_ATTR;
 
 static constexpr uint32_t AMIIBO_DATA_MAGIC = 0x4E534144u; // 'NSAD'

@@ -585,8 +585,13 @@ void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
     if (!c.active) return;
+    // Only create a new event for an actual state transition. Send the same
+    // event a few times because this UI control message travels over UDP.
+    if (c.amiibo_request_seq[sub_idx] != 0 && c.amiibo_requested[sub_idx] == requested) return;
     c.amiibo_requested[sub_idx] = requested;
     c.amiibo_request_pending[sub_idx] = true;
+    c.amiibo_request_repeats[sub_idx] = 3;
+    if (++c.amiibo_request_seq[sub_idx] == 0) ++c.amiibo_request_seq[sub_idx];
 }
 
 void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, uint16_t len) {
@@ -906,6 +911,8 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.pad_present[s] = false; c.pad_last_present_us[s] = 0;
         c.amiibo_request_pending[s] = false;
         c.amiibo_requested[s] = false;
+        c.amiibo_request_repeats[s] = 0;
+        c.amiibo_request_seq[s] = 0;
         c.amiibo_writeback_pending[s] = false;
         c.amiibo_writeback_len[s] = 0;
     }
