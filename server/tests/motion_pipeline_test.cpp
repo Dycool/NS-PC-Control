@@ -15,12 +15,15 @@ void test_consume_once() {
     pipeline.push_gyro(t0, 200.0f, 0.0f, 0.0f);
 
     ns::MotionReport samples[3]{};
-    assert(pipeline.sample(t0 + 10'000, samples));
+    bool fresh = false;
+    assert(pipeline.sample(t0 + 10'000, samples, &fresh));
+    assert(fresh);
     assert(samples[2].gx != 0);
 
     // A faster transport poll must not expose the same physical gyro sample a
     // second time.
-    assert(!pipeline.sample(t0 + 12'000, samples));
+    assert(pipeline.sample(t0 + 12'000, samples, &fresh));
+    assert(!fresh);
     for (const auto& sample : samples) {
         assert(sample.gx == 0 && sample.gy == 0 && sample.gz == 0);
     }

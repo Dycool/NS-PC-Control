@@ -25,12 +25,11 @@ public:
     void push_accel(uint64_t timestamp_us, float x, float y, float z);
     void push_gyro(uint64_t timestamp_us, float x, float y, float z);
 
-    // Produces three evenly timed samples, oldest to newest. now_us must use
-    // the same monotonic clock as push_* timestamps. When a gyro is available,
-    // true is returned only once for each newly received gyro sample. A faster
-    // network/USB polling loop therefore receives a held/no-motion frame rather
-    // than integrating the same physical sample repeatedly.
-    bool sample(uint64_t now_us, MotionReport out[3]);
+    // Produces three evenly timed samples, oldest to newest. The return value
+    // means motion remains available; sample_fresh distinguishes a newly
+    // consumed physical sensor sample from a held frame. Held frames retain
+    // acceleration but carry zero gyro so consumers never integrate twice.
+    bool sample(uint64_t now_us, MotionReport out[3], bool* sample_fresh = nullptr);
 
     uint64_t last_accel_us() const noexcept { return accel_.last_input_us; }
     uint64_t last_gyro_us() const noexcept { return gyro_.last_input_us; }
@@ -65,6 +64,8 @@ private:
     bool gyro_bias_ready_ = false;
     uint64_t last_emitted_gyro_input_us_ = 0;
     uint64_t last_emitted_accel_input_us_ = 0;
+    MotionReport last_output_samples_[3]{};
+    bool have_last_output_samples_ = false;
 
     static void push(Stream& stream, uint64_t timestamp_us,
                      float x, float y, float z, float cutoff_hz);

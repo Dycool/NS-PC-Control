@@ -114,6 +114,11 @@ static constexpr uint8_t EXT_BUTTON_MASK  = EXT_BUTTON_C | EXT_BUTTON_GL | EXT_B
 // Extended HIDReport::reserved[1] status flags. Older clients leave these zero.
 static constexpr uint8_t EXT_STATUS_BATTERY_VALID = 0x01;
 static constexpr uint8_t EXT_STATUS_BATTERY_CHARGING = 0x02;
+// New clients keep has_motion stable while marking only packets that contain
+// a newly consumed physical sensor sample. The VALID bit preserves backward
+// compatibility: without it, servers treat has_motion as fresh as before.
+static constexpr uint8_t EXT_STATUS_MOTION_FRESH = 0x04;
+static constexpr uint8_t EXT_STATUS_MOTION_FRESH_VALID = 0x08;
 static constexpr uint8_t EXT_STATUS_BATTERY_PERCENT_UNKNOWN = 0xFF;
 // HIDReport::reserved[2]. Zero is treated as Pro for older clients.
 enum ControllerType : uint8_t {

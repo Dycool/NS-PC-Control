@@ -596,14 +596,21 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 if (port_needed) report_for_port = out_reports[h];
                                 const MotionReport* motion_for_port = nullptr;
                                 bool has_motion_for_port = false;
+                                bool motion_fresh_for_port = false;
                                 MotionReport joycon_motion[3]{};
                                 if (port_needed) {
                                     int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                     motion_for_port = get_hid_report(snap[cidx], sidx).motion;
                                     has_motion_for_port = get_hid_report(snap[cidx], sidx).has_motion != 0;
+                                    const uint8_t motion_status = get_hid_report(snap[cidx], sidx).reserved[1];
+                                    motion_fresh_for_port = has_motion_for_port &&
+                                        ((motion_status & ns::EXT_STATUS_MOTION_FRESH_VALID)
+                                            ? (motion_status & ns::EXT_STATUS_MOTION_FRESH) != 0
+                                            : true);
                                     if (hw_slots[h].pair_member && !hw_slots[h].pair_right && !g_port_switch2[h]) {
                                         motion_for_port = nullptr;
                                         has_motion_for_port = false;
+                                        motion_fresh_for_port = false;
                                     }
                                     if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_R
                                             && !g_port_switch2[h]) {
@@ -634,7 +641,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         continue;
                                     }
                                     const bool imu_on = (switch2_native_enabled_features(h) & 0x04u) != 0;
-                                    build_s2_pro_report(report_for_port, motion_for_port, has_motion_for_port, imu_on, pro_timer_from_us(now_stamp), now_stamp, h, write_buf);
+                                    build_s2_pro_report(report_for_port, motion_for_port,
+                                                        motion_fresh_for_port, imu_on,
+                                                        pro_timer_from_us(now_stamp), now_stamp,
+                                                        h, write_buf);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
                                     build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);

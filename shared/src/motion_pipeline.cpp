@@ -51,6 +51,8 @@ void MotionPipeline::reset() {
     gyro_bias_ready_ = false;
     last_emitted_gyro_input_us_ = 0;
     last_emitted_accel_input_us_ = 0;
+    for (auto& sample : last_output_samples_) sample.reset();
+    have_last_output_samples_ = false;
 }
 
 void MotionPipeline::configure(bool has_accel, float accel_rate_hz,
@@ -229,8 +231,9 @@ bool MotionPipeline::interpolate(const Stream& stream, uint64_t timestamp_us,
     return true;
 }
 
-bool MotionPipeline::sample(uint64_t now_us, MotionReport out[3]) {
+bool MotionPipeline::sample(uint64_t now_us, MotionReport out[3], bool* sample_fresh) {
     if (!out) return false;
+    if (sample_fresh) *sample_fresh = false;
     for (int i = 0; i < 3; ++i) out[i].reset();
 
     const auto stream_is_fresh = [now_us](const Stream& stream) {
@@ -247,7 +250,14 @@ bool MotionPipeline::sample(uint64_t now_us, MotionReport out[3]) {
     // source: one physical gyro sample may be exposed only once even if the
     // client/network/report loop polls this function more frequently.
     const bool emit = gyro_.available ? new_gyro : new_accel;
-    if (!emit) return false;
+    if (!emit) {
+        if (!(accel_live || gyro_live) || !have_last_output_samples_) return false;
+        for (int i = 0; i < 3; ++i) {
+            out[i] = last_output_samples_[i];
+            out[i].gx = out[i].gy = out[i].gz = 0;
+        }
+        return true;
+    }
 
     // Anchor the newest output slot to the newly consumed physical sample.
     // Delaying by one sensor period and then marking that sample consumed would
@@ -273,6 +283,9 @@ bool MotionPipeline::sample(uint64_t now_us, MotionReport out[3]) {
 
     if (new_gyro) last_emitted_gyro_input_us_ = gyro_.last_input_us;
     if (new_accel) last_emitted_accel_input_us_ = accel_.last_input_us;
+    for (int i = 0; i < 3; ++i) last_output_samples_[i] = out[i];
+    have_last_output_samples_ = true;
+    if (sample_fresh) *sample_fresh = true;
     return true;
 }
 

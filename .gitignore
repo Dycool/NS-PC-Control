@@ -27,3 +27,6 @@ mobile/ios/build/
 /build/
 /build-client/
 
+# Local diagnostic captures and helper binaries
+/debug/
+

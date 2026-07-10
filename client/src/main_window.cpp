@@ -148,6 +148,7 @@ int MainWindow::platformHeight() { return 365; }
 int MainWindow::platformPairHeight() { return platformHeight() - 42; }
 
 void MainWindow::toggleConnection() {
+    if (g_connecting.load(std::memory_order_relaxed)) return;
     if (g_connected.load()) {
         stop_connection();
     } else {
@@ -155,17 +156,21 @@ void MainWindow::toggleConnection() {
         connectBtn->setText("Connecting...");
         QCoreApplication::processEvents();
         auto res = start_connection(q_to_std(ipEdit->text()));
-        if (!res) QMessageBox::critical(this, "Error", std_to_q(res.error()));
-        connectBtn->setEnabled(true);
+        if (!res) {
+            QMessageBox::critical(this, "Error", std_to_q(res.error()));
+            connectBtn->setEnabled(true);
+        }
     }
 }
 
 
 void MainWindow::updateUi() {
     const bool connected = g_connected.load();
-    connectBtn->setText(connected ? "Disconnect" : "Connect");
-    ipEdit->setEnabled(!connected);
-    keyboardCombo->setEnabled(!connected);
+    const bool connecting = g_connecting.load(std::memory_order_relaxed);
+    connectBtn->setText(connecting ? "Connecting..." : (connected ? "Disconnect" : "Connect"));
+    connectBtn->setEnabled(!connecting);
+    ipEdit->setEnabled(!connected && !connecting);
+    keyboardCombo->setEnabled(!connected && !connecting);
     bindingsBtn->setEnabled(true);
     statusLabel->setText(std_to_q(status_message()));
 

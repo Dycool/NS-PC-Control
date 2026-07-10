@@ -585,15 +585,18 @@ void SDLInputManager::handle_sensor_event(const SDL_GamepadSensorEvent& event) {
         }
     }
 
-void SDLInputManager::apply_motion(Device& d, ns::MotionReport out_samples[3], bool& has_motion) {
+void SDLInputManager::apply_motion(Device& d, ns::MotionReport out_samples[3],
+                                   bool& has_motion, bool& motion_sample_fresh) {
         for (int i = 0; i < 3; ++i) out_samples[i].reset();
         has_motion = false;
+        motion_sample_fresh = false;
 
         if (!motion_enabled.load(std::memory_order_relaxed)) {
             d.motion_pipeline.reset();
             return;
         }
-        has_motion = d.motion_pipeline.sample(SDL_GetTicksNS() / 1000ULL, out_samples);
+        has_motion = d.motion_pipeline.sample(
+            SDL_GetTicksNS() / 1000ULL, out_samples, &motion_sample_fresh);
     }
 
 SDLInputManager::Device* SDLInputManager::device_for_slot_locked(int slot) {
@@ -742,7 +745,7 @@ void SDLInputManager::refresh_states_locked(uint64_t now) {
             // SDL_POWERSTATE_CHARGED often means "full/not discharging", not necessarily actively charging.
             // Only set the Switch charging bit when SDL explicitly reports charging.
             st.battery_charging = (power_state == SDL_POWERSTATE_CHARGING);
-            apply_motion(d, st.motion_samples, st.has_motion);
+            apply_motion(d, st.motion_samples, st.has_motion, st.motion_sample_fresh);
             st.motion = st.has_motion ? st.motion_samples[2] : ns::MotionReport{};
             if (report_non_neutral(st.input) || st.has_motion) st.last_input_us = now;
             states[d.slot] = st;

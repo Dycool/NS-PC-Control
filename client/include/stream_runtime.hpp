@@ -15,6 +15,7 @@
 #include <QString>
 
 extern std::atomic<bool> g_connected;
+extern std::atomic<bool> g_connecting;
 extern std::thread g_senderThread;
 extern std::atomic<bool> g_senderRunning;
 extern uint8_t g_hmacKey[32];
@@ -65,6 +66,7 @@ struct ClientFrame {
     ns::MotionReport motion[4][3];
     bool present[4] = {false, false, false, false};
     bool has_motion[4] = {false, false, false, false};
+    bool motion_sample_fresh[4] = {false, false, false, false};
     int controller_for_slot[4] = {-1, -1, -1, -1};
     int battery_percent[4] = {-1, -1, -1, -1};
     bool battery_charging[4] = {false, false, false, false};

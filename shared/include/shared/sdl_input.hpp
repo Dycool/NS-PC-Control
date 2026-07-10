@@ -34,6 +34,7 @@ struct SdlPadState {
     ns::MotionReport motion{};
     ns::MotionReport motion_samples[3]{};
     bool has_motion = false;
+    bool motion_sample_fresh = false;
     uint64_t last_input_us = 0;
     std::string name;
     uint16_t vid = 0;
@@ -178,7 +179,8 @@ private:
     void apply_motion_enabled_locked(bool enabled);
 
     ns::HoriHIDReport map_gamepad(const Device& d) const;
-    void apply_motion(Device& d, ns::MotionReport out_samples[3], bool& has_motion);
+    void apply_motion(Device& d, ns::MotionReport out_samples[3],
+                      bool& has_motion, bool& motion_sample_fresh);
     void handle_sensor_event(const SDL_GamepadSensorEvent& event);
     Device* device_for_slot_locked(int slot);
     int first_free_slot_locked() const;

@@ -17,6 +17,7 @@
 #include <vector>
 
 std::atomic<bool> g_connected{false};
+std::atomic<bool> g_connecting{false};
 std::atomic<bool> g_amiiboScanPending[4]{};
 std::atomic<uint16_t> g_amiiboRequestSequence[4]{};
 std::atomic<uint64_t> g_amiiboScanDeadlineUs[4]{};
@@ -186,6 +187,7 @@ void ClientFrame::reset() {
         for (int j = 0; j < 3; ++j) motion[i][j].reset();
         present[i] = false;
         has_motion[i] = false;
+        motion_sample_fresh[i] = false;
         controller_for_slot[i] = -1;
         battery_percent[i] = -1;
         battery_charging[i] = false;
@@ -222,6 +224,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
             for (int j = 0; j < 3; ++j) frame.motion[0][j] = sdl[source].motion_samples[j];
             frame.present[0] = true;
             frame.has_motion[0] = send_motion && sdl[source].has_motion;
+            frame.motion_sample_fresh[0] = frame.has_motion[0] && sdl[source].motion_sample_fresh;
             frame.controller_for_slot[0] = source;
             frame.battery_percent[0] = sdl[source].battery_percent;
             frame.battery_charging[0] = sdl[source].battery_charging;
@@ -255,6 +258,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         for (int j = 0; j < 3; ++j) frame.motion[i][j] = sdl[i].motion_samples[j];
         frame.present[i] = true;
         frame.has_motion[i] = send_motion && sdl[i].has_motion;
+        frame.motion_sample_fresh[i] = frame.has_motion[i] && sdl[i].motion_sample_fresh;
         frame.controller_for_slot[i] = i;
         frame.battery_percent[i] = sdl[i].battery_percent;
         frame.battery_charging[i] = sdl[i].battery_charging;
@@ -269,6 +273,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
                 frame.reports[target] = frame.reports[0];
                 std::copy_n(frame.motion[0], 3, frame.motion[target]);
                 frame.has_motion[target] = frame.has_motion[0];
+                frame.motion_sample_fresh[target] = frame.motion_sample_fresh[0];
                 frame.present[target] = true;
                 frame.controller_for_slot[target] = frame.controller_for_slot[0];
                 frame.battery_percent[target] = frame.battery_percent[0];
@@ -281,6 +286,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         apply_keyboard_to_report(frame.reports[0], false);
         frame.present[0] = true;
         frame.has_motion[0] = false;
+        frame.motion_sample_fresh[0] = false;
         frame.controller_for_slot[0] = -1;
         frame.battery_percent[0] = -1;
         frame.battery_charging[0] = false;
@@ -324,7 +330,8 @@ void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_
     for (int i = 0; i < 4; ++i) {
         ns::HIDReport* dst = (i == 0 ? &pkt.report.p1 : (i == 1 ? &pkt.report.p2 : (i == 2 ? &pkt.report.p3 : &pkt.report.p4)));
         fill_extended_pad(*dst, frame.reports[i], frame.present[i], frame.has_motion[i] ? frame.motion[i] : nullptr,
-                          frame.battery_percent[i], frame.battery_charging[i]);
+                          frame.battery_percent[i], frame.battery_charging[i],
+                          frame.motion_sample_fresh[i]);
         // This is a requested controller profile, not necessarily the final
         // USB identity. In Joy-Con L+R mode the server expands one source pad
         // into two virtual ports and chooses L/R per port.
@@ -466,7 +473,12 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         if (cfg.gui_features) {
             if (g_macro_recording.load(std::memory_order_relaxed)) macro_record_sample(frame.reports[0]);
             if (g_macro_running.load(std::memory_order_relaxed)) {
-                if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) frame.active_count = 1;
+                if (apply_macro_override(frame.reports, frame.present, frame.has_motion)) {
+                    frame.active_count = 1;
+                    for (int i = 0; i < 4; ++i) {
+                        if (!frame.has_motion[i]) frame.motion_sample_fresh[i] = false;
+                    }
+                }
             }
         }
 
@@ -524,9 +536,41 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
 }
 
 void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port) {
+    set_status_message("Connecting to " + host + ":" + std::to_string(port) + "...");
+    if (!probe_server_sync(host, port)) {
+        const std::string error = g_serverProbeFull.load(std::memory_order_relaxed)
+            ? "Server is full. All virtual controller slots are in use."
+            : "Server not reachable. Check the IP address.";
+        g_lastError = error;
+        set_status_message(error);
+        g_connecting.store(false, std::memory_order_relaxed);
+        g_connected.store(false, std::memory_order_relaxed);
+        running.store(false, std::memory_order_relaxed);
+        return;
+    }
+    if (!running.load(std::memory_order_relaxed)) {
+        g_connecting.store(false, std::memory_order_relaxed);
+        return;
+    }
+    if (!g_sdlInput.start()) {
+        const std::string error = "SDL3 input failed: " + g_sdlInput.error();
+        g_lastError = error;
+        set_status_message(error);
+        g_connecting.store(false, std::memory_order_relaxed);
+        g_connected.store(false, std::memory_order_relaxed);
+        running.store(false, std::memory_order_relaxed);
+        return;
+    }
+    if (!running.load(std::memory_order_relaxed)) {
+        g_connecting.store(false, std::memory_order_relaxed);
+        return;
+    }
+
     ClientStreamConfig cfg{.host = std::move(host), .port = port,
                            .gui_features = true, .print_cli_waiting_messages = false,
                            .idle_sleep_ms = 50, .hmac_key = g_hmacKey};
+    g_connected.store(true, std::memory_order_relaxed);
+    g_connecting.store(false, std::memory_order_relaxed);
     set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
     std::string err;
     int rc = run_client_stream(cfg, running, &err);
@@ -535,23 +579,18 @@ void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t p
         set_status_message(err);
     }
     g_connected.store(false);
+    g_connecting.store(false, std::memory_order_relaxed);
     running.store(false, std::memory_order_relaxed);
 }
 
 std::expected<void, std::string> start_connection(const std::string& target) {
-    if (g_connected.load()) return {};
+    if (g_connected.load() || g_connecting.load()) return {};
     std::string host;
     int port = ns::DEFAULT_PORT;
     if (!parse_host_port(target, host, port)) return std::unexpected("Please enter a Raspberry Pi IP address.");
     g_serverProbeFull.store(false, std::memory_order_relaxed);
     g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
     g_horiModeEnabled.store(false, std::memory_order_relaxed);
-    if (!probe_server_sync(host, port)) {
-        if (g_serverProbeFull.load(std::memory_order_relaxed)) return std::unexpected("Server is full. All virtual controller slots are in use.");
-        return std::unexpected("Server not reachable. Check the IP address.");
-    }
-    if (g_serverProbeFull.load(std::memory_order_relaxed)) return std::unexpected("Server is full. All virtual controller slots are in use.");
-    if (!g_sdlInput.start()) return std::unexpected("SDL3 input failed: " + g_sdlInput.error());
     derive_key(ns::DEFAULT_SECRET, g_hmacKey);
     save_last_ip(target);
     load_macro_entries();
@@ -564,18 +603,19 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     reset_roster_state();
     mouse_input_reset();
     g_lastError.clear();
-    g_connected.store(true);
     if (g_senderThread.joinable()) {
         g_senderRunning = false;
         g_senderThread.join();
     }
     g_senderRunning = true;
+    g_connecting.store(true, std::memory_order_relaxed);
     g_senderThread = std::thread(sender_thread_main, std::ref(g_senderRunning), host, (uint16_t)port);
     return {};
 }
 
 void stop_connection() {
     const bool was_connected = g_connected.exchange(false);
+    const bool was_connecting = g_connecting.exchange(false, std::memory_order_relaxed);
     if (g_senderThread.joinable()) {
         g_senderRunning = false;
         g_senderThread.join();
@@ -592,7 +632,7 @@ void stop_connection() {
         g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);
         g_amiiboScanDeadlineUs[i].store(0, std::memory_order_relaxed);
     }
-    if (was_connected) set_status_message("Disconnected");
+    if (was_connected || was_connecting) set_status_message("Disconnected");
 }
 
 NetworkRuntime::NetworkRuntime() {

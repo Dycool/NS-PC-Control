@@ -13,7 +13,8 @@ constexpr uint8_t EXT_PAD_PRESENT = 0x01;
 void set_pad_present_flag(ns::HIDReport& r, bool present);
 void fill_extended_pad(ns::HIDReport& dst, const ns::HoriHIDReport& input,
                        bool present, const ns::MotionReport motion[3] = nullptr,
-                       int battery_percent = -1, bool battery_charging = false);
+                       int battery_percent = -1, bool battery_charging = false,
+                       bool motion_sample_fresh = false);
 bool set_socket_nonblocking(SOCKET sock);
 bool socket_would_block();
 bool resolve_udp_destination(const std::string& host, int port, sockaddr_in& dest);
