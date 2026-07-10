@@ -502,7 +502,8 @@ bool switch2_native_handle_vendor_command(int port,
                 static constexpr uint8_t nfc[] = {0x61, 0x12, 0x50, 0x10};
                 std::memcpy(d, nfc, sizeof(nfc));
                 dl = sizeof(nfc);
-            } else if (sub == 0x05 || sub == 0x06 || sub == 0x14 || sub == 0x15) {
+            } else if (sub == 0x03 || sub == 0x04 || sub == 0x05
+                    || sub == 0x06 || sub == 0x14 || sub == 0x15) {
                 // The native S2 NFC transport uses the vendor command channel,
                 // not the legacy 0x21 HID-subcommand wrapper. Keep the exact
                 // eight-byte command header above and append the tag payload
@@ -527,8 +528,17 @@ bool switch2_native_handle_vendor_command(int port,
             break;
     }
 
-    // Dedicated vendor-bulk path: each native S2 controller has independent
-    // init/feature/report-selection state.
+    // The Switch performs one device-level identity handshake and initializes
+    // only the first vendor interface of this composite USB device.  The other
+    // native HID interfaces are additional controllers on that same device,
+    // so they must inherit the shared streaming/report/feature state from the
+    // vendor channel the console actually drives (normally port 0).
+    mirror_shared_runtime_state_locked(port);
+    if (g_ctx.verbose && id == 0x03 && sub == 0x0A && s.streaming) {
+        std::fprintf(stdout,
+                     "[s2] vendor port %d enabled shared streaming for %d native HID ports\n",
+                     port, active_native_ports());
+    }
 
     response.assign(r.begin(), r.begin() + 8 + dl);
     return true;

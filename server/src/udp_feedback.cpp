@@ -111,7 +111,7 @@ void flush_feedback_to_udp(int sock, int client_idx) {
             if (c.amiibo_request_pending[s]) {
                 pending_amiibo_request[s] = ns::AmiiboRequestPacket{};
                 pending_amiibo_request[s].subpad = static_cast<uint8_t>(s);
-                pending_amiibo_request[s].requested = 1;
+                pending_amiibo_request[s].requested = c.amiibo_requested[s] ? 1 : 0;
                 has_amiibo_request[s] = true;
                 c.amiibo_request_pending[s] = false;
             }

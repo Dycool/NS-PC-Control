@@ -16,6 +16,10 @@ constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 60;
 constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 20;
 
 constexpr auto SDL_INPUT_POLL_INTERVAL = std::chrono::milliseconds(4);
+constexpr float STANDARD_GRAVITY = 9.80665f;
+constexpr float ACCEL_SCALE = 4096.0f / STANDARD_GRAVITY;
+constexpr float RAD_TO_DEG = 57.29577951308232f;
+constexpr float GYRO_SCALE = RAD_TO_DEG * 16.384f;
 
 uint8_t scale_sdl_rumble_motor(uint8_t v, int gain_percent) {
     int scaled = ((int)v * gain_percent) / 100;
@@ -294,6 +298,7 @@ bool SDLInputManager::init_sdl() {
             set_error((e && *e) ? e : "SDL_Init failed");
             return false;
         }
+        SDL_SetEventEnabled(SDL_EVENT_GAMEPAD_SENSOR_UPDATE, true);
         initialized = true;
         // The initial device scan/open is deferred to the first poll loop iteration (last_scan_us == 0
         // forces a scan there) so start() returns as soon as SDL is initialized. Opening controllers
@@ -323,6 +328,8 @@ void SDLInputManager::poll_once() {
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_EVENT_GAMEPAD_ADDED || ev.type == SDL_EVENT_GAMEPAD_REMOVED)
                 force_scan.store(true, std::memory_order_relaxed);
+            else if (ev.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE)
+                handle_sensor_event(ev.gsensor);
         }
         SDL_UpdateGamepads();
         if (motion_enabled.load(std::memory_order_relaxed))
@@ -443,9 +450,16 @@ void SDLInputManager::apply_motion_enabled_locked(bool enabled) {
                 d.gyro_enabled = false;
             }
             if (!enabled) {
-                d.has_motion_samples = false;
-                for (int i = 0; i < 3; ++i) d.motion_samples[i].reset();
+                d.motion_pipeline.reset();
+                d.accel_clock = Device::SensorClock{};
+                d.gyro_clock = Device::SensorClock{};
             }
+            d.accel_rate_hz = d.accel_enabled
+                ? SDL_GetGamepadSensorDataRate(d.pad, SDL_SENSOR_ACCEL) : 0.0f;
+            d.gyro_rate_hz = d.gyro_enabled
+                ? SDL_GetGamepadSensorDataRate(d.pad, SDL_SENSOR_GYRO) : 0.0f;
+            d.motion_pipeline.configure(d.accel_enabled, d.accel_rate_hz,
+                                        d.gyro_enabled, d.gyro_rate_hz);
         }
         if (!enabled) {
             for (auto& st : states) {
@@ -513,72 +527,73 @@ bool SDLInputManager::report_non_neutral(const ns::HoriHIDReport& r) {
                r.lx != 128 || r.ly != 128 || r.rx != 128 || r.ry != 128;
     }
 
-void SDLInputManager::push_motion_sample(Device& d, const ns::MotionReport& sample) {
-        if (!d.has_motion_samples) {
-            d.motion_samples[0] = sample;
-            d.motion_samples[1] = sample;
-            d.motion_samples[2] = sample;
-            d.has_motion_samples = true;
-            return;
+uint64_t SDLInputManager::sensor_event_time_us(Device::SensorClock& clock,
+                                               uint64_t event_ns, uint64_t sensor_ns) {
+        if (event_ns == 0) event_ns = SDL_GetTicksNS();
+        if (sensor_ns == 0) return event_ns / 1000ULL;
+
+        const bool reset = clock.base_sensor_ns == 0
+            || sensor_ns <= clock.last_sensor_ns
+            || sensor_ns < clock.base_sensor_ns;
+        if (reset) {
+            clock.base_sensor_ns = sensor_ns;
+            clock.base_event_ns = event_ns;
         }
-        d.motion_samples[0] = d.motion_samples[1];
-        d.motion_samples[1] = d.motion_samples[2];
-        d.motion_samples[2] = sample;
+        uint64_t mapped_ns = clock.base_event_ns + (sensor_ns - clock.base_sensor_ns);
+        const uint64_t skew_ns = mapped_ns > event_ns ? mapped_ns - event_ns : event_ns - mapped_ns;
+        // Hardware clocks are not guaranteed to share SDL's epoch. Re-anchor
+        // after resets or implausible drift while retaining their precise
+        // relative sample spacing in normal operation.
+        if (skew_ns > 250'000'000ULL) {
+            clock.base_sensor_ns = sensor_ns;
+            clock.base_event_ns = event_ns;
+            mapped_ns = event_ns;
+        }
+        // A hardware acquisition timestamp may precede event delivery but it
+        // must not place a sample in the future on SDL's monotonic timeline.
+        mapped_ns = std::min(mapped_ns, event_ns);
+        clock.last_sensor_ns = sensor_ns;
+        return mapped_ns / 1000ULL;
+    }
+
+void SDLInputManager::handle_sensor_event(const SDL_GamepadSensorEvent& event) {
+        Device* device = nullptr;
+        for (auto& d : devices) {
+            if (d.id == event.which) {
+                device = &d;
+                break;
+            }
+        }
+        if (!device) return;
+
+        if (event.sensor == SDL_SENSOR_ACCEL && device->accel_enabled) {
+            const uint64_t timestamp_us = sensor_event_time_us(
+                device->accel_clock, event.timestamp, event.sensor_timestamp);
+            device->motion_pipeline.push_accel(
+                timestamp_us,
+                -event.data[2] * ACCEL_SCALE,
+                -event.data[0] * ACCEL_SCALE,
+                 event.data[1] * ACCEL_SCALE);
+        } else if (event.sensor == SDL_SENSOR_GYRO && device->gyro_enabled) {
+            const uint64_t timestamp_us = sensor_event_time_us(
+                device->gyro_clock, event.timestamp, event.sensor_timestamp);
+            device->motion_pipeline.push_gyro(
+                timestamp_us,
+                -event.data[2] * GYRO_SCALE,
+                -event.data[0] * GYRO_SCALE,
+                 event.data[1] * GYRO_SCALE);
+        }
     }
 
 void SDLInputManager::apply_motion(Device& d, ns::MotionReport out_samples[3], bool& has_motion) {
-        SDL_Gamepad* pad = d.pad;
         for (int i = 0; i < 3; ++i) out_samples[i].reset();
         has_motion = false;
 
         if (!motion_enabled.load(std::memory_order_relaxed)) {
-            d.has_motion_samples = false;
-            for (int i = 0; i < 3; ++i) d.motion_samples[i].reset();
+            d.motion_pipeline.reset();
             return;
         }
-
-        ns::MotionReport sample{};
-        constexpr float STANDARD_GRAVITY = 9.80665f;
-        constexpr float ACCEL_SCALE = 4096.0f / STANDARD_GRAVITY;
-        constexpr float RAD_TO_DEG = 57.29577951308232f;
-        constexpr float GYRO_SCALE = RAD_TO_DEG * 16.384f;
-
-        if (d.accel_enabled) {
-            float accel[3] = {0, 0, 0};
-            if (SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, accel, 3)) {
-                sample.ax = clamp_motion_i16(-accel[2] * ACCEL_SCALE);
-                sample.ay = clamp_motion_i16(-accel[0] * ACCEL_SCALE);
-                sample.az = clamp_motion_i16(accel[1] * ACCEL_SCALE);
-                has_motion = true;
-            } else {
-                sample.az = 4096;
-            }
-        } else {
-            sample.az = 4096;
-        }
-
-        if (d.gyro_enabled) {
-            float gyro[3] = {0, 0, 0};
-            if (SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
-                const float gx = -gyro[2];
-                const float gy = -gyro[0];
-                const float gz =  gyro[1];
-                sample.gx = gyro_deadzone_i16(clamp_motion_i16(gx * GYRO_SCALE));
-                sample.gy = gyro_deadzone_i16(clamp_motion_i16(gy * GYRO_SCALE));
-                sample.gz = gyro_deadzone_i16(clamp_motion_i16(gz * GYRO_SCALE));
-                has_motion = true;
-            }
-        }
-
-        if (has_motion) {
-            push_motion_sample(d, sample);
-            out_samples[0] = d.motion_samples[0];
-            out_samples[1] = d.motion_samples[1];
-            out_samples[2] = d.motion_samples[2];
-        } else {
-            d.has_motion_samples = false;
-            for (int i = 0; i < 3; ++i) d.motion_samples[i].reset();
-        }
+        has_motion = d.motion_pipeline.sample(SDL_GetTicksNS() / 1000ULL, out_samples);
     }
 
 SDLInputManager::Device* SDLInputManager::device_for_slot_locked(int slot) {
@@ -696,6 +711,15 @@ void SDLInputManager::scan_locked(bool initial) {
             const bool enable_motion = motion_enabled.load(std::memory_order_relaxed);
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) d.accel_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, enable_motion);
             if (SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) d.gyro_enabled = SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, enable_motion);
+            d.accel_rate_hz = d.accel_enabled ? SDL_GetGamepadSensorDataRate(pad, SDL_SENSOR_ACCEL) : 0.0f;
+            d.gyro_rate_hz = d.gyro_enabled ? SDL_GetGamepadSensorDataRate(pad, SDL_SENSOR_GYRO) : 0.0f;
+            d.motion_pipeline.configure(d.accel_enabled, d.accel_rate_hz,
+                                        d.gyro_enabled, d.gyro_rate_hz);
+            if (d.accel_enabled || d.gyro_enabled) {
+                std::println("[sdl] motion slot={} accel={} ({:.1f} Hz) gyro={} ({:.1f} Hz)",
+                             d.slot + 1, d.accel_enabled ? "yes" : "no", d.accel_rate_hz,
+                             d.gyro_enabled ? "yes" : "no", d.gyro_rate_hz);
+            }
             devices.push_back(d);
         }
         SDL_free(ids);

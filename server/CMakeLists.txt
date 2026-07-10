@@ -179,6 +179,7 @@ add_executable(ns-backend
     src/bluetooth_input.cpp
     src/bluetooth_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/motion_pipeline.cpp
     ${WEBAPP_EMBED}
 )
 

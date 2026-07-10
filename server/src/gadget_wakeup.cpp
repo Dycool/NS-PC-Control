@@ -195,6 +195,7 @@ struct FfsPortState {
     std::atomic<bool> writer_exited{true};
     std::atomic<bool> vendor_reader_exited{true};
     std::atomic<bool> vendor_writer_exited{true};
+    bool input_write_seen = false;
     std::thread reader_thread;               // blocking read(ep2) -> out_reports
     std::thread writer_thread;               // in_reports -> blocking write(ep1)
     std::thread vendor_reader_thread;        // blocking read(ep3) -> vendor_out_reports
@@ -1010,6 +1011,11 @@ static void ffs_writer_loop(int id) {
         if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
             continue;
         }
+        if (w == static_cast<ssize_t>(report.size()) && !st.input_write_seen) {
+            st.input_write_seen = true;
+            if (g_ctx.verbose)
+                std::println("[ffs] port {} first HID IN report accepted by host", id + 1);
+        }
         (void)w;
     }
     st.writer_exited.store(true, std::memory_order_release);
@@ -1043,6 +1049,7 @@ static bool functionfs_start_port_io(int id) {
     { std::lock_guard<std::mutex> lk(st.vendor_in_mtx);  st.vendor_in_reports.clear();  }
     st.reader_exited.store(false, std::memory_order_relaxed);
     st.writer_exited.store(false, std::memory_order_relaxed);
+    st.input_write_seen = false;
     st.vendor_reader_exited.store(!s2_native, std::memory_order_relaxed);
     st.vendor_writer_exited.store(!s2_native, std::memory_order_relaxed);
     st.io_running.store(true, std::memory_order_relaxed);

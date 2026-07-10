@@ -61,7 +61,10 @@ std::mutex g_s2_motion_mtx;
 
 constexpr std::array<uint8_t, 5> S2_IMU_TICK_PATTERN = {3, 3, 3, 3, 4};
 constexpr int16_t S2_DEFAULT_TEMPERATURE = 0x0C00;
-constexpr double S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC = 48000.0;
+// MotionReport retains the Switch 1 raw IMU unit used by every client:
+// 16.384 counts per degree/second. Convert that unit accurately when updating
+// the native S2 phase accumulator instead of treating it as 48000/turn.
+constexpr double S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC = 360.0 * 16.384;
 constexpr double S2_INTERNAL_IMU_HZ = 800.0;
 constexpr long double S2_PHASE_UNITS_PER_TURN = 4294967296.0L;
 
@@ -725,7 +728,8 @@ static void write_s2_pro_motion_block(uint8_t* out,
 
     // The captured Pro Controller 2 block stores three wrapping 32-bit angular
     // phase accumulators. The observed scale is one full turn per 2^32 units.
-    // MotionReport gyro values use the common Switch scale: 48000 = 360 deg/s.
+    // MotionReport gyro values use the common S1 scale: 16.384 counts per
+    // degree/second (5898.24 counts per full turn/second).
     const long double phase_scale =
         S2_PHASE_UNITS_PER_TURN /
         (S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC * S2_INTERNAL_IMU_HZ);
@@ -1049,6 +1053,12 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
     }
     size_t plen = 0;
     switch (nfc_sub) {
+    case 0x03: // Enter NFC scan mode.
+        publish_amiibo_request_for_port(port, true);
+        break;
+    case 0x04: // Leave NFC scan mode.
+        publish_amiibo_request_for_port(port, false);
+        break;
     case 0x05: { // Get status - match captured structure from PC2_Write_Amiibo.pcapng
         // Observed when tag present: 09 00 00 00 01 01 02 00 <tag-info/UID-ish 8B> 00...
         payload[0] = 0x09; payload[1] = 0x00; payload[2] = 0x00; payload[3] = 0x00;

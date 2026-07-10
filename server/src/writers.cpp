@@ -200,7 +200,9 @@ void writer_thread(std::stop_token stoken, int hz) {
 
         if (g_ctx.verbose) {
             if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                std::println("{}x native S2 FunctionFS port(s) opened", nports);
+                std::println("{} native S2 FunctionFS port(s) + {} S1 fallback port(s) opened",
+                             g_ctx.switch2_native_port_count,
+                             nports - g_ctx.switch2_native_port_count);
             else
                 std::println("{}x legacy /dev/hidg* opened", nports);
         }
@@ -563,6 +565,18 @@ void writer_thread(std::stop_token stoken, int hz) {
             bool ok = true;
             for (int h = 0; h < nports; ++h) {
                 const bool port_needed = (hw_slots[h].client_idx != -1);
+                    if (port_uses_s2_functionfs(h)) {
+                        // S2 exposes one composite USB device. The console
+                        // initializes vendor port 0 only, and switch2_native
+                        // mirrors that device-wide state to every native HID
+                        // interface. Keep each per-port writer runtime aligned
+                        // so ports 1/2 start producing input reports too.
+                        rt[h].full_report_enabled = switch2_native_streaming_enabled(h);
+                        rt[h].input_report_mode = switch2_native_selected_report(h);
+                        const uint32_t enabled_features = switch2_native_enabled_features(h);
+                        rt[h].imu_enabled = (enabled_features & 0x04u) != 0;
+                        rt[h].vibration_enabled = (enabled_features & 0x20u) != 0;
+                    }
                     uint8_t write_buf[HIDG_MAX_REPORT_SIZE] = {};
                     size_t write_len = PRO_REPORT_SIZE;
                     bool have_report_to_write = false, wrote_subcmd_reply = false, wrote_cmd_response = false;

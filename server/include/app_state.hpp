@@ -117,6 +117,7 @@ struct ClientSession {
 
     // Amiibo support
     bool amiibo_request_pending[4] = {};
+    bool amiibo_requested[4] = {};
     bool amiibo_writeback_pending[4] = {};
     uint16_t amiibo_writeback_len[4] = {};
     uint8_t amiibo_writeback_data[4][540] = {};
