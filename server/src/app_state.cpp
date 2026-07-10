@@ -304,12 +304,22 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
         if (pad_present && !pad_present[s]) continue;
         const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
         if (!controller_profile_supported_by_usb_family(profile)) continue;
-        needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
+        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+            // --s2 exposes three native Pro2 ports plus one single Switch 1
+            // fallback slot.  A Joy-Con Pair setting is not expanded into two
+            // USB slots in this hybrid topology; native S2 ports are Pro2 and
+            // the fallback has only one f_hid interface.
+            needed += 1;
+        } else {
+            needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
+        }
     }
     if (needed == 0 && reserve_when_idle) {
         const uint8_t profile = requested_profile_from_wire_report(report.p1);
         if (controller_profile_supported_by_usb_family(profile)) {
-            needed = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
+            needed = (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                ? 1
+                : ((profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1);
         }
     }
     // Do not clamp here. Callers use a value larger than HID_PORT_COUNT to
@@ -321,7 +331,7 @@ int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool
 
 static int configured_virtual_port_count() {
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-        return std::clamp(g_ctx.switch2_native_port_count, 1, HID_PORT_COUNT);
+        return std::clamp(g_ctx.switch2_native_port_count, 1, 3);
     return HID_PORT_COUNT;
 }
 

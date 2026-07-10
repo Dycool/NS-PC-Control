@@ -121,7 +121,7 @@ NativeState& state_for_port(int port) {
 }
 
 int active_native_ports() {
-    return std::clamp(g_ctx.switch2_native_port_count, 1, HID_PORT_COUNT);
+    return std::clamp(g_ctx.switch2_native_port_count, 1, 3);
 }
 
 void mirror_shared_runtime_state_locked(int src_port) {
@@ -395,11 +395,8 @@ bool switch2_native_handle_vendor_command(int port,
             break;
     }
 
-    // The Linux/RPi endpoint-saving S2 topology uses one vendor-bulk command
-    // channel shared by all exposed Pro2 HID interfaces. Treat commands on that
-    // channel as device-wide state transitions so every HID interface starts
-    // streaming once the Switch selects report 0x09 and enables features.
-    mirror_shared_runtime_state_locked(port);
+    // Dedicated vendor-bulk path: each native S2 controller has independent
+    // init/feature/report-selection state.
 
     response.assign(r.begin(), r.begin() + 8 + dl);
     return true;

@@ -21,10 +21,37 @@
 using namespace ns;
 
 
-// Profile actually used for mapping/reports: coerced onto the active family so a
-// mismatched client is adapted rather than dropped.
+static uint8_t raw_controller_profile_from_report(const HIDReport& report) {
+    switch (report.reserved[2]) {
+        case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_R:
+        case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+        case ns::CONTROLLER_TYPE_HORI:
+        case ns::CONTROLLER_TYPE_PRO_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
+            return report.reserved[2];
+        case ns::CONTROLLER_TYPE_DEFAULT:
+        default:
+            return ns::CONTROLLER_TYPE_PRO;
+    }
+}
+
+static uint8_t switch1_profile_from_report(const HIDReport& report) {
+    return coerce_profile_to_family(raw_controller_profile_from_report(report), UsbControllerFamily::Switch1);
+}
+
+// Profile actually requested by the source pad.  For native S2 ports this will
+// be forced to Pro2 later, but the slot-3 fallback in --s2 intentionally keeps
+// the source's Switch 1 shape so P4 can be a full S1 Pro/Joy-Con path instead
+// of an 8-byte HORI-style compatibility pad.
 static uint8_t requested_controller_profile_from_report(const HIDReport& report) {
-    return coerce_profile_to_family(report.reserved[2], g_ctx.usb_controller_family);
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+        return switch1_profile_from_report(report);
+    }
+    return coerce_profile_to_family(raw_controller_profile_from_report(report), g_ctx.usb_controller_family);
 }
 
 static uint8_t virtual_type_for_profile(uint8_t profile, bool pair_right_side = false) {
@@ -59,8 +86,38 @@ static const HIDReport& get_hid_report(const ClientSession& c, int s) {
     return c.report.p4;
 }
 
+static bool port_uses_s2_functionfs(int port) {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+        && port >= 0 && port < g_ctx.switch2_native_port_count;
+}
+
+static int legacy_hidg_index_for_port(int port) {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? 0 : port;
+}
+
+static bool port_uses_hori_hidg(int port) {
+    return !port_uses_s2_functionfs(port)
+        && g_ctx.usb_controller_family == UsbControllerFamily::Hori;
+}
+
+static bool write_all_nonblock_drop(int fd, const uint8_t* data, size_t len) {
+    if (fd < 0 || !data || len == 0) return false;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, data + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+            return false;
+        }
+        if (w == 0) return false;
+        off += static_cast<size_t>(w);
+    }
+    return true;
+}
+
 void writer_thread(std::stop_token stoken, int hz) {
-    const int nports = functionfs_active_port_count();
+    const int nports = HID_PORT_COUNT;
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -75,7 +132,12 @@ void writer_thread(std::stop_token stoken, int hz) {
     ControllerRuntime rt[HID_PORT_COUNT];
     for (int i = 0; i < HID_PORT_COUNT; ++i) rt[i].ctrl = i;
 
-    auto close_all_fds = [&]() {};
+    int hidg_fd[HID_PORT_COUNT] = {-1, -1, -1, -1};
+    auto close_all_fds = [&]() {
+        for (int i = 0; i < HID_PORT_COUNT; ++i) {
+            if (hidg_fd[i] >= 0) { close(hidg_fd[i]); hidg_fd[i] = -1; }
+        }
+    };
 
     auto reset_port_runtime = [&](int i) {
         rt[i].fd = -1;
@@ -100,26 +162,44 @@ void writer_thread(std::stop_token stoken, int hz) {
     while (!stoken.stop_requested()) {
         bool all_open = true;
         for (int i = 0; i < nports; ++i) {
-            const bool live = functionfs_transport_active() && functionfs_io_ready(i);
-            if (!live) {
-                ffs_live[i] = false;
-                all_open = false;
-            } else if (!ffs_live[i]) {
-                ffs_live[i] = true;
-                reset_port_runtime(i);
+            if (port_uses_s2_functionfs(i)) {
+                const bool live = functionfs_transport_active() && functionfs_io_ready(i);
+                if (!live) {
+                    ffs_live[i] = false;
+                    all_open = false;
+                } else if (!ffs_live[i]) {
+                    ffs_live[i] = true;
+                    reset_port_runtime(i);
+                }
+                continue;
             }
+
+            const int hidg_idx = legacy_hidg_index_for_port(i);
+            if (hidg_fd[i] < 0) {
+                const std::string path = "/dev/hidg" + std::to_string(hidg_idx);
+                const int mode = port_uses_hori_hidg(i) ? O_WRONLY : O_RDWR;
+                hidg_fd[i] = open(path.c_str(), mode | O_NONBLOCK);
+                if (hidg_fd[i] >= 0) {
+                    reset_port_runtime(i);
+                    if (!port_uses_hori_hidg(i)) drain_hid_output_queue(hidg_fd[i]);
+                }
+            }
+            if (hidg_fd[i] < 0) all_open = false;
         }
 
         if (!all_open) {
             clear_switch2_usb_activity();
             close_all_fds();
-            run_gadget_setup_if_needed(false, "requested FunctionFS endpoints could not all be opened");
+            run_gadget_setup_if_needed(false, "requested USB gadget endpoints could not all be opened");
             for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
 
         if (g_ctx.verbose) {
-            std::println("{}x Pro FunctionFS endpoints opened", nports);
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                std::println("3x native S2 FunctionFS + 1x Switch 1 /dev/hidg fallback opened");
+            else
+                std::println("{}x legacy /dev/hidg* opened", nports);
         }
         auto next = Clock::now() + tick;
         bool error_shown = false;
@@ -128,6 +208,16 @@ void writer_thread(std::stop_token stoken, int hz) {
         for (int i = 0; i < HID_PORT_COUNT; ++i) prev[i].buttons = 0xFFFF;
         bool pairing_screen_open[HID_PORT_COUNT] = {}; // edge-trigger for grip/order auto-pair
         uint64_t last_switch_sleep_poll_us = 0;
+
+        auto port_submit_input = [&](int h, const uint8_t* data, size_t len) -> bool {
+            if (port_uses_s2_functionfs(h)) return functionfs_submit_input_report(h, data, len);
+            return write_all_nonblock_drop(hidg_fd[h], data, len);
+        };
+
+        auto port_drain_output = [&](int h) {
+            if (port_uses_s2_functionfs(h)) functionfs_drain_output(h);
+            else if (!port_uses_hori_hidg(h)) drain_hid_output_queue(hidg_fd[h]);
+        };
 
         const auto idle_virtual_type = [] {
             return g_ctx.usb_controller_family == UsbControllerFamily::Hori ? NS_TYPE_HORI : NS_TYPE_PRO;
@@ -176,7 +266,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                         : (!hid_is_neutral(get_hid_report(snaps[c], s)) || macro_active);
                     if (!active) continue;
                     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-                        singles.push_back({c, s, ns::CONTROLLER_TYPE_PRO_S2});
+                        // Native S2 ports are always Pro2, but the fourth f_hid
+                        // fallback is a real Switch 1 path.  Keep the source's
+                        // S1 profile shape here and decide per physical port
+                        // after allocation.  Pairs cannot fit in the single
+                        // fallback slot, so they degrade to one S1 Pro slot.
+                        singles.push_back({c, s, static_cast<uint8_t>(profile_is_pair(profile) ? ns::CONTROLLER_TYPE_PRO : profile)});
                     } else {
                         (profile_is_pair(profile) ? pairs : singles).push_back({c, s, profile});
                     }
@@ -193,7 +288,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const uint8_t idle_profile = requested_controller_profile_from_report(get_hid_report(snaps[c], 0));
                     if (controller_profile_supported_by_usb_family(idle_profile)) {
                         if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                            singles.push_back({c, 0, ns::CONTROLLER_TYPE_PRO_S2});
+                            singles.push_back({c, 0, static_cast<uint8_t>(profile_is_pair(idle_profile) ? ns::CONTROLLER_TYPE_PRO : idle_profile)});
                         else
                             (profile_is_pair(idle_profile) ? pairs : singles).push_back({c, 0, idle_profile});
                     }
@@ -276,7 +371,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (port < 0 && req.sub_idx < nports && next_slots[req.sub_idx].client_idx == -1) port = req.sub_idx;
                 if (port < 0) port = first_free_port();
                 if (port < 0) continue;
-                const uint8_t vtype = (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                const uint8_t vtype = (g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && port_uses_s2_functionfs(port))
                     ? NS_TYPE_PRO
                     : virtual_type_for_profile(req.profile);
                 next_slots[port] = {req.client_idx, req.sub_idx, vtype, false, false};
@@ -287,12 +382,12 @@ void writer_thread(std::stop_token stoken, int hz) {
                 const HwSlot old = hw_slots[h];
                 if (old.client_idx != -1) {
                     rt[h].neutral_burst_until_us = stamp + PRO_RELEASE_NEUTRAL_US;
-                    functionfs_drain_output(h);
+                    port_drain_output(h);
                     if (old.virtual_type == NS_TYPE_HORI && next_slots[h].client_idx == -1) {
                         HoriHIDReport neutral{};
                         neutral.reset();
                         neutral.vendor = 0;
-                        functionfs_submit_input_report(h, reinterpret_cast<const uint8_t*>(&neutral), sizeof(neutral));
+                        port_submit_input(h, reinterpret_cast<const uint8_t*>(&neutral), sizeof(neutral));
                         prev[h] = neutral;
                     }
                 }
@@ -301,7 +396,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     const int c = hw_slots[h].client_idx;
                     const int s = hw_slots[h].sub_idx;
                     const uint8_t profile = requested_controller_profile_from_report(get_hid_report(snaps[c], s));
-                    set_controller_type_for_port(h, g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                    set_controller_type_for_port(h, port_uses_s2_functionfs(h)
                         ? ns::CONTROLLER_TYPE_PRO_S2
                         : protocol_for_slot(profile, hw_slots[h].pair_right));
                     if (old.client_idx != c || old.sub_idx != s) {
@@ -310,7 +405,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                                         VIRTUAL_BODY_RGB[h]);
                     }
                 } else {
-                    const uint8_t idle_profile = g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                    const uint8_t idle_profile = port_uses_s2_functionfs(h)
                         ? ns::CONTROLLER_TYPE_PRO_S2
                         : (g_ctx.usb_controller_family == UsbControllerFamily::Hori
                             ? ns::CONTROLLER_TYPE_HORI
@@ -399,23 +494,21 @@ void writer_thread(std::stop_token stoken, int hz) {
                 const int s = hw_slots[h].sub_idx;
                 assignment_masks[c][s] = static_cast<uint8_t>(assignment_masks[c][s] | (1u << h));
                 if (assignment_primary[c][s] == ns::CONTROLLER_CONSOLE_PORT_NONE) assignment_primary[c][s] = static_cast<uint8_t>(h);
-                const uint8_t req = assignment_requested[c][s];
-                const bool s2_pair = (req == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
-                const bool s2 = (req == ns::CONTROLLER_TYPE_PRO_S2 || req == ns::CONTROLLER_TYPE_JOYCON_L_S2 || req == ns::CONTROLLER_TYPE_JOYCON_R_S2 || s2_pair);
+                const bool actual_s2 = port_uses_s2_functionfs(h);
                 if (hw_slots[h].pair_member) {
-                    assignment_virtual[c][s] = s2_pair ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2
-                                                       : ns::CONTROLLER_TYPE_JOYCON_PAIR;
+                    assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2
+                                                         : ns::CONTROLLER_TYPE_JOYCON_PAIR;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_HORI) {
                     assignment_virtual[c][s] = ns::CONTROLLER_TYPE_HORI;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
-                    assignment_virtual[c][s] = s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2
-                                                   : ns::CONTROLLER_TYPE_JOYCON_L;
+                    assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_JOYCON_L_S2
+                                                         : ns::CONTROLLER_TYPE_JOYCON_L;
                 } else if (hw_slots[h].virtual_type == NS_TYPE_JOYCON_R) {
-                    assignment_virtual[c][s] = s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2
-                                                   : ns::CONTROLLER_TYPE_JOYCON_R;
+                    assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_JOYCON_R_S2
+                                                         : ns::CONTROLLER_TYPE_JOYCON_R;
                 } else {
-                    assignment_virtual[c][s] = s2 ? ns::CONTROLLER_TYPE_PRO_S2
-                                                   : ns::CONTROLLER_TYPE_PRO;
+                    assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_PRO_S2
+                                                         : ns::CONTROLLER_TYPE_PRO;
                 }
             }
             for (int c = 0; c < MAX_CLIENTS; ++c) {
@@ -433,7 +526,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     server_macro_apply(hw_slots[h].client_idx, hw_slots[h].sub_idx, out_reports[h].input);
                     const uint8_t profile = requested_controller_profile_from_report(out_reports[h]);
                     uint8_t eff_profile = profile;
-                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                    if (port_uses_s2_functionfs(h)) {
                         eff_profile = ns::CONTROLLER_TYPE_PRO_S2;
                     } else if (profile_is_pair(profile)) {
                         bool is_s2 = (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2);
@@ -545,7 +638,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 apply_controller_type_report(controller_type_for_port(h), write_buf);
                             }
                         }
-                        if (functionfs_submit_input_report(h, write_buf, write_len)) {
+                        if (port_submit_input(h, write_buf, write_len)) {
                             if (wrote_subcmd_reply) rt[h].pending_subcmd_reply = false;
                             if (wrote_cmd_response) rt[h].pending_cmd_response = false;
                             ++g_ctx.hid_writes;
@@ -608,22 +701,22 @@ void writer_thread(std::stop_token stoken, int hz) {
                             case 0x04: rt[h].usb_timeout_disabled = true; break;
                             case 0x05: rt[h].usb_timeout_disabled = false; break;
                         }
-                        if (functionfs_submit_input_report(h, resp_81, PRO_REPORT_SIZE)) mark_switch2_usb_activity(now_stamp);
+                        if (port_submit_input(h, resp_81, PRO_REPORT_SIZE)) mark_switch2_usb_activity(now_stamp);
                     }
                 };
 
                 for (int h = 0; h < nports; ++h) {
-                    std::vector<unsigned char> ctrl_report;
-                    for (int control_reads = 0; control_reads < 8 && functionfs_poll_control_report(h, ctrl_report); ++control_reads) {
-                        process_host_output_report(h, ctrl_report.data(), ctrl_report.size());
-                    }
+                    if (port_uses_s2_functionfs(h)) {
+                        std::vector<unsigned char> ctrl_report;
+                        for (int control_reads = 0; control_reads < 8 && functionfs_poll_control_report(h, ctrl_report); ++control_reads) {
+                            process_host_output_report(h, ctrl_report.data(), ctrl_report.size());
+                        }
 
-                    std::vector<unsigned char> out_report;
-                    for (int output_reads = 0; output_reads < 16 && functionfs_poll_output_report(h, out_report); ++output_reads) {
-                        process_host_output_report(h, out_report.data(), out_report.size());
-                    }
+                        std::vector<unsigned char> out_report;
+                        for (int output_reads = 0; output_reads < 16 && functionfs_poll_output_report(h, out_report); ++output_reads) {
+                            process_host_output_report(h, out_report.data(), out_report.size());
+                        }
 
-                    if (g_port_switch2[h]) {
                         std::vector<unsigned char> vendor_cmd;
                         for (int vendor_reads = 0; vendor_reads < 16 && functionfs_poll_vendor_report(h, vendor_cmd); ++vendor_reads) {
                             ++g_ctx.host_out_reports;
@@ -634,10 +727,23 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 functionfs_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
                             }
                         }
+                    } else if (!port_uses_hori_hidg(h)) {
+                        uint8_t read_buf[HIDG_MAX_REPORT_SIZE];
+                        for (int output_reads = 0; output_reads < 16; ++output_reads) {
+                            ssize_t r = read(hidg_fd[h], read_buf, sizeof(read_buf));
+                            if (r < 0) {
+                                if (errno == EINTR) continue;
+                                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                                ok = false;
+                                break;
+                            }
+                            if (r == 0) break;
+                            process_host_output_report(h, read_buf, static_cast<size_t>(r));
+                        }
                     }
                 }
 
-                if (functionfs_transport_active() == false) ok = false;
+                if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && functionfs_transport_active() == false) ok = false;
 
             if (!ok) {
                 if (!error_shown && g_ctx.verbose) { std::println("Host USB transport disconnected; waiting for reconnect..."); error_shown = true; }

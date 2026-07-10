@@ -284,53 +284,45 @@ static bool gadget_uses_switch2_identity() {
 }
 
 static int switch2_virtual_port_count() {
-    return std::clamp(g_ctx.switch2_native_port_count, 1, HID_PORT_COUNT);
+    // Native S2 on the Pi Zero 2 W uses two endpoint numbers per Pro2:
+    // HID IN/OUT + vendor-bulk IN/OUT.  Three native controllers consume
+    // endpoint numbers 1..6; endpoint 7 is left for one Switch 1 f_hid fallback.
+    return std::clamp(g_ctx.switch2_native_port_count, 1, 3);
 }
 
-// FunctionFS function count is not the same as virtual controller count.
-// S1/HORI keep the historical one-FunctionFS-function-per-controller layout.
-// Native S2 now uses one shared FunctionFS composite function containing:
-//   HID0 + shared vendor + HID1 + HID2 + HID3...
-// This is the endpoint-saving topology we want by default: the vendor-bulk
-// command channel is shared instead of duplicated per virtual Pro2.
+static int legacy_hidg_node_count_for_family() {
+    return gadget_uses_switch2_identity() ? 1 : HID_PORT_COUNT;
+}
+
 static int functionfs_function_count_for_family() {
-    if (gadget_uses_switch2_identity()) return 1;
-    return HID_PORT_COUNT;
+    // FunctionFS is now used only for native S2 controllers.
+    // S1 and HORI go through the upstream/mainline f_hid /dev/hidg* path.
+    if (gadget_uses_switch2_identity()) return switch2_virtual_port_count();
+    return 0;
 }
 
 static int functionfs_virtual_port_count_for_family() {
     if (gadget_uses_switch2_identity()) return switch2_virtual_port_count();
-    return HID_PORT_COUNT;
+    return 0;
 }
 
 static int s2_hid_endpoint_number_for_port(int port) {
-    // Keep port 0 byte-for-byte closest to the real/PicoSwitch2 Pro2 layout:
-    // HID = endpoint number 1, shared vendor = endpoint number 2.
-    // Extra HID controllers then use endpoint numbers 3,4,5.
-    return port == 0 ? 1 : port + 2;
+    // One native Pro2 instance consumes two endpoint numbers:
+    //   HID    IN/OUT = odd endpoint number
+    //   vendor IN/OUT = even endpoint number
+    return port * 2 + 1;
 }
 
-static int s2_shared_vendor_endpoint_number() { return 2; }
-
-static int s2_hid_in_epfile_index(int port) {
-    // FunctionFS epN files are assigned in descriptor order, not from the USB
-    // endpoint address. Descriptor order is: HID0 IN/OUT, vendor OUT/IN, then
-    // HID1 IN/OUT, HID2 IN/OUT, HID3 IN/OUT.
-    return port == 0 ? 1 : 5 + (port - 1) * 2;
+static int s2_vendor_endpoint_number_for_port(int port) {
+    return port * 2 + 2;
 }
-
-static int s2_hid_out_epfile_index(int port) { return s2_hid_in_epfile_index(port) + 1; }
-static int s2_vendor_out_epfile_index() { return 3; }
-static int s2_vendor_in_epfile_index() { return 4; }
-
-static int s2_interface_for_port(int port) { return port == 0 ? 0 : port + 1; }
 
 static int s2_port_for_interface(uint16_t w_index) {
-    const uint8_t ifnum = static_cast<uint8_t>(w_index & 0xFF);
-    if (ifnum == 0) return 0;
-    if (ifnum == 1) return 0; // shared vendor interface; route to state 0.
-    const int port = static_cast<int>(ifnum) - 1;
-    return (port >= 1 && port < switch2_virtual_port_count()) ? port : 0;
+    // Each S2 FunctionFS instance has its own local HID/vendor interface pair.
+    // FunctionFS passes local interface numbers to this handler, so route EP0
+    // requests to the function id supplied by the caller.
+    (void)w_index;
+    return 0;
 }
 
 static const char* gadget_id_vendor() {
@@ -439,15 +431,12 @@ static void append_s2_iad(std::vector<uint8_t>& out, uint8_t first_interface, ui
     out.push_back(0x00);
 }
 
-static void append_s2_shared_function_descriptors(std::vector<uint8_t>& out, bool high_speed) {
-    const int ports = switch2_virtual_port_count();
-
-    // Interface 0 + endpoint 1 intentionally remains the real/PicoSwitch2
-    // Pro2 core. Interface 1 is the single shared vendor command channel using
-    // endpoint 2. Extra controllers are additional HID interfaces on endpoints
-    // 3..5. This is the default S2 topology; no debug flag required.
+static void append_s2_vendor_function_descriptors(std::vector<uint8_t>& out, int id, bool high_speed) {
+    // Minimal native Pro Controller 2 function, following PicoSwitch2/ndeadly:
+    // one HID interface for report 0x09/rumble 0x02 and one adjacent vendor
+    // bulk interface for init/pairing/feature/memory commands.
     append_s2_iad(out, 0, 1, 0x03, 0x00, 0x00);
-    append_hid_function_descriptors(out, 0, high_speed, 0);
+    append_hid_function_descriptors(out, id, high_speed, 0);
 
     append_s2_iad(out, 1, 1, 0xFF, 0x00, 0x00);
     usb_interface_descriptor vendor_intf{};
@@ -465,7 +454,7 @@ static void append_s2_shared_function_descriptors(std::vector<uint8_t>& out, boo
     usb_endpoint_descriptor_no_audio vendor_out{};
     vendor_out.bLength = USB_DT_ENDPOINT_SIZE;
     vendor_out.bDescriptorType = USB_DT_ENDPOINT;
-    vendor_out.bEndpointAddress = static_cast<uint8_t>(s2_shared_vendor_endpoint_number());
+    vendor_out.bEndpointAddress = static_cast<uint8_t>(s2_vendor_endpoint_number_for_port(id));
     vendor_out.bmAttributes = USB_ENDPOINT_XFER_BULK;
     vendor_out.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
     vendor_out.bInterval = 0;
@@ -474,17 +463,11 @@ static void append_s2_shared_function_descriptors(std::vector<uint8_t>& out, boo
     usb_endpoint_descriptor_no_audio vendor_in{};
     vendor_in.bLength = USB_DT_ENDPOINT_SIZE;
     vendor_in.bDescriptorType = USB_DT_ENDPOINT;
-    vendor_in.bEndpointAddress = static_cast<uint8_t>(USB_DIR_IN | s2_shared_vendor_endpoint_number());
+    vendor_in.bEndpointAddress = static_cast<uint8_t>(USB_DIR_IN | s2_vendor_endpoint_number_for_port(id));
     vendor_in.bmAttributes = USB_ENDPOINT_XFER_BULK;
     vendor_in.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
     vendor_in.bInterval = 0;
     append_obj(out, vendor_in);
-
-    for (int port = 1; port < ports; ++port) {
-        const uint8_t ifnum = static_cast<uint8_t>(s2_interface_for_port(port));
-        append_s2_iad(out, ifnum, 1, 0x03, 0x00, 0x00);
-        append_hid_function_descriptors(out, port, high_speed, ifnum);
-    }
 }
 
 static std::vector<uint8_t> build_functionfs_descriptors(int id) {
@@ -494,12 +477,10 @@ static std::vector<uint8_t> build_functionfs_descriptors(int id) {
     append_u32(out, 0); // patched below
     append_u32(out, FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
     if (gadget_uses_switch2_identity()) {
-        (void)id;
-        const uint32_t desc_count = static_cast<uint32_t>(5 * switch2_virtual_port_count() + 4);
-        append_u32(out, desc_count); // FS: each HID has IAD+IF+HID+2EP; shared vendor has IAD+IF+2EP
-        append_u32(out, desc_count); // HS: same descriptor topology
-        append_s2_shared_function_descriptors(out, false);
-        append_s2_shared_function_descriptors(out, true);
+        append_u32(out, 8); // FS: IAD+HID IF+HID desc+2 HID EP + IAD+vendor IF+2 bulk EP
+        append_u32(out, 8); // HS: same descriptor topology
+        append_s2_vendor_function_descriptors(out, id, false);
+        append_s2_vendor_function_descriptors(out, id, true);
     } else {
         append_u32(out, 4); // FS: interface + HID + IN ep + OUT ep
         append_u32(out, 4); // HS: interface + HID + IN ep + OUT ep
@@ -686,7 +667,7 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
     const uint16_t length = le16toh(ctrl.wLength);
     const uint8_t desc_type = static_cast<uint8_t>(value >> 8);
     const bool dir_in = (bm & USB_DIR_IN) != 0;
-    const int target_port = gadget_uses_switch2_identity() ? s2_port_for_interface(le16toh(ctrl.wIndex)) : id;
+    const int target_port = id;
 
     if (gadget_uses_switch2_identity() && (bm & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
         std::vector<uint8_t> response;
@@ -965,11 +946,11 @@ static bool functionfs_start_port_io(int id) {
     const bool s2_native = gadget_uses_switch2_identity();
     st.ep_in_fd  = open(functionfs_ep_in_path(id).c_str(),  in_flags);
     st.ep_out_fd = open(functionfs_ep_out_path(id).c_str(), O_RDONLY);
-    if (s2_native && id == 0) {
-        st.ep_vendor_out_fd = open(functionfs_ep_vendor_out_path(0).c_str(), O_RDONLY);
-        st.ep_vendor_in_fd  = open(functionfs_ep_vendor_in_path(0).c_str(),  O_WRONLY);
+    if (s2_native) {
+        st.ep_vendor_out_fd = open(functionfs_ep_vendor_out_path(id).c_str(), O_RDONLY);
+        st.ep_vendor_in_fd  = open(functionfs_ep_vendor_in_path(id).c_str(),  O_WRONLY);
     }
-    const bool vendor_required = s2_native && id == 0;
+    const bool vendor_required = s2_native;
     if (st.ep_in_fd < 0 || st.ep_out_fd < 0 || (vendor_required && (st.ep_vendor_out_fd < 0 || st.ep_vendor_in_fd < 0))) {
         if (st.ep_in_fd  >= 0) { close(st.ep_in_fd);  st.ep_in_fd  = -1; }
         if (st.ep_out_fd >= 0) { close(st.ep_out_fd); st.ep_out_fd = -1; }
@@ -983,17 +964,15 @@ static bool functionfs_start_port_io(int id) {
     { std::lock_guard<std::mutex> lk(st.vendor_in_mtx);  st.vendor_in_reports.clear();  }
     st.reader_exited.store(false, std::memory_order_relaxed);
     st.writer_exited.store(false, std::memory_order_relaxed);
-    st.vendor_reader_exited.store(!(s2_native && id == 0), std::memory_order_relaxed);
-    st.vendor_writer_exited.store(!(s2_native && id == 0), std::memory_order_relaxed);
+    st.vendor_reader_exited.store(!s2_native, std::memory_order_relaxed);
+    st.vendor_writer_exited.store(!s2_native, std::memory_order_relaxed);
     st.io_running.store(true, std::memory_order_relaxed);
     st.reader_thread = std::thread(ffs_reader_loop, id);
     st.writer_thread = std::thread(ffs_writer_loop, id);
     if (s2_native) {
         switch2_native_reset_port(id);
-        if (id == 0) {
-            st.vendor_reader_thread = std::thread(ffs_vendor_reader_loop, 0);
-            st.vendor_writer_thread = std::thread(ffs_vendor_writer_loop, 0);
-        }
+        st.vendor_reader_thread = std::thread(ffs_vendor_reader_loop, id);
+        st.vendor_writer_thread = std::thread(ffs_vendor_writer_loop, id);
     }
     return true;
 }
@@ -1061,45 +1040,30 @@ int functionfs_active_port_count() {
 }
 
 std::string functionfs_ep_in_path(int id) {
-    if (gadget_uses_switch2_identity())
-        return (ffs_mount_dir(0) / ("ep" + std::to_string(s2_hid_in_epfile_index(id)))).string();
     return (ffs_mount_dir(id) / "ep1").string();
 }
 
 std::string functionfs_ep_out_path(int id) {
-    if (gadget_uses_switch2_identity())
-        return (ffs_mount_dir(0) / ("ep" + std::to_string(s2_hid_out_epfile_index(id)))).string();
     return (ffs_mount_dir(id) / "ep2").string();
 }
 
 std::string functionfs_ep_vendor_out_path(int id) {
-    (void)id;
-    if (gadget_uses_switch2_identity())
-        return (ffs_mount_dir(0) / ("ep" + std::to_string(s2_vendor_out_epfile_index()))).string();
     return (ffs_mount_dir(id) / "ep3").string();
 }
 
 std::string functionfs_ep_vendor_in_path(int id) {
-    (void)id;
-    if (gadget_uses_switch2_identity())
-        return (ffs_mount_dir(0) / ("ep" + std::to_string(s2_vendor_in_epfile_index()))).string();
     return (ffs_mount_dir(id) / "ep4").string();
 }
 
 bool functionfs_nodes_ready() {
     if (!functionfs_transport_active()) return false;
-    const int functions = functionfs_function_count_for_family();
-    for (int i = 0; i < functions; ++i) {
-        if (g_ffs_ports[i].ep0_fd < 0 || !g_ffs_ports[i].descriptors_written) return false;
-    }
     const int ports = functionfs_virtual_port_count_for_family();
     for (int i = 0; i < ports; ++i) {
+        if (g_ffs_ports[i].ep0_fd < 0 || !g_ffs_ports[i].descriptors_written) return false;
         if (access(functionfs_ep_in_path(i).c_str(), R_OK | W_OK) != 0) return false;
         if (access(functionfs_ep_out_path(i).c_str(), R_OK | W_OK) != 0) return false;
-        if (gadget_uses_switch2_identity() && i == 0) {
-            if (access(functionfs_ep_vendor_out_path(0).c_str(), R_OK | W_OK) != 0) return false;
-            if (access(functionfs_ep_vendor_in_path(0).c_str(), R_OK | W_OK) != 0) return false;
-        }
+        if (access(functionfs_ep_vendor_out_path(i).c_str(), R_OK | W_OK) != 0) return false;
+        if (access(functionfs_ep_vendor_in_path(i).c_str(), R_OK | W_OK) != 0) return false;
         if (!functionfs_io_ready(i)) return false;
     }
     return true;
@@ -1108,7 +1072,7 @@ bool functionfs_nodes_ready() {
 bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_report) {
     out_report.clear();
     if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
-    pump_functionfs_ep0_events(gadget_uses_switch2_identity() ? 0 : id);
+    pump_functionfs_ep0_events(id);
     auto& q = g_ffs_ports[id].control_reports;
     if (q.empty()) return false;
     out_report = std::move(q.front());
@@ -1123,7 +1087,7 @@ bool functionfs_io_ready(int id) {
     const FfsPortState& st = g_ffs_ports[id];
     bool base = st.io_running.load(std::memory_order_relaxed)
         && st.ep_in_fd >= 0 && st.ep_out_fd >= 0;
-    if (gadget_uses_switch2_identity() && id == 0)
+    if (gadget_uses_switch2_identity())
         base = base && st.ep_vendor_out_fd >= 0 && st.ep_vendor_in_fd >= 0;
     return base;
 }
@@ -1140,14 +1104,7 @@ bool functionfs_submit_input_report(int id, const uint8_t* data, size_t len) {
     if (!st.host_enabled || !functionfs_io_ready(id)) return false;
     {
         std::lock_guard<std::mutex> lk(st.in_mtx);
-        // HORI/legacy mode is input-only and very latency-sensitive.  The old
-        // /dev/hidg* path wrote directly with O_NONBLOCK and effectively dropped
-        // stale frames when the USB host was not ready.  FunctionFS has a worker
-        // queue, so keep only the newest 8-byte HORI report; otherwise fast input
-        // changes can build up behind a blocking endpoint write and feel delayed.
-        if (gadget_uses_hori_identity()) {
-            st.in_reports.clear();
-        } else if (st.in_reports.size() >= 8) {
+        if (st.in_reports.size() >= 8) {
             st.in_reports.pop_front();
         }
         st.in_reports.emplace_back(data, data + len);
@@ -1180,8 +1137,7 @@ void functionfs_drain_output(int id) {
 bool functionfs_poll_vendor_report(int id, std::vector<unsigned char>& out_report) {
     out_report.clear();
     if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
-    if (gadget_uses_switch2_identity() && id != 0) return false;
-    FfsPortState& st = g_ffs_ports[gadget_uses_switch2_identity() ? 0 : id];
+    FfsPortState& st = g_ffs_ports[id];
     std::lock_guard<std::mutex> lk(st.vendor_out_mtx);
     if (st.vendor_out_reports.empty()) return false;
     out_report.assign(st.vendor_out_reports.front().begin(), st.vendor_out_reports.front().end());
@@ -1192,7 +1148,6 @@ bool functionfs_poll_vendor_report(int id, std::vector<unsigned char>& out_repor
 bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len) {
     if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
     if (!data || len == 0) return false;
-    if (gadget_uses_switch2_identity()) id = 0;
     FfsPortState& st = g_ffs_ports[id];
     if (!st.host_enabled || !functionfs_io_ready(id) || st.ep_vendor_in_fd < 0) return false;
     {
@@ -1201,6 +1156,39 @@ bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len) {
         st.vendor_in_reports.emplace_back(data, data + len);
     }
     st.vendor_in_cv.notify_one();
+    return true;
+}
+
+static bool create_hid_function(int id) {
+    fs::path func = fs::path(GADGET_DIR) / "functions" / ("hid.usb" + std::to_string(id));
+    if (!mkdirs(func)
+            || !write_file(func / "protocol", "0")
+            || !write_file(func / "subclass", "0")) {
+        return false;
+    }
+
+    const bool legacy_hori = gadget_uses_hori_identity();
+    if (!write_file(func / "report_length", legacy_hori ? "8" : "64")) return false;
+
+    fs::path desc_path = func / "report_desc";
+    if (legacy_hori) {
+        if (!write_file(desc_path, LEGACY_REPORT_DESC, sizeof(LEGACY_REPORT_DESC))) return false;
+    } else {
+        if (!write_file(desc_path, VIRTUAL_CONTROLLER_REPORT_DESC, VIRTUAL_CONTROLLER_REPORT_DESC_SIZE)) return false;
+    }
+
+    fs::path link_path = fs::path(CONFIG_DIR) / ("hid.usb" + std::to_string(id));
+    std::error_code ec;
+    fs::remove(link_path, ec);
+    return symlink(func.c_str(), link_path.c_str()) == 0;
+}
+
+static bool hidg_nodes_ready_for_family() {
+    const int count = legacy_hidg_node_count_for_family();
+    for (int i = 0; i < count; ++i) {
+        if (access(("/dev/hidg" + std::to_string(i)).c_str(), R_OK | W_OK) != 0)
+            return false;
+    }
     return true;
 }
 
@@ -2143,14 +2131,16 @@ static void print_gadget_host_config_error() {
 }
 
 static bool setup_gadget_builtin(bool force, const char* reason) {
-    auto nodes_ready = [&]() { return functionfs_nodes_ready(); };
+    auto nodes_ready = [&]() {
+        if (gadget_uses_switch2_identity()) {
+            return functionfs_nodes_ready() && hidg_nodes_ready_for_family();
+        }
+        return hidg_nodes_ready_for_family();
+    };
 
     if (!force && nodes_ready()) return true;
     if (!force && g_ctx.gadget_setup_attempted.exchange(true)) {
         if (nodes_ready()) return true;
-        // FunctionFS has more moving parts than f_hid (mounts + ep0 descriptors).
-        // If a previous setup was interrupted half-way, rebuild it instead of
-        // getting stuck forever with missing endpoints.
         force = true;
     }
     if (force) g_ctx.gadget_setup_attempted.store(true);
@@ -2161,21 +2151,27 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         return false;
     }
 
+    const int ffs_count = functionfs_function_count_for_family();
+    const int legacy_count = legacy_hidg_node_count_for_family();
+
     if (g_ctx.verbose) {
-        const int virtual_ports = functionfs_virtual_port_count_for_family();
         if (gadget_uses_switch2_identity()) {
-            std::println("[gadget] {}; creating native S2 shared-vendor FunctionFS gadget with {} Pro2 HID interface(s)",
-                         reason ? reason : "USB gadget not ready", virtual_ports);
+            std::println("[gadget] {}; creating 3 native S2 FunctionFS Pro2 controller(s) plus 1 Switch 1 f_hid fallback",
+                         reason ? reason : "USB gadget not ready");
+        } else if (gadget_uses_hori_identity()) {
+            std::println("[gadget] {}; creating upstream-style 4-interface f_hid HORI gadget",
+                         reason ? reason : "USB gadget not ready");
         } else {
-            std::println("[gadget] {}; creating built-in {}-interface FunctionFS Pro HID gadget",
-                         reason ? reason : "USB gadget not ready", HID_PORT_COUNT);
+            std::println("[gadget] {}; creating upstream-style 4-interface f_hid Switch 1 gadget",
+                         reason ? reason : "USB gadget not ready");
         }
     }
 
     int dummy = 0;
     dummy = std::system("modprobe libcomposite >/dev/null 2>&1 || true"); (void)dummy;
-    dummy = std::system("modprobe usb_f_fs >/dev/null 2>&1 || true");
-    (void)dummy;
+    if (gadget_uses_switch2_identity()) {
+        dummy = std::system("modprobe usb_f_fs >/dev/null 2>&1 || true"); (void)dummy;
+    }
     dummy = std::system("mountpoint -q /sys/kernel/config "
                         "|| mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true"); (void)dummy;
 
@@ -2198,9 +2194,6 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         return false;
 
     const bool any_hori = gadget_uses_hori_identity();
-    // Modern FunctionFS keeps the same Nintendo VID/PID/product surface, but the
-    // HID interface itself is owned by user space. That lets us answer HID report
-    // descriptor requests and accept SET_REPORT control traffic directly.
     bool ok = write_file(gd / "bcdDevice",                  gadget_bcd_device())
            && write_file(gd / "bcdUSB",                     "0x0200")
            && write_file(gd / "idVendor",                   gadget_id_vendor())
@@ -2215,13 +2208,15 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
            && write_file(cd / "bmAttributes",               any_hori ? "0x80" : "0xA0");
     if (!ok) return false;
 
-    const int ffs_count = functionfs_function_count_for_family();
-    const int virtual_ports = functionfs_virtual_port_count_for_family();
     if (gadget_uses_switch2_identity()) switch2_native_init();
     for (int i = 0; i < ffs_count; ++i) {
         if (!create_functionfs_function(i)) return false;
     }
-    g_ctx.functionfs_transport_active.store(true, std::memory_order_relaxed);
+    for (int i = 0; i < legacy_count; ++i) {
+        const int hid_id = gadget_uses_switch2_identity() ? (HID_PORT_COUNT - 1) : i;
+        if (!create_hid_function(hid_id)) return false;
+    }
+    g_ctx.functionfs_transport_active.store(ffs_count > 0, std::memory_order_relaxed);
 
     std::string UDC = first_udc_name();
     if (UDC.empty()) {
@@ -2233,39 +2228,40 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
 
     for (int tries = 0; tries < 20; ++tries) {
         bool all_seen = true;
-        for (int i = 0; i < virtual_ports; ++i) {
+        for (int i = 0; i < ffs_count; ++i) {
             if (access(functionfs_ep_in_path(i).c_str(), F_OK) != 0) all_seen = false;
             if (access(functionfs_ep_out_path(i).c_str(), F_OK) != 0) all_seen = false;
+            if (access(functionfs_ep_vendor_out_path(i).c_str(), F_OK) != 0) all_seen = false;
+            if (access(functionfs_ep_vendor_in_path(i).c_str(), F_OK) != 0) all_seen = false;
             chmod(functionfs_ep_in_path(i).c_str(), 0666);
             chmod(functionfs_ep_out_path(i).c_str(), 0666);
+            chmod(functionfs_ep_vendor_out_path(i).c_str(), 0666);
+            chmod(functionfs_ep_vendor_in_path(i).c_str(), 0666);
         }
-        if (gadget_uses_switch2_identity()) {
-            if (access(functionfs_ep_vendor_out_path(0).c_str(), F_OK) != 0) all_seen = false;
-            if (access(functionfs_ep_vendor_in_path(0).c_str(), F_OK) != 0) all_seen = false;
-            chmod(functionfs_ep_vendor_out_path(0).c_str(), 0666);
-            chmod(functionfs_ep_vendor_in_path(0).c_str(), 0666);
+        for (int i = 0; i < legacy_count; ++i) {
+            const std::string node = "/dev/hidg" + std::to_string(i);
+            if (access(node.c_str(), F_OK) != 0) all_seen = false;
+            chmod(node.c_str(), 0666);
         }
         if (all_seen) {
-            // Bring up the blocking data-endpoint I/O threads now that ep1/ep2
-            // exist. Without them the OUT endpoint never queues a USB request
-            // and the console's wired handshake would NAK-timeout forever.
-            // functionfs_nodes_ready() checks io_ready below, so start first.
             bool io_ok = true;
-            for (int i = 0; i < virtual_ports; ++i)
+            for (int i = 0; i < ffs_count; ++i)
                 if (!functionfs_start_port_io(i)) io_ok = false;
             if (!io_ok) {
-                for (int i = 0; i < virtual_ports; ++i) functionfs_stop_port_io(i);
+                for (int i = 0; i < ffs_count; ++i) functionfs_stop_port_io(i);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            
+
             if (nodes_ready()) {
                 if (g_ctx.verbose) {
-                    if (gadget_uses_switch2_identity())
-                        std::println("[gadget] Done. Exposed {} native S2 Pro2 HID interface(s) with one shared vendor-bulk channel", virtual_ports);
-                    else
-                        std::println("[gadget] Done. Exposed {} FunctionFS HID interface(s) ({}/port*/ep1+ep2)",
-                                     HID_PORT_COUNT, FFS_BASE_DIR);
+                    if (gadget_uses_switch2_identity()) {
+                        std::println("[gadget] Done. Exposed {} native S2 Pro2 FunctionFS controller(s) + {} Switch 1 f_hid fallback",
+                                     ffs_count, legacy_count);
+                    } else {
+                        std::println("[gadget] Done. Exposed {} upstream-style f_hid interface(s) (/dev/hidg*)",
+                                     legacy_count);
+                    }
                 }
                 return true;
             }
