@@ -3,13 +3,16 @@
 #include "shared/macros.hpp"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCloseEvent>
 #include <QDialog>
 #include <QGridLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMouseEvent>
 #include <QPushButton>
+#include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -24,14 +27,17 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
 };
 
 class BindingsDialog : public QDialog {
 public:
     explicit BindingsDialog(QWidget* parent = nullptr);
+    ~BindingsDialog() override;
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
 
 private:
     std::unordered_map<std::string, std::string> editBindings;
@@ -41,6 +47,7 @@ private:
 
     void addRow(QGridLayout* grid, int row, int col, int index, const std::string& name);
     void refresh();
+    void applyCapturedKey(const std::string& name);
 };
 
 class SettingsDialog : public QDialog {
@@ -50,9 +57,21 @@ public:
 private:
     QCheckBox* gyroBox = nullptr;
     QCheckBox* rumbleBox = nullptr;
+    QComboBox* switch2AudioDeviceBox = nullptr;
+    QComboBox* switch2MicrophoneDeviceBox = nullptr;
     QCheckBox* homeShortcutBox = nullptr;
     QCheckBox* captureShortcutBox = nullptr;
+    QComboBox* controllerTypeBox = nullptr;
+    QCheckBox* joyconHorizontalBox = nullptr;
+    QCheckBox* mouseModeBox = nullptr;
+    QCheckBox* joyconMouseModeBox = nullptr;
+    QLabel* mouseSensitivityLabel = nullptr;
+    QSlider* mouseSensitivitySlider = nullptr;
+    QLabel* mouseSensitivityValue = nullptr;
 
+    void updateMouseModeControls();
+    void updateJoyconHorizontalControl();
+    bool joyconMouseModeAvailable() const;
     void saveSettings();
 };
 
@@ -65,9 +84,11 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    void applyCapturedMacroHotkey(const std::string& name);
     QVBoxLayout* outer = nullptr;
     QGridLayout* rows = nullptr;
     QGridLayout* controls = nullptr;

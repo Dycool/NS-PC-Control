@@ -12,7 +12,8 @@ void set_pad_present_flag(ns::HIDReport& r, bool present) {
 }
 
 void fill_extended_pad(ns::HIDReport& dst, const ns::HoriHIDReport& input,
-                              bool present, const ns::MotionReport motion[3], int battery_percent, bool battery_charging) {
+                              bool present, const ns::MotionReport motion[3], int battery_percent,
+                              bool battery_charging, bool motion_sample_fresh) {
     dst.reset();
     dst.input = input;
     set_pad_present_flag(dst, present);
@@ -27,6 +28,8 @@ void fill_extended_pad(ns::HIDReport& dst, const ns::HoriHIDReport& input,
         dst.motion[2] = motion[2];
         dst.has_motion = 1;
     }
+    dst.reserved[1] |= ns::EXT_STATUS_MOTION_FRESH_VALID;
+    if (motion_sample_fresh) dst.reserved[1] |= ns::EXT_STATUS_MOTION_FRESH;
 }
 
 bool set_socket_nonblocking(SOCKET sock) {

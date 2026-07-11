@@ -33,6 +33,8 @@ private enum ProtocolWire {
     static let flagSinglePad = 0x04
     static let extStatusBatteryValid = 0x01
     static let extStatusBatteryCharging = 0x02
+    static let extStatusMotionFresh = 0x04
+    static let extStatusMotionFreshValid = 0x08
 
     static let btnY       = 1 << 0
     static let btnB       = 1 << 1
@@ -171,6 +173,18 @@ private enum ProtocolWire {
         }
     }
 
+    static func setFrameMotionFresh(_ frame: inout [UInt8], pad: Int, fresh: Bool) {
+        guard pad >= 0 && pad < padCount else { return }
+        let base = 20 + pad * 48
+        guard frame.count >= base + 48 else { return }
+        frame[base + 46] |= UInt8(extStatusMotionFreshValid)
+        if fresh {
+            frame[base + 46] |= UInt8(extStatusMotionFresh)
+        } else {
+            frame[base + 46] &= ~UInt8(extStatusMotionFresh)
+        }
+    }
+
     static func setFrameBatteryPercent(_ frame: inout [UInt8], pad: Int, percent: Int, charging: Bool = false) {
         guard pad >= 0 && pad < padCount && percent >= 0 && percent <= 100 else { return }
         let base = 20 + pad * 48
@@ -178,6 +192,13 @@ private enum ProtocolWire {
         frame[base + 45] = UInt8(percent)
         frame[base + 46] |= UInt8(extStatusBatteryValid)
         if charging { frame[base + 46] |= UInt8(extStatusBatteryCharging) }
+    }
+
+    static func setFrameControllerType(_ frame: inout [UInt8], pad: Int, controllerType: Int) {
+        guard pad >= 0 && pad < padCount && controllerType >= 1 && controllerType <= 3 else { return }
+        let base = 20 + pad * 48
+        guard frame.count >= base + 48 else { return }
+        frame[base + 47] = UInt8(controllerType)
     }
 
     static func extractPad0Hid(from frame: [UInt8]) -> [UInt8]? {
@@ -229,6 +250,8 @@ private final class PhysicalPad {
     var hapticPlayer: CHHapticPatternPlayer?
     var motionSamples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
     var motionSampleCount = 0
+    var motionRevision: UInt64 = 0
+    var sentMotionRevision: UInt64 = .max
 
     func reset() {
         cleanupRumble()
@@ -249,6 +272,8 @@ private final class PhysicalPad {
         rumbleUntilMs = 0
         rumbleLastSetMs = 0
         motionSampleCount = 0
+        motionRevision = 0
+        sentMotionRevision = .max
         motionSamples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
     }
 
@@ -313,11 +338,15 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private struct PhoneMotionState {
         var samples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
         var count = 0
+        var revision: UInt64 = 0
+        var sentRevision: UInt64 = .max
     }
 
     private var touchHid: [UInt8]?
     private var touchFrame: [UInt8]?
     private var lastTouchFrameMs: UInt64 = 0
+    private var touchControllerType = 3
+    private var touchExtraButtons = 0
     private var lastBridgeFrameParseMs: UInt64 = 0
 
     private let physicalPads = Locked((0..<ProtocolWire.padCount).map { _ in PhysicalPad() })
@@ -446,6 +475,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             onOpen:function(){post('onOpen');},
             onBinary:function(json){post('onBinary',[json]);},
             onTouchState:function(buttons,hat,lx,ly,rx,ry){post('onTouchState',[buttons,hat,lx,ly,rx,ry]);},
+            onTouchControllerType:function(controllerType){post('onTouchControllerType',[controllerType]);},
+            onTouchExtraButtons:function(extraButtons){post('onTouchExtraButtons',[extraButtons]);},
             onClose:function(){post('onClose');},
             onPhysicalStart:function(){post('onPhysicalStart');},
             onPhysicalStop:function(){post('onPhysicalStop');},
@@ -723,8 +754,15 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             if let json = args.first as? String { onBinary(json: json) }
         case "onTouchState":
             if args.count >= 6 {
-                onTouchState(buttons: intArg(args[0]), hat: intArg(args[1]), lx: intArg(args[2]), ly: intArg(args[3]), rx: intArg(args[4]), ry: intArg(args[5]))
+                onTouchState(buttons: intArg(args[0]), hat: intArg(args[1]), lx: intArg(args[2]), ly: intArg(args[3]), rx: intArg(args[4]), ry: intArg(args[5]),
+                             controllerType: args.count > 6 ? intArg(args[6]) : nil)
             }
+        case "onTouchControllerType":
+            if let first = args.first {
+                touchControllerType = ViewController.normalizedControllerType(intArg(first))
+            }
+        case "onTouchExtraButtons":
+            if let first = args.first { touchExtraButtons = intArg(first) & (0x10 | 0x20) }
         case "onClose":
             deactivateControlClient()
         case "onPhysicalStart":
@@ -765,7 +803,12 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         lastTouchFrameMs = now
     }
 
-    private func onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
+    // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
+    private static func normalizedControllerType(_ value: Int) -> Int {
+        return (1...3).contains(value) ? value : 3
+    }
+
+    private func onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int?) {
         guard currentPage == .touchControls && controlClientActive else { return }
         touchHid = ProtocolWire.hid(buttons: ProtocolWire.normalizeShortcuts(buttons),
                                     hat: min(max(hat, 0), 8),
@@ -775,6 +818,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                                     ry: min(max(ry, 0), 255),
                                     present: true)
         lastTouchFrameMs = uptimeMs()
+        // Only trust an inline controller type (legacy webapps); the current
+        // webapp sends it once via onTouchControllerType instead.
+        if let type = controllerType {
+            touchControllerType = ViewController.normalizedControllerType(type)
+        }
     }
 
     private func togglePhysicalControllers() {
@@ -887,6 +935,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             guard let self, let task = webSocketTask, self.webSocket === task, self.controlClientActive else { return }
             self.statusLabel.text = "Connected"
             if self.activeClientMode == .physical { self.updatePhysicalStatusOnPage(prefix: "Connected") }
+            self.sendNamesFrame()
             self.startSending()
             self.pingTimer?.invalidate()
             self.pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
@@ -896,9 +945,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        let closeReason = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let message: String
+        if closeReason.localizedCaseInsensitiveContains("S2 does not support L+R") {
+            message = "Switch 2 mode does not support Joy-Con L + R"
+        } else if closeReason.localizedCaseInsensitiveContains("server full") {
+            message = "Server full"
+        } else {
+            message = "Disconnected"
+        }
         DispatchQueue.main.async { [weak self, weak webSocketTask] in
             guard let self, let task = webSocketTask, self.webSocket === task else { return }
-            self.handleWsClosed(text: "Disconnected")
+            self.handleWsClosed(text: message)
         }
     }
 
@@ -1016,8 +1074,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 hid = ProtocolWire.neutralHid()
             }
             ProtocolWire.setFrameHid(&frame, pad: 0, hid: hid)
-            if let samples = phoneMotionSamples() {
-                ProtocolWire.setFrameMotionSamples(&frame, pad: 0, samples: samples)
+            frame[20 + 7] |= UInt8(touchExtraButtons)
+            ProtocolWire.setFrameControllerType(&frame, pad: 0, controllerType: touchControllerType)
+            if let batch = phoneMotionSamples() {
+                ProtocolWire.setFrameMotionSamples(&frame, pad: 0, samples: batch.samples)
+                ProtocolWire.setFrameMotionFresh(&frame, pad: 0, fresh: batch.fresh)
             }
             if let status = phoneBatteryStatus() {
                 ProtocolWire.setFrameBatteryPercent(&frame, pad: 0, percent: status.percent, charging: status.charging)
@@ -1030,6 +1091,9 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                     ProtocolWire.setFrameHid(&frame, pad: i, hid: pad.hid())
                     if pad.hasMotion && pad.motionSampleCount >= ProtocolWire.motionSampleCount {
                         ProtocolWire.setFrameMotionSamples(&frame, pad: i, samples: pad.motionSamples)
+                        ProtocolWire.setFrameMotionFresh(&frame, pad: i,
+                                                         fresh: pad.motionRevision != pad.sentMotionRevision)
+                        pad.sentMotionRevision = pad.motionRevision
                     }
                 }
             }
@@ -1047,6 +1111,44 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func sendResetFrame(to socket: URLSessionWebSocketTask) {
         let frame = ProtocolWire.initFrame(flags: ProtocolWire.flagReset, seq: nextSeq(), timestampUs: UInt64(Date().timeIntervalSince1970 * 1_000_000.0))
         socket.send(.data(Data(frame)), completionHandler: { _ in })
+    }
+
+    private func sendNamesFrame() {
+        guard let socket = webSocket else { return }
+        var data = Data(count: 224)
+        data[0] = 0x4E
+        data[1] = 0x43
+        data[2] = 0x53
+        data[3] = 0x4E
+        data[4] = 1 // version
+
+        let touchActive = controlClientActive && activeClientMode == .touch && currentPage == .touchControls
+        if touchActive {
+            let off = 8
+            data[off] = 1
+            data[off + 1] = phoneSensorsActive ? 1 : 0
+            let name = "iOS Controller"
+            let nameBytes = Array(name.utf8.prefix(47))
+            for (k, byte) in nameBytes.enumerated() {
+                data[off + 2 + k] = byte
+            }
+        } else {
+            physicalPads.withLock { pads in
+                for i in 0..<4 {
+                    let pad = pads[i]
+                    let off = 8 + i * 50
+                    data[off] = pad.present ? 1 : 0
+                    data[off + 1] = pad.hasGyro ? 1 : 0
+                    if pad.present {
+                        let nameBytes = Array(pad.name.utf8.prefix(47))
+                        for (k, byte) in nameBytes.enumerated() {
+                            data[off + 2 + k] = byte
+                        }
+                    }
+                }
+            }
+        }
+        socket.send(.data(data)) { _ in }
     }
 
     private func nextSeq() -> UInt32 {
@@ -1093,13 +1195,16 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             state.samples[1] = state.samples[2]
             state.samples[2] = sample
             if state.count < ProtocolWire.motionSampleCount { state.count += 1 }
+            state.revision &+= 1
         }
     }
 
-    private func phoneMotionSamples() -> [[UInt8]]? {
+    private func phoneMotionSamples() -> (samples: [[UInt8]], fresh: Bool)? {
         phoneMotion.withLock { state in
             guard state.count >= ProtocolWire.motionSampleCount else { return nil }
-            return state.samples
+            let fresh = state.revision != state.sentRevision
+            state.sentRevision = state.revision
+            return (state.samples, fresh)
         }
     }
 
@@ -1119,6 +1224,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         if activeClientMode == .physical {
             scanPhysicalControllers()
             updatePhysicalStatusOnPage()
+            sendNamesFrame()
         }
     }
 
@@ -1250,6 +1356,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 pad.motionSamples[2] = sample
                 if pad.motionSampleCount < ProtocolWire.motionSampleCount { pad.motionSampleCount += 1 }
                 pad.hasMotion = pad.motionSampleCount >= ProtocolWire.motionSampleCount
+                pad.motionRevision &+= 1
             }
         }
     }

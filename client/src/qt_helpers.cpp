@@ -1,11 +1,20 @@
 #include "qt_helpers.hpp"
 #include "input_settings.hpp"
 #include "platform.hpp"
+#ifdef _WIN32
+#include <shobjidl.h>
+#endif
 #include <QIcon>
+#include <QApplication>
+#include <QDialog>
+#include <QEvent>
+#include <QPointer>
+#include <QTimer>
 #include <QKeyEvent>
 #include <QCoreApplication>
 #include <QDir>
 #include <vector>
+#include <QWidget>
 
 std::string q_to_std(const QString& s) { return s.toUtf8().constData(); }
 QString std_to_q(const std::string& s) { return QString::fromUtf8(s.c_str()); }
@@ -70,3 +79,85 @@ QIcon app_icon() {
     return cached;
 }
 
+void apply_windows_app_identity() {
+#ifdef _WIN32
+    // Give the process its own taskbar identity before any window exists so
+    // the shell never associates this app with a stale cached icon entry.
+    SetCurrentProcessExplicitAppUserModelID(L"NSPCControl.NSClient");
+#endif
+}
+
+void apply_windows_taskbar_icon(QWidget* window) {
+#ifdef _WIN32
+    if (!window) return;
+    // The taskbar resolves the button icon from the window icons (WM_SETICON),
+    // then the window-class icons, then the .exe file icon. Set the first two
+    // explicitly from icon resource 1 (ns-gui.rc) so no shell surface falls
+    // back to the generic default, even when SDL owns its own event thread.
+    HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    HICON big_icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                                   GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+                                                   LR_DEFAULTCOLOR | LR_SHARED));
+    HICON small_icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                                     GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                                     LR_DEFAULTCOLOR | LR_SHARED));
+    if (big_icon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon));
+        SetClassLongPtrW(hwnd, GCLP_HICON, reinterpret_cast<LONG_PTR>(big_icon));
+    }
+    if (small_icon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+        SetClassLongPtrW(hwnd, GCLP_HICONSM, reinterpret_cast<LONG_PTR>(small_icon));
+    }
+#else
+    (void)window;
+#endif
+}
+
+
+
+namespace {
+
+class SubwindowMoveLock final : public QObject {
+public:
+    explicit SubwindowMoveLock(QObject* parent = nullptr) : QObject(parent) {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        auto* dialog = qobject_cast<QDialog*>(watched);
+        if (!dialog || !dialog->isWindow()) return QObject::eventFilter(watched, event);
+
+        static constexpr const char* kLockedProperty = "ns_subwindow_position_locked";
+        static constexpr const char* kPositionProperty = "ns_subwindow_locked_position";
+
+        if (event->type() == QEvent::Show) {
+            dialog->setProperty(kLockedProperty, false);
+            QPointer<QDialog> guard(dialog);
+            QTimer::singleShot(0, dialog, [guard] {
+                if (!guard || !guard->isVisible()) return;
+                guard->setProperty(kPositionProperty, guard->pos());
+                guard->setProperty(kLockedProperty, true);
+            });
+        } else if (event->type() == QEvent::Hide || event->type() == QEvent::Close) {
+            dialog->setProperty(kLockedProperty, false);
+        } else if (event->type() == QEvent::Move
+                   && dialog->property(kLockedProperty).toBool()) {
+            const QPoint locked = dialog->property(kPositionProperty).toPoint();
+            if (dialog->pos() != locked) {
+                QPointer<QDialog> guard(dialog);
+                QTimer::singleShot(0, dialog, [guard, locked] {
+                    if (guard && guard->isVisible() && guard->pos() != locked)
+                        guard->move(locked);
+                });
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+} // namespace
+
+void install_subwindow_move_lock(QApplication& app) {
+    app.installEventFilter(new SubwindowMoveLock(&app));
+}

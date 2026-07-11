@@ -1,6 +1,7 @@
 const defLayout = {
     'btn-zl': {l:4, t:4, w:14, h:8}, 'btn-l': {l:4, t:14, w:14, h:8},
     'btn-zr': {l:82, t:4, w:14, h:8}, 'btn-r': {l:82, t:14, w:14, h:8},
+    'btn-sl': {l:38, t:29, w:9, h:7}, 'btn-sr': {l:53, t:29, w:9, h:7},
     'btn-minus': {l:38, t:5, w:6}, 'btn-plus': {l:56, t:5, w:6},
     'btn-capture': {l:42, t:18, w:5}, 'btn-home': {l:53, t:18, w:5},
     'lstick': {l:6, t:35, w:16}, 'btn-ls': {l:2, t:65, w:5},
@@ -9,12 +10,20 @@ const defLayout = {
     'rstick': {l:62, t:60, w:16}, 'btn-rs': {l:85, t:80, w:5}
 };
 let layout = JSON.parse(localStorage.getItem('nswc_layout')) || defLayout;
+let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || '3');
+if (![1,2,3].includes(controllerType)) controllerType = 3;
+const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
+const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
+function allowedForController(id) {
+    if (controllerType === 3) return id !== 'btn-sl' && id !== 'btn-sr';
+    return controllerType === 1 ? joyconLeftOnly.has(id) : joyconRightOnly.has(id);
+}
 function applyLayout() {
     for(let id in defLayout) {
         let el = document.getElementById(id);
         if(!el) continue;
         let conf = layout[id] || defLayout[id];
-        if(conf.hide) { el.style.display = 'none'; }
+        if(conf.hide || !allowedForController(id)) { el.style.display = 'none'; }
         else {
             if(id === 'dpad' || id === 'abxy') el.style.display = 'grid';
             else el.style.display = 'flex';
@@ -25,11 +34,16 @@ function applyLayout() {
     }
 }
 applyLayout();
+document.getElementById('controllerType').value = String(controllerType);
+function changeControllerType() {
+    controllerType = parseInt(document.getElementById('controllerType').value);
+    applyLayout(); populateAdd(); checkOverlaps();
+}
 function populateAdd() {
     let sel = document.getElementById('addSel'); sel.innerHTML = '<option value="">+ Add Button</option>';
     for(let id in defLayout) {
         let conf = layout[id] || defLayout[id];
-        if(conf.hide) { let opt = document.createElement('option'); opt.value = id; opt.innerText = id; sel.appendChild(opt); }
+        if(conf.hide && allowedForController(id)) { let opt = document.createElement('option'); opt.value = id; opt.innerText = id; sel.appendChild(opt); }
     }
 }
 populateAdd();
@@ -125,6 +139,7 @@ setTimeout(checkOverlaps, 500);
 function saveLayout() {
     if(checkOverlaps()) { alert('Fix overlapping buttons (red) before saving!'); return; }
     localStorage.setItem('nswc_layout', JSON.stringify(layout));
+    localStorage.setItem('nswc_controller_type', String(controllerType));
     window.location.href = 'mobile.html';
 }
 function resetLayout() {

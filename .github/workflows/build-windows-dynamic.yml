@@ -103,6 +103,18 @@ jobs:
             Copy-Item $sdlDll.FullName client/artifacts/windows-dynamic/SDL3.dll
           }
 
+          $opensslBin = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x64-windows\bin"
+          $opensslDlls = @("libcrypto-3-x64.dll", "libssl-3-x64.dll")
+          foreach ($dll in $opensslDlls) {
+              $src = Join-Path $opensslBin $dll
+              if (Test-Path $src) {
+                  Copy-Item $src -Destination client/artifacts/windows-dynamic/ -Force
+                  Write-Host "Copied $dll"
+              } else {
+                  Write-Warning "$dll not found in $opensslBin"
+              }
+          }
+
           Compress-Archive `
             -Path client/artifacts/windows-dynamic/* `
             -DestinationPath client/artifacts/ns-client-windows-dynamic.zip `

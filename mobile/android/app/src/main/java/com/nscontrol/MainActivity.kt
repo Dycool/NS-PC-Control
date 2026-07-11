@@ -84,10 +84,14 @@ class MainActivity : AppCompatActivity() {
     private var hasLatestPhoneGyro = false
     private val latestMotionSamples = Array(Protocol.MOTION_SAMPLE_COUNT) { ByteArray(Protocol.MOTION_SAMPLE_SIZE) }
     private var latestMotionSampleCount = 0
+    private var phoneMotionRevision = 0L
+    private var sentPhoneMotionRevision = -1L
 
     @Volatile private var touchHid: ByteArray? = null
     @Volatile private var touchFrame: ByteArray? = null
     @Volatile private var lastTouchFrameMs: Long = 0
+    @Volatile private var touchControllerType: Int = 3
+    @Volatile private var touchExtraButtons: Int = 0
     @Volatile private var lastBridgeFrameParseMs: Long = 0
 
     private enum class Page { MAIN_MENU, TOUCH_CONTROLS, EDITOR }
@@ -115,6 +119,8 @@ class MainActivity : AppCompatActivity() {
         var rumbleLastSetMs: Long = 0L
         val motionSamples: Array<ByteArray> = Array(Protocol.MOTION_SAMPLE_COUNT) { Protocol.neutralMotion() }
         var motionSampleCount: Int = 0
+        var motionRevision: Long = 0
+        var sentMotionRevision: Long = -1
 
         fun reset() {
             deviceId = -1
@@ -134,6 +140,8 @@ class MainActivity : AppCompatActivity() {
             rumbleUntilMs = 0L
             rumbleLastSetMs = 0L
             motionSampleCount = 0
+            motionRevision = 0
+            sentMotionRevision = -1
             for (i in 0 until Protocol.MOTION_SAMPLE_COUNT) motionSamples[i].fill(0)
         }
 
@@ -300,12 +308,19 @@ class MainActivity : AppCompatActivity() {
                         if (!controlClientActive || ws !== webSocket) return@runOnUiThread
                         statusText.text = "Connected"
                         if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
+                        sendNamesFrame()
                         startSending()
                     }
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    runOnUiThread { handleWsClosed(webSocket, "Disconnected") }
+                    val message = when {
+                        reason.contains("S2 does not support L+R", ignoreCase = true) ->
+                            "Switch 2 mode does not support Joy-Con L + R"
+                        reason.contains("server full", ignoreCase = true) -> "Server full"
+                        else -> "Disconnected"
+                    }
+                    runOnUiThread { handleWsClosed(webSocket, message) }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -463,6 +478,44 @@ class MainActivity : AppCompatActivity() {
         try { sendFrameInternal(socketOverride = socket, flagsOverride = Protocol.FLAG_RESET, forceNeutral = true) } catch (_: Throwable) {}
     }
 
+    private fun sendNamesFrame() {
+        val socket = ws ?: return
+        val data = ByteArray(224)
+        data[0] = 0x4E.toByte()
+        data[1] = 0x43.toByte()
+        data[2] = 0x53.toByte()
+        data[3] = 0x4E.toByte()
+        data[4] = 1.toByte()
+
+        val touchActive = controlClientActive && activeClientMode == ClientMode.TOUCH && currentPage == Page.TOUCH_CONTROLS
+        if (touchActive) {
+            val off = 8
+            data[off] = 1.toByte()
+            data[off + 1] = (if (phoneSensorsActive) 1 else 0).toByte()
+            val name = "Android Controller"
+            val nameBytes = name.toByteArray(Charsets.UTF_8).take(47)
+            for (k in nameBytes.indices) {
+                data[off + 2 + k] = nameBytes[k]
+            }
+        } else {
+            synchronized(physicalLock) {
+                for (i in 0 until Protocol.PAD_COUNT) {
+                    val pad = physicalPads[i]
+                    val off = 8 + i * 50
+                    data[off] = (if (pad.present) 1 else 0).toByte()
+                    data[off + 1] = (if (pad.hasGyro) 1 else 0).toByte()
+                    if (pad.present) {
+                        val nameBytes = pad.name.toByteArray(Charsets.UTF_8).take(47)
+                        for (k in nameBytes.indices) {
+                            data[off + 2 + k] = nameBytes[k]
+                        }
+                    }
+                }
+            }
+        }
+        try { socket.send(data.toByteString()) } catch (_: Throwable) {}
+    }
+
     private fun sendFrameInternal(socketOverride: WebSocket? = null, flagsOverride: Int? = null, forceNeutral: Boolean = false) {
         synchronized(sendLock) {
             val socket = socketOverride ?: ws ?: return
@@ -480,7 +533,12 @@ class MainActivity : AppCompatActivity() {
                         Protocol.neutralHid()
                     }
                     Protocol.setFrameHid(frame, 0, hid)
-                    phoneMotionSamples()?.let { Protocol.setFrameMotionSamples(frame, 0, it) }
+                    frame[20 + 7] = (frame[20 + 7].toInt() or touchExtraButtons).toByte()
+                    Protocol.setFrameControllerType(frame, 0, touchControllerType)
+                    phoneMotionSamples()?.let { batch ->
+                        Protocol.setFrameMotionSamples(frame, 0, batch.samples)
+                        Protocol.setFrameMotionFresh(frame, 0, batch.fresh)
+                    }
                     phoneBatteryStatus()?.let { (percent, charging) -> Protocol.setFrameBatteryPercent(frame, 0, percent, charging) }
                 }
                 activeClientMode == ClientMode.PHYSICAL && !forceNeutral -> {
@@ -491,6 +549,8 @@ class MainActivity : AppCompatActivity() {
                             Protocol.setFrameHid(frame, i, pad.hid())
                             if (pad.hasMotion && pad.motionSampleCount >= Protocol.MOTION_SAMPLE_COUNT) {
                                 Protocol.setFrameMotionSamples(frame, i, Array(Protocol.MOTION_SAMPLE_COUNT) { j -> pad.motionSamples[j].copyOf() })
+                                Protocol.setFrameMotionFresh(frame, i, pad.motionRevision != pad.sentMotionRevision)
+                                pad.sentMotionRevision = pad.motionRevision
                             }
                         }
                     }
@@ -520,12 +580,17 @@ class MainActivity : AppCompatActivity() {
         latestMotionSamples[1] = latestMotionSamples[2]
         latestMotionSamples[2] = sample
         if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) latestMotionSampleCount++
+        phoneMotionRevision++
     }
 
-    private fun phoneMotionSamples(): Array<ByteArray>? {
+    private data class MotionBatch(val samples: Array<ByteArray>, val fresh: Boolean)
+
+    private fun phoneMotionSamples(): MotionBatch? {
         synchronized(phoneSensorLock) {
             if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) return null
-            return Array(Protocol.MOTION_SAMPLE_COUNT) { i -> latestMotionSamples[i].copyOf() }
+            val fresh = phoneMotionRevision != sentPhoneMotionRevision
+            sentPhoneMotionRevision = phoneMotionRevision
+            return MotionBatch(Array(Protocol.MOTION_SAMPLE_COUNT) { i -> latestMotionSamples[i].copyOf() }, fresh)
         }
     }
 
@@ -751,6 +816,10 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Throwable) {}
         }
 
+        // Keep the 6-arg signature the webapp has always called: the WebView JS
+        // bridge matches methods by argument count, so changing the arity breaks
+        // touch input whenever the APK and the served webapp are out of sync.
+        // The controller type travels through its own optional method instead.
         @JavascriptInterface
         fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int) {
             if (currentPage != Page.TOUCH_CONTROLS || !controlClientActive) return
@@ -764,6 +833,24 @@ class MainActivity : AppCompatActivity() {
                 present = true
             )
             lastTouchFrameMs = SystemClock.uptimeMillis()
+        }
+
+        // Arity overload for webapps that still pass the controller type inline.
+        @JavascriptInterface
+        fun onTouchState(buttons: Int, hat: Int, lx: Int, ly: Int, rx: Int, ry: Int, controllerType: Int) {
+            onTouchControllerType(controllerType)
+            onTouchState(buttons, hat, lx, ly, rx, ry)
+        }
+
+        @JavascriptInterface
+        fun onTouchControllerType(controllerType: Int) {
+            // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
+            touchControllerType = if (controllerType in 1..3) controllerType else 3
+        }
+
+        @JavascriptInterface
+        fun onTouchExtraButtons(extraButtons: Int) {
+            touchExtraButtons = extraButtons and (0x10 or 0x20)
         }
 
         @JavascriptInterface
@@ -856,6 +943,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updatePhysicalStatusOnPage()
+        sendNamesFrame()
     }
 
     private fun isControllerDevice(device: InputDevice): Boolean {
@@ -1118,6 +1206,7 @@ class MainActivity : AppCompatActivity() {
         pad.motionSamples[2] = sample
         if (pad.motionSampleCount < Protocol.MOTION_SAMPLE_COUNT) pad.motionSampleCount++
         pad.hasMotion = pad.motionSampleCount >= Protocol.MOTION_SAMPLE_COUNT
+        pad.motionRevision++
     }
 
     private fun stopPhysicalControllerSensors() {

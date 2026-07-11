@@ -42,12 +42,15 @@ unzip ns-pc-control-raspberry-pi.zip
 
 * Enable USB gadget, check the [Raspberry Pi setup](docs/raspberry-pi-setup.md) for more details.
 * Start the backend: `sudo chrt -f 99 ./ns-backend`
+  * Switch 2 USB mode: `sudo chrt -f 99 ./ns-backend --s2`
+    * S2 mode exposes one native controller on P1. Pro Controller 2 and individual Joy-Con 2 L/R are supported; L+R pair mode is rejected.
+  * Legacy HORI USB mode: `sudo chrt -f 99 ./ns-backend --hori`
 
 **2. 💻 PC / Mobile (Client):**
 * **Desktop** — Download the zip for your OS (Windows, Mac, or Linux), launch `ns-client`, enter your Pi's IP.
 * **Android** — Download `NS-mobile.apk` from the release and install it.
 * **iOS** — Download `NS-mobile.ipa` from the release (sideload via iloader).
-* **Up to 4 controllers** are supported simultaneously on a single client.
+* **Up to 4 controllers** are supported simultaneously in Switch 1/HORI mode. Native Switch 2 mode intentionally supports one P1 controller only.
 > Mobile clients do not support rumble with touch controls.
 
 **3. 🌐 Web App (Optional):**
@@ -56,24 +59,6 @@ unzip ns-pc-control-raspberry-pi.zip
 * Open `http://<pi-ip>:8080` in your browser.
 * See the **[Web App Guide](docs/web-app.md)** for details.
 
----
-
-## 🎛️ Controller Emulation Modes
-
-The Raspberry Pi server can emulate **two different controller profiles**:
-
-| Feature | Hori Controllers | Pro Controllers |
-|---------|--------------------|---------------------|
-| HID report size | 8 bytes | 64 bytes |
-| **Latency** | **Fastest** | **Fast** |
-| **Gyro** | **No** | **Yes** |
-| **Rumble** | **No** | **Yes** |
-
-Default mode is the pro controller. Use `-hori` if you have any issues with the other mode:
-
-```bash
-sudo chrt -f 99 ./ns-backend -hori
-```
 
 ---
 
@@ -96,7 +81,7 @@ Detailed guides and technical information are in the `docs/` folder:
 
 * **[Raspberry Pi System Setup](docs/raspberry-pi-setup.md)** - Enabling USB gadget mode and automating on boot.
 * **[Building from Source](docs/building-from-source.md)** - Compiling the desktop client (Windows/Mac/Linux), Android/iOS mobile apps, and server from scratch.
-* **[Controller Modes](docs/controller-modes.md)** - Legacy vs modern backend mode, gyro, rumble, and how to choose.
+* **[Controller Modes](docs/controller-modes.md)** - Legacy vs modern backend mode, gyro, rumble, and Joy-Con emulation.
 * **[Macros](docs/macros.md)** - Recording and replaying button sequences for speedruns and TAS.
 * **[Architecture & Security](docs/architecture.md)** - Latency optimization tips and HMAC-SHA256 protocol details.
 * **[Web App & Mobile Clients](docs/web-app.md)** - Using the embedded web interface and mobile touch controls.

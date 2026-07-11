@@ -6,8 +6,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPointer>
 #include <QTimer>
 #include <QWidget>
+
+class MacroDialog;
 
 class MainWindow : public QWidget {
 public:
@@ -26,13 +29,17 @@ private:
     QPushButton* macrosBtn = nullptr;
     QPushButton* settingsBtn = nullptr;
     QPushButton* connectBtn = nullptr;
+    QPushButton* scanAmiiboBtn = nullptr;
     QPushButton* quitBtn = nullptr;
     QLabel* statusLabel = nullptr;
     QLabel* padLabels[4]{};
     QTimer* timer = nullptr;
+    QPointer<MacroDialog> macroDialog;
 
     static int platformWidth();
     static int platformHeight();
+    static int platformPairHeight();
     void toggleConnection();
     void updateUi();
+    void onScanAmiiboClicked();
 };

@@ -1,11 +1,13 @@
 #include "macro_client.hpp"
 #include "input_settings.hpp"
+#include "stream_runtime.hpp"
 #include "shared/sha256.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <fstream>
 #include <thread>
+#include <cstdio>
 
 uint32_t g_macro_udp_seq = 0;
 
@@ -15,10 +17,11 @@ uint32_t next_macro_upload_id() {
     return v;
 }
 
-bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
-                                  const std::string& json_or_commands, uint8_t subpad) {
-    if (json_or_commands.size() > ns::macro::UDP_TEXT_MAX) return false;
-    auto sign_and_send = [&](const void* hdr_ptr, size_t hdr_size, const char* data_ptr, size_t data_size) {
+bool send_udp_upload_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                            std::span<const uint8_t> payload, uint8_t subpad,
+                            ns::macro::UploadKind kind, bool force_chunked) {
+    if (payload.empty() || payload.size() > ns::macro::UDP_TEXT_MAX) return false;
+    auto sign_and_send = [&](const void* hdr_ptr, size_t hdr_size, const uint8_t* data_ptr, size_t data_size) {
         std::vector<uint8_t> buf(hdr_size + data_size + ns::HMAC_TAG_SIZE);
         std::memcpy(buf.data(), hdr_ptr, hdr_size);
         if (data_size) std::memcpy(buf.data() + hdr_size, data_ptr, data_size);
@@ -28,29 +31,40 @@ bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t h
         return send_all_udp(sock, dest, buf) != SOCKET_ERROR;
     };
 
-    if (json_or_commands.size() + ns::macro::UDP_HEADER_SIZE + ns::HMAC_TAG_SIZE <= 1400) {
+    // Keep the old NSMC single-datagram path strictly macro-only. Typed chunked uploads
+    // must use NSMK chunks so the server can read header.reserved.
+    if (!force_chunked && kind == ns::macro::UploadKind::Macro &&
+            payload.size() + ns::macro::UDP_HEADER_SIZE + ns::HMAC_TAG_SIZE <= 1400) {
         ns::macro::MacroUdpHeaderWire hdr{.magic = ns::macro::UDP_MAGIC, .version = ns::PROTO_VERSION,
-                                          .subpad = subpad, .text_len = (uint32_t)json_or_commands.size(),
+                                          .subpad = subpad, .text_len = (uint32_t)payload.size(),
                                           .seq = next_macro_upload_id()};
-        return sign_and_send(&hdr, sizeof(hdr), json_or_commands.data(), json_or_commands.size());
+        return sign_and_send(&hdr, sizeof(hdr), payload.data(), payload.size());
     }
 
     const uint32_t upload_id = next_macro_upload_id();
-    const uint32_t chunk_count = (uint32_t)((json_or_commands.size() + ns::macro::UDP_CHUNK_MAX - 1) / ns::macro::UDP_CHUNK_MAX);
+    const uint32_t chunk_count = (uint32_t)((payload.size() + ns::macro::UDP_CHUNK_MAX - 1) / ns::macro::UDP_CHUNK_MAX);
     for (uint32_t i = 0; i < chunk_count; ++i) {
         size_t off = (size_t)i * ns::macro::UDP_CHUNK_MAX;
-        size_t n = std::min(ns::macro::UDP_CHUNK_MAX, json_or_commands.size() - off);
+        size_t n = std::min(ns::macro::UDP_CHUNK_MAX, payload.size() - off);
         ns::macro::MacroUdpChunkHeaderWire hdr{
             .magic = ns::macro::UDP_CHUNK_MAGIC, .version = ns::PROTO_VERSION, .subpad = subpad,
-            .flags = (uint8_t)((i + 1 == chunk_count) ? 0x01 : 0x00), .reserved = 0,
+            .flags = (uint8_t)((i + 1 == chunk_count) ? ns::macro::CHUNK_FLAG_LAST : 0x00),
+            .reserved = static_cast<uint8_t>(kind),
             .upload_id = upload_id, .chunk_index = i, .chunk_count = chunk_count,
-            .total_len = (uint32_t)json_or_commands.size(), .chunk_len = (uint16_t)n,
+            .total_len = (uint32_t)payload.size(), .chunk_len = (uint16_t)n,
             .seq = next_macro_upload_id()
         };
-        if (!sign_and_send(&hdr, sizeof(hdr), json_or_commands.data() + off, n)) return false;
+        if (!sign_and_send(&hdr, sizeof(hdr), payload.data() + off, n)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return true;
+}
+
+bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                                  const std::string& json_or_commands, uint8_t subpad) {
+    return send_udp_upload_packet(sock, dest, hmac_key,
+                                  std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(json_or_commands.data()), json_or_commands.size()),
+                                  subpad, ns::macro::UploadKind::Macro, false);
 }
 
 std::mutex g_macro_mtx;

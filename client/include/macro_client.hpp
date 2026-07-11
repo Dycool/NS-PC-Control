@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -23,8 +24,12 @@ extern std::vector<ns::macro::Entry> g_macro_entries;
 extern std::unordered_map<std::string, bool> g_macro_hotkey_down;
 
 uint32_t next_macro_upload_id();
+bool send_udp_upload_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
+                            std::span<const uint8_t> payload, uint8_t subpad,
+                            ns::macro::UploadKind kind, bool force_chunked = false);
 bool send_macro_udp_packet(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32],
                            const std::string& json_or_commands, uint8_t subpad = 0);
+
 int find_macro_entry_by_name(const std::string& name);
 std::string unique_macro_name(const std::string& base_raw);
 bool macro_hotkey_conflicts(const std::string& hotkey, std::string* conflict_name = nullptr);

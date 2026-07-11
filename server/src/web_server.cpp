@@ -21,70 +21,26 @@ static void enable_udp_rumble_state(ClientSession& c) {
     }
 }
 
-void flush_rumble_to_udp(int sock, int client_idx) {
-    if (sock < 0 || client_idx < 0 || client_idx >= MAX_CLIENTS) return;
-    sockaddr_in dest{};
-    ns::RumblePacket pending[4]{};
-    bool has[4]{};
-    ns::ControllerStatusPacket pending_status[4]{};
-    bool has_status[4]{};
-
-    {
-        std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
-        ClientSession& c = g_ctx.clients[client_idx];
-        if (!c.active || !c.udp_rumble_enabled) return;
-        dest = c.addr;
-        for (int s = 0; s < 4; ++s) {
-            uint32_t seq = c.rumble_seq[s];
-            if (seq != c.udp_last_rumble_seq[s]) {
-                pending[s] = c.rumble[s];
-                c.udp_last_rumble_seq[s] = seq;
-                has[s] = true;
-            }
-            uint32_t status_seq = c.controller_status_seq[s];
-            if (status_seq != c.udp_last_controller_status_seq[s]) {
-                pending_status[s] = ns::ControllerStatusPacket{};
-                pending_status[s].subpad = static_cast<uint8_t>(s);
-                pending_status[s].player_index = c.controller_status[s].player_index;
-                pending_status[s].player_leds = c.controller_status[s].player_leds;
-                if (c.controller_status[s].body_rgb_valid) {
-                    pending_status[s].reserved[0] = c.controller_status[s].body_rgb[0];
-                    pending_status[s].reserved[1] = c.controller_status[s].body_rgb[1];
-                    pending_status[s].reserved[2] = c.controller_status[s].body_rgb[2];
-                    pending_status[s].reserved[3] |= ns::CONTROLLER_STATUS_FLAG_BODY_RGB_VALID;
-                }
-                c.udp_last_controller_status_seq[s] = status_seq;
-                has_status[s] = true;
-            }
-        }
-    }
-
-    for (int s = 0; s < 4; ++s) {
-        if (has_status[s]) {
-            ssize_t sent = sendto(sock, &pending_status[s], sizeof(ns::ControllerStatusPacket), 0,
-                                  reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-            if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::ControllerStatusPacket)))
-                std::println(stderr, "[udp] failed to send controller status packet: {}", std::strerror(errno));
-        }
-        if (!has[s]) continue;
-        ssize_t sent = sendto(sock, &pending[s], sizeof(ns::RumblePacket), 0,
-                              reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-        if (g_ctx.verbose && sent != static_cast<ssize_t>(sizeof(ns::RumblePacket)))
-            std::println(stderr, "[udp] failed to send rumble packet: {}", std::strerror(errno));
-    }
-}
-
 struct SessionData {
     int ws_slot = -1;
     uint32_t ws_seq = 0;
     bool ws_first = true;
     uint32_t last_rumble_seq[4] = {};
     uint32_t last_status_seq[4] = {};
+    uint32_t last_assignment_seq[4] = {};
+    uint64_t last_server_state_seq = 0;
     uint32_t pending_rumble_seq[4] = {};
     uint8_t pending_rumble[4][sizeof(RumblePacket)];
     uint8_t pending_status[4][sizeof(ControllerStatusPacket)];
+    uint8_t pending_assignment[4][sizeof(ClientAssignmentPacket)];
     bool has_pending_rumble[4] = {};
     bool has_pending_status[4] = {};
+    bool has_pending_assignment[4] = {};
+    uint8_t pending_roster[sizeof(RosterPacket)];
+    bool has_pending_roster = false;
+    uint64_t last_roster_seq = 0;
+    bool close_after_write = false;
+    bool close_profile_unsupported = false;
     uint64_t assigned_sleep_seq = 0;
     bool had_slot = false;
 };
@@ -145,9 +101,16 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->had_slot = false;
             std::fill(sd->last_rumble_seq, sd->last_rumble_seq + 4, 0);
             std::fill(sd->last_status_seq, sd->last_status_seq + 4, 0);
+            std::fill(sd->last_assignment_seq, sd->last_assignment_seq + 4, 0);
+            sd->last_server_state_seq = 0;
             std::fill(sd->pending_rumble_seq, sd->pending_rumble_seq + 4, 0);
             std::fill(sd->has_pending_rumble, sd->has_pending_rumble + 4, false);
             std::fill(sd->has_pending_status, sd->has_pending_status + 4, false);
+            std::fill(sd->has_pending_assignment, sd->has_pending_assignment + 4, false);
+            sd->has_pending_roster = false;
+            sd->last_roster_seq = 0;
+            sd->close_after_write = false;
+            sd->close_profile_unsupported = false;
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
             break;
@@ -168,7 +131,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (text.starts_with("MACRO_RUN:")) {
                     uint64_t now = now_us();
                     if (sd->ws_slot < 0) {
-                        sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
+                        if (active_client_count(now) < configured_client_capacity() && free_virtual_slot_count(now) > 0) {
+                            sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
+                        }
                         if (sd->ws_slot >= 0) {
                             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                             sd->had_slot = true;
@@ -190,11 +155,26 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 break;
             }
 
+            if (len == sizeof(ns::ClientNamesPacket)) {
+                uint32_t magic; memcpy(&magic, payload, 4);
+                if (magic == ns::CLIENT_NAMES_MAGIC) {
+                    if (sd->ws_slot >= 0) {
+                        ns::ClientNamesPacket names{};
+                        memcpy(&names, payload, sizeof(names));
+                        if (names.version == ns::SERVER_INFO_VERSION) store_client_source_names(sd->ws_slot, names);
+                    }
+                    break;
+                }
+            }
+
             if (len >= ns::macro::CHUNK_HEADER_SIZE) {
                 uint32_t magic; memcpy(&magic, payload, 4);
                 if (magic == ns::macro::UDP_CHUNK_MAGIC) {
                     if (sd->ws_slot < 0) {
-                        sd->ws_slot = allocate_client_session(now_us(), nullptr, true, InputSource::WebSocket);
+                        const uint64_t now = now_us();
+                        if (active_client_count(now) < configured_client_capacity() && free_virtual_slot_count(now) > 0) {
+                            sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
+                        }
                         if (sd->ws_slot >= 0) {
                             sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
                             sd->had_slot = true;
@@ -211,6 +191,12 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             bool pad_present[4] = {};
             if (!parse_client_packet(payload, len, flags, seq, report, pad_present)) break;
 
+            const bool unsupported_s2_pair = report_requests_unsupported_s2_pair(report, pad_present, true);
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                report.p2.reset(); report.p3.reset(); report.p4.reset();
+                pad_present[1] = pad_present[2] = pad_present[3] = false;
+            }
+
             if (!sd->ws_first && !(flags & FLAG_RESET) && (int32_t)(seq - sd->ws_seq) < 0) break;
             sd->ws_first = false; sd->ws_seq = seq + 1;
 
@@ -220,7 +206,38 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) sd->ws_slot = -1;
             }
+            if (unsupported_s2_pair) {
+                if (sd->ws_slot >= 0) {
+                    reset_client_session_if_source(sd->ws_slot, InputSource::WebSocket);
+                    sd->ws_slot = -1;
+                }
+                ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
+                    switch2_sleep_confirmed(now));
+                std::memcpy(sd->pending_assignment[0], &unsupported, sizeof(unsupported));
+                sd->has_pending_assignment[0] = true;
+                sd->close_after_write = true;
+                sd->close_profile_unsupported = true;
+                if (g_ctx.verbose) std::println("[ws] refused Joy-Con L+R in native S2 single-controller mode");
+                lws_callback_on_writable(wsi);
+                break;
+            }
             if (sd->ws_slot < 0) {
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
+                const int free_slots_now = free_virtual_slot_count(now);
+                if (required_slots > free_slots_now || active_client_count(now) >= configured_client_capacity()) {
+                    ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
+                        switch2_sleep_confirmed(now));
+                    std::memcpy(sd->pending_assignment[0], &full, sizeof(full));
+                    sd->has_pending_assignment[0] = true;
+                    sd->close_after_write = true;
+                    if (g_ctx.verbose) std::println("[ws] server virtual controller slot full, refusing client");
+                    lws_callback_on_writable(wsi);
+                    break;
+                }
                 sd->ws_slot = allocate_client_session(now, nullptr, true, InputSource::WebSocket);
                 if (sd->ws_slot >= 0) {
                     sd->assigned_sleep_seq = g_ctx.switch2_sleep_seq.load(std::memory_order_relaxed);
@@ -230,7 +247,9 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     for (int s = 0; s < 4; ++s) {
                         sd->last_rumble_seq[s] = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                         sd->last_status_seq[s] = g_ctx.clients[sd->ws_slot].controller_status_seq[s];
+                        sd->last_assignment_seq[s] = 0;
                     }
+                    sd->last_server_state_seq = 0;
                 }
             }
 
@@ -248,11 +267,13 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (c.first_pkt || memcmp(&c.report, &report, sizeof(MultiReport)) != 0) {
                     c.report = report;
                     c.has_new_report = true; c.first_pkt = false;
+                    ++c.report_generation;
                     enable_udp_rumble_state(c);
                 }
 
                 for (int s = 0; s < 4; ++s) {
-                    if (pad_present[s]) { c.pad_present[s] = true; c.pad_last_present_us[s] = now; }
+                    c.pad_present[s] = pad_present[s];
+                    c.pad_last_present_us[s] = pad_present[s] ? now : 0;
                 }
             }
             if (sd->ws_slot >= 0 && wake_on_new_client) {
@@ -262,25 +283,58 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
-            if (sd->ws_slot < 0) break;
+            if (sd->ws_slot < 0 && !sd->has_pending_roster &&
+                    !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; })) break;
+            bool wrote = false;
             for (int s = 0; s < 4; ++s) {
-                if (sd->has_pending_status[s]) {
-                    uint8_t buffer[LWS_PRE + sizeof(ControllerStatusPacket)];
-                    memcpy(buffer + LWS_PRE, sd->pending_status[s], sizeof(ControllerStatusPacket));
-                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ControllerStatusPacket), LWS_WRITE_BINARY) != sizeof(ControllerStatusPacket)) return -1;
-                    sd->has_pending_status[s] = false;
-                    break;
-                }
                 if (sd->has_pending_rumble[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(RumblePacket)];
                     memcpy(buffer + LWS_PRE, sd->pending_rumble[s], sizeof(RumblePacket));
                     if (lws_write(wsi, buffer + LWS_PRE, sizeof(RumblePacket), LWS_WRITE_BINARY) != sizeof(RumblePacket)) return -1;
                     sd->has_pending_rumble[s] = false;
                     sd->last_rumble_seq[s] = sd->pending_rumble_seq[s];
+                    wrote = true;
+                    break;
+                }
+                if (sd->has_pending_status[s]) {
+                    uint8_t buffer[LWS_PRE + sizeof(ControllerStatusPacket)];
+                    memcpy(buffer + LWS_PRE, sd->pending_status[s], sizeof(ControllerStatusPacket));
+                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ControllerStatusPacket), LWS_WRITE_BINARY) != sizeof(ControllerStatusPacket)) return -1;
+                    sd->has_pending_status[s] = false;
+                    wrote = true;
+                    break;
+                }
+                if (sd->has_pending_assignment[s]) {
+                    uint8_t buffer[LWS_PRE + sizeof(ClientAssignmentPacket)];
+                    memcpy(buffer + LWS_PRE, sd->pending_assignment[s], sizeof(ClientAssignmentPacket));
+                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(ClientAssignmentPacket), LWS_WRITE_BINARY) != sizeof(ClientAssignmentPacket)) return -1;
+                    sd->has_pending_assignment[s] = false;
+                    wrote = true;
                     break;
                 }
             }
-            if (std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) ||
+            if (!wrote && sd->has_pending_roster) {
+                uint8_t buffer[LWS_PRE + sizeof(RosterPacket)];
+                memcpy(buffer + LWS_PRE, sd->pending_roster, sizeof(RosterPacket));
+                if (lws_write(wsi, buffer + LWS_PRE, sizeof(RosterPacket), LWS_WRITE_BINARY) != (int)sizeof(RosterPacket)) return -1;
+                sd->has_pending_roster = false;
+            }
+            if (sd->close_after_write &&
+                    !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) &&
+                    !std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) &&
+                    !std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) {
+                if (sd->close_profile_unsupported) {
+                    static unsigned char reason[] = "S2 does not support L+R";
+                    lws_close_reason(wsi, static_cast<lws_close_status>(1008), reason, sizeof(reason) - 1);
+                } else {
+                    static unsigned char reason[] = "server full";
+                    lws_close_reason(wsi, static_cast<lws_close_status>(1013), reason, sizeof(reason) - 1);
+                }
+                return -1;
+            }
+            if (sd->has_pending_roster ||
+                std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; }) ||
+                std::ranges::any_of(sd->has_pending_status, [](bool h) { return h; }) ||
                 std::ranges::any_of(sd->has_pending_rumble, [](bool h) { return h; })) lws_callback_on_writable(wsi);
             break;
         }
@@ -299,12 +353,41 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             if (sd->ws_slot >= 0) {
                 bool new_rumble = false;
                 bool new_status = false;
+                bool new_assignment = false;
+                bool new_roster = false;
+                const uint64_t state_seq = refresh_server_state_seq();
+                const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(), 0, configured_client_capacity()));
+                const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(), 0, configured_virtual_port_count()));
+                const bool switch_asleep = switch2_sleep_confirmed();
+                const uint64_t roster_seq = refresh_roster_seq();
+                ns::RosterPacket roster_pkt{};
+                get_roster_packet(roster_pkt);
                 std::lock_guard<std::mutex> lk(g_ctx.mtx[sd->ws_slot]);
                 if (!g_ctx.clients[sd->ws_slot].active || g_ctx.clients[sd->ws_slot].source != InputSource::WebSocket) {
                     sd->ws_slot = -1;
                     break;
                 }
                 for (int s = 0; s < 4; ++s) {
+                    uint32_t assignment_seq = g_ctx.clients[sd->ws_slot].client_assignment_seq[s];
+                    if (assignment_seq != sd->last_assignment_seq[s]) {
+                        ClientAssignmentPacket ap{};
+                        ap.flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+                        ap.server_slot = static_cast<uint8_t>(sd->ws_slot);
+                        ap.subpad = static_cast<uint8_t>(s);
+                        ap.console_port_mask = g_ctx.clients[sd->ws_slot].client_assignment[s].console_port_mask;
+                        ap.primary_console_port = g_ctx.clients[sd->ws_slot].client_assignment[s].primary_console_port;
+                        ap.requested_type = g_ctx.clients[sd->ws_slot].client_assignment[s].requested_type;
+                        ap.virtual_type = g_ctx.clients[sd->ws_slot].client_assignment[s].virtual_type;
+                        if (ap.console_port_mask != 0) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+                        if (switch_asleep) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+                        ap.active_clients = active_clients;
+                        ap.max_clients = static_cast<uint8_t>(configured_client_capacity());
+                        ap.free_virtual_slots = free_slots;
+                        memcpy(sd->pending_assignment[s], &ap, sizeof(ap));
+                        sd->last_assignment_seq[s] = assignment_seq;
+                        sd->has_pending_assignment[s] = true;
+                        new_assignment = true;
+                    }
                     uint32_t seq = g_ctx.clients[sd->ws_slot].rumble_seq[s];
                     if (seq != sd->last_rumble_seq[s]) {
                         memcpy(sd->pending_rumble[s], &g_ctx.clients[sd->ws_slot].rumble[s], sizeof(RumblePacket));
@@ -330,7 +413,34 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         new_status = true;
                     }
                 }
-                if (new_rumble || new_status) lws_callback_on_writable(wsi);
+                if (state_seq != sd->last_server_state_seq) {
+                    sd->last_server_state_seq = state_seq;
+                    if (!std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; })) {
+                        ClientAssignmentPacket ap{};
+                        ap.flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+                        ap.server_slot = static_cast<uint8_t>(sd->ws_slot);
+                        ap.subpad = 0;
+                        ap.console_port_mask = g_ctx.clients[sd->ws_slot].client_assignment[0].console_port_mask;
+                        ap.primary_console_port = g_ctx.clients[sd->ws_slot].client_assignment[0].primary_console_port;
+                        ap.requested_type = g_ctx.clients[sd->ws_slot].client_assignment[0].requested_type;
+                        ap.virtual_type = g_ctx.clients[sd->ws_slot].client_assignment[0].virtual_type;
+                        if (ap.console_port_mask != 0) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+                        if (switch_asleep) ap.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+                        ap.active_clients = active_clients;
+                        ap.max_clients = static_cast<uint8_t>(configured_client_capacity());
+                        ap.free_virtual_slots = free_slots;
+                        memcpy(sd->pending_assignment[0], &ap, sizeof(ap));
+                        sd->has_pending_assignment[0] = true;
+                        new_assignment = true;
+                    }
+                }
+                if (roster_seq != sd->last_roster_seq) {
+                    sd->last_roster_seq = roster_seq;
+                    memcpy(sd->pending_roster, &roster_pkt, sizeof(roster_pkt));
+                    sd->has_pending_roster = true;
+                    new_roster = true;
+                }
+                if (new_assignment || new_rumble || new_status || new_roster) lws_callback_on_writable(wsi);
             }
             lws_set_timer_usecs(wsi, 10 * 1000);
             break;

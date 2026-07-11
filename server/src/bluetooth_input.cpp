@@ -35,12 +35,17 @@ static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
     c.last_rx_us = now;
     c.report.reset();
     c.report.p1.input = pad.input;
+    // Sources request a shape; the server coerces it onto S1, S2, or HORI.
+    c.report.p1.reserved[2] = ns::CONTROLLER_TYPE_PRO;
     if (pad.battery_percent >= 0 && pad.battery_percent <= 100) {
         c.report.p1.reserved[0] = static_cast<uint8_t>(pad.battery_percent);
         c.report.p1.reserved[1] |= EXT_STATUS_BATTERY_VALID;
         if (pad.battery_charging) c.report.p1.reserved[1] |= EXT_STATUS_BATTERY_CHARGING;
     }
     c.report.p1.has_motion = pad.has_motion ? 1 : 0;
+    c.report.p1.reserved[1] |= EXT_STATUS_MOTION_FRESH_VALID;
+    if (pad.has_motion && pad.motion_sample_fresh)
+        c.report.p1.reserved[1] |= EXT_STATUS_MOTION_FRESH;
     if (pad.has_motion) {
         c.report.p1.motion[0] = pad.motion_samples[0];
         c.report.p1.motion[1] = pad.motion_samples[1];
@@ -55,6 +60,8 @@ static bool publish_bluetooth_state_to_client(int client_idx, const SdlPadState&
         c.pad_last_present_us[s] = 0;
         clear_motion(c, s);
     }
+    c.has_new_report = true;
+    ++c.report_generation;
     return true;
 }
 
@@ -231,6 +238,10 @@ void bluetooth_input_thread(std::stop_token stoken) {
 
             if (client_for_sdl[i] < 0) {
                 if (dormant_until_input[i] && switch_sleeping && !real_bt_input) {
+                    continue;
+                }
+                if (active_client_count(now) >= configured_client_capacity() || free_virtual_slot_count(now) <= 0) {
+                    any_waiting = true;
                     continue;
                 }
                 client_for_sdl[i] = allocate_client_session(now, nullptr, true, InputSource::Bluetooth, i);

@@ -9,6 +9,9 @@
 #include <utility>
 #include <span>
 #include <algorithm>
+#include <cerrno>
+#include <bit>
+#include <sys/socket.h>
 
 using namespace ns;
 
@@ -35,6 +38,15 @@ const char* input_source_name(InputSource source) {
     }
 }
 
+const char* usb_controller_family_name(UsbControllerFamily family) {
+    switch (family) {
+        case UsbControllerFamily::Switch1: return "switch1";
+        case UsbControllerFamily::Switch2: return "switch2";
+        case UsbControllerFamily::Hori:    return "hori";
+        default:                            return "unknown";
+    }
+}
+
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then) {
     return (then == 0 || then > now) ? 0 : now - then;
 }
@@ -45,6 +57,12 @@ bool elapsed_us_over(uint64_t now, uint64_t then, uint64_t limit) {
 
 void mark_switch2_usb_activity(uint64_t now) {
     if (now == 0) now = now_us();
+
+    if (g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
+        g_ctx.switch2_usb_host_suspended.store(false, std::memory_order_relaxed);
+        g_ctx.switch2_usb_inactive_since_us.store(0, std::memory_order_relaxed);
+        g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+    }
 
     const uint64_t prev_last = g_ctx.switch2_last_usb_activity_us.exchange(now, std::memory_order_relaxed);
     uint64_t stream_since = g_ctx.switch2_rx_stream_since_us.load(std::memory_order_relaxed);
@@ -69,8 +87,23 @@ void mark_switch2_usb_activity(uint64_t now) {
     }
 }
 
+void mark_switch2_usb_host_resumed(uint64_t now) {
+    if (now == 0) now = now_us();
+    g_ctx.switch2_usb_lifecycle_seen.store(true, std::memory_order_relaxed);
+    g_ctx.switch2_usb_host_suspended.store(false, std::memory_order_relaxed);
+    g_ctx.switch2_usb_inactive_since_us.store(0, std::memory_order_relaxed);
+    g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+    g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
+    // Treat a resume/configuration event as recent host activity for wake
+    // suppression even when the S2 sends no further OUT reports.
+    g_ctx.switch2_last_usb_activity_us.store(now, std::memory_order_relaxed);
+}
+
 void clear_switch2_usb_activity() {
     g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+    g_ctx.switch2_usb_lifecycle_seen.store(false, std::memory_order_relaxed);
+    g_ctx.switch2_usb_host_suspended.store(false, std::memory_order_relaxed);
+    g_ctx.switch2_usb_inactive_since_us.store(0, std::memory_order_relaxed);
     g_ctx.switch2_last_usb_activity_us.store(0, std::memory_order_relaxed);
     g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
     g_ctx.switch2_rx_stream_stable.store(false, std::memory_order_relaxed);
@@ -78,15 +111,25 @@ void clear_switch2_usb_activity() {
 }
 
 void mark_switch2_usb_host_disconnected() {
-    // USB gadget write/open errors are only transport noise. They are not a reason
-    // to tear down clients or Bluetooth controllers. The only clean proof that the
-    // Switch is active is host-originated HID OUT/protocol traffic, recorded by
-    // mark_switch2_usb_activity(). When that RX traffic stops becoming fresh, the
-    // backend simply treats the console as sleeping/dormant.
+    // Start a debounce window; poll_switch2_sleep_state() performs the actual
+    // transition. This absorbs the disable/enable sequence of a quick gadget
+    // re-enumeration without conflating normal S2 command silence with sleep.
     g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+    if (g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
+        g_ctx.switch2_usb_host_suspended.store(true, std::memory_order_relaxed);
+        uint64_t expected = 0;
+        g_ctx.switch2_usb_inactive_since_us.compare_exchange_strong(
+            expected, now_us(), std::memory_order_relaxed);
+    }
 }
 
 bool switch2_usb_host_recently_active(uint64_t now) {
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+            && g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
+        const bool active = !g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed);
+        g_ctx.switch2_usb_host_connected.store(active, std::memory_order_relaxed);
+        return active;
+    }
     uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
     if (last == 0 || elapsed_us_saturated(now, last) > SWITCH2_USB_ACTIVITY_FRESH_US) {
         g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
@@ -133,33 +176,7 @@ bool switch2_sleep_confirmed(uint64_t now) {
     return g_ctx.switch2_sleep_confirmed.load(std::memory_order_relaxed);
 }
 
-void poll_switch2_sleep_state(uint64_t now) {
-    if (now == 0) now = now_us();
-    uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
-    if (last == 0) {
-        g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-        g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
-        g_ctx.switch2_rx_stream_stable.store(false, std::memory_order_relaxed);
-        return;
-    }
-
-    const uint64_t quiet_us = elapsed_us_saturated(now, last);
-    if (quiet_us <= SWITCH2_USB_ACTIVITY_FRESH_US) {
-        g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
-        return;
-    }
-
-    g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
-
-    // If the last RX stream was only a short flicker, ignore it. This happens
-    // during the Switch 2 suspend/reconnect dance and should not cause repeated
-    // BT disconnects / UDP slot churn / wake spam.
-    if (!g_ctx.switch2_rx_stream_stable.exchange(false, std::memory_order_relaxed)) {
-        g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
-        return;
-    }
-    g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
-
+static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
     bool expected = false;
     if (!g_ctx.switch2_sleep_confirmed.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
         return;
@@ -187,9 +204,60 @@ void poll_switch2_sleep_state(uint64_t now) {
         if (stop_macros) server_macro_stop_all_for_client(i);
     }
     if (g_ctx.verbose) {
-        std::println("[switch] confirmed asleep after {:.1f}s without stable Switch USB RX; UDP/WebSocket sessions released",
-                     (double)quiet_us / 1000000.0);
+        std::println("[switch] confirmed asleep after {:.1f}s {}; input sessions released",
+                     static_cast<double>(quiet_us) / 1000000.0, evidence);
     }
+}
+
+void poll_switch2_sleep_state(uint64_t now) {
+    if (now == 0) now = now_us();
+
+    // The current native S2 transport exposes authoritative bus lifecycle
+    // events.  An idle command/RX stream is normal while the console is awake,
+    // so only a sustained FunctionFS suspend/disable may release sessions.
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+            && g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
+        if (!g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed)) {
+            g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+            return;
+        }
+        const uint64_t inactive_since = g_ctx.switch2_usb_inactive_since_us.load(std::memory_order_relaxed);
+        if (inactive_since == 0
+                || elapsed_us_saturated(now, inactive_since) <= SWITCH2_USB_ACTIVITY_FRESH_US
+                || switch2_wake_recent(now)) {
+            return;
+        }
+        confirm_switch2_sleep(elapsed_us_saturated(now, inactive_since),
+                              "of USB suspend/disconnect");
+        return;
+    }
+
+    uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
+    if (last == 0) {
+        g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+        g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+        g_ctx.switch2_rx_stream_stable.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    const uint64_t quiet_us = elapsed_us_saturated(now, last);
+    if (quiet_us <= SWITCH2_USB_ACTIVITY_FRESH_US) {
+        g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
+        return;
+    }
+
+    g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
+
+    // If the last RX stream was only a short flicker, ignore it. This happens
+    // during the Switch 2 suspend/reconnect dance and should not cause repeated
+    // BT disconnects / UDP slot churn / wake spam.
+    if (!g_ctx.switch2_rx_stream_stable.exchange(false, std::memory_order_relaxed)) {
+        g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+        return;
+    }
+    g_ctx.switch2_rx_stream_since_us.store(0, std::memory_order_relaxed);
+
+    confirm_switch2_sleep(quiet_us, "without stable USB RX");
 }
 
 void rearm_switch2_wake_after_client_disconnect() {
@@ -216,6 +284,201 @@ int active_client_count(uint64_t now) {
         }
     }
     return count;
+}
+
+// The physical "shape" a profile represents, independent of Switch generation.
+enum class ProfileShape : uint8_t { Pro, JoyConL, JoyConR, Pair };
+
+static ProfileShape profile_shape(uint8_t profile) {
+    switch (profile) {
+        case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:    return ProfileShape::JoyConL;
+        case ns::CONTROLLER_TYPE_JOYCON_R:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:    return ProfileShape::JoyConR;
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2: return ProfileShape::Pair;
+        default:                                 return ProfileShape::Pro; // Pro/Pro_S2/Hori/default
+    }
+}
+
+// Map any requested profile onto the equivalent profile in the given family.
+// The USB device can only be one family at a time, so a mismatched client is
+// adapted to the active family (keeping its L/R/pair shape) instead of rejected.
+uint8_t coerce_profile_to_family(uint8_t profile, UsbControllerFamily family) {
+    const ProfileShape shape = profile_shape(profile);
+    switch (family) {
+        case UsbControllerFamily::Switch2:
+            switch (shape) {
+                case ProfileShape::JoyConL: return ns::CONTROLLER_TYPE_JOYCON_L_S2;
+                case ProfileShape::JoyConR: return ns::CONTROLLER_TYPE_JOYCON_R_S2;
+                case ProfileShape::Pair:    return ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+                default:                    return ns::CONTROLLER_TYPE_PRO_S2;
+            }
+        case UsbControllerFamily::Hori:
+            return ns::CONTROLLER_TYPE_HORI; // Hori exposes a single Pro-like pad
+        case UsbControllerFamily::Switch1:
+        default:
+            switch (shape) {
+                case ProfileShape::JoyConL: return ns::CONTROLLER_TYPE_JOYCON_L;
+                case ProfileShape::JoyConR: return ns::CONTROLLER_TYPE_JOYCON_R;
+                case ProfileShape::Pair:    return ns::CONTROLLER_TYPE_JOYCON_PAIR;
+                default:                    return ns::CONTROLLER_TYPE_PRO;
+            }
+    }
+}
+
+static uint8_t raw_profile_from_wire_report(const ns::HIDReport& report) {
+    switch (report.reserved[2]) {
+        case ns::CONTROLLER_TYPE_JOYCON_L:
+        case ns::CONTROLLER_TYPE_JOYCON_R:
+        case ns::CONTROLLER_TYPE_PRO:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR:
+        case ns::CONTROLLER_TYPE_HORI:
+        case ns::CONTROLLER_TYPE_PRO_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
+            return report.reserved[2];
+        case ns::CONTROLLER_TYPE_DEFAULT:
+        default:
+            return ns::CONTROLLER_TYPE_PRO;
+    }
+}
+
+static uint8_t requested_profile_from_wire_report(const ns::HIDReport& report) {
+    return coerce_profile_to_family(raw_profile_from_wire_report(report), g_ctx.usb_controller_family);
+}
+
+UsbControllerFamily usb_family_for_profile(uint8_t profile) {
+    switch (profile) {
+        case ns::CONTROLLER_TYPE_PRO_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_L_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_R_S2:
+        case ns::CONTROLLER_TYPE_JOYCON_PAIR_S2:
+            return UsbControllerFamily::Switch2;
+        case ns::CONTROLLER_TYPE_HORI:
+            return UsbControllerFamily::Hori;
+        default:
+            return UsbControllerFamily::Switch1;
+    }
+}
+
+bool controller_profile_supported_by_usb_family(uint8_t /*profile*/) {
+    // Every requested profile is now coerced onto the active family
+    // (coerce_profile_to_family), so a client is never rejected for a family
+    // mismatch — it is adapted to the current family instead. Kept as an always
+    // -true hook so slot accounting and the old reject call sites stay valid.
+    return true;
+}
+
+bool report_requests_unsupported_s2_pair(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle) {
+    if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2) return false;
+    const ns::HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    bool any_present = false;
+    for (int s = 0; s < 4; ++s) {
+        if (pad_present && !pad_present[s]) continue;
+        any_present = true;
+        const uint8_t raw = raw_profile_from_wire_report(*pads[s]);
+        if (raw == ns::CONTROLLER_TYPE_JOYCON_PAIR || raw == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) return true;
+    }
+    if (!any_present && reserve_when_idle) {
+        const uint8_t raw = raw_profile_from_wire_report(report.p1);
+        return raw == ns::CONTROLLER_TYPE_JOYCON_PAIR || raw == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2;
+    }
+    return false;
+}
+
+int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle) {
+    const ns::HIDReport* pads[4] = {&report.p1, &report.p2, &report.p3, &report.p4};
+    int needed = 0;
+    for (int s = 0; s < 4; ++s) {
+        if (pad_present && !pad_present[s]) continue;
+        const uint8_t profile = requested_profile_from_wire_report(*pads[s]);
+        if (!controller_profile_supported_by_usb_family(profile)) continue;
+        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+            // A pair still requests two logical halves, which deliberately exceeds
+            // the single native S2 slot and is rejected by the connection layer.
+            needed += profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2 ? 2 : 1;
+        } else {
+            needed += (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1;
+        }
+    }
+    if (needed == 0 && reserve_when_idle) {
+        const uint8_t profile = requested_profile_from_wire_report(report.p1);
+        if (controller_profile_supported_by_usb_family(profile)) {
+            needed = (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                ? (profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2 ? 2 : 1)
+                : ((profile == ns::CONTROLLER_TYPE_JOYCON_PAIR || profile == ns::CONTROLLER_TYPE_JOYCON_PAIR_S2) ? 2 : 1);
+        }
+    }
+    // Do not clamp here. Callers use a value larger than the configured
+    // capacity to reject requests that cannot be mapped completely.
+    return needed;
+}
+
+
+int configured_virtual_port_count() {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? 1 : HID_PORT_COUNT;
+}
+
+int configured_client_capacity() {
+    return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 ? 1 : MAX_CLIENTS;
+}
+
+int active_requested_virtual_slots(uint64_t now, int ignore_client_idx) {
+    if (now == 0) now = now_us();
+    int used = 0;
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        if (i == ignore_client_idx) continue;
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        ClientSession& c = g_ctx.clients[i];
+        repair_future_client_timestamp(c, now);
+        if (!c.active || c.last_rx_us == 0 || elapsed_us_saturated(now, c.last_rx_us) > CLIENT_TIMEOUT_US) continue;
+        uint8_t assigned_mask = 0;
+        for (int s = 0; s < 4; ++s) {
+            assigned_mask = static_cast<uint8_t>(assigned_mask | c.client_assignment[s].console_port_mask);
+        }
+        // An existing assignment does not cover source pads which appeared
+        // later in the same session. Reserve for the larger of the committed
+        // layout and the current request so another client cannot be admitted
+        // into those pending ports in the gap before the writer reconciles it.
+        const int assigned = std::popcount(static_cast<unsigned>(assigned_mask));
+        const int requested = requested_virtual_slots_for_report(c.report, c.pad_present, true);
+        used += std::max(assigned, requested);
+    }
+    return std::min(used, configured_virtual_port_count());
+}
+
+int free_virtual_slot_count(uint64_t now, int ignore_client_idx) {
+    const int capacity = configured_virtual_port_count();
+    const int used = active_requested_virtual_slots(now, ignore_client_idx);
+    return std::max(0, capacity - used);
+}
+
+uint32_t pack_server_state(uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep) {
+    return static_cast<uint32_t>(active_clients)
+        | (static_cast<uint32_t>(free_virtual_slots) << 8)
+        | (switch_asleep ? (1u << 16) : 0u);
+}
+
+uint64_t refresh_server_state_seq(uint64_t now, bool force) {
+    if (now == 0) now = now_us();
+    const uint64_t last_refresh = g_ctx.server_state_last_refresh_us.load(std::memory_order_relaxed);
+    if (!force && last_refresh != 0 && elapsed_us_saturated(now, last_refresh) < SERVER_STATE_REFRESH_MIN_US) {
+        return g_ctx.server_state_seq.load(std::memory_order_relaxed);
+    }
+    g_ctx.server_state_last_refresh_us.store(now, std::memory_order_relaxed);
+    const uint8_t active_clients = static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity()));
+    const uint8_t free_slots = static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count()));
+    const bool asleep = switch2_sleep_confirmed(now);
+    const uint32_t packed = pack_server_state(active_clients, free_slots, asleep);
+    uint32_t old = g_ctx.server_state_packed.load(std::memory_order_relaxed);
+    while (old != packed) {
+        if (g_ctx.server_state_packed.compare_exchange_weak(old, packed, std::memory_order_relaxed)) {
+            return g_ctx.server_state_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
+    }
+    return g_ctx.server_state_seq.load(std::memory_order_relaxed);
 }
 
 uint8_t switch_player_index_from_leds(uint8_t player_leds) {
@@ -251,6 +514,27 @@ void publish_controller_status_event(int client_idx, int sub_idx, uint8_t player
     if (changed) c.controller_status_seq[sub_idx]++;
 }
 
+void publish_client_assignment_event(int client_idx, int sub_idx, uint8_t console_port_mask,
+                                     uint8_t primary_console_port, uint8_t requested_type,
+                                     uint8_t virtual_type) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return;
+    ClientAssignmentState& st = c.client_assignment[sub_idx];
+    if (primary_console_port >= HID_PORT_COUNT) primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    console_port_mask = static_cast<uint8_t>(console_port_mask & ((1u << HID_PORT_COUNT) - 1u));
+    const bool changed = st.console_port_mask != console_port_mask
+        || st.primary_console_port != primary_console_port
+        || st.requested_type != requested_type
+        || st.virtual_type != virtual_type;
+    st.console_port_mask = console_port_mask;
+    st.primary_console_port = primary_console_port;
+    st.requested_type = requested_type;
+    st.virtual_type = virtual_type;
+    if (changed) c.client_assignment_seq[sub_idx]++;
+}
+
 bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns::ControllerStatusPacket& packet) {
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return false;
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
@@ -270,6 +554,231 @@ bool get_controller_status_packet(int client_idx, int sub_idx, uint32_t& seq, ns
     return true;
 }
 
+bool get_client_assignment_packet(int client_idx, int sub_idx, uint8_t active_clients,
+                                  uint8_t free_virtual_slots, uint32_t& seq,
+                                  ns::ClientAssignmentPacket& packet) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return false;
+    const bool switch_asleep = switch2_sleep_confirmed();
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    const ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return false;
+    seq = c.client_assignment_seq[sub_idx];
+    packet = ns::ClientAssignmentPacket{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+    packet.server_slot = static_cast<uint8_t>(client_idx);
+    packet.subpad = static_cast<uint8_t>(sub_idx);
+    packet.console_port_mask = c.client_assignment[sub_idx].console_port_mask;
+    packet.primary_console_port = c.client_assignment[sub_idx].primary_console_port;
+    packet.requested_type = c.client_assignment[sub_idx].requested_type;
+    packet.virtual_type = c.client_assignment[sub_idx].virtual_type;
+    if (packet.console_port_mask != 0) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.active_clients = active_clients;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
+    packet.free_virtual_slots = free_virtual_slots;
+    return true;
+}
+
+int console_port_for_client_subpad(int client_idx, int sub_idx) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) return -1;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    const ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return -1;
+    const uint8_t primary = c.client_assignment[sub_idx].primary_console_port;
+    if (primary < HID_PORT_COUNT) return primary;
+    const uint8_t mask = c.client_assignment[sub_idx].console_port_mask;
+    for (int port = 0; port < HID_PORT_COUNT; ++port) {
+        if (mask & (1u << port)) return port;
+    }
+    return -1;
+}
+
+bool client_subpad_for_console_port(int console_port, int& client_idx, int& sub_idx) {
+    client_idx = -1;
+    sub_idx = -1;
+    if (console_port < 0 || console_port >= HID_PORT_COUNT) return false;
+    const uint8_t bit = static_cast<uint8_t>(1u << console_port);
+    for (int cidx = 0; cidx < MAX_CLIENTS; ++cidx) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[cidx]);
+        const ClientSession& c = g_ctx.clients[cidx];
+        if (!c.active) continue;
+        for (int sidx = 0; sidx < 4; ++sidx) {
+            if (c.client_assignment[sidx].console_port_mask & bit) {
+                client_idx = cidx;
+                sub_idx = sidx;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void publish_amiibo_request(int client_idx, int sub_idx, bool requested) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][ui-event] invalid route client={} subpad={} requested={}",
+                         client_idx, sub_idx, requested);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][ui-event] client={} inactive; requested={} dropped", client_idx, requested);
+        return;
+    }
+    // Only create a new event for an actual state transition. Send the same
+    // event a few times because this UI control message travels over UDP.
+    if (c.amiibo_request_seq[sub_idx] != 0 && c.amiibo_requested[sub_idx] == requested) {
+        // Periodic assignment reconciliation intentionally reasserts the
+        // current NFC UI state. This is an expected no-op, not a protocol
+        // event, so keep it silent even in verbose mode. Logging every
+        // duplicate hides the command/response trace we actually need.
+        return;
+    }
+    c.amiibo_requested[sub_idx] = requested;
+    c.amiibo_request_pending[sub_idx] = true;
+    c.amiibo_request_repeats[sub_idx] = 3;
+    if (++c.amiibo_request_seq[sub_idx] == 0) ++c.amiibo_request_seq[sub_idx];
+    if (g_ctx.verbose)
+        std::println("[s2][nfc][ui-event] t_us={} client={} subpad={} requested={} seq={} repeats=3 source={}",
+                     now_us(), client_idx, sub_idx, requested, c.amiibo_request_seq[sub_idx],
+                     input_source_name(c.source));
+}
+
+void publish_amiibo_writeback(int client_idx, int sub_idx, const uint8_t* data, uint16_t len) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || sub_idx < 0 || sub_idx >= 4 || !data || len == 0) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][writeback] invalid publish client={} subpad={} len={} data_ptr={}",
+                         client_idx, sub_idx, len, data != nullptr);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active || c.source != InputSource::Udp) {
+        if (g_ctx.verbose)
+            std::println(stderr, "[s2][nfc][writeback] dropped client={} active={} source={} len={}",
+                         client_idx, c.active, input_source_name(c.source), len);
+        return;
+    }
+    const uint16_t safe_len = static_cast<uint16_t>(
+        std::min<size_t>(len, ns::AMIIBO_EXTENDED_DUMP_SIZE));
+    c.amiibo_writeback_pending[sub_idx] = true;
+    c.amiibo_writeback_len[sub_idx] = safe_len;
+    std::memcpy(c.amiibo_writeback_data[sub_idx], data, safe_len);
+    if (g_ctx.verbose)
+        std::println("[s2][nfc][writeback] t_us={} queued client={} subpad={} len={}",
+                     now_us(), client_idx, sub_idx, safe_len);
+}
+
+void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS) return;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active) return;
+    for (int s = 0; s < 4; ++s) {
+        ns::RosterEntry e = packet.pads[s];
+        e.present = e.present ? 1 : 0;
+        e.name[ns::ROSTER_NAME_CAP - 1] = '\0';
+        c.source_pads[s] = e;
+    }
+    g_ctx.roster_last_refresh_us.store(0, std::memory_order_relaxed);
+}
+
+static bool roster_entry_equal(const ns::RosterEntry& a, const ns::RosterEntry& b) {
+    return a.present == b.present && a.has_gyro == b.has_gyro
+        && std::memcmp(a.name, b.name, ns::ROSTER_NAME_CAP) == 0;
+}
+
+uint64_t refresh_roster_seq(uint64_t now, bool force) {
+    if (now == 0) now = now_us();
+    const uint64_t last_refresh = g_ctx.roster_last_refresh_us.load(std::memory_order_relaxed);
+    if (!force && last_refresh != 0 && elapsed_us_saturated(now, last_refresh) < SERVER_STATE_REFRESH_MIN_US) {
+        return g_ctx.roster_seq.load(std::memory_order_relaxed);
+    }
+    g_ctx.roster_last_refresh_us.store(now, std::memory_order_relaxed);
+
+    ns::RosterEntry built[HID_PORT_COUNT]{};
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        const ClientSession& c = g_ctx.clients[i];
+        if (!c.active) continue;
+        for (int s = 0; s < 4; ++s) {
+            const uint8_t port = c.client_assignment[s].primary_console_port;
+            if (port >= HID_PORT_COUNT) continue;
+            if (built[port].present != 1) {
+                if (c.source_pads[s].present && c.source_pads[s].name[0] != '\0') {
+                    built[port] = c.source_pads[s];
+                    built[port].present = 1;
+                } else {
+                    built[port].present = 1;
+                    const char* default_name = (c.source == InputSource::WebSocket) ? "Mobile" : "Controller";
+                    std::strncpy(built[port].name, default_name, sizeof(built[port].name) - 1);
+                    built[port].name[sizeof(built[port].name) - 1] = '\0';
+                }
+            }
+            const uint8_t mask = c.client_assignment[s].console_port_mask;
+            for (int h = 0; h < HID_PORT_COUNT; ++h) {
+                if (h != port && (mask & (1 << h))) {
+                    built[h].present = 2;
+                    built[h].has_gyro = 0;
+                    std::memset(built[h].name, 0, sizeof(built[h].name));
+                }
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(g_ctx.roster_mtx);
+    bool changed = false;
+    for (int h = 0; h < HID_PORT_COUNT; ++h) {
+        if (!roster_entry_equal(g_ctx.roster[h], built[h])) { changed = true; break; }
+    }
+    if (changed) {
+        for (int h = 0; h < HID_PORT_COUNT; ++h) g_ctx.roster[h] = built[h];
+        return g_ctx.roster_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    return g_ctx.roster_seq.load(std::memory_order_relaxed);
+}
+
+uint64_t get_roster_packet(ns::RosterPacket& packet) {
+    packet = ns::RosterPacket{};
+    std::lock_guard<std::mutex> lk(g_ctx.roster_mtx);
+    for (int h = 0; h < HID_PORT_COUNT; ++h) packet.ports[h] = g_ctx.roster[h];
+    return g_ctx.roster_seq.load(std::memory_order_relaxed);
+}
+
+ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_clients,
+                                                              uint8_t free_virtual_slots,
+                                                              bool switch_asleep) {
+    ns::ClientAssignmentPacket packet{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_SERVER_FULL;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    packet.subpad = 0;
+    packet.console_port_mask = 0;
+    packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    packet.active_clients = active_clients;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
+    packet.free_virtual_slots = free_virtual_slots;
+    return packet;
+}
+
+ns::ClientAssignmentPacket make_server_profile_unsupported_assignment_packet(uint8_t active_clients,
+                                                                              uint8_t free_virtual_slots,
+                                                                              bool switch_asleep) {
+    ns::ClientAssignmentPacket packet{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    packet.subpad = 0;
+    packet.console_port_mask = 0;
+    packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    packet.active_clients = active_clients;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
+    packet.free_virtual_slots = free_virtual_slots;
+    return packet;
+}
+
 bool any_client_source_active(InputSource source, uint64_t now) {
     if (now == 0) now = now_us();
     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -284,6 +793,7 @@ void repair_future_client_timestamp(ClientSession& c, uint64_t now) {
     if (c.active && (c.last_rx_us == 0 || c.last_rx_us > now)) c.last_rx_us = now;
 }
 
+
 static HIDReport* get_pad_report(ClientSession& c, int subpad) {
     if (subpad == 0) return &c.report.p1;
     if (subpad == 1) return &c.report.p2;
@@ -291,6 +801,9 @@ static HIDReport* get_pad_report(ClientSession& c, int subpad) {
     if (subpad == 3) return &c.report.p4;
     return nullptr;
 }
+
+
+
 
 void clear_motion(ClientSession& c, int subpad) {
     auto pad = get_pad_report(c, subpad);
@@ -326,7 +839,7 @@ void set_motion_samples(ClientSession& c, int subpad, const MotionReport samples
 bool rate_allow(uint32_t ip);
 bool server_macro_start(int client_idx, int subpad, const std::string& json_or_commands);
 
-static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpad, uint32_t total_len, uint32_t chunk_count, uint32_t chunk_index, std::span<const uint8_t> payload) {
+static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpad, ns::macro::UploadKind kind, uint32_t total_len, uint32_t chunk_count, uint32_t chunk_index, std::span<const uint8_t> payload) {
     if (chunk_count == 0 || chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX
             || chunk_index >= chunk_count || total_len > ns::macro::UDP_TEXT_MAX) {
         return true;
@@ -336,11 +849,12 @@ static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpa
     {
         std::lock_guard<std::mutex> lk(g_ctx.server_macro_upload_mtx);
         ServerMacroUploadRuntime& up = g_ctx.server_macro_uploads[client_idx];
-        if (!up.active || up.upload_id != upload_id) {
+        if (!up.active || up.upload_id != upload_id || up.kind != kind) {
             up = ServerMacroUploadRuntime{};
             up.active = true;
             up.upload_id = upload_id;
             up.subpad = (uint8_t)(subpad < 4 ? subpad : 0);
+            up.kind = kind;
             up.total_len = total_len;
             up.chunk_count = chunk_count;
             up.chunks.assign(chunk_count, {}); up.got.assign(chunk_count, 0);
@@ -359,8 +873,10 @@ static bool handle_macro_chunk(int client_idx, uint32_t upload_id, uint8_t subpa
         }
     }
     if (!completed.empty()) {
-        if (g_ctx.verbose) std::println("[macro] received chunked macro {} bytes", completed.size());
-        server_macro_start(client_idx, subpad, completed);
+        if (kind == ns::macro::UploadKind::Macro) {
+            if (g_ctx.verbose) std::println("[macro] received chunked macro {} bytes", completed.size());
+            server_macro_start(client_idx, subpad, completed);
+        }
     }
     return true;
 }
@@ -373,6 +889,7 @@ int server_macro_client_for_sender(const sockaddr_in& sender) {
             g_ctx.clients[i].last_rx_us = now; return i;
         }
     }
+    if (active_client_count(now) >= configured_client_capacity() || free_virtual_slot_count(now) <= 0) return -1;
     return allocate_client_session(now, &sender, false, InputSource::Udp);
 }
 
@@ -382,9 +899,11 @@ bool server_macro_handle_chunk_packet(std::span<const uint8_t> data, const socka
     std::ranges::copy(data.subspan(0, sizeof(h)), (uint8_t*)&h);
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION || h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len + HMAC_TAG_SIZE) return true;
+    if (h.reserved != static_cast<uint8_t>(ns::macro::UploadKind::Macro)) return true;
+    const auto kind = static_cast<ns::macro::UploadKind>(h.reserved);
     if (hmac_verify({g_ctx.hmac_key, 32}, data.subspan(0, ns::macro::CHUNK_HEADER_SIZE + h.chunk_len), data.subspan(ns::macro::CHUNK_HEADER_SIZE + h.chunk_len, HMAC_TAG_SIZE)) != 0 || !rate_allow(sender.sin_addr.s_addr)) return true;
     int cidx = server_macro_client_for_sender(sender);
-    if (cidx >= 0) handle_macro_chunk(cidx, h.upload_id, h.subpad, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
+    if (cidx >= 0) handle_macro_chunk(cidx, h.upload_id, h.subpad, kind, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
     return true;
 }
 
@@ -394,8 +913,9 @@ bool server_macro_handle_ws_chunk_packet(int client_idx, std::span<const uint8_t
     std::ranges::copy(data.subspan(0, sizeof(h)), (uint8_t*)&h);
     if (h.magic != ns::macro::UDP_CHUNK_MAGIC) return false;
     if (h.version != PROTO_VERSION && h.version != WEB_PROTO_VERSION) return true;
+    if (h.reserved != static_cast<uint8_t>(ns::macro::UploadKind::Macro)) return true;
     if (h.total_len > ns::macro::UDP_TEXT_MAX || h.chunk_len > ns::macro::UDP_CHUNK_MAX || h.chunk_count == 0 || h.chunk_count > ns::macro::UDP_CHUNK_COUNT_MAX || h.chunk_index >= h.chunk_count || data.size() != ns::macro::CHUNK_HEADER_SIZE + h.chunk_len) return true;
-    return handle_macro_chunk(client_idx, h.upload_id, h.subpad, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
+    return handle_macro_chunk(client_idx, h.upload_id, h.subpad, ns::macro::UploadKind::Macro, h.total_len, h.chunk_count, h.chunk_index, data.subspan(ns::macro::CHUNK_HEADER_SIZE, h.chunk_len));
 }
 
 bool server_macro_running(int client_idx, int subpad) {
@@ -415,6 +935,7 @@ void server_macro_apply(int client_idx, int subpad, HoriHIDReport& live) {
     ns::macro::Step step{};
     if (!ns::macro::step_at(rt.steps, (now_us() - rt.start_us) / 1000ULL, step)) { rt.running = false; return; }
     live.buttons |= step.buttons;
+    live.vendor |= step.extra_buttons;
     if (step.hat != HAT_NEUTRAL && live.hat == HAT_NEUTRAL) live.hat = step.hat;
     if (step.has_lstick) { live.lx = step.lx; live.ly = step.ly; }
     if (step.has_rstick) { live.rx = step.rx; live.ry = step.ry; }
@@ -449,17 +970,37 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.rumble_active[s] = false; c.rumble_seq[s]++;
         c.controller_status[s] = ControllerStatusState{};
         c.controller_status_seq[s]++;
+        c.client_assignment[s] = ClientAssignmentState{};
+        c.client_assignment_seq[s]++;
         c.udp_last_rumble_seq[s] = c.rumble_seq[s];
         c.udp_last_controller_status_seq[s] = c.controller_status_seq[s];
+        c.udp_last_client_assignment_seq[s] = 0;
         c.pad_present[s] = false; c.pad_last_present_us[s] = 0;
+        c.amiibo_request_pending[s] = false;
+        c.amiibo_requested[s] = false;
+        c.amiibo_request_repeats[s] = 0;
+        c.amiibo_request_seq[s] = 0;
+        c.amiibo_writeback_pending[s] = false;
+        c.amiibo_writeback_len[s] = 0;
+        c.joycon_mouse_active[s] = false;
+        c.joycon_mouse_first_packet[s] = true;
+        c.joycon_mouse_last_seq[s] = 0;
+        c.joycon_mouse_last_rx_us[s] = 0;
+        c.joycon_mouse_pending_x[s] = 0;
+        c.joycon_mouse_pending_y[s] = 0;
+        c.joycon_mouse_surface[s] = 0;
     }
+    c.udp_last_server_state_seq = 0;
 }
 
 void reset_client_session_locked(ClientSession& c) {
     c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
-    c.report.reset(); c.has_new_report = false;
+    c.report.reset(); c.has_new_report = false; c.report_generation = 0;
     clear_all_motion(c);
     c.uses_pad_presence = c.udp_rumble_enabled = false;
+    for (int s = 0; s < 4; ++s) c.source_pads[s] = ns::RosterEntry{};
+    c.udp_last_roster_seq = 0;
+    c.udp_last_roster_send_us = 0;
     reset_client_slot_streams_locked(c);
 }
 
@@ -483,7 +1024,9 @@ bool reset_client_session_if_source(int client_idx, InputSource source) {
             reset = true;
         }
     }
-    if (reset) server_macro_stop_all_for_client(client_idx);
+    if (reset) {
+        server_macro_stop_all_for_client(client_idx);
+    }
     return reset;
 }
 
@@ -493,10 +1036,90 @@ bool client_session_is_source(int client_idx, InputSource source) {
     return g_ctx.clients[client_idx].active && g_ctx.clients[client_idx].source == source;
 }
 
+bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& packet, uint64_t now) {
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || packet.subpad >= 4) return false;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active || c.source != InputSource::Udp) return false;
+
+    const int subpad = packet.subpad;
+    const uint32_t seq = packet.seq;
+    if (!c.joycon_mouse_first_packet[subpad]
+            && static_cast<int32_t>(seq - c.joycon_mouse_last_seq[subpad]) <= 0) {
+        return false;
+    }
+    c.joycon_mouse_first_packet[subpad] = false;
+    c.joycon_mouse_last_seq[subpad] = seq;
+    c.joycon_mouse_last_rx_us[subpad] = now;
+    c.joycon_mouse_surface[subpad] = packet.surface;
+
+    const bool active = (packet.flags & ns::JOYCON_MOUSE_FLAG_ACTIVE) != 0;
+    const bool was_active = c.joycon_mouse_active[subpad];
+    c.joycon_mouse_active[subpad] = active;
+    if (g_ctx.verbose && active != was_active) {
+        std::println("[s2][mouse] UDP stream {} for client {} subpad {}",
+                     active ? "enabled" : "disabled", client_idx, subpad);
+    }
+    if (!active) {
+        c.joycon_mouse_pending_x[subpad] = 0;
+        c.joycon_mouse_pending_y[subpad] = 0;
+        return true;
+    }
+
+    // Bound hostile/corrupt input without losing any realistic mouse motion.
+    constexpr int64_t MAX_PENDING = 1LL << 30;
+    c.joycon_mouse_pending_x[subpad] = std::clamp<int64_t>(
+        c.joycon_mouse_pending_x[subpad] + packet.delta_x,
+        -MAX_PENDING, MAX_PENDING);
+    c.joycon_mouse_pending_y[subpad] = std::clamp<int64_t>(
+        c.joycon_mouse_pending_y[subpad] + packet.delta_y,
+        -MAX_PENDING, MAX_PENDING);
+    return true;
+}
+
+JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
+                                              uint64_t now, bool feature_enabled) {
+    JoyconMouseSample out{};
+    if (client_idx < 0 || client_idx >= MAX_CLIENTS || subpad < 0 || subpad >= 4) return out;
+    std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+    ClientSession& c = g_ctx.clients[client_idx];
+    if (!c.active || c.source != InputSource::Udp) return out;
+
+    if (!c.joycon_mouse_active[subpad]
+            || c.joycon_mouse_last_rx_us[subpad] == 0
+            || elapsed_us_saturated(now, c.joycon_mouse_last_rx_us[subpad]) > JOYCON_MOUSE_TIMEOUT_US) {
+        c.joycon_mouse_active[subpad] = false;
+        c.joycon_mouse_pending_x[subpad] = 0;
+        c.joycon_mouse_pending_y[subpad] = 0;
+        return out;
+    }
+
+    // Do not queue movement while the console has the mouse feature disabled;
+    // otherwise enabling it later would produce a large stale cursor jump.
+    if (!feature_enabled) {
+        c.joycon_mouse_pending_x[subpad] = 0;
+        c.joycon_mouse_pending_y[subpad] = 0;
+        return out;
+    }
+
+    const int64_t dx = std::clamp<int64_t>(c.joycon_mouse_pending_x[subpad],
+                                            INT16_MIN, INT16_MAX);
+    const int64_t dy = std::clamp<int64_t>(c.joycon_mouse_pending_y[subpad],
+                                            INT16_MIN, INT16_MAX);
+    c.joycon_mouse_pending_x[subpad] -= dx;
+    c.joycon_mouse_pending_y[subpad] -= dy;
+    out.dx = static_cast<int16_t>(dx);
+    out.dy = static_cast<int16_t>(dy);
+    out.surface = c.joycon_mouse_surface[subpad];
+    out.active = true;
+    return out;
+}
+
 int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad_presence,
                             InputSource source, int preferred_client_idx) {
+    const int capacity = configured_client_capacity();
     auto try_slot = [&](int i) -> bool {
-        if (i < 0 || i >= MAX_CLIENTS) return false;
+        if (i < 0 || i >= capacity) return false;
 
         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
         repair_future_client_timestamp(g_ctx.clients[i], now);
@@ -518,11 +1141,11 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         return true;
     };
 
-    if (source == InputSource::Bluetooth && preferred_client_idx >= 0 && preferred_client_idx < MAX_CLIENTS) {
+    if (source == InputSource::Bluetooth && preferred_client_idx >= 0 && preferred_client_idx < capacity) {
         if (try_slot(preferred_client_idx)) return preferred_client_idx;
     }
 
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+    for (int i = 0; i < capacity; ++i) {
         if (i == preferred_client_idx) continue;
         if (try_slot(i)) return i;
     }

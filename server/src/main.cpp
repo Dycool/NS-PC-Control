@@ -6,11 +6,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <format>
 #include <iostream>
 #include <mutex>
 #include <print>
@@ -53,8 +56,18 @@ static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxe
 #include "gadget_wakeup.hpp"
 #include "writers.hpp"
 #include "web_server.hpp"
+#include "udp_feedback.hpp"
+#include "udp_audio.hpp"
 #include "bluetooth_input.hpp"
 #include "bluetooth_manager.hpp"
+
+static void on_fatal_signal(int sig) {
+    static const char msg[] = "[gadget] fatal signal; unbinding USB gadget\n";
+    ssize_t n = write(STDERR_FILENO, msg, sizeof(msg) - 1); (void)n;
+    emergency_unbind_udc();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 // ===========================================================================
 // UPnP port mapping (optional)
@@ -163,6 +176,7 @@ int main(int argc, char** argv) {
         std::string s = argv[i] ? argv[i] : "";
         if      (s == "-wake")                  s = "--wake";
         else if (s == "-hori")                  s = "--hori";
+        else if (s == "-s2")                    s = "--s2";
         else if (s == "-bt" || s == "--bt") {
             std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled "
                                  "by default. Use -no-bt to disable it.");
@@ -184,6 +198,8 @@ int main(int argc, char** argv) {
     bool        pair_explicit     = false;
     bool        no_bt             = false;
     bool        legacy_p          = false;
+    bool        use_hori          = false;
+    bool        use_s2            = false;
     int         web_port          = 8080;
 
     CLI::App app{"ns-backend - Switch Input Server\n\n"
@@ -194,10 +210,11 @@ int main(int argc, char** argv) {
     app.add_flag  ("-v",       g_ctx.verbose,              "Enable verbose output");
     app.add_flag  ("--wake",   g_ctx.switch2_wakeup_setup_requested,
                                                            "Run interactive Joy-Con 2 wake setup and exit");
-    app.add_flag  ("--hori",   g_ctx.legacy_mode,          "Expose the legacy 8-byte HORI controller gadget");
     app.add_flag  ("--pair",   pair_explicit,              "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
     app.add_flag  ("--no-bt",  no_bt,                      "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
-    app.add_flag  ("--upnp",   do_upnp,                   "Forward UDP port via UPnP");
+    app.add_flag  ("--hori",   use_hori,                   "Use legacy HORI USB controller identity");
+    app.add_flag  ("--s2",     use_s2,                     "Use Switch 2 USB controller identity");
+    app.add_flag  ("--upnp",   do_upnp,                    "Forward UDP port via UPnP");
     auto opt_w = app.add_option("-w", "Serve browser webapp on this port")->expected(0, 1);
     app.add_flag  ("-p",       legacy_p,                   "")->group("");
 
@@ -219,6 +236,10 @@ int main(int argc, char** argv) {
     }
     if (legacy_p) {
         std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead");
+        return 1;
+    }
+    if (use_hori && use_s2) {
+        std::println(stderr, "error: --hori and --s2 are mutually exclusive");
         return 1;
     }
     if (!bind_arg.empty() && !parse_bind_arg(bind_arg, bind_addr, port)) {
@@ -274,6 +295,14 @@ int main(int argc, char** argv) {
     }
 
     randomize_controller_identity();
+    // Default is Switch 1. The only runtime choices are explicit startup flags:
+    //   --s2   => Switch 2 USB identity/profile family
+    //   --hori => legacy HORI USB identity/profile family
+    const UsbControllerFamily selected_usb_family = use_s2 ? UsbControllerFamily::Switch2
+        : (use_hori ? UsbControllerFamily::Hori : UsbControllerFamily::Switch1);
+    // One Raspberry Pi UDC is one USB device. --s2 therefore exposes one
+    // native Switch 2 controller only; multiplayer remains available in S1 mode.
+    configure_usb_controller_family(selected_usb_family);
     if (!run_gadget_setup_if_needed(true, "startup gadget recreation requested")) {
         std::println(stderr, "[gadget] Fatal: USB gadget setup failed.");
         return 1;
@@ -295,6 +324,16 @@ int main(int argc, char** argv) {
     sigemptyset(&sa_pipe.sa_mask);
     sa_pipe.sa_flags = 0;
     sigaction(SIGPIPE, &sa_pipe, nullptr);
+
+    struct sigaction sa_fatal{};
+    sa_fatal.sa_handler = on_fatal_signal;
+    sigemptyset(&sa_fatal.sa_mask);
+    sa_fatal.sa_flags = SA_RESETHAND;
+    sigaction(SIGSEGV, &sa_fatal, nullptr);
+    sigaction(SIGABRT, &sa_fatal, nullptr);
+    sigaction(SIGBUS,  &sa_fatal, nullptr);
+    sigaction(SIGFPE,  &sa_fatal, nullptr);
+    sigaction(SIGILL,  &sa_fatal, nullptr);
 
     // -----------------------------------------------------------------------
     // UDP socket setup
@@ -323,6 +362,8 @@ int main(int argc, char** argv) {
         perror("bind"); close(sock); return 1;
     }
 
+    s2_udp_audio_start(sock);
+
     // -----------------------------------------------------------------------
     // Worker threads
     // -----------------------------------------------------------------------
@@ -334,9 +375,8 @@ int main(int argc, char** argv) {
     // Startup message
     // -----------------------------------------------------------------------
     if (g_ctx.verbose) {
-        std::println("UDP {}:{} writer={} Hz mode={}",
-                     bind_addr, port, PRO_WRITER_HZ,
-                     g_ctx.legacy_mode ? "hori" : "modern");
+        std::println("UDP {}:{} writer={} Hz mode=modern",
+                     bind_addr, port, PRO_WRITER_HZ);
     }
 
     std::string start_msg = std::format("Started ns-backend server on {}:{}", bind_addr, port);
@@ -346,7 +386,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> extras;
     if (pair_explicit)                    extras.push_back("pairing enabled");
     if (no_bt)                            extras.push_back("Bluetooth disabled");
-    if (g_ctx.legacy_mode)                extras.push_back("HORI mode");
+    if (use_hori)                         extras.push_back("HORI USB mode");
+    if (use_s2)                           extras.push_back("Switch 2 USB mode (single native controller)");
     if (do_upnp)                          extras.push_back("UPnP mapping");
     if (g_ctx.switch2_wake_adv_enabled)   extras.push_back("Switch 2 wake armed");
     if (g_ctx.verbose)                    extras.push_back("verbose");
@@ -368,8 +409,9 @@ int main(int argc, char** argv) {
     // Main UDP receive loop
     // -----------------------------------------------------------------------
     std::vector<uint8_t> udp_rx(
-        std::max(UDP_RX_MAX_PACKET_SIZE,
-                 ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE));
+        std::max({UDP_RX_MAX_PACKET_SIZE,
+                  ns::S2_AUDIO_PACKET_SIZE,
+                  ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE}));
 
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
@@ -404,22 +446,76 @@ int main(int argc, char** argv) {
                 memcpy(&probe, udp_rx.data(), sizeof(probe));
                 if (probe.magic == SERVER_INFO_MAGIC && probe.version == SERVER_INFO_VERSION) {
                     ServerInfoReply reply{
-                        .backend        = static_cast<uint8_t>(g_ctx.legacy_mode
-                                              ? SERVER_BACKEND_LEGACY : SERVER_BACKEND_PRO),
-                        .udp_interval_ms = static_cast<uint16_t>(g_ctx.legacy_mode
-                                              ? LEGACY_UDP_INTERVAL_MS : PRO_UDP_INTERVAL_MS),
-                        .udp_hz         = static_cast<uint16_t>(g_ctx.legacy_mode
-                                              ? LEGACY_UDP_HZ : PRO_UDP_HZ),
+                        .backend        = static_cast<uint8_t>(SERVER_BACKEND_PRO),
+                        .udp_interval_ms = static_cast<uint16_t>(PRO_UDP_INTERVAL_MS),
+                        .udp_hz         = static_cast<uint16_t>(PRO_UDP_HZ),
                     };
                     const uint64_t reply_now = now_us();
+                    const int free_slots_now = free_virtual_slot_count(reply_now);
+                    const int active_now = active_client_count(reply_now);
                     if (switch2_sleep_confirmed(reply_now)
                             && switch2_dormant_udp_endpoint_matches(sender)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
                     }
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH2_MODE;
+                        reply.reserved[0] |= SERVER_INFO_FLAG_S2_AUDIO;
+                    }
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Hori) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_HORI_MODE;
+                    }
+                    if (free_slots_now <= 0 || active_now >= configured_client_capacity()) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_SERVER_FULL;
+                    }
+                    reply.reserved[1] = static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity()));
+                    reply.reserved[2] = static_cast<uint8_t>(configured_client_capacity());
+                    reply.reserved[3] = static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count()));
                     sendto(sock, &reply, sizeof(reply), 0,
                            reinterpret_cast<const sockaddr*>(&sender), slen);
                     continue;
                 }
+            }
+
+            // --- Native Joy-Con 2 mouse motion (desktop ns-client only) ---
+            if (bytes == static_cast<ssize_t>(sizeof(ns::JoyconMousePacket))) {
+                uint32_t mouse_magic = 0;
+                std::memcpy(&mouse_magic, udp_rx.data(), sizeof(mouse_magic));
+                if (mouse_magic == ns::JOYCON_MOUSE_MAGIC) {
+                    if (hmac_verify({g_ctx.hmac_key, 32},
+                                    {udp_rx.data(), ns::JOYCON_MOUSE_AUTH_SIZE},
+                                    {udp_rx.data() + ns::JOYCON_MOUSE_AUTH_SIZE, HMAC_TAG_SIZE}) != 0) {
+                        if (g_ctx.verbose) std::println("bad Joy-Con mouse HMAC, dropped");
+                        continue;
+                    }
+                    if (!rate_allow(sender.sin_addr.s_addr)) continue;
+
+                    ns::JoyconMousePacket mouse{};
+                    std::memcpy(&mouse, udp_rx.data(), sizeof(mouse));
+                    if (mouse.version != ns::JOYCON_MOUSE_VERSION || mouse.subpad >= 4) continue;
+
+                    int client_idx = -1;
+                    for (int i = 0; i < MAX_CLIENTS; ++i) {
+                        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                        if (g_ctx.clients[i].active
+                                && g_ctx.clients[i].source == InputSource::Udp
+                                && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr
+                                && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                            client_idx = i;
+                            break;
+                        }
+                    }
+                    if (client_idx >= 0) {
+                        update_joycon_mouse_stream(client_idx, mouse, now_us());
+                    }
+                    continue;
+                }
+            }
+
+
+
+            if (s2_udp_audio_handle_packet(
+                    std::span<const uint8_t>(udp_rx.data(), static_cast<size_t>(bytes)), sender)) {
+                continue;
             }
 
             // --- Macro chunk ---
@@ -428,6 +524,84 @@ int main(int argc, char** argv) {
                 memcpy(&mmagic, udp_rx.data(), 4);
                 if (mmagic == ns::macro::UDP_CHUNK_MAGIC) {
                     server_macro_handle_chunk_packet({udp_rx.data(), static_cast<size_t>(bytes)}, sender);
+                    continue;
+                }
+                if (mmagic == ns::AMIIBO_DATA_MAGIC) {
+                    ns::AmiiboDataPacket ad{};
+                    memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
+                    // AmiiboDataPacket is packed for the UDP wire format. Copy
+                    // multi-byte members before formatting/using them so C++ does
+                    // not try to bind a reference to a potentially unaligned field.
+                    const uint16_t amiibo_data_len = ad.data_len;
+                    constexpr size_t amiibo_packet_header = offsetof(ns::AmiiboDataPacket, data);
+                    const bool amiibo_size_supported = amiibo_data_len == ns::AMIIBO_RAW_DUMP_SIZE
+                        || amiibo_data_len == ns::AMIIBO_EXTENDED_DUMP_SIZE;
+                    const bool amiibo_packet_complete = bytes >= 0
+                        && static_cast<size_t>(bytes) >= amiibo_packet_header + amiibo_data_len;
+                    if (g_ctx.verbose) {
+                        char addrbuf[INET_ADDRSTRLEN] = {};
+                        inet_ntop(AF_INET, &sender.sin_addr, addrbuf, sizeof(addrbuf));
+                        std::println("[s2][nfc][udp-rx] t_us={} from={}:{} packet_bytes={} subpad={} declared_data_len={}",
+                                     now_us(), addrbuf, ntohs(sender.sin_port), bytes,
+                                     static_cast<unsigned>(ad.subpad),
+                                     static_cast<unsigned>(amiibo_data_len));
+                    }
+                    if (!amiibo_size_supported || !amiibo_packet_complete) {
+                        if (g_ctx.verbose) {
+                            std::println(stderr,
+                                         "[s2][nfc][udp-rx] upload rejected before routing: supported_size={} complete_packet={} header_bytes={} declared_data_len={} packet_bytes={}",
+                                         amiibo_size_supported, amiibo_packet_complete,
+                                         amiibo_packet_header, static_cast<unsigned>(amiibo_data_len), bytes);
+                        }
+                        continue;
+                    }
+                    int client_idx = -1;
+                    for (int i = 0; i < MAX_CLIENTS; ++i) {
+                        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                        if (g_ctx.clients[i].active
+                                && g_ctx.clients[i].source == InputSource::Udp
+                                && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr
+                                && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                            client_idx = i;
+                            break;
+                        }
+                    }
+                    int port_for_source = client_idx >= 0
+                        ? console_port_for_client_subpad(client_idx, ad.subpad)
+                        : -1;
+                    if (g_ctx.verbose)
+                        std::println("[s2][nfc][udp-rx] resolved client={} subpad={} initial_port={}",
+                                     client_idx, ad.subpad, port_for_source);
+                    // Joy-Con L+R pair exposes NFC on the right virtual port.
+                    // If the primary assignment is the left port, route the
+                    // uploaded tag to any assigned port that actually has NFC.
+                    if (client_idx >= 0 && (port_for_source < 0 || !controller_port_supports_amiibo(port_for_source))) {
+                        uint8_t mask = 0;
+                        {
+                            std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
+                            mask = g_ctx.clients[client_idx].client_assignment[ad.subpad].console_port_mask;
+                        }
+                        for (int port = 0; port < HID_PORT_COUNT; ++port) {
+                            if ((mask & (1u << port)) && controller_port_supports_amiibo(port)) {
+                                port_for_source = port;
+                                break;
+                            }
+                        }
+                        if (g_ctx.verbose)
+                            std::println("[s2][nfc][udp-rx] NFC-capable fallback lookup mask=0x{:02x} resolved_port={}",
+                                         mask, port_for_source);
+                    }
+                    if (port_for_source >= 0) {
+                        if (g_ctx.verbose)
+                            std::println("[s2][nfc][udp-rx] forwarding upload client={} subpad={} -> port={} len={}",
+                                         client_idx, static_cast<unsigned>(ad.subpad), port_for_source,
+                                         static_cast<unsigned>(amiibo_data_len));
+                        set_amiibo_data_for_port(port_for_source, ad.data, amiibo_data_len);
+                    } else if (g_ctx.verbose) {
+                        std::println(stderr,
+                                     "[s2][nfc][udp-rx] upload dropped: no assigned NFC-capable port client={} subpad={}",
+                                     client_idx, ad.subpad);
+                    }
                     continue;
                 }
             }
@@ -470,6 +644,37 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // --- Client source controller names ---
+            if (bytes == static_cast<ssize_t>(sizeof(ns::ClientNamesPacket))) {
+                uint32_t nmagic = 0;
+                memcpy(&nmagic, udp_rx.data(), 4);
+                if (nmagic == ns::CLIENT_NAMES_MAGIC) {
+                    if (hmac_verify({g_ctx.hmac_key, 32},
+                                    {udp_rx.data(), ns::CLIENT_NAMES_AUTH_SIZE},
+                                    {udp_rx.data() + ns::CLIENT_NAMES_AUTH_SIZE, HMAC_TAG_SIZE}) == 0) {
+                        if (!rate_allow(sender.sin_addr.s_addr)) continue;
+                        ns::ClientNamesPacket names{};
+                        memcpy(&names, udp_rx.data(), sizeof(names));
+                        if (names.version == ns::SERVER_INFO_VERSION) {
+                            int cidx = -1;
+                            for (int i = 0; i < MAX_CLIENTS; ++i) {
+                                std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                                if (g_ctx.clients[i].active
+                                        && g_ctx.clients[i].source == InputSource::Udp
+                                        && g_ctx.clients[i].addr.sin_addr.s_addr == sender.sin_addr.s_addr
+                                        && g_ctx.clients[i].addr.sin_port == sender.sin_port) {
+                                    cidx = i; break;
+                                }
+                            }
+                            if (cidx >= 0) store_client_source_names(cidx, names);
+                        }
+                    } else if (g_ctx.verbose) {
+                        std::println("bad names HMAC, dropped");
+                    }
+                    continue;
+                }
+            }
+
             // --- Normal controller packet ---
             uint32_t src_ip = sender.sin_addr.s_addr;
             if (!rate_allow(src_ip)) continue;
@@ -493,6 +698,13 @@ int main(int argc, char** argv) {
             bool        pad_present[4] = {};
             if (!parse_client_packet(udp_rx.data(), bytes, flags, seq, report, pad_present)) continue;
 
+            // Native S2 mode has one source/input only. New clients already send
+            // P1 exclusively, but enforce it server-side for compatibility.
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                report.p2.reset(); report.p3.reset(); report.p4.reset();
+                pad_present[1] = pad_present[2] = pad_present[3] = false;
+            }
+
             // --- Disconnect ---
             if (flags & FLAG_DISCONNECT) {
                 int cidx = -1;
@@ -506,6 +718,7 @@ int main(int argc, char** argv) {
                     }
                 }
                 forget_switch2_dormant_udp_endpoint(sender);
+                s2_udp_audio_forget_endpoint(sender);
                 if (cidx >= 0) {
                     reset_client_session(cidx);
                     rearm_switch2_wake_after_client_disconnect();
@@ -532,6 +745,17 @@ int main(int argc, char** argv) {
             }
 
             const bool dormant_endpoint = sleeping && switch2_dormant_udp_endpoint_matches(sender);
+            const bool unsupported_s2_pair = report_requests_unsupported_s2_pair(report, pad_present, true);
+            if (cidx >= 0 && unsupported_s2_pair) {
+                ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
+                    sleeping);
+                sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                reset_client_session(cidx);
+                if (g_ctx.verbose) std::println("[udp] refused Joy-Con L+R: native S2 mode supports one controller only");
+                continue;
+            }
             if (cidx == -1) {
                 if (dormant_endpoint) {
                     // This endpoint belonged to a pre-sleep client. Keep dropping
@@ -540,6 +764,39 @@ int main(int argc, char** argv) {
                     ++g_ctx.pkts_rx;
                     continue;
                 }
+
+                const int free_slots_now = free_virtual_slot_count(now);
+                const int active_now = active_client_count(now);
+                // Profile errors take priority over capacity errors so an L+R
+                // client always receives the actionable S2-mode explanation.
+                if (unsupported_s2_pair) {
+                    ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
+                        sleeping);
+                    sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                    if (g_ctx.verbose) std::println("[udp] refused Joy-Con L+R: native S2 mode supports one controller only");
+                    continue;
+                }
+                if (free_slots_now <= 0 || active_now >= configured_client_capacity()) {
+                    ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
+                        sleeping);
+                    sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                    if (g_ctx.verbose) std::println("server is full, refused UDP client");
+                    continue;
+                }
+                const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
+                if (required_slots > free_slots_now) {
+                    ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                        static_cast<uint8_t>(std::clamp(active_now, 0, configured_client_capacity())),
+                        static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
+                        sleeping);
+                    sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                    continue;
+                }
+
                 cidx = allocate_client_session(now, &sender, true, InputSource::Udp);
                 if (cidx >= 0) {
                     wake_on_new_client = true;
@@ -549,6 +806,11 @@ int main(int argc, char** argv) {
             }
 
             if (cidx == -1) {
+                ns::ClientAssignmentPacket full = make_server_full_assignment_packet(
+                    static_cast<uint8_t>(std::clamp(active_client_count(now), 0, configured_client_capacity())),
+                    static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
+                    sleeping);
+                sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
                 if (g_ctx.verbose) std::println("server is full, dropped");
                 continue;
             }
@@ -580,6 +842,7 @@ int main(int argc, char** argv) {
                         c.udp_rumble_enabled = true;
                         c.report             = report;
                         c.has_new_report     = true;
+                        ++c.report_generation;
 
                         const HIDReport* src_pads[4] = { &report.p1, &report.p2, &report.p3, &report.p4 };
                         HIDReport*       dst_pads[4] = { &c.report.p1, &c.report.p2, &c.report.p3, &c.report.p4 };
@@ -606,7 +869,7 @@ int main(int argc, char** argv) {
             if (wake_on_new_client) {
                 maybe_send_switch2_wake_advert("UDP client connected");
             }
-            flush_rumble_to_udp(sock, cidx);
+            flush_feedback_to_udp(sock, cidx);
         }
     }
 
@@ -617,6 +880,7 @@ int main(int argc, char** argv) {
 
     g_ctx.running.store(false, std::memory_order_relaxed);
     upnp_remove_mapping(port);
+    s2_udp_audio_stop();
     close(sock);
     std::cout << "." << std::flush;
 

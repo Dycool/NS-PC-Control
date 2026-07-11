@@ -46,15 +46,25 @@ int cli_main(const std::vector<std::string>& original_args) {
     for (const auto& a : original_args) if (a != "--cli") args.push_back(a);
     if (args.empty()) args.push_back("ns-client");
     if (args.size() < 2) {
-        std::println(stderr, "Usage: {} --cli <RASPBERRY_PI_IP[:PORT]> [--hori] [-m MACRO] [-k [single|override]]", args[0]);
+        std::println(stderr, "Usage: {} --cli <RASPBERRY_PI_IP[:PORT]> [-m MACRO] [-k [single|override]] [-c pro|joycon-l|joycon-r|joycon-lr] [--s2-audio|--no-s2-audio] [--s2-mic]", args[0]);
         return 1;
     }
 
-    std::string host_arg, macro_path, k_val = "single";
+    std::string host_arg, macro_path, k_val = "single", controller_type = "pro";
+    bool enable_s2_audio = false;
+    bool disable_s2_audio = false;
+    bool enable_s2_microphone = false;
     CLI::App app{"ns-client --cli"};
     app.add_option("host", host_arg, "Target IP[:PORT]")->required();
     auto* opt_m = app.add_option("-m,--macro", macro_path);
     auto* opt_k = app.add_option("-k,--keyboard", k_val)->expected(0, 1);
+    app.add_option("-c,--controller", controller_type, "Emulated controller: pro, joycon-l, joycon-r, or joycon-lr");
+    app.add_flag("--s2-audio", enable_s2_audio,
+                 "Enable Switch 2 audio playback on the default system output device");
+    app.add_flag("--no-s2-audio", disable_s2_audio,
+                 "Disable Switch 2 audio playback on the default system output device");
+    app.add_flag("--s2-mic", enable_s2_microphone,
+                 "Send the default system microphone to Switch 2 (disabled by default)");
 
     std::vector<const char*> argv_ptrs;
     for (const auto& a : args) argv_ptrs.push_back(a.c_str());
@@ -74,6 +84,25 @@ int cli_main(const std::vector<std::string>& original_args) {
 
     load_saved_bindings();
     load_saved_feature_toggles();
+    if (enable_s2_audio && disable_s2_audio) {
+        return std::println(stderr, "Choose only one of --s2-audio or --no-s2-audio"), 1;
+    }
+    if (enable_s2_audio) g_switch2AudioEnabled.store(true, std::memory_order_relaxed);
+    if (disable_s2_audio) {
+        g_switch2AudioEnabled.store(false, std::memory_order_relaxed);
+        g_switch2MicrophoneEnabled.store(false, std::memory_order_relaxed);
+    }
+    if (enable_s2_microphone) {
+        // A microphone is only valid as part of a headset, so CLI mic mode also
+        // enables the playback/headphones capability.
+        g_switch2AudioEnabled.store(true, std::memory_order_relaxed);
+        g_switch2MicrophoneEnabled.store(true, std::memory_order_relaxed);
+    }
+    if (controller_type == "pro") g_controllerType.store(ns::CONTROLLER_TYPE_PRO);
+    else if (controller_type == "joycon-l") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_L);
+    else if (controller_type == "joycon-r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_R);
+    else if (controller_type == "joycon-lr" || controller_type == "joycon-pair" || controller_type == "joycon-l+r") g_controllerType.store(ns::CONTROLLER_TYPE_JOYCON_PAIR);
+    else return std::println(stderr, "Unknown controller type: {}", controller_type), 1;
     g_keyboardMode.store(cli_kb);
     if (cli_kb != KB_OFF) {
         std::println("Keyboard mode enabled ({}) - {} Player 1",

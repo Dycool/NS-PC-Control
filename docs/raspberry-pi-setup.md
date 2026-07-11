@@ -95,6 +95,7 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStartPre=-/usr/sbin/rfkill unblock bluetooth
 ExecStartPre=-/sbin/modprobe uhid
 ExecStart=/usr/bin/chrt -f 99 /home/YOUR_USER/NS-PC-Control/server/ns-backend
+ExecStopPost=-/bin/sh -c 'echo > /sys/kernel/config/usb_gadget/ns_ctrl/UDC'
 Restart=always
 RestartSec=5
 User=root

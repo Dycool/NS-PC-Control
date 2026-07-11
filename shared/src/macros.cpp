@@ -116,6 +116,22 @@ std::uint16_t button_bit(const std::string& token) {
     return 0;
 }
 
+static std::uint8_t extra_button_bit(const std::string& token) {
+    struct TokenMap { std::string_view key; std::uint8_t bit; };
+    static constexpr TokenMap BUTTONS[] = {
+        {"C", ns::EXT_BUTTON_C}, {"BTN_C", ns::EXT_BUTTON_C},
+        {"GL", ns::EXT_BUTTON_GL}, {"BTN_GL", ns::EXT_BUTTON_GL},
+        {"GR", ns::EXT_BUTTON_GR}, {"BTN_GR", ns::EXT_BUTTON_GR},
+        {"SL", ns::EXT_BUTTON_SL}, {"BTN_SL", ns::EXT_BUTTON_SL},
+        {"SR", ns::EXT_BUTTON_SR}, {"BTN_SR", ns::EXT_BUTTON_SR},
+    };
+    const std::string name = upper(trim(token));
+    for (const auto& entry : BUTTONS) {
+        if (entry.key == name) return entry.bit;
+    }
+    return 0;
+}
+
 std::expected<void, std::string> apply_token(const std::string& raw_tok, Step& st,
                         bool& du, bool& dd, bool& dl, bool& dr,
                         bool& llu, bool& lld, bool& lll, bool& llr,
@@ -124,6 +140,8 @@ std::expected<void, std::string> apply_token(const std::string& raw_tok, Step& s
     if (tok.empty()) return {};
     std::uint16_t bit = button_bit(tok);
     if (bit) { st.buttons |= bit; return {}; }
+    std::uint8_t extra_bit = extra_button_bit(tok);
+    if (extra_bit) { st.extra_buttons |= extra_bit; return {}; }
 
     struct ActionMap {
         std::string_view key;
@@ -350,6 +368,7 @@ bool report_at(const std::vector<Step>& steps, std::uint64_t elapsed_ms, ns::Hor
     Step st{};
     if (!step_at(steps, elapsed_ms, st)) return false;
     out.buttons = st.buttons;
+    out.vendor = st.extra_buttons;
     out.hat = st.hat;
     if (st.has_lstick) { out.lx = st.lx; out.ly = st.ly; }
     if (st.has_rstick) { out.rx = st.rx; out.ry = st.ry; }
@@ -453,6 +472,22 @@ std::string buttons_to_text(std::uint16_t buttons) {
     return out;
 }
 
+static std::string extra_buttons_to_text(std::uint8_t buttons) {
+    struct BtnName { std::uint8_t bit; const char* name; };
+    static const BtnName names[] = {
+        {ns::EXT_BUTTON_C, "C"}, {ns::EXT_BUTTON_GL, "GL"}, {ns::EXT_BUTTON_GR, "GR"},
+        {ns::EXT_BUTTON_SL, "SL"}, {ns::EXT_BUTTON_SR, "SR"},
+    };
+    std::string out;
+    for (const auto& n : names) {
+        if (buttons & n.bit) {
+            if (!out.empty()) out += "+";
+            out += n.name;
+        }
+    }
+    return out;
+}
+
 RecordFrame record_frame_from_report(const ns::HoriHIDReport& report) {
     auto axis_dir = [](std::uint8_t v) -> std::int8_t {
         if (v < 80) return -1;
@@ -461,6 +496,7 @@ RecordFrame record_frame_from_report(const ns::HoriHIDReport& report) {
     };
     RecordFrame f{};
     f.buttons = report.buttons;
+    f.extra_buttons = static_cast<std::uint8_t>(report.vendor & ns::EXT_BUTTON_MASK);
     f.hat = report.hat;
     f.lx = axis_dir(report.lx);
     f.ly = axis_dir(report.ly);
@@ -476,6 +512,11 @@ void append_token(std::string& out, const char* token) {
 
 std::string record_frame_to_text(const RecordFrame& f) {
     std::string out = buttons_to_text(f.buttons);
+    const std::string extras = extra_buttons_to_text(f.extra_buttons);
+    if (!extras.empty()) {
+        if (!out.empty()) out += "+";
+        out += extras;
+    }
     switch (f.hat) {
         case ns::HAT_N:  append_token(out, "DPAD_UP"); break;
         case ns::HAT_NE: append_token(out, "DPAD_UP"); append_token(out, "DPAD_RIGHT"); break;

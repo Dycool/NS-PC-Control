@@ -1,54 +1,42 @@
 # Controller Emulation Modes
 
-The Raspberry Pi server can emulate **two different controller profiles**. Each has different trade-offs.
+The Raspberry Pi server now owns the USB controller family. The client only chooses the logical controller shape for input mapping; it no longer chooses HORI or Switch 2 mode directly.
 
 ---
 
-## Comparison
+## Server USB family flags
 
-| Feature | Hori Controller | Pro Controller |
-|---------|--------------------|---------------------|
-| HID report size | 8 bytes | 64 bytes |
-| **Buttons, D-Pad, Sticks** | Yes | Yes |
-| **Latency** | **Lowest** | Low |
-| **Gyroscope** | **No** | **Yes** |
-| **Rumble** | **No** | **Yes** |
+By default, the server starts as a Switch 1 Pro/Joy-Con-capable USB gadget.
 
-### Legacy Mode
+- `--s2` starts the server with the Switch 2 USB identity. Clients detect this during the server-info handshake and automatically request the Switch 2 protocol variants. The desktop client shows **Scan Amiibo** only while connected to an `--s2` server.
+- `--hori` starts the server with the legacy HORI USB identity.
+- `--hori` and `--s2` are mutually exclusive.
 
-- The **fastest** emulation mode: 8-byte HID reports mean minimal USB overhead.
-- No gyro, no rumble.
+Examples:
 
-### Modern Mode
-
-- Full 64-byte report emulation with the advanced feature path enabled.
-- **Gyroscope and accelerometer** data is sent from the  client to the target console.
-- **Rumble**: rumble commands from the console are forwarded back to the client.
+```bash
+sudo ns-backend --s2
+sudo ns-backend --hori
+```
 
 ---
 
-## Gyro & Rumble Requirements
+## Client logical controller shapes
 
-Gyro and rumble require **both** server and client support:
+The desktop/CLI client can choose these logical shapes:
 
-| Side | Requirements |
-|------|--------------|
-| **Server** | Run the default **pro controller mode** |
-| **Client** | Must use the extended UDP protocol |
-| **Controller** | Must support gyro (DS4, DualSense, compatible USB motion pads) or have rumble motors |
-> Pro controllers connected to android clients cannot send gyro and recieve rumble. This is a hardware limit from android.
+### 1. Pro Controller
+- The default shape.
+- Supports gyroscope and rumble when the selected server USB family supports them.
 
-Platform-specific gyro support:
+### 2. Joy-Con (L)
+- Maps input as a standalone left Joy-Con.
+- Useful for single-Joy-Con multiplayer games.
 
-- **Desktop clients:** SDL3 `SDL_GetGamepadSensorData` (gyro-capable controllers on Windows, Linux, and macOS)
-- **Android:** Device sensors via `SensorManager` and `Sensor.TYPE_GAME_ROTATION_VECTOR` / `TYPE_GYROSCOPE`
-- **iOS:** Device sensors via `CMDeviceMotion` (`CMRotationRate` and `CMAcceleration`), remapped identically to the Android pipeline
+### 3. Joy-Con (R)
+- Maps input as a standalone right Joy-Con.
+- Useful for standalone right-hand Joy-Con controls.
 
-> Gyro and rumble are **not available** in hori controller mode.
-
----
-
-### Use hori controller mode when:
-- You dont need gyro or rumble.
-- You only need buttons, sticks, and d-pad.
-- The default Pro controller mode is not working.
+### 4. Joy-Con L + R Pair
+- Maps one source controller as a combined Joy-Con pair.
+- The server expands it into two virtual USB devices, Joy-Con L and Joy-Con R, which allocates **two virtual ports**.

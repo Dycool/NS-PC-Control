@@ -18,6 +18,12 @@
             </div>
             <div style="padding: 15px; display: flex; flex-direction: column; gap: 10px;">
                 <div style="color:#fff; text-align:center; font-size:14px; margin-bottom:5px;">Drag to Move, Pinch to Resize</div>
+                <label for="controllerType" style="color:#fff;font-size:13px;">Emulated controller</label>
+                <select id="controllerType" onchange="changeControllerType()">
+                    <option value="3">Pro Controller</option>
+                    <option value="1">Joy-Con (L)</option>
+                    <option value="2">Joy-Con (R)</option>
+                </select>
                 <button onclick="saveLayout()" style="background:#0a0; color:#fff;">Save</button>
                 <select id="addSel" onchange="addBtn()"><option value="">+ Add Button</option></select>
                 <button id="toggleDel" onclick="toggleDel()">🗑️ Delete Mode: OFF</button>
@@ -29,6 +35,8 @@
         <div id="btn-l" class="edit-item btn-shoulder btn">L</div>
         <div id="btn-zr" class="edit-item btn-shoulder btn">ZR</div>
         <div id="btn-r" class="edit-item btn-shoulder btn">R</div>
+        <div id="btn-sl" class="edit-item btn-shoulder btn">SL</div>
+        <div id="btn-sr" class="edit-item btn-shoulder btn">SR</div>
         <div id="btn-minus" class="edit-item btn-sys btn">-</div>
         <div id="btn-plus" class="edit-item btn-sys btn">+</div>
         <div id="btn-capture" class="edit-item btn-sys btn">O</div>

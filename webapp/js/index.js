@@ -9,6 +9,19 @@
 // FIX #11 (security model): This webapp sends input over an unauthenticated
 // WebSocket. Ensure the server port is not reachable from untrusted networks.
 const PROTO_MAGIC = 0x4E535743;
+const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341;
+const CLIENT_ASSIGNMENT_SIZE = 16;
+const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01;
+const CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
+const CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
+const CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
+const CLIENT_NAMES_MAGIC = 0x4E53434E;
+const ROSTER_MAGIC = 0x4E53524F;
+const SERVER_INFO_VERSION = 1;
+const ROSTER_NAME_CAP = 48;
+const ROSTER_ENTRY_SIZE = 50;
+const ROSTER_SIZE = 208;
+const CLIENT_NAMES_SIZE = 224;
 const PROTO_VERSION = 5;
 const PAD_PRESENT = 1;
 const EXT_REPORT_SIZE = 48;
@@ -23,9 +36,69 @@ let ws = null;
 let isConnected = false;
 let loopId = null;
 let seqCounter = 0;
+let lastNamesSent = '';
+let lastNamesSentMs = 0;
 let lastActivePads = [];
+let serverAssignment = { accepted:false, serverFull:false, serverSlot:255, masks:[0,0,0,0], primary:[255,255,255,255], activeClients:0, maxClients:4, freeSlots:0 };
+function resetServerAssignment() { serverAssignment = { accepted:false, serverFull:false, serverSlot:255, masks:[0,0,0,0], primary:[255,255,255,255], activeClients:0, maxClients:4, freeSlots:0 }; }
+let roster = { valid:false, ports:[{present:0,gyro:0,name:''},{present:0,gyro:0,name:''},{present:0,gyro:0,name:''},{present:0,gyro:0,name:''}] };
+function resetRoster() { roster = { valid:false, ports:[{present:0,gyro:0,name:''},{present:0,gyro:0,name:''},{present:0,gyro:0,name:''},{present:0,gyro:0,name:''}] }; }
+function parseRosterPacket(view) {
+    const ports = [];
+    for (let i = 0; i < 4; i++) {
+        const off = 8 + i * ROSTER_ENTRY_SIZE;
+        const present = view.getUint8(off);
+        const gyro = view.getUint8(off + 1);
+        let name = '';
+        for (let k = 0; k < ROSTER_NAME_CAP; k++) {
+            const ch = view.getUint8(off + 2 + k);
+            if (ch === 0) break;
+            name += String.fromCharCode(ch);
+        }
+        ports.push({ present, gyro, name });
+    }
+    roster = { valid:true, ports };
+}
+function handleAssignmentPacket(view) {
+    const flags = view.getUint8(5);
+    const subpad = view.getUint8(7);
+    serverAssignment.serverFull = !!(flags & CLIENT_ASSIGNMENT_FLAG_SERVER_FULL);
+    if (flags & CLIENT_ASSIGNMENT_FLAG_ACCEPTED) {
+        serverAssignment.accepted = true;
+        serverAssignment.serverSlot = view.getUint8(6);
+    }
+    serverAssignment.activeClients = view.getUint8(12);
+    serverAssignment.maxClients = view.getUint8(13);
+    serverAssignment.freeSlots = view.getUint8(14);
+    if (subpad < 4) {
+        serverAssignment.masks[subpad] = view.getUint8(8);
+        serverAssignment.primary[subpad] = view.getUint8(9);
+    }
+    if (flags & CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED) {
+        resetMainConnectionUi('Switch 2 mode does not support Joy-Con L + R');
+        try { if (ws) ws.close(); } catch (_) {}
+        alert('Switch 2 mode supports one controller only; Joy-Con L + R is not supported.');
+    } else if (serverAssignment.serverFull) {
+        resetMainConnectionUi('Server full');
+        try { if (ws) ws.close(); } catch (_) {}
+        alert('Server full: all virtual controller slots are in use.');
+    }
+}
+function handleWsBinaryMessage(ev) {
+    if (!(ev.data instanceof ArrayBuffer)) return;
+    const view = new DataView(ev.data);
+    if (view.byteLength < 4) return;
+    const magic = view.getUint32(0, true);
+    if (magic === CLIENT_ASSIGNMENT_MAGIC && view.byteLength === CLIENT_ASSIGNMENT_SIZE) handleAssignmentPacket(view);
+    else if (magic === ROSTER_MAGIC && view.byteLength === ROSTER_SIZE) parseRosterPacket(view);
+}
+
 function resetMainConnectionUi(text) {
     isConnected = false;
+    resetServerAssignment();
+    resetRoster();
+    lastNamesSent = '';
+    lastNamesSentMs = 0;
     if (loopId) { clearInterval(loopId); loopId = null; }
     const btn = document.getElementById('btnConnect');
     if (btn) btn.innerText = 'Connect';
@@ -309,6 +382,47 @@ function wireMacroMenu() {
         else { macroRecording=false; if (macroRecordLast !== null) macroRecorded.push(`${macroFrameToText(macroRecordLast)} ${Math.max(1, Math.round(performance.now()-macroRecordSince))}`); if(macroRecorded.some(x=>!x.startsWith('WAIT '))) savedMacros.push(macroPrettyEntry({name:uniqueMacroName('Recorded Macro'), commands:macroRecorded})); persistMacros(); refreshMacroList(); document.getElementById('btnMacroRecord').innerText='Record P1'; }
     };
 }
+function sendNamesIfChanged(slotPresent, slotName) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const key = slotName.map((n, i) => slotPresent[i] ? n : '').join('');
+    const now = Date.now();
+    if (key === lastNamesSent && (now - lastNamesSentMs) < 2000) return;
+    lastNamesSent = key;
+    lastNamesSentMs = now;
+    const buf = new ArrayBuffer(CLIENT_NAMES_SIZE), v = new DataView(buf);
+    v.setUint32(0, CLIENT_NAMES_MAGIC, true);
+    v.setUint8(4, SERVER_INFO_VERSION);
+    for (let p = 0; p < 4; p++) {
+        const off = 8 + p * ROSTER_ENTRY_SIZE;
+        v.setUint8(off, slotPresent[p] ? 1 : 0);
+        v.setUint8(off + 1, 0);
+        const name = (slotPresent[p] ? (slotName[p] || 'Controller') : '').slice(0, ROSTER_NAME_CAP - 1);
+        for (let k = 0; k < name.length; k++) v.setUint8(off + 2 + k, name.charCodeAt(k) & 0xff);
+    }
+    ws.send(buf);
+}
+function updateRosterUi() {
+    let playerNum = 1;
+    for (let p = 0; p < 4; p++) {
+        const el = document.getElementById(`p${p+1}Text`);
+        if (!el) continue;
+        if (roster.valid && roster.ports[p] && roster.ports[p].present === 2) {
+            el.style.display = 'none';
+            continue;
+        }
+        el.style.display = 'block';
+        let label = 'Not connected';
+        if (roster.valid && roster.ports[p] && roster.ports[p].present === 1) {
+            label = roster.ports[p].name || 'Controller';
+            if (roster.ports[p].gyro) label += ' + gyro';
+            el.innerText = `P${playerNum}: ${label}`;
+            playerNum++;
+        } else {
+            el.innerText = `P${playerNum}: ${label}`;
+            playerNum++;
+        }
+    }
+}
 function buildAndSendPacket() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (window.NSBridge || (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nsBridge)) return;
@@ -319,47 +433,48 @@ function buildAndSendPacket() {
     const mode = parseInt(document.getElementById('kbMode').value);
     const kbState = getKeyboardState();
     let slotStates = [null, null, null, null];
-    let uiText = ["", "", "", ""];
+    let slotName = ["", "", "", ""];
     let slotPresent = [false, false, false, false];
+    const padName = (pad) => (pad && pad.id) ? pad.id : "Controller";
     if (mode === 0) {
         for (let i = 0; i < 4; i++) {
             let pad = activePads[i];
             let gp = getGamepadState(pad);
             slotStates[i] = gp || getNeutralState();
             slotPresent[i] = !!gp;
-            uiText[i] = gp ? "Connected" : "Not connected";
+            slotName[i] = gp ? padName(pad) : "";
         }
     } else if (mode === 1) {
-        slotStates[0] = kbState; slotPresent[0] = true; uiText[0] = `Keyboard (Connected)`;
+        slotStates[0] = kbState; slotPresent[0] = true; slotName[0] = "Keyboard";
         for (let i = 1; i < 4; i++) {
             let pad = activePads[i - 1];
             let gp = getGamepadState(pad);
             slotStates[i] = gp || getNeutralState();
             slotPresent[i] = !!gp;
-            uiText[i] = gp ? "Connected" : "Not connected";
+            slotName[i] = gp ? padName(pad) : "";
         }
     } else if (mode === 2) {
         let pad0 = activePads[0];
         let gp0 = getGamepadState(pad0);
         slotStates[0] = mergeStates(kbState, gp0 || getNeutralState());
         slotPresent[0] = true;
-        uiText[0] = `${gp0 ? "Connected" : "Not connected"} \ Keyboard`;
+        slotName[0] = gp0 ? (padName(pad0) + " + Keyboard") : "Keyboard";
         for (let i = 1; i < 4; i++) {
             let pad = activePads[i];
             let gp = getGamepadState(pad);
             slotStates[i] = gp || getNeutralState();
             slotPresent[i] = !!gp;
-            uiText[i] = gp ? "Connected" : "Not connected";
+            slotName[i] = gp ? padName(pad) : "";
         }
     }
     sampleMacroRecording(slotStates[0]);
     const macroOverride = updateMacroState();
-    if (macroOverride) { slotStates[0] = macroOverride; uiText[0] = 'Macro running'; }
+    if (macroOverride) slotStates[0] = macroOverride;
+    updateRosterUi();
     const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now() * 1000), true);
     for(let p = 0; p < 4; p++) {
-        document.getElementById(`p${p+1}Text`).innerText = `P${p+1}: ${uiText[p]}`;
         const finalButtons = normalizeSystemShortcuts(slotStates[p].buttons);
         const offset = 20 + (p * EXT_REPORT_SIZE);
         view.setUint16(offset, finalButtons, true);
@@ -370,6 +485,7 @@ function buildAndSendPacket() {
         for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(offset + k, 0);
     }
     ws.send(buffer);
+    sendNamesIfChanged(slotPresent, slotName);
 }
 document.getElementById('btnConnect').onclick = async () => {
     if (isConnected) {
@@ -379,7 +495,7 @@ document.getElementById('btnConnect').onclick = async () => {
     }
     const wsUrl = makeWsUrl();
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
-    ws.onmessage = null;
+    ws.onmessage = handleWsBinaryMessage;
     ws.onopen = () => {
         isConnected = true;
         document.getElementById('btnConnect').innerText = "Disconnect";
@@ -393,7 +509,7 @@ document.getElementById('btnConnect').onclick = async () => {
     };
     ws.onclose = () => {
         const current = document.getElementById('statusText').innerText;
-        resetMainConnectionUi(current === 'Connection failed' ? 'Connection failed' : 'Disconnected');
+        resetMainConnectionUi((current === 'Connection failed' || current === 'Server full') ? current : 'Disconnected');
     }
 };
 function formatKeyName(code) {

@@ -171,12 +171,17 @@ add_executable(ns-backend
     src/main.cpp
     src/app_state.cpp
     src/web_server.cpp
+    src/udp_feedback.cpp
+    src/udp_audio.cpp
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
+    src/switch2_native.cpp
+    src/s2_nfc_codec.cpp
     src/writers.cpp
     src/bluetooth_input.cpp
     src/bluetooth_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/motion_pipeline.cpp
     ${WEBAPP_EMBED}
 )
 
