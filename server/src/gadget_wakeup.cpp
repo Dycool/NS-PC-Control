@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <poll.h>
 #include <pthread.h>
@@ -219,6 +220,10 @@ struct FfsPortState {
     std::atomic<uint8_t> audio_capture_mute{0};
     std::atomic<int16_t> audio_playback_volume{0};
     std::atomic<int16_t> audio_capture_volume{0};
+    // Linear gain in unsigned Q16.16. Recomputed only when the host changes
+    // UAC1 volume, so the 1 kHz audio path never calls pow()/exp().
+    std::atomic<uint32_t> audio_playback_gain_q16{1u << 16};
+    std::atomic<uint32_t> audio_capture_gain_q16{1u << 16};
     // Native S2 input reports are real-time state, not a reliable byte stream.
     // Keep a transport-side clock so timing is stamped when the report is
     // actually submitted to the USB endpoint, after any queued stale frames
@@ -759,10 +764,59 @@ static bool ep0_ack_status(int fd, bool dir_in) {
     return dir_in ? ep0_write_status(fd) : ep0_read_status(fd);
 }
 
+// FunctionFS requests a control-pipe STALL by performing I/O in the wrong
+// direction for the pending setup packet.
+static bool ep0_stall_setup(int fd, bool dir_in) {
+    return dir_in ? ep0_read_status(fd) : ep0_write_status(fd);
+}
+
 static bool ep0_write_data(int fd, const uint8_t* data, size_t len, size_t limit) {
     len = std::min(len, limit);
     if (len == 0) return ep0_write_status(fd);
     return write_all_fd(fd, data, len);
+}
+
+constexpr int16_t S2_UAC_VOLUME_MIN_256DB = static_cast<int16_t>(-64 * 256);
+constexpr int16_t S2_UAC_VOLUME_MAX_256DB = 0;
+constexpr int16_t S2_UAC_VOLUME_RES_256DB = 256;
+constexpr int16_t S2_UAC_VOLUME_SILENCE = std::numeric_limits<int16_t>::min();
+constexpr uint32_t S2_UAC_GAIN_Q16_UNITY = 1u << 16;
+
+static uint32_t uac1_volume_to_gain_q16(int16_t volume_256db) {
+    if (volume_256db == S2_UAC_VOLUME_SILENCE) return 0;
+    const int clamped = std::clamp<int>(volume_256db,
+                                        S2_UAC_VOLUME_MIN_256DB,
+                                        S2_UAC_VOLUME_MAX_256DB);
+    if (clamped == 0) return S2_UAC_GAIN_Q16_UNITY;
+    const double db = static_cast<double>(clamped) / 256.0;
+    const double linear = std::pow(10.0, db / 20.0);
+    return static_cast<uint32_t>(std::clamp<long long>(
+        std::llround(linear * static_cast<double>(S2_UAC_GAIN_Q16_UNITY)),
+        0,
+        S2_UAC_GAIN_Q16_UNITY));
+}
+
+static int16_t normalize_uac1_volume(int16_t volume_256db) {
+    if (volume_256db == S2_UAC_VOLUME_SILENCE) return volume_256db;
+    return static_cast<int16_t>(std::clamp<int>(volume_256db,
+                                                S2_UAC_VOLUME_MIN_256DB,
+                                                S2_UAC_VOLUME_MAX_256DB));
+}
+
+static void store_uac1_volume(std::atomic<int16_t>& volume,
+                              std::atomic<uint32_t>& gain_q16,
+                              int16_t requested_256db) {
+    const int16_t normalized = normalize_uac1_volume(requested_256db);
+    volume.store(normalized, std::memory_order_release);
+    gain_q16.store(uac1_volume_to_gain_q16(normalized), std::memory_order_release);
+}
+
+static std::string uac1_volume_text(int16_t volume_256db) {
+    if (volume_256db == S2_UAC_VOLUME_SILENCE) return "-inf dB";
+    char text[32]{};
+    std::snprintf(text, sizeof(text), "%.2f dB",
+                  static_cast<double>(volume_256db) / 256.0);
+    return text;
 }
 
 static void queue_control_report(int id, uint16_t w_value, const std::vector<uint8_t>& payload) {
@@ -781,8 +835,10 @@ static void queue_control_report(int id, uint16_t w_value, const std::vector<uin
 static bool handle_s2_audio_control_request(FfsPortState& st, const usb_ctrlrequest& ctrl) {
     if (!gadget_uses_switch2_identity()) return false;
     const uint8_t bm = ctrl.bRequestType;
-    if ((bm & USB_TYPE_MASK) != USB_TYPE_CLASS || (bm & USB_RECIP_MASK) != USB_RECIP_INTERFACE)
+    if ((bm & USB_TYPE_MASK) != USB_TYPE_CLASS ||
+        (bm & USB_RECIP_MASK) != USB_RECIP_INTERFACE) {
         return false;
+    }
 
     const uint16_t index = le16toh(ctrl.wIndex);
     const uint8_t interface_number = static_cast<uint8_t>(index & 0xFFu);
@@ -791,58 +847,141 @@ static bool handle_s2_audio_control_request(FfsPortState& st, const usb_ctrlrequ
     const uint8_t entity = static_cast<uint8_t>(index >> 8);
     const uint16_t value = le16toh(ctrl.wValue);
     const uint8_t selector = static_cast<uint8_t>(value >> 8);
+    const uint8_t channel = static_cast<uint8_t>(value & 0xFFu);
     const uint8_t req = ctrl.bRequest;
     const uint16_t length = le16toh(ctrl.wLength);
     const bool dir_in = (bm & USB_DIR_IN) != 0;
 
     std::atomic<uint8_t>* mute = nullptr;
     std::atomic<int16_t>* volume = nullptr;
+    std::atomic<uint32_t>* gain_q16 = nullptr;
+    const char* direction_name = nullptr;
     if (entity == 2) {
         mute = &st.audio_playback_mute;
         volume = &st.audio_playback_volume;
+        gain_q16 = &st.audio_playback_gain_q16;
+        direction_name = "playback";
     } else if (entity == 5) {
         mute = &st.audio_capture_mute;
         volume = &st.audio_capture_volume;
+        gain_q16 = &st.audio_capture_gain_q16;
+        direction_name = "microphone";
+    } else {
+        if (g_ctx.verbose) {
+            std::println("[s2][audio-control] stall unknown feature unit entity={}", entity);
+        }
+        ep0_stall_setup(st.ep0_fd, dir_in);
+        return true;
     }
 
-    // UAC1 feature unit selectors: 1=mute (one byte), 2=volume (signed 1/256 dB).
-    if (!dir_in && req == 0x01) { // SET_CUR
+    // The Nintendo descriptors expose mute+volume only on the master channel.
+    // UAC1 requires unsupported channel/control combinations to STALL.
+    if (channel != 0) {
+        if (g_ctx.verbose) {
+            std::println("[s2][audio-control] stall {} unsupported channel={}",
+                         direction_name, channel);
+        }
+        ep0_stall_setup(st.ep0_fd, dir_in);
+        return true;
+    }
+
+    constexpr uint8_t UAC_SET_CUR = 0x01;
+    constexpr uint8_t UAC_GET_CUR = 0x81;
+    constexpr uint8_t UAC_GET_MIN = 0x82;
+    constexpr uint8_t UAC_GET_MAX = 0x83;
+    constexpr uint8_t UAC_GET_RES = 0x84;
+    constexpr uint8_t UAC_FU_MUTE = 0x01;
+    constexpr uint8_t UAC_FU_VOLUME = 0x02;
+
+    if (!dir_in && req == UAC_SET_CUR) {
+        const size_t expected = selector == UAC_FU_MUTE ? 1u
+                              : selector == UAC_FU_VOLUME ? 2u
+                              : 0u;
+        if (expected == 0 || length != expected) {
+            if (g_ctx.verbose) {
+                std::println("[s2][audio-control] stall {} SET_CUR selector={} length={}",
+                             direction_name, selector, length);
+            }
+            ep0_stall_setup(st.ep0_fd, false);
+            return true;
+        }
+
         std::vector<uint8_t> payload;
-        if (length > 0 && !read_ep0_payload(st.ep0_fd, payload, length)) return true;
-        if (mute && selector == 1 && !payload.empty()) {
-            mute->store(payload[0] ? 1 : 0, std::memory_order_relaxed);
-        } else if (volume && selector == 2 && payload.size() >= 2) {
-            uint16_t raw = static_cast<uint16_t>(payload[0])
-                         | (static_cast<uint16_t>(payload[1]) << 8);
-            volume->store(static_cast<int16_t>(raw), std::memory_order_relaxed);
+        if (!read_ep0_payload(st.ep0_fd, payload, expected)) return true;
+
+        if (selector == UAC_FU_MUTE) {
+            const uint8_t next = payload[0] ? 1 : 0;
+            mute->store(next, std::memory_order_release);
+            if (g_ctx.verbose) {
+                std::println("[s2][audio-control] {} mute={}", direction_name, next != 0);
+            }
+            return true;
+        }
+
+        const uint16_t raw = static_cast<uint16_t>(payload[0]) |
+                             (static_cast<uint16_t>(payload[1]) << 8);
+        const int16_t requested = static_cast<int16_t>(raw);
+        store_uac1_volume(*volume, *gain_q16, requested);
+        if (g_ctx.verbose) {
+            const int16_t stored = volume->load(std::memory_order_acquire);
+            std::println("[s2][audio-control] {} volume={}",
+                         direction_name, uac1_volume_text(stored));
         }
         return true;
     }
 
-    if (dir_in && req >= 0x81 && req <= 0x84) { // GET_CUR/MIN/MAX/RES
-        if (selector == 1) {
-            uint8_t response = 0;
-            if (req == 0x81 && mute) response = mute->load(std::memory_order_relaxed);
-            else if (req == 0x84) response = 1;
-            ep0_write_data(st.ep0_fd, &response, 1, length);
+    if (dir_in) {
+        if (selector == UAC_FU_MUTE) {
+            // UAC1 mute has only CUR; GET_MIN/MAX/RES must STALL.
+            if (req != UAC_GET_CUR || length != 1) {
+                if (g_ctx.verbose) {
+                    std::println("[s2][audio-control] stall {} mute request={:#04x} length={}",
+                                 direction_name, req, length);
+                }
+                ep0_stall_setup(st.ep0_fd, true);
+                return true;
+            }
+            const uint8_t response = mute->load(std::memory_order_acquire) ? 1 : 0;
+            ep0_write_data(st.ep0_fd, &response, sizeof(response), length);
             return true;
         }
-        if (selector == 2) {
+
+        if (selector == UAC_FU_VOLUME) {
+            if (length != 2 ||
+                (req != UAC_GET_CUR && req != UAC_GET_MIN &&
+                 req != UAC_GET_MAX && req != UAC_GET_RES)) {
+                if (g_ctx.verbose) {
+                    std::println("[s2][audio-control] stall {} volume request={:#04x} length={}",
+                                 direction_name, req, length);
+                }
+                ep0_stall_setup(st.ep0_fd, true);
+                return true;
+            }
+
             int16_t response = 0;
-            if (req == 0x81 && volume) response = volume->load(std::memory_order_relaxed);
-            else if (req == 0x82) response = static_cast<int16_t>(-64 * 256); // -64 dB
-            else if (req == 0x83) response = 0;                               // 0 dB
-            else if (req == 0x84) response = 256;                             // 1 dB
-            uint16_t raw = htole16(static_cast<uint16_t>(response));
-            ep0_write_data(st.ep0_fd, reinterpret_cast<const uint8_t*>(&raw), sizeof(raw), length);
+            if (req == UAC_GET_CUR) {
+                response = volume->load(std::memory_order_acquire);
+            } else if (req == UAC_GET_MIN) {
+                response = S2_UAC_VOLUME_MIN_256DB;
+            } else if (req == UAC_GET_MAX) {
+                response = S2_UAC_VOLUME_MAX_256DB;
+            } else {
+                response = S2_UAC_VOLUME_RES_256DB;
+            }
+            const uint16_t raw = htole16(static_cast<uint16_t>(response));
+            ep0_write_data(st.ep0_fd,
+                           reinterpret_cast<const uint8_t*>(&raw),
+                           sizeof(raw),
+                           length);
             return true;
         }
-        std::vector<uint8_t> zeros(std::max<uint16_t>(1, length), 0);
-        ep0_write_data(st.ep0_fd, zeros.data(), zeros.size(), length);
-        return true;
     }
 
-    ep0_ack_status(st.ep0_fd, dir_in);
+    if (g_ctx.verbose) {
+        std::println("[s2][audio-control] stall {} unsupported request={:#04x} selector={}",
+                     direction_name, req, selector);
+    }
+    ep0_stall_setup(st.ep0_fd, dir_in);
     return true;
 }
 
@@ -1207,24 +1346,26 @@ static void ffs_vendor_writer_loop(int id) {
     st.vendor_writer_exited.store(true, std::memory_order_release);
 }
 
-static void apply_uac1_gain(uint8_t* pcm, size_t len, uint8_t muted, int16_t volume_256db) {
+static void apply_uac1_gain(uint8_t* pcm, size_t len, uint8_t muted, uint32_t gain_q16) {
     if (!pcm || len == 0) return;
-    if (muted != 0) {
+    if (muted != 0 || gain_q16 == 0) {
         std::fill_n(pcm, len, uint8_t{0});
         return;
     }
+    if (gain_q16 >= S2_UAC_GAIN_Q16_UNITY) return;
 
-    // UAC1 volume values are signed 1/256 dB. The descriptor advertises
-    // -64 dB..0 dB, so clamp malformed host values to that range.
-    const int clamped = std::clamp<int>(volume_256db, -64 * 256, 0);
-    if (clamped == 0) return;
-    const double gain = std::pow(10.0, (static_cast<double>(clamped) / 256.0) / 20.0);
+    // S16LE stereo, gain in Q16.16. This stays allocation-free and avoids any
+    // floating-point/transcendental work in the 1 kHz USB audio loops.
     for (size_t i = 0; i + 1 < len; i += 2) {
-        const uint16_t raw = static_cast<uint16_t>(pcm[i])
-                           | (static_cast<uint16_t>(pcm[i + 1]) << 8);
-        const int16_t sample = static_cast<int16_t>(raw);
-        const int scaled = std::clamp<int>(static_cast<int>(std::lround(sample * gain)),
-                                           -32768, 32767);
+        const uint16_t raw = static_cast<uint16_t>(pcm[i]) |
+                             (static_cast<uint16_t>(pcm[i + 1]) << 8);
+        const int32_t sample = static_cast<int16_t>(raw);
+        int64_t product = static_cast<int64_t>(sample) * gain_q16;
+        product = product >= 0
+            ? (product + (1ll << 15)) / (1ll << 16)
+            : (product - (1ll << 15)) / (1ll << 16);
+        const int32_t scaled = std::clamp<int32_t>(static_cast<int32_t>(product),
+                                                   -32768, 32767);
         const uint16_t encoded = static_cast<uint16_t>(static_cast<int16_t>(scaled));
         pcm[i] = static_cast<uint8_t>(encoded & 0xFFu);
         pcm[i + 1] = static_cast<uint8_t>(encoded >> 8);
@@ -1248,8 +1389,8 @@ static void ffs_audio_reader_loop(int id) {
         if (r > 0) {
             mark_switch2_usb_activity();
             apply_uac1_gain(frame.data(), static_cast<size_t>(r),
-                            st.audio_playback_mute.load(std::memory_order_relaxed),
-                            st.audio_playback_volume.load(std::memory_order_relaxed));
+                            st.audio_playback_mute.load(std::memory_order_acquire),
+                            st.audio_playback_gain_q16.load(std::memory_order_acquire));
             // Isochronous playback is one 192-byte frame per millisecond. Keep
             // a fixed-size frame to avoid a heap allocation in the 1 kHz path;
             // if the UDC ever returns a short packet, pad the remainder with
@@ -1307,8 +1448,8 @@ static void ffs_audio_writer_loop(int id) {
         }
         if (!have_frame) frame = silence;
         apply_uac1_gain(frame.data(), frame.size(),
-                        st.audio_capture_mute.load(std::memory_order_relaxed),
-                        st.audio_capture_volume.load(std::memory_order_relaxed));
+                        st.audio_capture_mute.load(std::memory_order_acquire),
+                        st.audio_capture_gain_q16.load(std::memory_order_acquire));
         const ssize_t w = write(fd, frame.data(), frame.size());
         if (w < 0 && errno == EINTR) continue;
         if (w < 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -1464,6 +1605,8 @@ static bool functionfs_start_port_io(int id) {
     st.audio_capture_mute.store(0, std::memory_order_relaxed);
     st.audio_playback_volume.store(0, std::memory_order_relaxed);
     st.audio_capture_volume.store(0, std::memory_order_relaxed);
+    st.audio_playback_gain_q16.store(S2_UAC_GAIN_Q16_UNITY, std::memory_order_relaxed);
+    st.audio_capture_gain_q16.store(S2_UAC_GAIN_Q16_UNITY, std::memory_order_relaxed);
     st.io_running.store(true, std::memory_order_relaxed);
     st.reader_thread = std::thread(ffs_reader_loop, id);
     st.writer_thread = std::thread(ffs_writer_loop, id);

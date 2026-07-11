@@ -342,7 +342,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 
     homeShortcutBox = add_box("Home shortcut (LStick + RStick)", g_homeShortcutEnabled.load());
     captureShortcutBox = add_box("Capture shortcut (Minus + Plus)", g_captureShortcutEnabled.load());
-    mouseModeBox = add_box("Mouse Mode (mouse aims right stick; mouse buttons bindable)", g_mouseModeEnabled.load());
+    mouseModeBox = add_box("Mouse Mode", g_mouseModeEnabled.load());
     joyconMouseModeBox = add_box("Joycon Mouse Mode", g_joyconMouseModeEnabled.load());
 
     auto* mouseSensRow = new QGridLayout();
@@ -436,7 +436,6 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 }
 
 void SettingsDialog::updateMouseModeControls() {
-    const bool keyboardActive = g_keyboardMode.load() != KB_OFF;
     const bool joyconNativeAvailable = joyconMouseModeAvailable();
     const bool nativeChecked = joyconNativeAvailable
         && joyconMouseModeBox && joyconMouseModeBox->isChecked();
@@ -445,21 +444,13 @@ void SettingsDialog::updateMouseModeControls() {
     if (joyconMouseModeBox) {
         joyconMouseModeBox->setVisible(joyconNativeAvailable);
         joyconMouseModeBox->setEnabled(joyconNativeAvailable && !normalChecked);
-        joyconMouseModeBox->setToolTip(normalChecked
-            ? QStringLiteral("Disable Mouse Mode first.")
-            : QStringLiteral("Send native Joy-Con 2 mouse movement. Left click maps to L/R; right click maps to ZL/ZR."));
+        joyconMouseModeBox->setToolTip(QString());
     }
     if (mouseModeBox) {
-        mouseModeBox->setEnabled(!nativeChecked && (keyboardActive || normalChecked));
-        if (nativeChecked) {
-            mouseModeBox->setToolTip(QStringLiteral("Disable Joycon Mouse Mode first."));
-        } else {
-            mouseModeBox->setToolTip(keyboardActive
-                ? QString()
-                : QStringLiteral("Turn on a Keyboard Mode first — mouse mode drives the keyboard player."));
-        }
+        mouseModeBox->setEnabled(!nativeChecked);
+        mouseModeBox->setToolTip(QString());
     }
-    const bool sensEnabled = nativeChecked || (keyboardActive && normalChecked);
+    const bool sensEnabled = nativeChecked || normalChecked;
     if (mouseSensitivityLabel) mouseSensitivityLabel->setEnabled(sensEnabled);
     if (mouseSensitivitySlider) mouseSensitivitySlider->setEnabled(sensEnabled);
     if (mouseSensitivityValue) mouseSensitivityValue->setEnabled(sensEnabled);

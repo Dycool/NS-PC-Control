@@ -112,7 +112,6 @@ bool is_mouse_button_name(const std::string& name) {
 bool mouse_mode_active() {
     return g_mouseModeEnabled.load(std::memory_order_relaxed)
         && !joycon_mouse_mode_active()
-        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
 }
 
@@ -457,7 +456,6 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     apply_axis("RSTICK_LEFT", "RSTICK_RIGHT", rep.rx);
     apply_axis("RSTICK_UP", "RSTICK_DOWN", rep.ry);
 
-    if (g_mouseModeEnabled.load(std::memory_order_relaxed)) mouse_apply_right_stick(rep.rx, rep.ry);
 }
 
 void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_type) {

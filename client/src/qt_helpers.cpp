@@ -5,6 +5,11 @@
 #include <shobjidl.h>
 #endif
 #include <QIcon>
+#include <QApplication>
+#include <QDialog>
+#include <QEvent>
+#include <QPointer>
+#include <QTimer>
 #include <QKeyEvent>
 #include <QCoreApplication>
 #include <QDir>
@@ -110,3 +115,49 @@ void apply_windows_taskbar_icon(QWidget* window) {
 #endif
 }
 
+
+
+namespace {
+
+class SubwindowMoveLock final : public QObject {
+public:
+    explicit SubwindowMoveLock(QObject* parent = nullptr) : QObject(parent) {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        auto* dialog = qobject_cast<QDialog*>(watched);
+        if (!dialog || !dialog->isWindow()) return QObject::eventFilter(watched, event);
+
+        static constexpr const char* kLockedProperty = "ns_subwindow_position_locked";
+        static constexpr const char* kPositionProperty = "ns_subwindow_locked_position";
+
+        if (event->type() == QEvent::Show) {
+            dialog->setProperty(kLockedProperty, false);
+            QPointer<QDialog> guard(dialog);
+            QTimer::singleShot(0, dialog, [guard] {
+                if (!guard || !guard->isVisible()) return;
+                guard->setProperty(kPositionProperty, guard->pos());
+                guard->setProperty(kLockedProperty, true);
+            });
+        } else if (event->type() == QEvent::Hide || event->type() == QEvent::Close) {
+            dialog->setProperty(kLockedProperty, false);
+        } else if (event->type() == QEvent::Move
+                   && dialog->property(kLockedProperty).toBool()) {
+            const QPoint locked = dialog->property(kPositionProperty).toPoint();
+            if (dialog->pos() != locked) {
+                QPointer<QDialog> guard(dialog);
+                QTimer::singleShot(0, dialog, [guard, locked] {
+                    if (guard && guard->isVisible() && guard->pos() != locked)
+                        guard->move(locked);
+                });
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+} // namespace
+
+void install_subwindow_move_lock(QApplication& app) {
+    app.installEventFilter(new SubwindowMoveLock(&app));
+}

@@ -6,6 +6,7 @@
 
 #include <string>
 
+class QApplication;
 class QWidget;
 
 std::string q_to_std(const QString& s);
@@ -14,3 +15,4 @@ QString key_name_from_qkey(QKeyEvent* event);
 QIcon app_icon();
 void apply_windows_app_identity();
 void apply_windows_taskbar_icon(QWidget* window);
+void install_subwindow_move_lock(QApplication& app);

@@ -227,6 +227,8 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         // to P1 and every additional controller is ignored.
         if (keyboard_mode == KB_SINGLE) {
             apply_keyboard_to_report(frame.reports[0], false);
+            if (mouse_mode_active())
+                mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
             if (native_mouse) apply_joycon_mouse_buttons(frame.reports[0]);
             frame.present[0] = true;
             frame.active_count = 1;
@@ -259,6 +261,14 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
             apply_keyboard_to_report(frame.reports[0], true);
             frame.present[0] = true;
             frame.active_count = 1;
+        }
+        if (mouse_mode_active()) {
+            if (!frame.present[0]) {
+                frame.reports[0].reset();
+                frame.present[0] = true;
+                frame.active_count = 1;
+            }
+            mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
         }
         if (g_joyconHorizontalMode.load(std::memory_order_relaxed) && frame.present[0]) {
             apply_joycon_horizontal_transform(frame.reports[0], g_controllerType.load(std::memory_order_relaxed));
@@ -328,6 +338,15 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         apply_keyboard_to_report(frame.reports[0], true);
         frame.present[0] = true;
         frame.active_count = std::max(frame.active_count, 1);
+    }
+
+    if (mouse_mode_active()) {
+        if (!frame.present[0]) {
+            frame.reports[0].reset();
+            frame.present[0] = true;
+            frame.active_count = std::max(frame.active_count, 1);
+        }
+        mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
     }
 
     if (g_joyconHorizontalMode.load(std::memory_order_relaxed)) {

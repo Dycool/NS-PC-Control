@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
     app.setApplicationName("NS PC Control");
     app.setOrganizationName("NSPCControl");
     app.setWindowIcon(app_icon());
+    install_subwindow_move_lock(app);
 #if defined(__APPLE__)
     if (auto* s = QStyleFactory::create("macOS")) QApplication::setStyle(s);
 #elif defined(_WIN32)
