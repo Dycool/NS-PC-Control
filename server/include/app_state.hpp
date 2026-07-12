@@ -30,7 +30,7 @@ constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
 // Number of slots to probe when the primary hash slot holds a different IP.
 constexpr int RATE_PROBE = 4;
-// Debounce for native S2 FunctionFS suspend/disable events. It is also retained
+// Debounce for native S2 USB suspend/disable events. It is also retained
 // for the legacy host-originated HID OUT/protocol-RX fallback used without the
 // native lifecycle signal. Writes to the gadget remain intentionally excluded
 // from wake/sleep evidence.
@@ -176,9 +176,8 @@ struct ServerContext {
     bool verbose = false;
     std::string usb_serial;
     UsbControllerFamily usb_controller_family = UsbControllerFamily::Switch1;
-    // Switch 2 mode exposes exactly one native S2 FunctionFS controller on
-    // console port 0. There are no S1 fallback interfaces in this mode.
-    std::atomic<bool> functionfs_transport_active{false};
+    // Switch 2 mode exposes exactly one native controller on console port 0.
+    // There are no S1 fallback interfaces in this mode.
     bool bluetooth_input_disabled = false;
     bool bluetooth_disabled = false; // reserved: disables all Bluetooth stack access, including wake setup/runtime
     std::atomic<bool> gadget_setup_attempted{false};
@@ -192,7 +191,7 @@ struct ServerContext {
     std::atomic<bool> switch2_wake_adv_running{false};
     std::atomic<uint64_t> switch2_last_wake_adv_us{0};
     std::atomic<bool> switch2_usb_host_connected{false};
-    // Native S2 FunctionFS reports the USB bus lifecycle directly.  Do not
+    // Native S2 Raw Gadget reports the USB bus lifecycle directly. Do not
     // infer suspend from an idle HID/vendor OUT stream: an awake S2 can be
     // completely quiet after its initial handshake.
     std::atomic<bool> switch2_usb_lifecycle_seen{false};

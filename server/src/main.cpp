@@ -362,7 +362,8 @@ int main(int argc, char** argv) {
         perror("bind"); close(sock); return 1;
     }
 
-    s2_udp_audio_start(sock);
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+        s2_udp_audio_start(sock);
 
     // -----------------------------------------------------------------------
     // Worker threads
@@ -513,8 +514,9 @@ int main(int argc, char** argv) {
 
 
 
-            if (s2_udp_audio_handle_packet(
-                    std::span<const uint8_t>(udp_rx.data(), static_cast<size_t>(bytes)), sender)) {
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                    && s2_udp_audio_handle_packet(
+                        std::span<const uint8_t>(udp_rx.data(), static_cast<size_t>(bytes)), sender)) {
                 continue;
             }
 
@@ -718,7 +720,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 forget_switch2_dormant_udp_endpoint(sender);
-                s2_udp_audio_forget_endpoint(sender);
+                if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                    s2_udp_audio_forget_endpoint(sender);
                 if (cidx >= 0) {
                     reset_client_session(cidx);
                     rearm_switch2_wake_after_client_disconnect();
@@ -880,7 +883,8 @@ int main(int argc, char** argv) {
 
     g_ctx.running.store(false, std::memory_order_relaxed);
     upnp_remove_mapping(port);
-    s2_udp_audio_stop();
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+        s2_udp_audio_stop();
     close(sock);
     std::cout << "." << std::flush;
 

@@ -7,10 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 
-// ALSA bridge for the kernel usb_f_uac1 function used only by the native S2
-// gadget. The USB OUT stream (console audio) is exposed as an ALSA capture
-// stream; the USB IN stream (headset microphone) is exposed as ALSA playback.
-bool s2_uac1_audio_compiled();
+// Audio bridge for the native S2 gadget's UAC1 interface, backed by
+// s2_rawgadget's AS-OUT/AS-IN endpoints.
 bool s2_uac1_audio_start();
 void s2_uac1_audio_stop();
 bool s2_uac1_audio_ready();

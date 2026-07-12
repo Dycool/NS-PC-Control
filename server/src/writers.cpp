@@ -79,7 +79,7 @@ static const HIDReport& get_hid_report(const ClientSession& c, int s) {
     return c.report.p4;
 }
 
-static bool port_uses_s2_functionfs(int port) {
+static bool port_uses_s2_gadget(int port) {
     return g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && port == 0;
 }
 
@@ -88,7 +88,7 @@ static int legacy_hidg_index_for_port(int port) {
 }
 
 static bool port_uses_hori_hidg(int port) {
-    return !port_uses_s2_functionfs(port)
+    return !port_uses_s2_gadget(port)
         && g_ctx.usb_controller_family == UsbControllerFamily::Hori;
 }
 
@@ -109,7 +109,7 @@ static bool write_all_nonblock_drop(int fd, const uint8_t* data, size_t len) {
 }
 
 void writer_thread(std::stop_token stoken, int hz) {
-    // S2 exposes exactly one native FunctionFS controller. S1/HORI retain
+    // S2 exposes exactly one native Raw Gadget controller. S1/HORI retain
     // the established four-port legacy layout.
     const int nports = configured_virtual_port_count();
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
@@ -152,18 +152,18 @@ void writer_thread(std::stop_token stoken, int hz) {
         memset(&rt[i].pending_reply, 0, sizeof(rt[i].pending_reply));
         memset(rt[i].cmd_response_buf, 0, sizeof(rt[i].cmd_response_buf));
     };
-    bool ffs_live[HID_PORT_COUNT] = {};
+    bool s2_live[HID_PORT_COUNT] = {};
 
     while (!stoken.stop_requested()) {
         bool all_open = true;
         for (int i = 0; i < nports; ++i) {
-            if (port_uses_s2_functionfs(i)) {
-                const bool live = functionfs_transport_active() && functionfs_io_ready(i);
+            if (port_uses_s2_gadget(i)) {
+                const bool live = s2_gadget_transport_active() && s2_gadget_io_ready(i);
                 if (!live) {
-                    ffs_live[i] = false;
+                    s2_live[i] = false;
                     all_open = false;
-                } else if (!ffs_live[i]) {
-                    ffs_live[i] = true;
+                } else if (!s2_live[i]) {
+                    s2_live[i] = true;
                     reset_port_runtime(i);
                 }
                 continue;
@@ -192,7 +192,7 @@ void writer_thread(std::stop_token stoken, int hz) {
 
         if (g_ctx.verbose) {
             if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-                std::println("1 native S2 FunctionFS port opened");
+                std::println("1 native S2 Raw Gadget port opened");
             else
                 std::println("{}x legacy /dev/hidg* opened", nports);
         }
@@ -208,12 +208,12 @@ void writer_thread(std::stop_token stoken, int hz) {
         uint64_t last_switch_sleep_poll_us = 0;
 
         auto port_submit_input = [&](int h, const uint8_t* data, size_t len) -> bool {
-            if (port_uses_s2_functionfs(h)) return functionfs_submit_input_report(h, data, len);
+            if (port_uses_s2_gadget(h)) return s2_gadget_submit_input_report(h, data, len);
             return write_all_nonblock_drop(hidg_fd[h], data, len);
         };
 
         auto port_drain_output = [&](int h) {
-            if (port_uses_s2_functionfs(h)) functionfs_drain_output(h);
+            if (port_uses_s2_gadget(h)) s2_gadget_drain_output(h);
             else if (!port_uses_hori_hidg(h)) drain_hid_output_queue(hidg_fd[h]);
         };
 
@@ -389,7 +389,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                                         VIRTUAL_BODY_RGB[h]);
                     }
                 } else {
-                    const uint8_t idle_profile = port_uses_s2_functionfs(h)
+                    const uint8_t idle_profile = port_uses_s2_gadget(h)
                         ? ns::CONTROLLER_TYPE_PRO_S2
                         : (g_ctx.usb_controller_family == UsbControllerFamily::Hori
                             ? ns::CONTROLLER_TYPE_HORI
@@ -501,7 +501,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                 const int s = hw_slots[h].sub_idx;
                 assignment_masks[c][s] = static_cast<uint8_t>(assignment_masks[c][s] | (1u << h));
                 if (assignment_primary[c][s] == ns::CONTROLLER_CONSOLE_PORT_NONE) assignment_primary[c][s] = static_cast<uint8_t>(h);
-                const bool actual_s2 = port_uses_s2_functionfs(h);
+                const bool actual_s2 = port_uses_s2_gadget(h);
                 if (hw_slots[h].pair_member) {
                     assignment_virtual[c][s] = actual_s2 ? ns::CONTROLLER_TYPE_JOYCON_PAIR_S2
                                                          : ns::CONTROLLER_TYPE_JOYCON_PAIR;
@@ -552,8 +552,8 @@ void writer_thread(std::stop_token stoken, int hz) {
             for (int h = 0; h < nports; ++h) {
                 const bool port_needed = (hw_slots[h].client_idx != -1);
                 uint32_t enabled_features_for_port = 0;
-                if (port_uses_s2_functionfs(h)) {
-                        // The only logical S2 port is native FunctionFS port 0.
+                if (port_uses_s2_gadget(h)) {
+                        // The only logical S2 port is native Raw Gadget port 0.
                         // Its vendor channel owns the streaming/feature state.
                         rt[h].full_report_enabled = switch2_native_streaming_enabled(h);
                         rt[h].input_report_mode = switch2_native_selected_report(h);
@@ -732,7 +732,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         // Native S2 HID OUT is rumble: report 0x02 for Pro Controller 2,
                         // report 0x01 for either Joy-Con 2 half.
                         // Init/pairing/feature/memory commands arrive on the vendor-bulk
-                        // endpoint and are processed below via functionfs_poll_vendor_report().
+                        // endpoint and are processed below via s2_gadget_poll_vendor_report().
                         if (id == switch2_output_report_id_for_port(h)) {
                             switch2_native_note_hid_out(h, std::span<const uint8_t>(read_buf, r));
                             if (hw_slots[h].client_idx != -1)
@@ -782,19 +782,19 @@ void writer_thread(std::stop_token stoken, int hz) {
                 };
 
                 for (int h = 0; h < nports; ++h) {
-                    if (port_uses_s2_functionfs(h)) {
+                    if (port_uses_s2_gadget(h)) {
                         std::vector<unsigned char> ctrl_report;
-                        for (int control_reads = 0; control_reads < 8 && functionfs_poll_control_report(h, ctrl_report); ++control_reads) {
+                        for (int control_reads = 0; control_reads < 8 && s2_gadget_poll_control_report(h, ctrl_report); ++control_reads) {
                             process_host_output_report(h, ctrl_report.data(), ctrl_report.size());
                         }
 
                         std::vector<unsigned char> out_report;
-                        for (int output_reads = 0; output_reads < 16 && functionfs_poll_output_report(h, out_report); ++output_reads) {
+                        for (int output_reads = 0; output_reads < 16 && s2_gadget_poll_output_report(h, out_report); ++output_reads) {
                             process_host_output_report(h, out_report.data(), out_report.size());
                         }
 
                         std::vector<unsigned char> vendor_cmd;
-                        for (int vendor_reads = 0; vendor_reads < 16 && functionfs_poll_vendor_report(h, vendor_cmd); ++vendor_reads) {
+                        for (int vendor_reads = 0; vendor_reads < 16 && s2_gadget_poll_vendor_report(h, vendor_cmd); ++vendor_reads) {
                             ++g_ctx.host_out_reports;
                             mark_switch2_usb_activity(now_stamp);
                             if (g_ctx.verbose && vendor_cmd.size() >= 4)
@@ -803,7 +803,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                             std::vector<uint8_t> vendor_resp;
                             if (switch2_native_handle_vendor_command(h, std::span<const uint8_t>(vendor_cmd.data(), vendor_cmd.size()), vendor_resp, rt[h])
                                     && !vendor_resp.empty()) {
-                                const bool queued = functionfs_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
+                                const bool queued = s2_gadget_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
                                 if (g_ctx.verbose && vendor_cmd.size() >= 4 && vendor_cmd[0] == 0x01) {
                                     std::println("[s2][nfc][tx-queue] t_us={} port={} sub=0x{:02x} response_len={} queued={}",
                                                  now_us(), h, vendor_cmd[3], vendor_resp.size(), queued);
@@ -830,7 +830,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
                 }
 
-                if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && functionfs_transport_active() == false) ok = false;
+                if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2 && !s2_gadget_transport_active()) ok = false;
 
             if (!ok) {
                 if (!error_shown && g_ctx.verbose) { std::println("Host USB transport disconnected; waiting for reconnect..."); error_shown = true; }

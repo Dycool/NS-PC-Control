@@ -1444,7 +1444,7 @@ bool rumble_half_is_neutral_carrier(const uint8_t* f) { return f[0] == 0x00 && f
 //   * 0x15 is a 630-byte transfer (8-byte header + 622-byte payload)
 //   * 0x14 carries a 454-byte staging image in six offset-addressed chunks
 //   * 0x08 commits that staging image, after which status becomes 0x05
-// USB packetisation is handled by FunctionFS; these are application lengths.
+// USB packetisation is handled by Raw Gadget; these are application lengths.
 namespace {
 constexpr size_t S2_NFC_MAX_RESPONSE_PAYLOAD = ns::s2nfc::READ_PAYLOAD_SIZE;
 constexpr auto S2_NFC_READ_HOLD = std::chrono::seconds(3);

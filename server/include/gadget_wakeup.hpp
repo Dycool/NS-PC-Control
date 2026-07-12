@@ -16,25 +16,15 @@ void teardown_gadget();
 void emergency_unbind_udc();
 void restore_wake_bt_state(bool restart_bluez = true);
 bool run_gadget_setup_if_needed(bool force, const char* reason);
-bool run_revert_gadget_host();
 void drain_hid_output_queue(int fd);
 
-// Modern FunctionFS transport helpers. Legacy mode still uses /dev/hidg*.
-bool functionfs_transport_active();
-bool functionfs_nodes_ready();
-int functionfs_active_port_count();
-std::string functionfs_ep_in_path(int id);
-std::string functionfs_ep_out_path(int id);
-std::string functionfs_ep_vendor_out_path(int id);
-std::string functionfs_ep_vendor_in_path(int id);
-bool functionfs_poll_control_report(int id, std::vector<unsigned char>& out_report);
-bool usb_transport_rebuild_ffs_port(int id);
-
-// FunctionFS data-endpoint transport (dedicated blocking I/O threads own ep1/ep2).
-bool functionfs_io_ready(int id);
-bool functionfs_host_enabled(int id);
-bool functionfs_submit_input_report(int id, const uint8_t* data, size_t len);
-bool functionfs_poll_output_report(int id, std::vector<unsigned char>& out_report);
-void functionfs_drain_output(int id);
-bool functionfs_poll_vendor_report(int id, std::vector<unsigned char>& out_report);
-bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len);
+bool s2_gadget_transport_active();
+bool s2_gadget_nodes_ready();
+bool s2_gadget_io_ready(int id);
+bool s2_gadget_host_enabled(int id);
+bool s2_gadget_submit_input_report(int id, const uint8_t* data, size_t len);
+bool s2_gadget_poll_control_report(int id, std::vector<unsigned char>& out_report);
+bool s2_gadget_poll_output_report(int id, std::vector<unsigned char>& out_report);
+void s2_gadget_drain_output(int id);
+bool s2_gadget_poll_vendor_report(int id, std::vector<unsigned char>& out_report);
+bool s2_gadget_submit_vendor_report(int id, const uint8_t* data, size_t len);

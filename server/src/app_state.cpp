@@ -214,7 +214,7 @@ void poll_switch2_sleep_state(uint64_t now) {
 
     // The current native S2 transport exposes authoritative bus lifecycle
     // events.  An idle command/RX stream is normal while the console is awake,
-    // so only a sustained FunctionFS suspend/disable may release sessions.
+    // so only a sustained S2 USB suspend/disable may release sessions.
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
             && g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
         if (!g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed)) {

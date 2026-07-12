@@ -174,6 +174,7 @@ add_executable(ns-backend
     src/udp_feedback.cpp
     src/udp_audio.cpp
     src/s2_uac1_audio.cpp
+    src/s2_rawgadget.cpp
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
     src/switch2_native.cpp
@@ -204,18 +205,6 @@ target_link_libraries(ns-backend PRIVATE
     OpenSSL::Crypto
 )
 
-if(UNIX AND NOT APPLE)
-    find_package(ALSA QUIET)
-    if(ALSA_FOUND)
-        target_compile_definitions(ns-backend PRIVATE NS_HAVE_ALSA=1)
-        if(TARGET ALSA::ALSA)
-            target_link_libraries(ns-backend PRIVATE ALSA::ALSA)
-        else()
-            target_include_directories(ns-backend PRIVATE ${ALSA_INCLUDE_DIRS} ${ALSA_INCLUDE_DIR})
-            target_link_libraries(ns-backend PRIVATE ${ALSA_LIBRARIES})
-        endif()
-    endif()
-endif()
 
 if(libwebsockets_FOUND)
     target_link_libraries(ns-backend PRIVATE websockets)

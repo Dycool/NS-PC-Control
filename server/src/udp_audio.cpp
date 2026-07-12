@@ -138,9 +138,7 @@ void sign_pcm_packet(ns::S2AudioPcmPacket& packet) {
 
 void audio_bridge_loop(std::stop_token stop_token) {
     // One USB isochronous frame maps to one authenticated UDP datagram. Wait on
-    // the stock-UAC1 ALSA capture queue instead of polling every millisecond;
-    // this keeps the existing 1 kHz UDP framing without routing audio through
-    // FunctionFS.
+    // the raw_gadget AS-OUT queue instead of polling every millisecond.
     std::array<unsigned char, ns::S2_AUDIO_PCM_BYTES> usb_frame{};
 
     while (!stop_token.stop_requested() && g_ctx.running.load(std::memory_order_relaxed)) {

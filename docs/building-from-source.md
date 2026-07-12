@@ -15,7 +15,7 @@ cd NS-PC-Control
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake g++ pkg-config xxd
+sudo apt-get install -y cmake g++ make pkg-config xxd linux-headers-rpi-v8
 # Optional: sudo apt-get install -y miniupnpc
 ```
 
@@ -28,13 +28,14 @@ cmake ..
 make
 ```
 
-4.  Run the server:
+4. Run the server:
 
 ```bash
 sudo ./ns-backend
 ```
 
-> The server automatically creates and binds the HID gadget on startup and cleans up on exit.
+> The server uses Raw Gadget for the native Switch 2 controller and ConfigFS
+> `f_hid` for Switch 1/HORI, and releases the UDC on exit.
 
 > **Note:** To disable UPnP support, add `-DUSE_UPNP=OFF` on the cmake command.
 

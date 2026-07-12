@@ -36,6 +36,10 @@ constexpr uint8_t FEATURE_MOUSE   = 0x10;
 constexpr uint8_t FEATURE_RUMBLE  = 0x20;
 constexpr uint8_t FEATURE_MAG     = 0x80;
 constexpr uint32_t DEFAULT_FEATURE_MASK = FEATURE_BUTTONS | FEATURE_STICKS | FEATURE_IMU | FEATURE_RUMBLE; // 0x27
+// Deliberately-current emulated FW/DSP/BT-patch values validated by the Raw Gadget probe.
+constexpr std::array<uint8_t, 12> EMULATED_FIRMWARE_VERSION = {
+    0x02, 0x09, 0x63, 0x02, 0x0C, 0x09, 0x09, 0x00, 0x00, 0x09, 0x09, 0x00
+};
 
 std::string s2_hex(std::span<const uint8_t> data) {
     static constexpr char kHex[] = "0123456789abcdef";
@@ -442,6 +446,15 @@ bool switch2_native_handle_vendor_command(int port,
     const uint8_t id = c[0];
     const uint8_t transport = c[2];
     const uint8_t sub = c[3];
+    if (id == 0x0D && sub != 0x01) {
+        if (g_ctx.verbose) {
+            std::println(stderr,
+                         "[s2][firmware] rejecting update stage sub=0x{:02x} len={}; "
+                         "emulated firmware already reports current",
+                         sub, c.size());
+        }
+        return false;
+    }
     update_stage(s, id, sub);
 
     if (g_ctx.verbose && id == 0x01) {
@@ -575,12 +588,13 @@ bool switch2_native_handle_vendor_command(int port,
             break;
         }
         case 0x10: {
-            // Firmware/version block exactly as reported by the reference
-            // Pro Controller 2 (cmd 0x10 sub 0x01 in PC2_Gyro_*.pcapng).
-            static constexpr uint8_t fw[] = {0x02, 0x00, 0x11, 0x02, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00};
-            std::memcpy(d, fw, sizeof(fw)); dl = sizeof(fw);
+            std::memcpy(d, EMULATED_FIRMWARE_VERSION.data(), EMULATED_FIRMWARE_VERSION.size());
+            dl = EMULATED_FIRMWARE_VERSION.size();
             break;
         }
+        case 0x0D:
+            dl = 0;
+            break;
         case 0x0B:
             if (sub == 0x03) { static constexpr uint8_t b[] = {0xA5, 0x0E, 0x00, 0x00}; std::memcpy(d, b, sizeof(b)); dl = sizeof(b); }
             else if (sub == 0x04) { static constexpr uint8_t b[] = {0x34, 0x00, 0x83, 0x00}; std::memcpy(d, b, sizeof(b)); dl = sizeof(b); }
@@ -615,7 +629,7 @@ bool switch2_native_handle_vendor_command(int port,
 
                 // Real NFC replies, including the 630-byte 0x15 response,
                 // retain the ordinary 00 F8 ACK. USB bulk packetisation is
-                // handled by FunctionFS and must not alter the command header.
+                // handled by Raw Gadget and must not alter the command header.
             }
             break;
         case 0x18:
