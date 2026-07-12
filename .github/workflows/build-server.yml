@@ -27,7 +27,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14 cmake ninja-build git wget xxd \
-            libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev pkg-config
+            libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev \
+            libasound2-dev pkg-config
+
+          # ALSA support is optional in CMake, so fail early rather than
+          # publishing an S2 server binary without audio support.
+          pkg-config --exists alsa
+          echo "ALSA development package: $(pkg-config --modversion alsa)"
 
       - name: Cache SDL3 aarch64 static
         id: cache-sdl3-aarch64
@@ -85,6 +91,13 @@ jobs:
             -DREQUIRE_SDL_BT=ON
 
           make -j"$(nproc)"
+
+          # Verify that CMake enabled NS_HAVE_ALSA and linked the resulting
+          # server against libasound. Do not publish a controller-only build.
+          if ! ldd ./ns-backend | grep -q 'libasound\.so'; then
+            echo "::error::ns-backend was built without ALSA support"
+            exit 1
+          fi
 
           mkdir -p artifact/pi-server
           cp ns-backend artifact/pi-server/ns-backend

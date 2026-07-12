@@ -111,6 +111,7 @@ bool is_mouse_button_name(const std::string& name) {
 
 bool mouse_mode_active() {
     return g_mouseModeEnabled.load(std::memory_order_relaxed)
+        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && !joycon_mouse_mode_active()
         && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
 }

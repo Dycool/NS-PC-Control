@@ -1,11 +1,10 @@
 #include "udp_audio.hpp"
 
 #include "app_state.hpp"
-#include "gadget_wakeup.hpp"
+#include "s2_uac1_audio.hpp"
 #include "shared/protocol.hpp"
 #include "shared/sha256.h"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -13,10 +12,8 @@
 #include <mutex>
 #include <print>
 #include <thread>
-#include <vector>
 
 #include <sys/socket.h>
-#include <unistd.h>
 
 namespace {
 
@@ -141,13 +138,13 @@ void sign_pcm_packet(ns::S2AudioPcmPacket& packet) {
 
 void audio_bridge_loop(std::stop_token stop_token) {
     // One USB isochronous frame maps to one authenticated UDP datagram. Wait on
-    // the FunctionFS queue instead of polling every millisecond; this removes a
-    // scheduler tick from the console-to-client latency path and avoids heap
-    // allocation/copy churn at 1 kHz.
+    // the stock-UAC1 ALSA capture queue instead of polling every millisecond;
+    // this keeps the existing 1 kHz UDP framing without routing audio through
+    // FunctionFS.
     std::array<unsigned char, ns::S2_AUDIO_PCM_BYTES> usb_frame{};
 
     while (!stop_token.stop_requested() && g_ctx.running.load(std::memory_order_relaxed)) {
-        if (!functionfs_wait_console_audio(0, usb_frame, std::chrono::milliseconds(5))) {
+        if (!s2_uac1_wait_console_audio(usb_frame, std::chrono::milliseconds(5))) {
             continue;
         }
 
@@ -279,7 +276,7 @@ bool s2_udp_audio_handle_packet(std::span<const uint8_t> data, const sockaddr_in
         g_audio_endpoint.last_seen_us = now;
         g_active_last_seen_us.store(now, std::memory_order_relaxed);
     }
-    (void)functionfs_submit_microphone_audio(0, packet.pcm, packet.payload_bytes);
+    (void)s2_uac1_submit_microphone_audio(packet.pcm, packet.payload_bytes);
     return true;
 }
 

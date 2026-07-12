@@ -2,6 +2,7 @@
 #include "app_state.hpp"
 #include "virtual_controller.hpp"
 #include "switch2_native.hpp"
+#include "s2_uac1_audio.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,7 +10,6 @@
 #include <cctype>
 #include <cerrno>
 #include <condition_variable>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,8 +18,6 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
-#include <limits>
 #include <mutex>
 #include <poll.h>
 #include <pthread.h>
@@ -44,6 +42,7 @@ constexpr const char* CONFIG_DIR = "/sys/kernel/config/usb_gadget/ns_ctrl/config
 constexpr const char* GADGET_UDC_PATH = "/sys/kernel/config/usb_gadget/ns_ctrl/UDC";
 constexpr const char* FFS_BASE_DIR = "/run/ns-pc-control/functionfs";
 constexpr const char* FFS_INSTANCE_PREFIX = "ns_ctrl";
+constexpr const char* S2_UAC1_FUNCTION_NAME = "uac1.s2";
 
 static std::string    g_saved_bt_mac;
 static std::string    g_saved_bt_hci;
@@ -204,26 +203,12 @@ struct FfsPortState {
     int ep_out_fd = -1;  // ep2, HID interrupt OUT
     int ep_vendor_out_fd = -1; // ep3, S2 vendor bulk OUT
     int ep_vendor_in_fd  = -1; // ep4, S2 vendor bulk IN
-    int ep_audio_out_fd  = -1; // ep5, S2 UAC1 playback OUT (Switch -> client)
-    int ep_audio_in_fd   = -1; // ep6, S2 UAC1 microphone IN (client -> Switch)
     std::atomic<bool> io_running{false};
     std::atomic<bool> reader_exited{true};   // observed by stop to know when to stop signalling
     std::atomic<bool> writer_exited{true};
     std::atomic<bool> vendor_reader_exited{true};
     std::atomic<bool> vendor_writer_exited{true};
-    std::atomic<bool> audio_reader_exited{true};
-    std::atomic<bool> audio_writer_exited{true};
     bool input_write_seen = false;
-    std::atomic<uint8_t> audio_playback_alt{0};
-    std::atomic<uint8_t> audio_capture_alt{0};
-    std::atomic<uint8_t> audio_playback_mute{0};
-    std::atomic<uint8_t> audio_capture_mute{0};
-    std::atomic<int16_t> audio_playback_volume{0};
-    std::atomic<int16_t> audio_capture_volume{0};
-    // Linear gain in unsigned Q16.16. Recomputed only when the host changes
-    // UAC1 volume, so the 1 kHz audio path never calls pow()/exp().
-    std::atomic<uint32_t> audio_playback_gain_q16{1u << 16};
-    std::atomic<uint32_t> audio_capture_gain_q16{1u << 16};
     // Native S2 input reports are real-time state, not a reliable byte stream.
     // Keep a transport-side clock so timing is stamped when the report is
     // actually submitted to the USB endpoint, after any queued stale frames
@@ -237,8 +222,6 @@ struct FfsPortState {
     std::thread writer_thread;               // in_reports -> blocking write(ep1)
     std::thread vendor_reader_thread;        // blocking read(ep3) -> vendor_out_reports
     std::thread vendor_writer_thread;        // vendor_in_reports -> blocking write(ep4)
-    std::thread audio_reader_thread;         // blocking read(ep5) -> console_audio_frames
-    std::thread audio_writer_thread;         // microphone_frames -> blocking write(ep6)
     std::mutex out_mtx;
     std::deque<std::vector<uint8_t>> out_reports;  // host -> us (HID interrupt OUT)
     std::mutex in_mtx;
@@ -249,12 +232,6 @@ struct FfsPortState {
     std::mutex vendor_in_mtx;
     std::condition_variable vendor_in_cv;
     std::deque<std::vector<uint8_t>> vendor_in_reports;
-    std::mutex audio_out_mtx;
-    std::condition_variable audio_out_cv;
-    std::deque<std::array<uint8_t, ns::S2_AUDIO_USB_FRAME_BYTES>> console_audio_frames;
-    std::mutex audio_in_mtx;
-    std::condition_variable audio_in_cv;
-    std::deque<std::array<uint8_t, ns::S2_AUDIO_USB_FRAME_BYTES>> microphone_frames;
 };
 
 std::array<FfsPortState, HID_PORT_COUNT> g_ffs_ports;
@@ -308,6 +285,14 @@ static fs::path ffs_function_dir(int id) {
 
 static fs::path ffs_config_link(int id) {
     return fs::path(CONFIG_DIR) / ("ffs." + ffs_instance_name(id));
+}
+
+static fs::path s2_uac1_function_dir() {
+    return fs::path(GADGET_DIR) / "functions" / S2_UAC1_FUNCTION_NAME;
+}
+
+static fs::path s2_uac1_config_link() {
+    return fs::path(CONFIG_DIR) / S2_UAC1_FUNCTION_NAME;
 }
 
 static bool path_is_mountpoint(const fs::path& p) {
@@ -518,47 +503,6 @@ static void append_s2_vendor_function_descriptors(std::vector<uint8_t>& out, int
     append_obj(out, vendor_in);
 }
 
-static void append_s2_audio_function_descriptors(std::vector<uint8_t>& out) {
-    // Exact USB Audio Class 1.0 topology exposed by the real Pro Controller 2:
-    // AudioControl interface 2, headphone playback on interface 3 / ep 0x03,
-    // and headset microphone capture on interface 4 / ep 0x83. Both streams
-    // are synchronous stereo S16LE at 48 kHz with one 192-byte USB frame per ms.
-    static constexpr uint8_t descriptors[] = {
-        // IAD: interfaces 2..4 are one audio function.
-        0x08, 0x0B, 0x02, 0x03, 0x01, 0x01, 0x00, 0x00,
-        // Interface 2, AudioControl.
-        0x09, 0x04, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
-        // Class-specific AC header, total 71 bytes, streaming IFs 3 and 4.
-        0x0A, 0x24, 0x01, 0x00, 0x01, 0x47, 0x00, 0x02, 0x03, 0x04,
-        // USB streaming input terminal -> playback feature unit -> headphones.
-        0x0C, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
-        0x0A, 0x24, 0x06, 0x02, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00,
-        0x09, 0x24, 0x03, 0x03, 0x02, 0x03, 0x00, 0x02, 0x00,
-        // Microphone terminal -> capture feature unit -> USB streaming output.
-        0x0C, 0x24, 0x02, 0x04, 0x01, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x09, 0x24, 0x06, 0x05, 0x04, 0x01, 0x03, 0x00, 0x00,
-        0x09, 0x24, 0x03, 0x06, 0x01, 0x01, 0x00, 0x05, 0x00,
-        // Interface 3 alt 0: playback disabled.
-        0x09, 0x04, 0x03, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
-        // Interface 3 alt 1: playback streaming.
-        0x09, 0x04, 0x03, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
-        0x07, 0x24, 0x01, 0x01, 0x00, 0x01, 0x00,
-        0x0B, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x80, 0xBB, 0x00,
-        0x07, 0x05, 0x03, 0x0D, 0xC0, 0x00, 0x01,
-        0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
-        // Interface 4 alt 0: microphone disabled.
-        0x09, 0x04, 0x04, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
-        // Interface 4 alt 1: microphone streaming. The real descriptor advertises
-        // two PCM channels here even though its physical terminal is mono.
-        0x09, 0x04, 0x04, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
-        0x07, 0x24, 0x01, 0x06, 0x00, 0x01, 0x00,
-        0x0B, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x80, 0xBB, 0x00,
-        0x07, 0x05, 0x83, 0x0D, 0xC0, 0x00, 0x01,
-        0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
-    };
-    append_bytes(out, descriptors, sizeof(descriptors));
-}
-
 static std::vector<uint8_t> build_functionfs_descriptors(int id) {
     std::vector<uint8_t> out;
     append_u32(out, FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
@@ -572,15 +516,14 @@ static std::vector<uint8_t> build_functionfs_descriptors(int id) {
     if (gadget_uses_switch2_identity()) ffs_flags |= FUNCTIONFS_ALL_CTRL_RECIP;
     append_u32(out, ffs_flags);
     if (gadget_uses_switch2_identity()) {
-        // 30 descriptors: 9 HID/vendor descriptors plus the real controller's
-        // 21 AudioControl/AudioStreaming descriptors. The kernel cross-checks
-        // this count against the blob length and rejects mismatches with EINVAL.
-        append_u32(out, 30); // FS
-        append_u32(out, 30); // HS: same topology; gadget is capped at full speed
+        // FunctionFS owns only the S2 HID and vendor interfaces. Audio is a
+        // separate stock usb_f_uac1 configfs function linked after ffs.s2, so
+        // it receives interface numbers 2, 3 and 4 without FunctionFS having
+        // to parse Audio Class-specific descriptors.
+        append_u32(out, 9); // FS: two IADs, two interfaces, HID, four endpoints
+        append_u32(out, 9); // HS: valid fallback; gadget is capped at full speed
         append_s2_vendor_function_descriptors(out, id, false);
-        append_s2_audio_function_descriptors(out);
         append_s2_vendor_function_descriptors(out, id, true);
-        append_s2_audio_function_descriptors(out);
     } else {
         append_u32(out, 4); // FS: interface + HID + IN ep + OUT ep
         append_u32(out, 4); // HS: interface + HID + IN ep + OUT ep
@@ -698,6 +641,64 @@ static bool create_functionfs_function(int id) {
     return symlink(func.c_str(), link_path.c_str()) == 0;
 }
 
+
+static bool create_s2_uac1_function() {
+    const fs::path func = s2_uac1_function_dir();
+    if (!mkdirs(func)) {
+        std::println(stderr, "[s2][audio] failed to create {} (is usb_f_uac1 available?)",
+                     func.string());
+        return false;
+    }
+
+    // The controller-research dump is stereo S16LE at exactly 48 kHz in both
+    // directions. Keep USB mute/volume Feature Units disabled for the first
+    // stock-UAC1 implementation: Linux otherwise adds an AudioControl interrupt
+    // endpoint that the real Pro Controller 2 does not expose and may consume
+    // the endpoint number expected by the microphone stream.
+    const auto required = [&](const char* name, const char* value) {
+        if (write_file(func / name, value)) return true;
+        std::println(stderr, "[s2][audio] failed to set {}={} on stock UAC1",
+                     name, value);
+        return false;
+    };
+    if (!required("c_chmask", "3")
+            || !required("c_srate", "48000")
+            || !required("c_ssize", "2")
+            || !required("p_chmask", "3")
+            || !required("p_srate", "48000")
+            || !required("p_ssize", "2")) {
+        return false;
+    }
+
+    // These attributes exist on current Raspberry Pi kernels. Treat older
+    // kernels that lack them as compatible: their defaults are still usable.
+    const auto optional = [&](const char* name, const char* value) {
+        const fs::path attr = func / name;
+        if (!fs::exists(attr)) return true;
+        if (write_file(attr, value)) return true;
+        std::println(stderr, "[s2][audio] stock UAC1 rejected optional {}={}", name, value);
+        return false;
+    };
+    if (!optional("c_mute_present", "0")
+            || !optional("c_volume_present", "0")
+            || !optional("p_mute_present", "0")
+            || !optional("p_volume_present", "0")
+            || !optional("req_number", "8")
+            || !optional("function_name", "Switch 2 Pro Controller Audio")) {
+        return false;
+    }
+
+    const fs::path link_path = s2_uac1_config_link();
+    std::error_code ec;
+    fs::remove(link_path, ec);
+    if (symlink(func.c_str(), link_path.c_str()) != 0) {
+        std::println(stderr, "[s2][audio] failed to link stock UAC1 function: {}",
+                     std::strerror(errno));
+        return false;
+    }
+    return true;
+}
+
 static void unmount_functionfs_instances() {
     close_functionfs_ep0s();
     for (int i = 0; i < HID_PORT_COUNT; ++i) {
@@ -764,59 +765,10 @@ static bool ep0_ack_status(int fd, bool dir_in) {
     return dir_in ? ep0_write_status(fd) : ep0_read_status(fd);
 }
 
-// FunctionFS requests a control-pipe STALL by performing I/O in the wrong
-// direction for the pending setup packet.
-static bool ep0_stall_setup(int fd, bool dir_in) {
-    return dir_in ? ep0_read_status(fd) : ep0_write_status(fd);
-}
-
 static bool ep0_write_data(int fd, const uint8_t* data, size_t len, size_t limit) {
     len = std::min(len, limit);
     if (len == 0) return ep0_write_status(fd);
     return write_all_fd(fd, data, len);
-}
-
-constexpr int16_t S2_UAC_VOLUME_MIN_256DB = static_cast<int16_t>(-64 * 256);
-constexpr int16_t S2_UAC_VOLUME_MAX_256DB = 0;
-constexpr int16_t S2_UAC_VOLUME_RES_256DB = 256;
-constexpr int16_t S2_UAC_VOLUME_SILENCE = std::numeric_limits<int16_t>::min();
-constexpr uint32_t S2_UAC_GAIN_Q16_UNITY = 1u << 16;
-
-static uint32_t uac1_volume_to_gain_q16(int16_t volume_256db) {
-    if (volume_256db == S2_UAC_VOLUME_SILENCE) return 0;
-    const int clamped = std::clamp<int>(volume_256db,
-                                        S2_UAC_VOLUME_MIN_256DB,
-                                        S2_UAC_VOLUME_MAX_256DB);
-    if (clamped == 0) return S2_UAC_GAIN_Q16_UNITY;
-    const double db = static_cast<double>(clamped) / 256.0;
-    const double linear = std::pow(10.0, db / 20.0);
-    return static_cast<uint32_t>(std::clamp<long long>(
-        std::llround(linear * static_cast<double>(S2_UAC_GAIN_Q16_UNITY)),
-        0,
-        S2_UAC_GAIN_Q16_UNITY));
-}
-
-static int16_t normalize_uac1_volume(int16_t volume_256db) {
-    if (volume_256db == S2_UAC_VOLUME_SILENCE) return volume_256db;
-    return static_cast<int16_t>(std::clamp<int>(volume_256db,
-                                                S2_UAC_VOLUME_MIN_256DB,
-                                                S2_UAC_VOLUME_MAX_256DB));
-}
-
-static void store_uac1_volume(std::atomic<int16_t>& volume,
-                              std::atomic<uint32_t>& gain_q16,
-                              int16_t requested_256db) {
-    const int16_t normalized = normalize_uac1_volume(requested_256db);
-    volume.store(normalized, std::memory_order_release);
-    gain_q16.store(uac1_volume_to_gain_q16(normalized), std::memory_order_release);
-}
-
-static std::string uac1_volume_text(int16_t volume_256db) {
-    if (volume_256db == S2_UAC_VOLUME_SILENCE) return "-inf dB";
-    char text[32]{};
-    std::snprintf(text, sizeof(text), "%.2f dB",
-                  static_cast<double>(volume_256db) / 256.0);
-    return text;
 }
 
 static void queue_control_report(int id, uint16_t w_value, const std::vector<uint8_t>& payload) {
@@ -832,159 +784,6 @@ static void queue_control_report(int id, uint16_t w_value, const std::vector<uin
     q.push_back(std::move(report));
 }
 
-static bool handle_s2_audio_control_request(FfsPortState& st, const usb_ctrlrequest& ctrl) {
-    if (!gadget_uses_switch2_identity()) return false;
-    const uint8_t bm = ctrl.bRequestType;
-    if ((bm & USB_TYPE_MASK) != USB_TYPE_CLASS ||
-        (bm & USB_RECIP_MASK) != USB_RECIP_INTERFACE) {
-        return false;
-    }
-
-    const uint16_t index = le16toh(ctrl.wIndex);
-    const uint8_t interface_number = static_cast<uint8_t>(index & 0xFFu);
-    if (interface_number != 2) return false;
-
-    const uint8_t entity = static_cast<uint8_t>(index >> 8);
-    const uint16_t value = le16toh(ctrl.wValue);
-    const uint8_t selector = static_cast<uint8_t>(value >> 8);
-    const uint8_t channel = static_cast<uint8_t>(value & 0xFFu);
-    const uint8_t req = ctrl.bRequest;
-    const uint16_t length = le16toh(ctrl.wLength);
-    const bool dir_in = (bm & USB_DIR_IN) != 0;
-
-    std::atomic<uint8_t>* mute = nullptr;
-    std::atomic<int16_t>* volume = nullptr;
-    std::atomic<uint32_t>* gain_q16 = nullptr;
-    const char* direction_name = nullptr;
-    if (entity == 2) {
-        mute = &st.audio_playback_mute;
-        volume = &st.audio_playback_volume;
-        gain_q16 = &st.audio_playback_gain_q16;
-        direction_name = "playback";
-    } else if (entity == 5) {
-        mute = &st.audio_capture_mute;
-        volume = &st.audio_capture_volume;
-        gain_q16 = &st.audio_capture_gain_q16;
-        direction_name = "microphone";
-    } else {
-        if (g_ctx.verbose) {
-            std::println("[s2][audio-control] stall unknown feature unit entity={}", entity);
-        }
-        ep0_stall_setup(st.ep0_fd, dir_in);
-        return true;
-    }
-
-    // The Nintendo descriptors expose mute+volume only on the master channel.
-    // UAC1 requires unsupported channel/control combinations to STALL.
-    if (channel != 0) {
-        if (g_ctx.verbose) {
-            std::println("[s2][audio-control] stall {} unsupported channel={}",
-                         direction_name, channel);
-        }
-        ep0_stall_setup(st.ep0_fd, dir_in);
-        return true;
-    }
-
-    constexpr uint8_t UAC_SET_CUR = 0x01;
-    constexpr uint8_t UAC_GET_CUR = 0x81;
-    constexpr uint8_t UAC_GET_MIN = 0x82;
-    constexpr uint8_t UAC_GET_MAX = 0x83;
-    constexpr uint8_t UAC_GET_RES = 0x84;
-    constexpr uint8_t UAC_FU_MUTE = 0x01;
-    constexpr uint8_t UAC_FU_VOLUME = 0x02;
-
-    if (!dir_in && req == UAC_SET_CUR) {
-        const size_t expected = selector == UAC_FU_MUTE ? 1u
-                              : selector == UAC_FU_VOLUME ? 2u
-                              : 0u;
-        if (expected == 0 || length != expected) {
-            if (g_ctx.verbose) {
-                std::println("[s2][audio-control] stall {} SET_CUR selector={} length={}",
-                             direction_name, selector, length);
-            }
-            ep0_stall_setup(st.ep0_fd, false);
-            return true;
-        }
-
-        std::vector<uint8_t> payload;
-        if (!read_ep0_payload(st.ep0_fd, payload, expected)) return true;
-
-        if (selector == UAC_FU_MUTE) {
-            const uint8_t next = payload[0] ? 1 : 0;
-            mute->store(next, std::memory_order_release);
-            if (g_ctx.verbose) {
-                std::println("[s2][audio-control] {} mute={}", direction_name, next != 0);
-            }
-            return true;
-        }
-
-        const uint16_t raw = static_cast<uint16_t>(payload[0]) |
-                             (static_cast<uint16_t>(payload[1]) << 8);
-        const int16_t requested = static_cast<int16_t>(raw);
-        store_uac1_volume(*volume, *gain_q16, requested);
-        if (g_ctx.verbose) {
-            const int16_t stored = volume->load(std::memory_order_acquire);
-            std::println("[s2][audio-control] {} volume={}",
-                         direction_name, uac1_volume_text(stored));
-        }
-        return true;
-    }
-
-    if (dir_in) {
-        if (selector == UAC_FU_MUTE) {
-            // UAC1 mute has only CUR; GET_MIN/MAX/RES must STALL.
-            if (req != UAC_GET_CUR || length != 1) {
-                if (g_ctx.verbose) {
-                    std::println("[s2][audio-control] stall {} mute request={:#04x} length={}",
-                                 direction_name, req, length);
-                }
-                ep0_stall_setup(st.ep0_fd, true);
-                return true;
-            }
-            const uint8_t response = mute->load(std::memory_order_acquire) ? 1 : 0;
-            ep0_write_data(st.ep0_fd, &response, sizeof(response), length);
-            return true;
-        }
-
-        if (selector == UAC_FU_VOLUME) {
-            if (length != 2 ||
-                (req != UAC_GET_CUR && req != UAC_GET_MIN &&
-                 req != UAC_GET_MAX && req != UAC_GET_RES)) {
-                if (g_ctx.verbose) {
-                    std::println("[s2][audio-control] stall {} volume request={:#04x} length={}",
-                                 direction_name, req, length);
-                }
-                ep0_stall_setup(st.ep0_fd, true);
-                return true;
-            }
-
-            int16_t response = 0;
-            if (req == UAC_GET_CUR) {
-                response = volume->load(std::memory_order_acquire);
-            } else if (req == UAC_GET_MIN) {
-                response = S2_UAC_VOLUME_MIN_256DB;
-            } else if (req == UAC_GET_MAX) {
-                response = S2_UAC_VOLUME_MAX_256DB;
-            } else {
-                response = S2_UAC_VOLUME_RES_256DB;
-            }
-            const uint16_t raw = htole16(static_cast<uint16_t>(response));
-            ep0_write_data(st.ep0_fd,
-                           reinterpret_cast<const uint8_t*>(&raw),
-                           sizeof(raw),
-                           length);
-            return true;
-        }
-    }
-
-    if (g_ctx.verbose) {
-        std::println("[s2][audio-control] stall {} unsupported request={:#04x} selector={}",
-                     direction_name, req, selector);
-    }
-    ep0_stall_setup(st.ep0_fd, dir_in);
-    return true;
-}
-
 static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
     if (id < 0 || id >= HID_PORT_COUNT) return;
     auto& st = g_ffs_ports[id];
@@ -995,8 +794,6 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
     const uint8_t desc_type = static_cast<uint8_t>(value >> 8);
     const bool dir_in = (bm & USB_DIR_IN) != 0;
     const int target_port = id;
-
-    if (handle_s2_audio_control_request(st, ctrl)) return;
 
     if (gadget_uses_switch2_identity() && (bm & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
         if (g_ctx.verbose)
@@ -1039,45 +836,6 @@ static void handle_functionfs_setup(int id, const usb_ctrlrequest& ctrl) {
         if (dir_in && req == USB_REQ_GET_STATUS) {
             const uint8_t status[2]{};
             ep0_write_data(st.ep0_fd, status, sizeof(status), length);
-            return;
-        }
-        if (dir_in && req == USB_REQ_GET_INTERFACE) {
-            const uint8_t interface_number = static_cast<uint8_t>(le16toh(ctrl.wIndex) & 0xFFu);
-            uint8_t alt_setting = 0;
-            if (interface_number == 3) alt_setting = st.audio_playback_alt.load(std::memory_order_relaxed);
-            else if (interface_number == 4) alt_setting = st.audio_capture_alt.load(std::memory_order_relaxed);
-            ep0_write_data(st.ep0_fd, &alt_setting, 1, length);
-            return;
-        }
-        if (!dir_in && req == USB_REQ_SET_INTERFACE) {
-            const uint8_t interface_number = static_cast<uint8_t>(le16toh(ctrl.wIndex) & 0xFFu);
-            const uint8_t alt_setting = static_cast<uint8_t>(value & 0xFFu);
-            if ((interface_number == 3 || interface_number == 4) && alt_setting <= 1) {
-                if (interface_number == 3) {
-                    st.audio_playback_alt.store(alt_setting, std::memory_order_relaxed);
-                    if (alt_setting == 0) {
-                        std::lock_guard<std::mutex> lk(st.audio_out_mtx);
-                        st.console_audio_frames.clear();
-                        st.audio_out_cv.notify_all();
-                    }
-                } else {
-                    st.audio_capture_alt.store(alt_setting, std::memory_order_relaxed);
-                    if (alt_setting == 0) {
-                        std::lock_guard<std::mutex> lk(st.audio_in_mtx);
-                        st.microphone_frames.clear();
-                    }
-                    st.audio_in_cv.notify_all();
-                }
-                if (g_ctx.verbose) {
-                    std::println("[s2][audio] USB interface {} alternate setting {}",
-                                 interface_number, alt_setting);
-                }
-                ep0_ack_status(st.ep0_fd, false);
-            } else {
-                // Ignore unsupported alternate settings without mutating the
-                // active stream state. FunctionFS/composite owns endpoint setup.
-                ep0_ack_status(st.ep0_fd, false);
-            }
             return;
         }
         if (!dir_in && length > 0) {
@@ -1346,117 +1104,6 @@ static void ffs_vendor_writer_loop(int id) {
     st.vendor_writer_exited.store(true, std::memory_order_release);
 }
 
-static void apply_uac1_gain(uint8_t* pcm, size_t len, uint8_t muted, uint32_t gain_q16) {
-    if (!pcm || len == 0) return;
-    if (muted != 0 || gain_q16 == 0) {
-        std::fill_n(pcm, len, uint8_t{0});
-        return;
-    }
-    if (gain_q16 >= S2_UAC_GAIN_Q16_UNITY) return;
-
-    // S16LE stereo, gain in Q16.16. This stays allocation-free and avoids any
-    // floating-point/transcendental work in the 1 kHz USB audio loops.
-    for (size_t i = 0; i + 1 < len; i += 2) {
-        const uint16_t raw = static_cast<uint16_t>(pcm[i]) |
-                             (static_cast<uint16_t>(pcm[i + 1]) << 8);
-        const int32_t sample = static_cast<int16_t>(raw);
-        int64_t product = static_cast<int64_t>(sample) * gain_q16;
-        product = product >= 0
-            ? (product + (1ll << 15)) / (1ll << 16)
-            : (product - (1ll << 15)) / (1ll << 16);
-        const int32_t scaled = std::clamp<int32_t>(static_cast<int32_t>(product),
-                                                   -32768, 32767);
-        const uint16_t encoded = static_cast<uint16_t>(static_cast<int16_t>(scaled));
-        pcm[i] = static_cast<uint8_t>(encoded & 0xFFu);
-        pcm[i + 1] = static_cast<uint8_t>(encoded >> 8);
-    }
-}
-
-static void ffs_audio_reader_loop(int id) {
-    FfsPortState& st = g_ffs_ports[id];
-    std::array<uint8_t, ns::S2_AUDIO_USB_FRAME_BYTES> frame{};
-    while (st.io_running.load(std::memory_order_relaxed)) {
-        if (st.audio_playback_alt.load(std::memory_order_relaxed) != 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        const int fd = st.ep_audio_out_fd;
-        if (fd < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
-        }
-        const ssize_t r = read(fd, frame.data(), frame.size());
-        if (r > 0) {
-            mark_switch2_usb_activity();
-            apply_uac1_gain(frame.data(), static_cast<size_t>(r),
-                            st.audio_playback_mute.load(std::memory_order_acquire),
-                            st.audio_playback_gain_q16.load(std::memory_order_acquire));
-            // Isochronous playback is one 192-byte frame per millisecond. Keep
-            // a fixed-size frame to avoid a heap allocation in the 1 kHz path;
-            // if the UDC ever returns a short packet, pad the remainder with
-            // silence so network packet timing stays exact.
-            if (static_cast<size_t>(r) < frame.size()) {
-                std::fill(frame.begin() + r, frame.end(), uint8_t{0});
-            }
-            {
-                std::lock_guard<std::mutex> lk(st.audio_out_mtx);
-                // Audio is real-time. Keep at most 8 ms and discard oldest data
-                // rather than replaying stale sound after a scheduling/network stall.
-                while (st.console_audio_frames.size() >= 8) st.console_audio_frames.pop_front();
-                st.console_audio_frames.push_back(frame);
-            }
-            st.audio_out_cv.notify_one();
-            continue;
-        }
-        if (r < 0 && errno == EINTR) continue;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    st.audio_reader_exited.store(true, std::memory_order_release);
-}
-
-static void ffs_audio_writer_loop(int id) {
-    FfsPortState& st = g_ffs_ports[id];
-    const std::array<uint8_t, ns::S2_AUDIO_USB_FRAME_BYTES> silence{};
-    while (st.io_running.load(std::memory_order_relaxed)) {
-        if (st.audio_capture_alt.load(std::memory_order_relaxed) != 1) {
-            std::unique_lock<std::mutex> lk(st.audio_in_mtx);
-            st.audio_in_cv.wait_for(lk, std::chrono::milliseconds(1), [&] {
-                return !st.io_running.load(std::memory_order_relaxed)
-                    || st.audio_capture_alt.load(std::memory_order_relaxed) == 1;
-            });
-            continue;
-        }
-        std::array<uint8_t, ns::S2_AUDIO_USB_FRAME_BYTES> frame{};
-        bool have_frame = false;
-        {
-            std::unique_lock<std::mutex> lk(st.audio_in_mtx);
-            st.audio_in_cv.wait_for(lk, std::chrono::milliseconds(1), [&] {
-                return !st.microphone_frames.empty() || !st.io_running.load(std::memory_order_relaxed);
-            });
-            if (!st.io_running.load(std::memory_order_relaxed)) break;
-            if (!st.microphone_frames.empty()) {
-                frame = st.microphone_frames.front();
-                st.microphone_frames.pop_front();
-                have_frame = true;
-            }
-        }
-
-        const int fd = st.ep_audio_in_fd;
-        if (fd < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            continue;
-        }
-        if (!have_frame) frame = silence;
-        apply_uac1_gain(frame.data(), frame.size(),
-                        st.audio_capture_mute.load(std::memory_order_acquire),
-                        st.audio_capture_gain_q16.load(std::memory_order_acquire));
-        const ssize_t w = write(fd, frame.data(), frame.size());
-        if (w < 0 && errno == EINTR) continue;
-        if (w < 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    st.audio_writer_exited.store(true, std::memory_order_release);
-}
-
 // Blocking write(ep1) loop: drains in_reports and submits each report on the
 // interrupt-IN endpoint, waiting for the host to poll it.
 static void ffs_writer_loop(int id) {
@@ -1566,27 +1213,20 @@ static bool functionfs_start_port_io(int id) {
     if (s2_native) {
         st.ep_vendor_out_fd = open(functionfs_ep_vendor_out_path(id).c_str(), O_RDONLY);
         st.ep_vendor_in_fd  = open(functionfs_ep_vendor_in_path(id).c_str(),  O_WRONLY);
-        st.ep_audio_out_fd  = open(functionfs_ep_audio_out_path(id).c_str(), O_RDONLY);
-        st.ep_audio_in_fd   = open(functionfs_ep_audio_in_path(id).c_str(),  O_WRONLY);
     }
     const bool vendor_required = s2_native;
     if (st.ep_in_fd < 0 || st.ep_out_fd < 0
-            || (vendor_required && (st.ep_vendor_out_fd < 0 || st.ep_vendor_in_fd < 0
-                                     || st.ep_audio_out_fd < 0 || st.ep_audio_in_fd < 0))) {
+            || (vendor_required && (st.ep_vendor_out_fd < 0 || st.ep_vendor_in_fd < 0))) {
         if (st.ep_in_fd  >= 0) { close(st.ep_in_fd);  st.ep_in_fd  = -1; }
         if (st.ep_out_fd >= 0) { close(st.ep_out_fd); st.ep_out_fd = -1; }
         if (st.ep_vendor_out_fd >= 0) { close(st.ep_vendor_out_fd); st.ep_vendor_out_fd = -1; }
         if (st.ep_vendor_in_fd  >= 0) { close(st.ep_vendor_in_fd);  st.ep_vendor_in_fd  = -1; }
-        if (st.ep_audio_out_fd  >= 0) { close(st.ep_audio_out_fd);  st.ep_audio_out_fd  = -1; }
-        if (st.ep_audio_in_fd   >= 0) { close(st.ep_audio_in_fd);   st.ep_audio_in_fd   = -1; }
         return false;
     }
     { std::lock_guard<std::mutex> lk(st.out_mtx); st.out_reports.clear(); }
     { std::lock_guard<std::mutex> lk(st.in_mtx);  st.in_reports.clear();  }
     { std::lock_guard<std::mutex> lk(st.vendor_out_mtx); st.vendor_out_reports.clear(); }
     { std::lock_guard<std::mutex> lk(st.vendor_in_mtx);  st.vendor_in_reports.clear();  }
-    { std::lock_guard<std::mutex> lk(st.audio_out_mtx); st.console_audio_frames.clear(); }
-    { std::lock_guard<std::mutex> lk(st.audio_in_mtx);  st.microphone_frames.clear();  }
     st.reader_exited.store(false, std::memory_order_relaxed);
     st.writer_exited.store(false, std::memory_order_relaxed);
     st.input_write_seen = false;
@@ -1597,16 +1237,6 @@ static bool functionfs_start_port_io(int id) {
     st.s2_coalesced_input_reports = 0;
     st.vendor_reader_exited.store(!s2_native, std::memory_order_relaxed);
     st.vendor_writer_exited.store(!s2_native, std::memory_order_relaxed);
-    st.audio_reader_exited.store(!s2_native, std::memory_order_relaxed);
-    st.audio_writer_exited.store(!s2_native, std::memory_order_relaxed);
-    st.audio_playback_alt.store(0, std::memory_order_relaxed);
-    st.audio_capture_alt.store(0, std::memory_order_relaxed);
-    st.audio_playback_mute.store(0, std::memory_order_relaxed);
-    st.audio_capture_mute.store(0, std::memory_order_relaxed);
-    st.audio_playback_volume.store(0, std::memory_order_relaxed);
-    st.audio_capture_volume.store(0, std::memory_order_relaxed);
-    st.audio_playback_gain_q16.store(S2_UAC_GAIN_Q16_UNITY, std::memory_order_relaxed);
-    st.audio_capture_gain_q16.store(S2_UAC_GAIN_Q16_UNITY, std::memory_order_relaxed);
     st.io_running.store(true, std::memory_order_relaxed);
     st.reader_thread = std::thread(ffs_reader_loop, id);
     st.writer_thread = std::thread(ffs_writer_loop, id);
@@ -1614,8 +1244,6 @@ static bool functionfs_start_port_io(int id) {
         switch2_native_reset_port(id);
         st.vendor_reader_thread = std::thread(ffs_vendor_reader_loop, id);
         st.vendor_writer_thread = std::thread(ffs_vendor_writer_loop, id);
-        st.audio_reader_thread = std::thread(ffs_audio_reader_loop, id);
-        st.audio_writer_thread = std::thread(ffs_audio_writer_loop, id);
     }
     return true;
 }
@@ -1626,8 +1254,6 @@ static void functionfs_stop_port_io(int id) {
     st.io_running.store(false, std::memory_order_relaxed);
     st.in_cv.notify_all();
     st.vendor_in_cv.notify_all();
-    st.audio_in_cv.notify_all();
-    st.audio_out_cv.notify_all();
 
     if (st.reader_thread.joinable()) {
         pthread_t h = st.reader_thread.native_handle();
@@ -1664,36 +1290,15 @@ static void functionfs_stop_port_io(int id) {
         st.vendor_writer_thread.join();
     }
 
-    if (st.audio_reader_thread.joinable()) {
-        pthread_t h = st.audio_reader_thread.native_handle();
-        while (!st.audio_reader_exited.load(std::memory_order_acquire)) {
-            pthread_kill(h, SIGUSR1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        st.audio_reader_thread.join();
-    }
-    if (st.audio_writer_thread.joinable()) {
-        pthread_t h = st.audio_writer_thread.native_handle();
-        while (!st.audio_writer_exited.load(std::memory_order_acquire)) {
-            st.audio_in_cv.notify_all();
-            pthread_kill(h, SIGUSR1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        st.audio_writer_thread.join();
-    }
 
     if (st.ep_in_fd  >= 0) { close(st.ep_in_fd);  st.ep_in_fd  = -1; }
     if (st.ep_out_fd >= 0) { close(st.ep_out_fd); st.ep_out_fd = -1; }
     if (st.ep_vendor_out_fd >= 0) { close(st.ep_vendor_out_fd); st.ep_vendor_out_fd = -1; }
     if (st.ep_vendor_in_fd  >= 0) { close(st.ep_vendor_in_fd);  st.ep_vendor_in_fd  = -1; }
-    if (st.ep_audio_out_fd  >= 0) { close(st.ep_audio_out_fd);  st.ep_audio_out_fd  = -1; }
-    if (st.ep_audio_in_fd   >= 0) { close(st.ep_audio_in_fd);   st.ep_audio_in_fd   = -1; }
     { std::lock_guard<std::mutex> lk(st.out_mtx); st.out_reports.clear(); }
     { std::lock_guard<std::mutex> lk(st.in_mtx);  st.in_reports.clear();  }
     { std::lock_guard<std::mutex> lk(st.vendor_out_mtx); st.vendor_out_reports.clear(); }
     { std::lock_guard<std::mutex> lk(st.vendor_in_mtx);  st.vendor_in_reports.clear();  }
-    { std::lock_guard<std::mutex> lk(st.audio_out_mtx); st.console_audio_frames.clear(); }
-    { std::lock_guard<std::mutex> lk(st.audio_in_mtx);  st.microphone_frames.clear();  }
 }
 
 } // namespace
@@ -1722,13 +1327,6 @@ std::string functionfs_ep_vendor_in_path(int id) {
     return (ffs_mount_dir(id) / "ep4").string();
 }
 
-std::string functionfs_ep_audio_out_path(int id) {
-    return (ffs_mount_dir(id) / "ep5").string();
-}
-
-std::string functionfs_ep_audio_in_path(int id) {
-    return (ffs_mount_dir(id) / "ep6").string();
-}
 
 bool functionfs_nodes_ready() {
     if (!functionfs_transport_active()) return false;
@@ -1739,8 +1337,6 @@ bool functionfs_nodes_ready() {
         if (access(functionfs_ep_out_path(i).c_str(), R_OK | W_OK) != 0) return false;
         if (access(functionfs_ep_vendor_out_path(i).c_str(), R_OK | W_OK) != 0) return false;
         if (access(functionfs_ep_vendor_in_path(i).c_str(), R_OK | W_OK) != 0) return false;
-        if (access(functionfs_ep_audio_out_path(i).c_str(), R_OK | W_OK) != 0) return false;
-        if (access(functionfs_ep_audio_in_path(i).c_str(), R_OK | W_OK) != 0) return false;
         if (!functionfs_io_ready(i)) return false;
     }
     return true;
@@ -1765,8 +1361,7 @@ bool functionfs_io_ready(int id) {
     bool base = st.io_running.load(std::memory_order_relaxed)
         && st.ep_in_fd >= 0 && st.ep_out_fd >= 0;
     if (gadget_uses_switch2_identity())
-        base = base && st.ep_vendor_out_fd >= 0 && st.ep_vendor_in_fd >= 0
-                    && st.ep_audio_out_fd >= 0 && st.ep_audio_in_fd >= 0;
+        base = base && st.ep_vendor_out_fd >= 0 && st.ep_vendor_in_fd >= 0;
     return base;
 }
 
@@ -1881,48 +1476,6 @@ bool functionfs_submit_vendor_report(int id, const uint8_t* data, size_t len) {
                      now_us(), id, len, depth_after, dropped_oldest,
                      bytes_to_hex(std::span<const uint8_t>(data, len)));
     st.vendor_in_cv.notify_one();
-    return true;
-}
-
-bool functionfs_wait_console_audio(
-        int id,
-        std::array<unsigned char, ns::S2_AUDIO_USB_FRAME_BYTES>& audio_frame,
-        std::chrono::milliseconds timeout) {
-    audio_frame.fill(0);
-    if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT) return false;
-    FfsPortState& st = g_ffs_ports[id];
-    if (st.audio_playback_alt.load(std::memory_order_relaxed) != 1) return false;
-    std::unique_lock<std::mutex> lk(st.audio_out_mtx);
-    if (!st.audio_out_cv.wait_for(lk, timeout, [&] {
-            return !st.console_audio_frames.empty()
-                || !st.io_running.load(std::memory_order_relaxed)
-                || st.audio_playback_alt.load(std::memory_order_relaxed) != 1;
-        })) {
-        return false;
-    }
-    if (st.console_audio_frames.empty()) return false;
-    audio_frame = st.console_audio_frames.front();
-    st.console_audio_frames.pop_front();
-    return true;
-}
-
-bool functionfs_submit_microphone_audio(int id, const uint8_t* data, size_t len) {
-    if (!functionfs_transport_active() || id < 0 || id >= HID_PORT_COUNT || !data || len == 0)
-        return false;
-    if (len % ns::S2_AUDIO_USB_FRAME_BYTES != 0) return false;
-    FfsPortState& st = g_ffs_ports[id];
-    if (!st.host_enabled || !functionfs_io_ready(id) || st.ep_audio_in_fd < 0
-            || st.audio_capture_alt.load(std::memory_order_relaxed) != 1) return false;
-    {
-        std::lock_guard<std::mutex> lk(st.audio_in_mtx);
-        for (size_t off = 0; off < len; off += ns::S2_AUDIO_USB_FRAME_BYTES) {
-            while (st.microphone_frames.size() >= 8) st.microphone_frames.pop_front();
-            std::array<uint8_t, ns::S2_AUDIO_USB_FRAME_BYTES> frame{};
-            std::memcpy(frame.data(), data + off, frame.size());
-            st.microphone_frames.push_back(frame);
-        }
-    }
-    st.audio_in_cv.notify_one();
     return true;
 }
 
@@ -2934,10 +2487,18 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
         }
     }
 
+    if (gadget_uses_switch2_identity() && !s2_uac1_audio_compiled()) {
+        std::println(stderr,
+                     "[s2][audio] this build has no ALSA support. Install libasound2-dev and rebuild; "
+                     "S1 and HORI builds do not require ALSA.");
+        return false;
+    }
+
     int dummy = 0;
     dummy = std::system("modprobe libcomposite >/dev/null 2>&1 || true"); (void)dummy;
     if (gadget_uses_switch2_identity()) {
         dummy = std::system("modprobe usb_f_fs >/dev/null 2>&1 || true"); (void)dummy;
+        dummy = std::system("modprobe usb_f_uac1 >/dev/null 2>&1 || true"); (void)dummy;
     }
     dummy = std::system("mountpoint -q /sys/kernel/config "
                         "|| mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true"); (void)dummy;
@@ -2991,6 +2552,7 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
     for (int i = 0; i < ffs_count; ++i) {
         if (!create_functionfs_function(i)) return false;
     }
+    if (gadget_uses_switch2_identity() && !create_s2_uac1_function()) return false;
     for (int i = 0; i < legacy_count; ++i) {
         // Function directory names must remain unique even though /dev/hidgN
         // numbering is assigned densely by f_hid in creation/link order.
@@ -3016,14 +2578,10 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             if (access(functionfs_ep_out_path(i).c_str(), F_OK) != 0) all_seen = false;
             if (access(functionfs_ep_vendor_out_path(i).c_str(), F_OK) != 0) all_seen = false;
             if (access(functionfs_ep_vendor_in_path(i).c_str(), F_OK) != 0) all_seen = false;
-            if (access(functionfs_ep_audio_out_path(i).c_str(), F_OK) != 0) all_seen = false;
-            if (access(functionfs_ep_audio_in_path(i).c_str(), F_OK) != 0) all_seen = false;
             chmod(functionfs_ep_in_path(i).c_str(), 0666);
             chmod(functionfs_ep_out_path(i).c_str(), 0666);
             chmod(functionfs_ep_vendor_out_path(i).c_str(), 0666);
             chmod(functionfs_ep_vendor_in_path(i).c_str(), 0666);
-            chmod(functionfs_ep_audio_out_path(i).c_str(), 0666);
-            chmod(functionfs_ep_audio_in_path(i).c_str(), 0666);
         }
         for (int i = 0; i < legacy_count; ++i) {
             const std::string node = "/dev/hidg" + std::to_string(i);
@@ -3041,9 +2599,30 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             }
 
             if (nodes_ready()) {
+                if (gadget_uses_switch2_identity()) {
+                    if (g_ctx.verbose) {
+                        std::println("[s2][audio] USB gadget is ready; waiting for the UAC1 ALSA card...");
+                    }
+                    bool audio_ready = false;
+                    for (int audio_try = 0; audio_try < 50; ++audio_try) {
+                        if (s2_uac1_audio_start()) {
+                            audio_ready = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (!audio_ready) {
+                        std::println(stderr,
+                                     "[s2][audio] USB gadget and FunctionFS endpoints are ready, but the "
+                                     "UAC1 ALSA PCM did not appear within 5 seconds. Check /proc/asound/cards, "
+                                     "/dev/snd, and the usb_f_uac1 module.");
+                        for (int i = 0; i < ffs_count; ++i) functionfs_stop_port_io(i);
+                        return false;
+                    }
+                }
                 if (g_ctx.verbose) {
                     if (gadget_uses_switch2_identity()) {
-                        std::println("[gadget] Done. Exposed one native S2 FunctionFS controller");
+                        std::println("[gadget] Done. Exposed one native S2 FunctionFS controller + stock UAC1 audio");
                     } else {
                         std::println("[gadget] Done. Exposed {} upstream-style f_hid interface(s) (/dev/hidg*)",
                                      legacy_count);
@@ -3053,6 +2632,12 @@ static bool setup_gadget_builtin(bool force, const char* reason) {
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (gadget_uses_switch2_identity()) {
+        s2_uac1_audio_stop();
+        std::println(stderr,
+                     "[gadget] S2 USB endpoints did not become ready after UDC binding; "
+                     "this failure occurred before ALSA audio startup.");
     }
     return false;
 }
@@ -3070,10 +2655,11 @@ void teardown_gadget() {
     clear_switch2_usb_activity();
     std::error_code ec;
     const bool had_gadget = fs::exists(GADGET_DIR, ec);
-    if (!had_gadget && !functionfs_transport_active()) return;
+    if (!had_gadget && !functionfs_transport_active() && !s2_uac1_audio_ready()) return;
     if (g_ctx.verbose) std::println("[gadget] Closing USB gadget...");
 
     if (had_gadget) write_file(fs::path(GADGET_DIR) / "UDC", "");
+    s2_uac1_audio_stop();
     for (int i = 0; i < HID_PORT_COUNT; ++i) {
         functionfs_stop_port_io(i);
     }
@@ -3081,6 +2667,7 @@ void teardown_gadget() {
         fs::remove(fs::path(CONFIG_DIR)  / ("hid.usb" + std::to_string(i)), ec);
         fs::remove(ffs_config_link(i), ec);
     }
+    fs::remove(s2_uac1_config_link(), ec);
 
     unmount_functionfs_instances();
 
@@ -3089,6 +2676,7 @@ void teardown_gadget() {
             fs::remove(fs::path(GADGET_DIR) / "functions" / ("hid.usb" + std::to_string(i)), ec);
             fs::remove(ffs_function_dir(i), ec);
         }
+        fs::remove(s2_uac1_function_dir(), ec);
         fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1/strings/0x409", ec);
         fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/configs/c.1",               ec);
         fs::remove("/sys/kernel/config/usb_gadget/ns_ctrl/strings/0x409",             ec);

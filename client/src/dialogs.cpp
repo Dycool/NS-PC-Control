@@ -436,10 +436,15 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 }
 
 void SettingsDialog::updateMouseModeControls() {
+    const bool keyboardModeEnabled =
+        g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF;
     const bool joyconNativeAvailable = joyconMouseModeAvailable();
     const bool nativeChecked = joyconNativeAvailable
         && joyconMouseModeBox && joyconMouseModeBox->isChecked();
-    const bool normalChecked = mouseModeBox && mouseModeBox->isChecked();
+    // A saved regular Mouse Mode preference is inactive while keyboard mode
+    // is off and must not block the independent native Joy-Con mouse mode.
+    const bool normalChecked = keyboardModeEnabled
+        && mouseModeBox && mouseModeBox->isChecked();
 
     if (joyconMouseModeBox) {
         joyconMouseModeBox->setVisible(joyconNativeAvailable);
@@ -447,8 +452,13 @@ void SettingsDialog::updateMouseModeControls() {
         joyconMouseModeBox->setToolTip(QString());
     }
     if (mouseModeBox) {
-        mouseModeBox->setEnabled(!nativeChecked);
-        mouseModeBox->setToolTip(QString());
+        mouseModeBox->setEnabled(keyboardModeEnabled && !nativeChecked);
+        mouseModeBox->setText(keyboardModeEnabled
+            ? QStringLiteral("Mouse Mode")
+            : QStringLiteral("Mouse Mode (Enable keyboard mode)"));
+        mouseModeBox->setToolTip(keyboardModeEnabled
+            ? QString()
+            : QStringLiteral("Enable keyboard mode to use Mouse Mode."));
     }
     const bool sensEnabled = nativeChecked || normalChecked;
     if (mouseSensitivityLabel) mouseSensitivityLabel->setEnabled(sensEnabled);
