@@ -1,6 +1,7 @@
 #include "s2_rawgadget.hpp"
 
 #include "app_state.hpp"
+#include "raw_gadget_embedded.hpp"
 #include "switch2_native.hpp"
 #include "virtual_controller.hpp"
 #include "shared/protocol.hpp"
@@ -1177,23 +1178,6 @@ bool wait_for_raw_gadget_device() {
     return false;
 }
 
-fs::path find_raw_gadget_source() {
-    std::error_code ec;
-    const fs::path executable = fs::read_symlink("/proc/self/exe", ec);
-    const fs::path cwd = fs::current_path(ec);
-    std::array<fs::path, 4> candidates = {
-        executable.parent_path() / "kernel/raw_gadget.c",
-        executable.parent_path().parent_path() / "kernel/raw_gadget.c",
-        cwd / "kernel/raw_gadget.c",
-        cwd / "server/kernel/raw_gadget.c",
-    };
-    for (const fs::path& candidate : candidates) {
-        ec.clear();
-        if (fs::is_regular_file(candidate, ec)) return candidate;
-    }
-    return {};
-}
-
 fs::path find_executable(std::initializer_list<const char*> candidates) {
     for (const char* candidate : candidates) {
         if (access(candidate, X_OK) == 0) return candidate;
@@ -1229,56 +1213,58 @@ bool provision_raw_gadget_module() {
     struct utsname info{};
     if (uname(&info) != 0) return false;
 
-    const fs::path source = find_raw_gadget_source();
-    const fs::path make = find_executable({"/usr/bin/make", "/bin/make"});
-    const fs::path depmod = find_executable({"/usr/sbin/depmod", "/sbin/depmod"});
-    if (source.empty() || make.empty() || depmod.empty()) return false;
-
     const std::string release = info.release;
-    const fs::path kernel_build = fs::path("/lib/modules") / release / "build";
-    if (!fs::is_directory(kernel_build)) return false;
-
-    const fs::path work_dir = fs::path("/tmp") / ("ns-pc-control-raw-gadget-" + release);
-    const fs::path installed_module = fs::path("/lib/modules") / release / "extra/raw_gadget.ko";
-    std::error_code ec;
-    fs::remove_all(work_dir, ec);
-    ec.clear();
-    if (!fs::create_directories(work_dir, ec) || ec) return false;
-    if (!fs::copy_file(source, work_dir / "raw_gadget.c",
-                       fs::copy_options::overwrite_existing, ec) || ec) {
-        fs::remove_all(work_dir, ec);
+    const EmbeddedRawGadgetModule* module = find_embedded_raw_gadget_module(release);
+    if (!module) {
+        std::println(stderr,
+            "[s2-rg] ns-backend has no Raw Gadget module for kernel {}.", release);
+        const auto supported = embedded_raw_gadget_modules();
+        if (supported.empty()) {
+            std::println(stderr,
+                "[s2-rg] This server build contains no precompiled Raspberry Pi modules.");
+        } else {
+            std::println(stderr, "[s2-rg] Embedded kernel releases:");
+            for (const auto& candidate : supported)
+                std::println(stderr, "[s2-rg]   {}", candidate.kernel_release);
+        }
+        std::println(stderr,
+            "[s2-rg] Install a newer ns-backend release that supports this kernel.");
         return false;
     }
+
+    const fs::path depmod = find_executable({"/usr/sbin/depmod", "/sbin/depmod"});
+    if (depmod.empty()) return false;
+
+    const fs::path installed_module = fs::path("/lib/modules") / release / "extra/raw_gadget.ko";
+    const fs::path temporary_module = installed_module.string() + ".tmp-" + std::to_string(getpid());
+    std::error_code ec;
+    fs::create_directories(installed_module.parent_path(), ec);
+    if (ec) return false;
     {
-        std::ofstream makefile(work_dir / "Makefile", std::ios::trunc);
-        if (!makefile) {
-            fs::remove_all(work_dir, ec);
+        std::ofstream output(temporary_module, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        output.write(reinterpret_cast<const char*>(module->image.data()),
+                     static_cast<std::streamsize>(module->image.size()));
+        if (!output) {
+            output.close();
+            fs::remove(temporary_module, ec);
             return false;
         }
-        makefile << "obj-m += raw_gadget.o\n";
     }
-
-    const bool built = run_command(make, {
-        "-C", kernel_build.string(), "M=" + work_dir.string(), "modules"
-    });
-    if (!built) {
-        fs::remove_all(work_dir, ec);
-        return false;
-    }
-
-    ec.clear();
-    fs::create_directories(installed_module.parent_path(), ec);
-    if (ec || !fs::copy_file(work_dir / "raw_gadget.ko", installed_module,
-                             fs::copy_options::overwrite_existing, ec) || ec) {
-        fs::remove_all(work_dir, ec);
-        return false;
-    }
-    fs::permissions(installed_module,
+    fs::permissions(temporary_module,
                     fs::perms::owner_read | fs::perms::owner_write
                     | fs::perms::group_read | fs::perms::others_read,
                     fs::perm_options::replace, ec);
+    if (ec) {
+        fs::remove(temporary_module, ec);
+        return false;
+    }
+    fs::rename(temporary_module, installed_module, ec);
+    if (ec) {
+        fs::remove(temporary_module, ec);
+        return false;
+    }
     const bool indexed = run_command(depmod, {"-a", release});
-    fs::remove_all(work_dir, ec);
     return indexed;
 }
 
@@ -1291,7 +1277,7 @@ bool s2_rawgadget_module_available() {
     if (load_raw_gadget_module() && wait_for_raw_gadget_device()) return true;
     if (geteuid() != 0) return false;
 
-    std::println("[s2-rg] raw_gadget is not installed for this kernel; building bundled driver for S2 mode...");
+    std::println("[s2-rg] raw_gadget is not installed for this kernel; installing embedded S2 module...");
     if (!provision_raw_gadget_module()) return false;
     return load_raw_gadget_module() && wait_for_raw_gadget_device();
 }
@@ -1308,8 +1294,7 @@ bool s2_rawgadget_setup(bool /*force*/, const char* reason) {
         const char* release = uname(&info) == 0 ? info.release : "unknown";
         std::println(stderr,
             "[s2-rg] could not provision /dev/raw-gadget for kernel {}.\n"
-            "[s2-rg] The release must include kernel/raw_gadget.c, "
-            "and the Pi must have matching kernel headers, make and a compiler.", release);
+            "[s2-rg] Install an ns-backend release with an embedded module for this exact kernel.", release);
         return false;
     }
     if (!udc_unbind_configfs_gadget()) {

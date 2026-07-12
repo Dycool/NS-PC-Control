@@ -131,6 +131,20 @@ if(NOT XXD_EXECUTABLE)
     message(FATAL_ERROR "xxd not found. Install it with: sudo apt install xxd   (or vim-common)")
 endif()
 
+
+set(RAW_GADGET_MODULE_DIR "" CACHE PATH "Directory containing raw_gadget-<uname-r>.ko files")
+set(RAW_GADGET_EMBED_CPP ${CMAKE_CURRENT_BINARY_DIR}/raw_gadget_embedded.cpp)
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+        -DINPUT_DIR=${RAW_GADGET_MODULE_DIR}
+        -DOUTPUT_FILE=${RAW_GADGET_EMBED_CPP}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_raw_gadget_modules.cmake
+    RESULT_VARIABLE RAW_GADGET_EMBED_RESULT
+)
+if(NOT RAW_GADGET_EMBED_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to embed Raw Gadget kernel modules")
+endif()
+
 # ---------------------------------------------------------------------------
 # Embed webapp HTML/CSS/JS files
 # ---------------------------------------------------------------------------
@@ -175,6 +189,7 @@ add_executable(ns-backend
     src/udp_audio.cpp
     src/s2_uac1_audio.cpp
     src/s2_rawgadget.cpp
+    ${RAW_GADGET_EMBED_CPP}
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
     src/switch2_native.cpp

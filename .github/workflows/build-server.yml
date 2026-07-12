@@ -5,6 +5,10 @@ on:
     paths:
       - 'server/**'
       - '.github/workflows/build-server.yml'
+  schedule:
+    # Keep the embedded module catalog current as Raspberry Pi OS publishes
+    # new kernels, even when the application source has not changed.
+    - cron: '23 4 * * 1'
   workflow_dispatch:
   workflow_call:
 
@@ -17,11 +21,109 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  build-raw-gadget-modules:
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        suite: [bookworm, trixie]
+    container: debian:${{ matrix.suite }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Raspberry Pi kernel headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y ca-certificates curl gnupg gcc make libc6-dev kmod
+          curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
+            | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
+          echo 'deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] https://archive.raspberrypi.com/debian/ ${{ matrix.suite }} main' \
+            > /etc/apt/sources.list.d/raspberrypi.list
+          apt-get update
+          apt-get install -y linux-headers-rpi-v8 linux-headers-rpi-2712
+
+      - name: Identify current Raspberry Pi kernel releases
+        id: kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          releases="$({
+            find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-rpi-v8' -printf '%f\n'
+            find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-rpi-2712' -printf '%f\n'
+          } | sed 's/^linux-headers-//' | sort -u | paste -sd_ -)"
+          if [ -z "$releases" ]; then
+            echo "No Raspberry Pi kernel header trees were installed"
+            exit 1
+          fi
+          echo "releases=$releases" >> "$GITHUB_OUTPUT"
+
+      - name: Restore previously supported Raw Gadget modules
+        uses: actions/cache@v5
+        with:
+          path: server/prebuilt-raw-gadget
+          key: raw-gadget-modules-${{ matrix.suite }}-${{ steps.kernels.outputs.releases }}-${{ hashFiles('server/kernel/raw_gadget.c') }}-v2
+          restore-keys: |
+            raw-gadget-modules-${{ matrix.suite }}-
+
+      - name: Build Raw Gadget for current Raspberry Pi kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/server/prebuilt-raw-gadget"
+          mkdir -p "$output"
+
+          found=0
+          for kernel_dir in /usr/src/linux-headers-*-rpi-v8 /usr/src/linux-headers-*-rpi-2712; do
+            [ -d "$kernel_dir" ] || continue
+            release="${kernel_dir#/usr/src/linux-headers-}"
+            build_dir="$(mktemp -d)"
+            cp server/kernel/raw_gadget.c "$build_dir/raw_gadget.c"
+            printf 'obj-m += raw_gadget.o\n' > "$build_dir/Makefile"
+            make -C "$kernel_dir" M="$build_dir" modules
+            cp "$build_dir/raw_gadget.ko" "$output/raw_gadget-$release.ko"
+            rm -rf "$build_dir"
+            found=$((found + 1))
+          done
+
+          if [ "$found" -lt 2 ]; then
+            echo "Expected both Raspberry Pi v8 and 2712 kernel headers"
+            find /usr/src -maxdepth 1 -type d -name 'linux-headers-*' -print
+            exit 1
+          fi
+
+          # Retain a useful update window without allowing the single server
+          # binary to grow forever. Each OS suite keeps its four newest exact
+          # kernel releases for both supported Raspberry Pi kernel profiles.
+          for profile in rpi-v8 rpi-2712; do
+            mapfile -t modules < <(
+              find "$output" -maxdepth 1 -type f -name "raw_gadget-*-$profile.ko" -print | sort -V
+            )
+            while [ "${#modules[@]}" -gt 4 ]; do
+              rm -f "${modules[0]}"
+              modules=("${modules[@]:1}")
+            done
+          done
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: raw-gadget-modules-${{ matrix.suite }}
+          path: server/prebuilt-raw-gadget/*.ko
+
   build-pi-server:
+    needs: build-raw-gadget-modules
     runs-on: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Download precompiled Raw Gadget modules
+        uses: actions/download-artifact@v7
+        with:
+          pattern: raw-gadget-modules-*
+          merge-multiple: true
+          path: server/prebuilt-raw-gadget
 
       - name: Install dependencies
         run: |
@@ -84,6 +186,7 @@ jobs:
           cmake .. \
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
+            -DRAW_GADGET_MODULE_DIR="$GITHUB_WORKSPACE/server/prebuilt-raw-gadget" \
             -DUSE_SDL_BT=ON \
             -DREQUIRE_SDL_BT=ON
 
@@ -91,8 +194,6 @@ jobs:
 
           mkdir -p artifact/pi-server
           cp ns-backend artifact/pi-server/ns-backend
-          mkdir -p artifact/pi-server/kernel
-          cp ../kernel/raw_gadget.c artifact/pi-server/kernel/raw_gadget.c
 
       - uses: actions/upload-artifact@v6
         with:
