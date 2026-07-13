@@ -10,8 +10,15 @@ const defLayout = {
     'rstick': {l:62, t:60, w:16}, 'btn-rs': {l:85, t:80, w:5}
 };
 let layout = JSON.parse(localStorage.getItem('nswc_layout')) || defLayout;
-let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || '3');
-if (![1,2,3].includes(controllerType)) controllerType = 3;
+const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
+let controllerType = 3;
+if (nativeMobileHost) {
+    controllerType = parseInt(localStorage.getItem('nswc_controller_type') || '3');
+    if (![1,2,3].includes(controllerType)) controllerType = 3;
+} else {
+    document.querySelector('label[for="controllerType"]')?.remove();
+    document.getElementById('controllerType')?.remove();
+}
 const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
 const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
 function allowedForController(id) {
@@ -34,8 +41,9 @@ function applyLayout() {
     }
 }
 applyLayout();
-document.getElementById('controllerType').value = String(controllerType);
+if (nativeMobileHost) document.getElementById('controllerType').value = String(controllerType);
 function changeControllerType() {
+    if (!nativeMobileHost) return;
     controllerType = parseInt(document.getElementById('controllerType').value);
     applyLayout(); populateAdd(); checkOverlaps();
 }
@@ -139,7 +147,7 @@ setTimeout(checkOverlaps, 500);
 function saveLayout() {
     if(checkOverlaps()) { alert('Fix overlapping buttons (red) before saving!'); return; }
     localStorage.setItem('nswc_layout', JSON.stringify(layout));
-    localStorage.setItem('nswc_controller_type', String(controllerType));
+    if (nativeMobileHost) localStorage.setItem('nswc_controller_type', String(controllerType));
     window.location.href = 'mobile.html';
 }
 function resetLayout() {

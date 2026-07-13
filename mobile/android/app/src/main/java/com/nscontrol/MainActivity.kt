@@ -91,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var touchFrame: ByteArray? = null
     @Volatile private var lastTouchFrameMs: Long = 0
     @Volatile private var touchControllerType: Int = 3
+    @Volatile private var physicalControllerType: Int = Protocol.CONTROLLER_TYPE_PRO
     @Volatile private var touchExtraButtons: Int = 0
     @Volatile private var lastBridgeFrameParseMs: Long = 0
 
@@ -547,6 +548,7 @@ class MainActivity : AppCompatActivity() {
                             val pad = physicalPads[i]
                             if (!pad.present) continue
                             Protocol.setFrameHid(frame, i, pad.hid())
+                            Protocol.setFrameControllerType(frame, i, physicalControllerType)
                             if (pad.hasMotion && pad.motionSampleCount >= Protocol.MOTION_SAMPLE_COUNT) {
                                 Protocol.setFrameMotionSamples(frame, i, Array(Protocol.MOTION_SAMPLE_COUNT) { j -> pad.motionSamples[j].copyOf() })
                                 Protocol.setFrameMotionFresh(frame, i, pad.motionRevision != pad.sentMotionRevision)
@@ -696,11 +698,18 @@ class MainActivity : AppCompatActivity() {
                           var oldRefresh = document.getElementById('btnHubRefresh');
                           if (oldRefresh) oldRefresh.remove();
                           var connect = document.getElementById('btnConnect');
+                          function publishPhysicalControllerType(){
+                            var selected = parseInt(localStorage.getItem('nswc_controller_type') || '3');
+                            if (![1,2,3].includes(selected)) selected = 3;
+                            if (window.NSBridge && NSBridge.onPhysicalControllerType) NSBridge.onPhysicalControllerType(selected);
+                          }
+                          publishPhysicalControllerType();
                           if (connect) {
                             connect.style.display = 'inline-block';
                             connect.textContent = 'Connect';
                             connect.onclick = function(ev){
                               if (ev) ev.preventDefault();
+                              publishPhysicalControllerType();
                               if (window.NSBridge && NSBridge.onPhysicalStart) NSBridge.onPhysicalStart();
                               return false;
                             };
@@ -846,6 +855,12 @@ class MainActivity : AppCompatActivity() {
         fun onTouchControllerType(controllerType: Int) {
             // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
             touchControllerType = if (controllerType in 1..3) controllerType else 3
+        }
+
+        @JavascriptInterface
+        fun onPhysicalControllerType(controllerType: Int) {
+            if (controlClientActive && activeClientMode == ClientMode.PHYSICAL) return
+            physicalControllerType = if (controllerType in 1..3) controllerType else Protocol.CONTROLLER_TYPE_PRO
         }
 
         @JavascriptInterface
@@ -1063,10 +1078,35 @@ class MainActivity : AppCompatActivity() {
 
             // Android controller axis layouts vary a lot. Switch Pro over BT often
             // exposes the right stick as RX/RY, while Xbox-style mappings often use Z/RZ.
-            pad.lx = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_X))
-            pad.ly = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_Y))
-            pad.rx = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_Z, MotionEvent.AXIS_RX))
-            pad.ry = axisToByte(centeredAxisAny(event, device, MotionEvent.AXIS_RZ, MotionEvent.AXIS_RY))
+            val primaryX = centeredAxisAny(event, device, MotionEvent.AXIS_X)
+            val primaryY = centeredAxisAny(event, device, MotionEvent.AXIS_Y)
+            val secondaryX = centeredAxisAny(event, device, MotionEvent.AXIS_Z, MotionEvent.AXIS_RX)
+            val secondaryY = centeredAxisAny(event, device, MotionEvent.AXIS_RZ, MotionEvent.AXIS_RY)
+            val hasPrimary = axisPresent(device, event.source, MotionEvent.AXIS_X) ||
+                axisPresent(device, event.source, MotionEvent.AXIS_Y)
+            when (physicalControllerType) {
+                Protocol.CONTROLLER_TYPE_JOYCON_L -> {
+                    pad.lx = axisToByte(if (hasPrimary) primaryX else secondaryX)
+                    pad.ly = axisToByte(if (hasPrimary) primaryY else secondaryY)
+                    pad.rx = 128
+                    pad.ry = 128
+                }
+                Protocol.CONTROLLER_TYPE_JOYCON_R -> {
+                    // A standalone right Joy-Con usually exposes its only stick as X/Y,
+                    // even though it is the console's right stick. Some Android drivers
+                    // retain a right-stick Z/R* layout, so use that when X/Y are absent.
+                    pad.lx = 128
+                    pad.ly = 128
+                    pad.rx = axisToByte(if (hasPrimary) primaryX else secondaryX)
+                    pad.ry = axisToByte(if (hasPrimary) primaryY else secondaryY)
+                }
+                else -> {
+                    pad.lx = axisToByte(primaryX)
+                    pad.ly = axisToByte(primaryY)
+                    pad.rx = axisToByte(secondaryX)
+                    pad.ry = axisToByte(secondaryY)
+                }
+            }
 
             val l2 = maxOf(
                 centeredAxisAny(event, device, MotionEvent.AXIS_LTRIGGER),

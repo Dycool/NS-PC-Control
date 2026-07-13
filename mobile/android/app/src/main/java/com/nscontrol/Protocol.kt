@@ -8,6 +8,10 @@ object Protocol {
     const val EXT_PAD_SIZE = 48
     const val PAD_COUNT = 4
 
+    const val CONTROLLER_TYPE_JOYCON_L = 1
+    const val CONTROLLER_TYPE_JOYCON_R = 2
+    const val CONTROLLER_TYPE_PRO = 3
+
     private const val MAGIC = 0x4E535743
     private const val VERSION = 6
 

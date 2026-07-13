@@ -24,6 +24,10 @@ private enum ProtocolWire {
     static let motionSampleCount = 3
     static let padCount = 4
 
+    static let controllerTypeJoyConL = 1
+    static let controllerTypeJoyConR = 2
+    static let controllerTypePro = 3
+
     static let rumblePacketSize = 8
     static let precisionRumblePacketSize = 20
     static let rumbleMagic: UInt32 = 0x4E535652
@@ -346,6 +350,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private var touchFrame: [UInt8]?
     private var lastTouchFrameMs: UInt64 = 0
     private var touchControllerType = 3
+    private var physicalControllerType = ProtocolWire.controllerTypePro
     private var touchExtraButtons = 0
     private var lastBridgeFrameParseMs: UInt64 = 0
 
@@ -478,6 +483,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             onTouchControllerType:function(controllerType){post('onTouchControllerType',[controllerType]);},
             onTouchExtraButtons:function(extraButtons){post('onTouchExtraButtons',[extraButtons]);},
             onClose:function(){post('onClose');},
+            onPhysicalControllerType:function(controllerType){post('onPhysicalControllerType',[controllerType]);},
             onPhysicalStart:function(){post('onPhysicalStart');},
             onPhysicalStop:function(){post('onPhysicalStop');},
             onPhysicalRefresh:function(){post('onPhysicalRefresh');},
@@ -710,10 +716,16 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
           var oldStop = document.getElementById('btn' + 'HubStop'); if (oldStop) oldStop.remove();
           var oldRefresh = document.getElementById('btn' + 'HubRefresh'); if (oldRefresh) oldRefresh.remove();
           var connect = document.getElementById('btnConnect');
+          function publishPhysicalControllerType(){
+            var selected = parseInt(localStorage.getItem('nswc_controller_type') || '3');
+            if (![1,2,3].includes(selected)) selected = 3;
+            if (window.NSBridge && NSBridge.onPhysicalControllerType) NSBridge.onPhysicalControllerType(selected);
+          }
+          publishPhysicalControllerType();
           if (connect) {
             connect.style.display = 'inline-block';
             connect.textContent = 'Connect';
-            connect.onclick = function(ev){ if(ev)ev.preventDefault(); if(window.NSBridge&&NSBridge.onPhysicalStart)NSBridge.onPhysicalStart(); return false; };
+            connect.onclick = function(ev){ if(ev)ev.preventDefault(); publishPhysicalControllerType(); if(window.NSBridge&&NSBridge.onPhysicalStart)NSBridge.onPhysicalStart(); return false; };
           }
           function nsButtonHost(){
             return document.querySelector('.actions') || document.querySelector('main') || document.body;
@@ -760,6 +772,10 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         case "onTouchControllerType":
             if let first = args.first {
                 touchControllerType = ViewController.normalizedControllerType(intArg(first))
+            }
+        case "onPhysicalControllerType":
+            if !(controlClientActive && activeClientMode == .physical), let first = args.first {
+                physicalControllerType = ViewController.normalizedControllerType(intArg(first))
             }
         case "onTouchExtraButtons":
             if let first = args.first { touchExtraButtons = intArg(first) & (0x10 | 0x20) }
@@ -1089,6 +1105,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                     let pad = pads[i]
                     guard pad.present else { continue }
                     ProtocolWire.setFrameHid(&frame, pad: i, hid: pad.hid())
+                    ProtocolWire.setFrameControllerType(&frame, pad: i, controllerType: physicalControllerType)
                     if pad.hasMotion && pad.motionSampleCount >= ProtocolWire.motionSampleCount {
                         ProtocolWire.setFrameMotionSamples(&frame, pad: i, samples: pad.motionSamples)
                         ProtocolWire.setFrameMotionFresh(&frame, pad: i,
@@ -1314,10 +1331,36 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             pad.dpadDown = gamepad.dpad.down.isPressed
             pad.dpadLeft = gamepad.dpad.left.isPressed
             pad.dpadRight = gamepad.dpad.right.isPressed
-            pad.lx = ProtocolWire.axisToByte(gamepad.leftThumbstick.xAxis.value)
-            pad.ly = ProtocolWire.axisToByte(-gamepad.leftThumbstick.yAxis.value)
-            pad.rx = ProtocolWire.axisToByte(gamepad.rightThumbstick.xAxis.value)
-            pad.ry = ProtocolWire.axisToByte(-gamepad.rightThumbstick.yAxis.value)
+            let leftX = gamepad.leftThumbstick.xAxis.value
+            let leftY = gamepad.leftThumbstick.yAxis.value
+            let rightX = gamepad.rightThumbstick.xAxis.value
+            let rightY = gamepad.rightThumbstick.yAxis.value
+            switch physicalControllerType {
+            case ProtocolWire.controllerTypeJoyConL:
+                let leftMagnitude = abs(leftX) + abs(leftY)
+                let rightMagnitude = abs(rightX) + abs(rightY)
+                let useRight = leftMagnitude < 0.001 && rightMagnitude >= 0.001
+                pad.lx = ProtocolWire.axisToByte(useRight ? rightX : leftX)
+                pad.ly = ProtocolWire.axisToByte(-(useRight ? rightY : leftY))
+                pad.rx = 128
+                pad.ry = 128
+            case ProtocolWire.controllerTypeJoyConR:
+                // Apple normally assigns a standalone R stick to rightThumbstick. A few
+                // GameController mappings expose the sole stick as leftThumbstick, so use
+                // whichever one is active while keeping the transmitted left slot neutral.
+                let rightMagnitude = abs(rightX) + abs(rightY)
+                let leftMagnitude = abs(leftX) + abs(leftY)
+                let useLeft = rightMagnitude < 0.001 && leftMagnitude >= 0.001
+                pad.lx = 128
+                pad.ly = 128
+                pad.rx = ProtocolWire.axisToByte(useLeft ? leftX : rightX)
+                pad.ry = ProtocolWire.axisToByte(-(useLeft ? leftY : rightY))
+            default:
+                pad.lx = ProtocolWire.axisToByte(leftX)
+                pad.ly = ProtocolWire.axisToByte(-leftY)
+                pad.rx = ProtocolWire.axisToByte(rightX)
+                pad.ry = ProtocolWire.axisToByte(-rightY)
+            }
         }
     }
 
