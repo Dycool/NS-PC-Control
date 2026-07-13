@@ -160,6 +160,11 @@ void writer_thread(std::stop_token stoken, int hz) {
             if (port_uses_s2_gadget(i)) {
                 const bool live = s2_gadget_transport_active() && s2_gadget_io_ready(i);
                 if (!live) {
+                    // Endpoint loss is also possible without a Raw Gadget
+                    // SUSPEND/DISCONNECT event (for example, a backend failure).
+                    // Only start the debounce on a live -> not-live edge so an
+                    // unconfigured gadget at startup is not treated as sleep.
+                    if (s2_live[i]) mark_switch2_usb_host_disconnected();
                     s2_live[i] = false;
                     all_open = false;
                 } else if (!s2_live[i]) {
@@ -190,7 +195,12 @@ void writer_thread(std::stop_token stoken, int hz) {
         }
 
         if (!all_open) {
-            clear_switch2_usb_activity();
+            // In native S2 mode, the not-live state is precisely the evidence
+            // consumed by the debounced USB lifecycle detector. Clearing it
+            // here erased the disconnect timestamp before the 1.5 s debounce
+            // could expire. Legacy gadgets do not expose that lifecycle.
+            if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2)
+                clear_switch2_usb_activity();
             close_all_fds();
             run_gadget_setup_if_needed(false, "requested USB gadget endpoints could not all be opened");
             for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));

@@ -986,9 +986,18 @@ void event_pump_loop() {
                 mark_switch2_usb_host_resumed();
                 break;
             case USB_RAW_EVENT_RESET:
+                // A reset tears down the configured endpoints just like a
+                // transient disconnect. Preserve that lifecycle evidence while
+                // the host re-enumerates; SET_CONFIGURATION/RESUME will cancel
+                // the debounce if the bus comes back promptly.
+                mark_switch2_usb_host_disconnected();
                 reset_connection_state(S2GadgetState::Resetting);
                 break;
             case USB_RAW_EVENT_DISCONNECT:
+                // Unlike SUSPEND, some UDCs report only DISCONNECT when the
+                // cable/host goes away. Feed it into the same debounced sleep
+                // path before dropping the Raw Gadget connection state.
+                mark_switch2_usb_host_disconnected();
                 reset_connection_state(S2GadgetState::DeviceInitialized);
                 break;
             default: break;
