@@ -43,6 +43,11 @@ private:
     uint64_t last_capabilities_send_us = 0;
     uint64_t last_playback_receive_us = 0;
     uint64_t next_open_retry_us = 0;
+    // Adaptive playback jitter buffer state (RFC 3550 inter-arrival jitter).
+    uint64_t jitter_last_arrival_us = 0;
+    uint64_t jitter_last_send_us = 0;
+    double jitter_estimate_us = 0.0;
+    bool have_jitter_sample = false;
 
     void reconfigure(uint8_t flags, const std::string& playback_device,
                      const std::string& microphone_device);

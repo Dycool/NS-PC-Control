@@ -14,15 +14,23 @@
 
 namespace {
 
-// Each network block is exactly one 1 ms USB audio frame. Two blocks are the
-// lowest practical startup target that still tolerates one late LAN/scheduler
-// tick without an immediate underrun.
-constexpr int PLAYBACK_START_BLOCKS = 2;      // 2 ms startup jitter buffer
-constexpr int PLAYBACK_TARGET_BLOCKS = 2;     // 2 ms steady-state queue target
-constexpr int PLAYBACK_MAX_BLOCKS = 12;       // 12 ms hard latency cap
-constexpr int MICROPHONE_MAX_BLOCKS = 8;      // 8 ms hard capture cap
+// The playback jitter buffer is sized in milliseconds and adapts to the measured
+// network jitter, so a clean link stays low-latency while a jittery/high-ping
+// link (e.g. the Pi's Wi-Fi under load) grows the buffer enough to stay
+// glitch-free. One millisecond of PCM is S2_AUDIO_USB_FRAME_BYTES bytes; the
+// target is held by a small resampling trim (see handle_packet). Datagrams now
+// carry S2_AUDIO_UDP_FRAMES ms each, so seq gaps are concealed in whole-datagram
+// silence chunks.
+constexpr float BYTES_PER_MS = static_cast<float>(ns::S2_AUDIO_USB_FRAME_BYTES);
+constexpr float PLAYBACK_MIN_TARGET_MS = 10.0f;    // floor on a clean link
+constexpr float PLAYBACK_MAX_TARGET_MS = 150.0f;   // ceiling for high jitter (balanced)
+constexpr float PLAYBACK_JITTER_MULT   = 2.5f;     // target = min + mult * jitter
+constexpr int   PLAYBACK_MAX_MS = 250;             // hard latency cap -> flush/restart
+constexpr int   MICROPHONE_MAX_MS = 40;            // capture backlog cap
+constexpr int   PLAYBACK_MAX_CONCEAL_DATAGRAMS = 8;// silence datagrams per gap
 constexpr float PLAYBACK_MIN_RATIO = 0.9975f;
 constexpr float PLAYBACK_MAX_RATIO = 1.0025f;
+constexpr float PLAYBACK_TRIM_COEFF = 0.0005f;     // trim per ms of queue error
 constexpr uint64_t CAPS_INTERVAL_US = 500'000ULL;
 constexpr uint64_t AUDIO_RETRY_US = 5'000'000ULL;
 constexpr uint64_t PLAYBACK_IDLE_RESET_US = 500'000ULL;
@@ -110,6 +118,8 @@ void S2AudioClient::close_streams() {
     active_flags = 0;
     have_playback_sequence = false;
     last_playback_receive_us = 0;
+    have_jitter_sample = false;
+    jitter_estimate_us = 0.0;
 }
 
 void S2AudioClient::reconfigure(uint8_t flags, const std::string& playback_device,
@@ -201,7 +211,7 @@ void S2AudioClient::pump_microphone(SOCKET sock, const sockaddr_in& destination,
     if (!microphone_stream || (active_flags & ns::S2_AUDIO_CAP_MICROPHONE) == 0) return;
 
     int available = SDL_GetAudioStreamAvailable(microphone_stream);
-    if (available > static_cast<int>(ns::S2_AUDIO_PCM_BYTES) * MICROPHONE_MAX_BLOCKS) {
+    if (available > static_cast<int>(BYTES_PER_MS) * MICROPHONE_MAX_MS) {
         // Prefer current microphone audio over sending a delayed backlog.
         SDL_ClearAudioStream(microphone_stream);
         return;
@@ -233,6 +243,7 @@ void S2AudioClient::maintain_playback() {
         SDL_SetAudioStreamFrequencyRatio(playback_stream, 1.0f);
         playback_started = false;
         have_playback_sequence = false;
+        have_jitter_sample = false;
     }
 }
 
@@ -293,10 +304,38 @@ bool S2AudioClient::handle_packet(const uint8_t* data, size_t len, const uint8_t
             || packet.payload_bytes != ns::S2_AUDIO_PCM_BYTES) return true;
     if (!playback_stream || (active_flags & ns::S2_AUDIO_CAP_PLAYBACK) == 0) return true;
 
+    const uint64_t arrival_us = ns::now_us();
+
+    int32_t delta = 1; // first packet of a run starts fresh (no concealment)
     if (have_playback_sequence) {
-        const int32_t delta = static_cast<int32_t>(packet.seq - last_playback_sequence);
-        if (delta <= 0) return true; // duplicate or late datagram
-        const int missing = std::min(delta - 1, 2);
+        delta = static_cast<int32_t>(packet.seq - last_playback_sequence);
+        if (delta <= 0) return true; // duplicate or late datagram; ignore entirely
+    }
+
+    // Adapt the target buffer to the measured inter-arrival jitter (RFC 3550
+    // style: only differences of arrival/send times are used, so the client and
+    // server clock offset cancels). Updated only for accepted, in-order
+    // datagrams. have_jitter_sample is cleared on every discontinuity below so
+    // the large gap after a stall never spikes the estimate.
+    if (have_jitter_sample) {
+        const int64_t d =
+            (static_cast<int64_t>(arrival_us) - static_cast<int64_t>(jitter_last_arrival_us))
+          - (static_cast<int64_t>(packet.ts_us) - static_cast<int64_t>(jitter_last_send_us));
+        const double abs_d = d < 0 ? -static_cast<double>(d) : static_cast<double>(d);
+        jitter_estimate_us += (abs_d - jitter_estimate_us) / 16.0;
+    }
+    jitter_last_arrival_us = arrival_us;
+    jitter_last_send_us = packet.ts_us;
+    have_jitter_sample = true;
+    const float jitter_ms = static_cast<float>(jitter_estimate_us) / 1000.0f;
+    const float target_ms = std::clamp(PLAYBACK_MIN_TARGET_MS + PLAYBACK_JITTER_MULT * jitter_ms,
+                                       PLAYBACK_MIN_TARGET_MS, PLAYBACK_MAX_TARGET_MS);
+
+    if (have_playback_sequence) {
+        // Conceal a lost/late run with whole-datagram silence so audio stays
+        // time-aligned instead of compressing. Capped so a large seq jump can't
+        // dump a long silence burst.
+        const int missing = std::min(delta - 1, PLAYBACK_MAX_CONCEAL_DATAGRAMS);
         if (missing > 0) {
             static constexpr std::array<uint8_t, ns::S2_AUDIO_PCM_BYTES> silence{};
             for (int i = 0; i < missing; ++i) {
@@ -307,18 +346,19 @@ bool S2AudioClient::handle_packet(const uint8_t* data, size_t len, const uint8_t
     }
     last_playback_sequence = packet.seq;
     have_playback_sequence = true;
-    last_playback_receive_us = ns::now_us();
+    last_playback_receive_us = arrival_us;
 
     int queued = SDL_GetAudioStreamQueued(playback_stream);
     if (queued < 0) queued = 0;
-    if (queued > static_cast<int>(ns::S2_AUDIO_PCM_BYTES) * PLAYBACK_MAX_BLOCKS) {
-        // Never preserve a stale backlog. Restart from the newest packet with a
-        // short pre-roll instead of allowing latency to climb toward 100+ ms.
+    if (queued > static_cast<int>(BYTES_PER_MS) * PLAYBACK_MAX_MS) {
+        // Never preserve a stale backlog. Restart from the newest packet rather
+        // than letting latency run away past the hard cap.
         SDL_PauseAudioStreamDevice(playback_stream);
         SDL_ClearAudioStream(playback_stream);
         SDL_SetAudioStreamFrequencyRatio(playback_stream, 1.0f);
         playback_started = false;
         have_playback_sequence = false;
+        have_jitter_sample = false;
         queued = 0;
     }
 
@@ -329,19 +369,18 @@ bool S2AudioClient::handle_packet(const uint8_t* data, size_t len, const uint8_t
     }
 
     queued = SDL_GetAudioStreamQueued(playback_stream);
-    if (!playback_started
-            && queued >= static_cast<int>(ns::S2_AUDIO_PCM_BYTES) * PLAYBACK_START_BLOCKS) {
+    const float queued_ms = static_cast<float>(std::max(queued, 0)) / BYTES_PER_MS;
+    // Pre-roll to the adaptive target before unpausing so playback starts with a
+    // full jitter cushion sized to the current link.
+    if (!playback_started && queued_ms >= target_ms) {
         if (SDL_ResumeAudioStreamDevice(playback_stream)) playback_started = true;
     }
 
-    if (playback_started && queued >= 0) {
-        // The Switch and the PC audio device have independent clocks. A tiny
-        // +/-0.25% resampling trim keeps the queue around two milliseconds and
-        // avoids periodic clear/restart glitches without audible pitch change.
-        const float blocks = static_cast<float>(queued)
-            / static_cast<float>(ns::S2_AUDIO_PCM_BYTES);
-        const float error = blocks - static_cast<float>(PLAYBACK_TARGET_BLOCKS);
-        const float ratio = std::clamp(1.0f + error * 0.0005f,
+    if (playback_started) {
+        // The Switch and PC audio clocks drift; a tiny +/-0.25% resampling trim
+        // holds the queue near the adaptive target with no audible pitch change.
+        const float error_ms = queued_ms - target_ms;
+        const float ratio = std::clamp(1.0f + error_ms * PLAYBACK_TRIM_COEFF,
                                        PLAYBACK_MIN_RATIO, PLAYBACK_MAX_RATIO);
         (void)SDL_SetAudioStreamFrequencyRatio(playback_stream, ratio);
     }

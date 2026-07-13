@@ -11,8 +11,11 @@
 #include <cstring>
 #include <mutex>
 #include <print>
+#include <span>
 #include <thread>
+#include <vector>
 
+#include <poll.h>
 #include <sys/socket.h>
 
 namespace {
@@ -33,7 +36,8 @@ struct AudioEndpointState {
 };
 
 AudioEndpointState g_audio_endpoint;
-std::jthread g_audio_thread;
+std::jthread g_audio_playback_thread;
+std::jthread g_audio_capture_thread;
 std::atomic<int> g_audio_socket{-1};
 std::atomic<uint8_t> g_active_capabilities{0};
 std::atomic<uint64_t> g_active_last_seen_us{0};
@@ -44,13 +48,22 @@ bool same_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
         && a.sin_port == b.sin_port;
 }
 
+// Audio arrives on its own socket, so its source port differs from the client's
+// input session's source port. Associate the two by source IP only. On a LAN
+// each client has a distinct IP; this could only mis-associate two clients that
+// shared one address behind NAT, which is not a supported deployment (same
+// constraint as the gadget-mode change path).
+bool same_ip(const sockaddr_in& a, const sockaddr_in& b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr;
+}
+
 bool endpoint_has_active_udp_session(const sockaddr_in& endpoint, uint64_t now) {
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
         const ClientSession& client = g_ctx.clients[i];
         if (!client.active || client.source != InputSource::Udp) continue;
         if (elapsed_us_over(now, client.last_rx_us, CLIENT_TIMEOUT_US)) continue;
-        if (same_endpoint(client.addr, endpoint)) return true;
+        if (same_ip(client.addr, endpoint)) return true;
     }
     return false;
 }
@@ -61,7 +74,7 @@ bool endpoint_has_active_udp_pro_session(const sockaddr_in& endpoint, uint64_t n
         const ClientSession& client = g_ctx.clients[i];
         if (!client.active || client.source != InputSource::Udp) continue;
         if (elapsed_us_over(now, client.last_rx_us, CLIENT_TIMEOUT_US)) continue;
-        if (!same_endpoint(client.addr, endpoint)) continue;
+        if (!same_ip(client.addr, endpoint)) continue;
 
         // The desktop client stamps every pad in the live input frame with the
         // requested controller profile. Audio is a Pro Controller 2-only
@@ -136,15 +149,26 @@ void sign_pcm_packet(ns::S2AudioPcmPacket& packet) {
     std::memcpy(packet.hmac, digest, ns::HMAC_TAG_SIZE);
 }
 
-void audio_bridge_loop(std::stop_token stop_token) {
-    // One USB isochronous frame maps to one authenticated UDP datagram. Wait on
-    // the raw_gadget AS-OUT queue instead of polling every millisecond.
-    std::array<unsigned char, ns::S2_AUDIO_PCM_BYTES> usb_frame{};
+// Console -> client. Batch S2_AUDIO_UDP_FRAMES one-millisecond USB frames into a
+// single authenticated datagram, cutting the packet rate (e.g. 1000 -> 200 pps)
+// so the audio socket loads the Pi and the network far less.
+void audio_playback_loop(std::stop_token stop_token) {
+    std::array<unsigned char, ns::S2_AUDIO_USB_FRAME_BYTES> frame{};
+    std::array<uint8_t, ns::S2_AUDIO_PCM_BYTES> payload{};
+    size_t frames_in_batch = 0;
 
     while (!stop_token.stop_requested() && g_ctx.running.load(std::memory_order_relaxed)) {
-        if (!s2_uac1_wait_console_audio(usb_frame, std::chrono::milliseconds(5))) {
+        if (!s2_uac1_wait_console_audio(frame, std::chrono::milliseconds(5))) {
+            // Genuine console silence (frames arrive every 1 ms when audio is
+            // flowing). Drop any partial batch so a silence gap never emits a
+            // stale half-batch when audio resumes.
+            frames_in_batch = 0;
             continue;
         }
+        std::memcpy(payload.data() + frames_in_batch * ns::S2_AUDIO_USB_FRAME_BYTES,
+                    frame.data(), ns::S2_AUDIO_USB_FRAME_BYTES);
+        if (++frames_in_batch < ns::S2_AUDIO_UDP_FRAMES) continue;
+        frames_in_batch = 0;
 
         sockaddr_in endpoint{};
         uint8_t capabilities = 0;
@@ -159,12 +183,37 @@ void audio_bridge_loop(std::stop_token stop_token) {
         packet.payload_bytes = ns::S2_AUDIO_PCM_BYTES;
         packet.seq = sequence;
         packet.ts_us = ns::now_us();
-        std::memcpy(packet.pcm, usb_frame.data(), usb_frame.size());
+        std::memcpy(packet.pcm, payload.data(), payload.size());
         sign_pcm_packet(packet);
         const int sock = g_audio_socket.load(std::memory_order_relaxed);
         if (sock >= 0) {
             (void)sendto(sock, &packet, sizeof(packet), 0,
                          reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
+        }
+    }
+}
+
+// Client -> console (mic) and capability updates. Owns all inbound audio traffic
+// on the dedicated socket so the controller-input loop never touches it.
+void audio_capture_loop(std::stop_token stop_token) {
+    std::vector<uint8_t> buf(sizeof(ns::S2AudioPcmPacket));
+    while (!stop_token.stop_requested() && g_ctx.running.load(std::memory_order_relaxed)) {
+        const int sock = g_audio_socket.load(std::memory_order_relaxed);
+        if (sock < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        pollfd pfd{.fd = sock, .events = POLLIN, .revents = 0};
+        const int n = poll(&pfd, 1, 5);
+        if (n <= 0 || (pfd.revents & POLLIN) == 0) continue;
+        for (;;) {
+            sockaddr_in sender{};
+            socklen_t slen = sizeof(sender);
+            const ssize_t r = recvfrom(sock, buf.data(), buf.size(), 0,
+                                       reinterpret_cast<sockaddr*>(&sender), &slen);
+            if (r <= 0) break;
+            (void)s2_udp_audio_handle_packet(
+                std::span<const uint8_t>(buf.data(), static_cast<size_t>(r)), sender);
         }
     }
 }
@@ -175,16 +224,23 @@ void s2_udp_audio_start(int udp_socket) {
     s2_udp_audio_stop();
     g_audio_socket.store(udp_socket, std::memory_order_relaxed);
     if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2) return;
-    g_audio_thread = std::jthread(audio_bridge_loop);
+    g_audio_playback_thread = std::jthread(audio_playback_loop);
+    g_audio_capture_thread = std::jthread(audio_capture_loop);
     if (g_ctx.verbose) {
-        std::println("[s2][audio] desktop UDP bridge ready: PCM S16LE stereo 48 kHz, 1 ms/datagram");
+        std::println("[s2][audio] dedicated UDP bridge ready on input port + {}: "
+                     "PCM S16LE stereo 48 kHz, {} ms/datagram",
+                     ns::S2_AUDIO_PORT_OFFSET, ns::S2_AUDIO_UDP_FRAMES);
     }
 }
 
 void s2_udp_audio_stop() {
-    if (g_audio_thread.joinable()) {
-        g_audio_thread.request_stop();
-        g_audio_thread.join();
+    if (g_audio_playback_thread.joinable()) {
+        g_audio_playback_thread.request_stop();
+        g_audio_playback_thread.join();
+    }
+    if (g_audio_capture_thread.joinable()) {
+        g_audio_capture_thread.request_stop();
+        g_audio_capture_thread.join();
     }
     g_audio_socket.store(-1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(g_audio_endpoint.mutex);

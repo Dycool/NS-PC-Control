@@ -362,8 +362,34 @@ int main(int argc, char** argv) {
         perror("bind"); close(sock); return 1;
     }
 
-    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
-        s2_udp_audio_start(sock);
+    // Desktop Switch 2 audio runs on its own UDP socket bound to port + offset,
+    // serviced by dedicated audio threads. Keeping it off the input socket means
+    // the controller-input receive loop never sees the ~200 audio datagrams/sec
+    // and never spends time HMAC-verifying them, so audio cannot add jitter to
+    // input latency.
+    int audio_sock = -1;
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+        const uint16_t audio_port = static_cast<uint16_t>(port + ns::S2_AUDIO_PORT_OFFSET);
+        audio_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (audio_sock < 0) { perror("audio socket"); close(sock); return 1; }
+        int aflags = fcntl(audio_sock, F_GETFL, 0);
+        if (aflags < 0 || fcntl(audio_sock, F_SETFL, aflags | O_NONBLOCK) < 0) {
+            perror("audio fcntl"); close(audio_sock); close(sock); return 1;
+        }
+        setsockopt(audio_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        setsockopt(audio_sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf));
+        sockaddr_in audio_addr{};
+        audio_addr.sin_family = AF_INET;
+        audio_addr.sin_port   = htons(audio_port);
+        audio_addr.sin_addr   = addr.sin_addr;
+        if (bind(audio_sock, reinterpret_cast<sockaddr*>(&audio_addr), sizeof(audio_addr)) < 0) {
+            perror("audio bind"); close(audio_sock); close(sock); return 1;
+        }
+        // NOTE: the built-in UPnP helper maps a single port only, so the audio
+        // port is not auto-forwarded. LAN play needs nothing extra; remote play
+        // over UPnP would require forwarding this port manually.
+        s2_udp_audio_start(audio_sock);
+    }
 
     // -----------------------------------------------------------------------
     // Worker threads
@@ -581,11 +607,9 @@ int main(int argc, char** argv) {
 
 
 
-            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-                    && s2_udp_audio_handle_packet(
-                        std::span<const uint8_t>(udp_rx.data(), static_cast<size_t>(bytes)), sender)) {
-                continue;
-            }
+            // Switch 2 desktop audio is handled entirely on its own socket/threads
+            // (see udp_audio.cpp). It never reaches this input loop, so nothing to
+            // do here — keeping audio off this thread is what protects input latency.
 
             // --- Macro chunk ---
             if (bytes >= 4) {
@@ -950,8 +974,10 @@ int main(int argc, char** argv) {
 
     g_ctx.running.store(false, std::memory_order_relaxed);
     upnp_remove_mapping(port);
-    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
         s2_udp_audio_stop();
+        if (audio_sock >= 0) close(audio_sock);
+    }
     close(sock);
     std::cout << "." << std::flush;
 

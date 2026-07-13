@@ -165,6 +165,13 @@ void writer_thread(std::stop_token stoken, int hz) {
                 } else if (!s2_live[i]) {
                     s2_live[i] = true;
                     reset_port_runtime(i);
+                    // The port going live means the console enumerated and
+                    // configured the gadget. Re-assert the authoritative host
+                    // lifecycle here so a not-live iteration's clear_switch2_usb_activity()
+                    // can't leave switch2_usb_lifecycle_seen stuck false after a
+                    // wake, which would drop sleep detection back to the RX-gap
+                    // heuristic and stall the console's init handshake.
+                    mark_switch2_usb_host_resumed();
                 }
                 continue;
             }

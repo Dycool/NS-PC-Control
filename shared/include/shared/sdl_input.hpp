@@ -45,6 +45,11 @@ struct SdlPadState {
 };
 
 uint8_t sdl_axis_to_byte(Sint16 val, bool invert = false, int deadzone = 8000);
+// Convert a stick's raw X/Y pair to Switch 0..255 axis bytes using a radial
+// (circular) deadzone, so diagonals activate at the same deflection as
+// cardinals. Prefer this over two independent sdl_axis_to_byte() calls for
+// stick axes.
+void sdl_stick_to_bytes(Sint16 raw_x, Sint16 raw_y, uint8_t& out_x, uint8_t& out_y, int deadzone = 8000);
 int16_t clamp_motion_i16(float v);
 int16_t gyro_deadzone_i16(int16_t v);
 

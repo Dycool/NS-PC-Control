@@ -517,6 +517,46 @@ static void send_client_names_if_changed(SOCKET sock, const sockaddr_in& dest, c
     last_send_us = now;
 }
 
+// Switch 2 desktop audio runs on its own UDP socket (input port + offset) and
+// its own thread so it never shares the controller-input send loop. This keeps
+// the ~200 audio datagrams/sec each way, plus the SDL audio work, entirely off
+// the input path — input latency is unaffected by audio activity.
+static void s2_audio_client_loop(std::stop_token st, std::atomic<bool>& running,
+                                 std::string host, uint16_t audio_port,
+                                 const uint8_t* hmac_key) {
+    SOCKET asock = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in adest{};
+    if (asock == INVALID_SOCKET || !resolve_udp_destination(host, audio_port, adest)) {
+        if (asock != INVALID_SOCKET) closesocket(asock);
+        return;
+    }
+    set_socket_nonblocking(asock);
+
+    S2AudioClient audio;
+    uint8_t buf[sizeof(ns::S2AudioPcmPacket)];
+    while (!st.stop_requested() && running.load(std::memory_order_relaxed)) {
+        const bool switch2ProAudio = g_switch2ModeEnabled.load(std::memory_order_relaxed)
+            && g_switch2AudioSupported.load(std::memory_order_relaxed)
+            && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_PRO;
+        const auto [playbackDevice, microphoneDevice] = switch2_audio_device_selections();
+        // Sends capability updates and pumps captured microphone audio.
+        audio.update(asock, adest, hmac_key, switch2ProAudio,
+                     g_switch2AudioEnabled.load(std::memory_order_relaxed),
+                     g_switch2MicrophoneEnabled.load(std::memory_order_relaxed),
+                     playbackDevice, microphoneDevice);
+        // Drain inbound playback datagrams into the jitter buffer.
+        for (;;) {
+            const int n = static_cast<int>(
+                recvfrom(asock, reinterpret_cast<char*>(buf), sizeof(buf), 0, nullptr, nullptr));
+            if (n <= 0) break;
+            audio.handle_packet(buf, static_cast<size_t>(n), hmac_key);
+        }
+        sleep_while_running(running, std::chrono::milliseconds(1));
+    }
+    audio.shutdown(asock, adest, hmac_key);
+    closesocket(asock);
+}
+
 int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running, std::string* err_out) {
     g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
     g_serverFullDisconnect.store(false, std::memory_order_relaxed);
@@ -545,7 +585,15 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     uint64_t joycon_mouse_last_send_us = 0;
     bool joycon_mouse_was_active = false;
     RumbleManager rumble;
-    S2AudioClient audio;
+    // Desktop Switch 2 audio runs on its own socket/thread (GUI client only) so
+    // it never shares this input loop. Started only after the server is known
+    // reachable (above) so we don't spawn it on a failed connect.
+    std::jthread audio_thread;
+    if (cfg.gui_features) {
+        audio_thread = std::jthread(s2_audio_client_loop, std::ref(running), cfg.host,
+                                    static_cast<uint16_t>(cfg.port + ns::S2_AUDIO_PORT_OFFSET),
+                                    cfg.hmac_key);
+    }
     DigitalReleaseFilter sdl_filters[4];
     bool no_controllers_printed = false;
     uint64_t last_probe_us = 0, last_kb_poll_us = 0;
@@ -600,23 +648,14 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
                                      joycon_mouse_was_active);
             ++g_packetCount;
         }
-        // Audio capability negotiation deliberately follows the first normal
-        // input frame. The server only accepts desktop-audio datagrams from an
-        // already authenticated/active UDP ClientSession, which keeps web and
-        // mobile peers outside this path without changing their protocols.
-        const auto [playbackDevice, microphoneDevice] = switch2_audio_device_selections();
-        const bool switch2ProAudio = g_switch2ModeEnabled.load(std::memory_order_relaxed)
-            && g_switch2AudioSupported.load(std::memory_order_relaxed)
-            && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_PRO;
-        audio.update(sock, dest, cfg.hmac_key, switch2ProAudio,
-                     g_switch2AudioEnabled.load(std::memory_order_relaxed),
-                     g_switch2MicrophoneEnabled.load(std::memory_order_relaxed),
-                     playbackDevice, microphoneDevice);
+        // Audio (capability negotiation, mic, playback) is handled entirely by
+        // the dedicated s2_audio_client_loop on its own socket/thread, so nothing
+        // audio-related runs on this input loop.
         send_client_names_if_changed(sock, dest, cfg.hmac_key, g_keyboardMode.load(), last_names, last_names_send_us);
         // Typed uploads are sent after the live input frame so the server has
         // already seen the current controller type.
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
-        pump_udp_replies(sock, rumble, audio, cfg.hmac_key, frame.controller_for_slot);
+        pump_udp_replies(sock, rumble, cfg.hmac_key, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
             if (g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed)) {
                 const std::string message = "Switch 2 mode does not support Joy-Con L + R. Use an individual Joy-Con or Pro Controller.";
@@ -642,13 +681,11 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             break;
         }
 
-        if (frame.active_count > 0 || audio.active()) {
+        if (frame.active_count > 0) {
             no_controllers_printed = false;
-            // Audio uses 1 ms datagrams. Poll the socket/capture stream every
-            // millisecond so packetisation, not the old 4 ms controller tick,
-            // is the dominant software latency.
-            const int sleep_ms = audio.active() ? 1 : ns::LEGACY_UDP_INTERVAL_MS;
-            sleep_while_running(running, std::chrono::milliseconds(sleep_ms));
+            // Input runs at the controller tick only. Audio has its own thread, so
+            // this loop no longer spins at 1 ms for packetisation.
+            sleep_while_running(running, std::chrono::milliseconds(ns::LEGACY_UDP_INTERVAL_MS));
         } else {
             if (cfg.print_cli_waiting_messages && !no_controllers_printed) {
                 std::println("No controllers detected - waiting for connections...");
@@ -658,7 +695,9 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         }
     }
 
-    audio.shutdown(sock, dest, cfg.hmac_key);
+    // The audio thread (audio_thread) stops and sends its own capability
+    // teardown when this function returns (running is already false here) via its
+    // jthread destructor; nothing to do for audio on this path.
     rumble.stop_all();
     if (joycon_mouse_was_active) {
         send_joycon_mouse_update(sock, dest, cfg.hmac_key,

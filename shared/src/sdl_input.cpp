@@ -96,6 +96,35 @@ uint8_t sdl_axis_to_byte(Sint16 val, bool invert, int deadzone) {
     return (uint8_t)(invert ? (255 - scaled) : scaled);
 }
 
+void sdl_stick_to_bytes(Sint16 raw_x, Sint16 raw_y, uint8_t& out_x, uint8_t& out_y, int deadzone) {
+    // Radial (circular) deadzone. Applying a deadzone per axis (as
+    // sdl_axis_to_byte does) carves a plus/cross-shaped dead region: a diagonal
+    // push only registers once BOTH axes independently clear the deadzone, so a
+    // diagonal needs ~deadzone*sqrt(2) of deflection versus deadzone for a
+    // cardinal. That is what makes diagonals hard to hold (e.g. entering a
+    // password on the Switch on-screen keyboard). Here the threshold is applied
+    // to the vector magnitude and the original direction is preserved, so a
+    // diagonal activates at the same push distance as a cardinal and keeps its
+    // 45-degree aim. Full deflection maps to the same per-axis values a real
+    // round-gated stick reports, so there is no over-driving.
+    const float x = static_cast<float>(raw_x);
+    const float y = static_cast<float>(raw_y);
+    const float mag = std::sqrt(x * x + y * y);
+    if (mag <= static_cast<float>(deadzone)) { out_x = 128; out_y = 128; return; }
+
+    constexpr float kMaxMag = 32767.0f;
+    const float clamped = std::min(mag, kMaxMag);
+    const float scaled = (clamped - static_cast<float>(deadzone)) / (kMaxMag - static_cast<float>(deadzone));
+    const float ux = x / mag;
+    const float uy = y / mag;
+    auto to_byte = [](float axis) -> uint8_t {
+        const int v = 128 + static_cast<int>(std::lround(axis * 127.0f));
+        return static_cast<uint8_t>(std::clamp(v, 0, 255));
+    };
+    out_x = to_byte(ux * scaled);
+    out_y = to_byte(uy * scaled);
+}
+
 int16_t clamp_motion_i16(float v) {
     if (v > 32767.0f) return 32767;
     if (v < -32768.0f) return -32768;
@@ -515,10 +544,14 @@ ns::HoriHIDReport SDLInputManager::map_gamepad(const Device& d) const {
         else if (down) r.hat = ns::HAT_S;
         else if (left) r.hat = ns::HAT_W;
         else if (right) r.hat = ns::HAT_E;
-        r.lx = sdl_axis_to_byte(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX));
-        r.ly = sdl_axis_to_byte(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY));
-        r.rx = sdl_axis_to_byte(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX));
-        r.ry = sdl_axis_to_byte(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY));
+        // Radial deadzone per stick so diagonals register as easily as
+        // cardinals (see sdl_stick_to_bytes). Y is not inverted here: SDL's
+        // down-positive Y already matches the Switch report convention used by
+        // the previous per-axis path.
+        sdl_stick_to_bytes(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX),
+                           SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY), r.lx, r.ly);
+        sdl_stick_to_bytes(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX),
+                           SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY), r.rx, r.ry);
         return r;
     }
 

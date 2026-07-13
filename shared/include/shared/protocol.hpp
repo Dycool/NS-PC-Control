@@ -67,8 +67,18 @@ static constexpr uint32_t S2_AUDIO_SAMPLE_RATE = 48000;
 static constexpr uint8_t  S2_AUDIO_CHANNELS = 2;
 static constexpr uint8_t  S2_AUDIO_SAMPLE_BYTES = 2;
 static constexpr uint16_t S2_AUDIO_USB_FRAME_BYTES = 192; // 1 ms, stereo S16LE @ 48 kHz
-static constexpr uint16_t S2_AUDIO_UDP_FRAMES = 1;        // 1 ms per datagram: exactly one USB isochronous frame
+// Number of 1 ms USB isochronous frames carried per UDP datagram. Batching
+// several frames per packet cuts the datagram rate (e.g. 5 => 200 pkts/s each
+// way instead of 1000), which reduces per-packet jitter sensitivity and the CPU
+// the Wi-Fi Pi spends on the audio socket, at the cost of that many ms of added
+// latency. The audio path runs on its own UDP socket/port and thread, so this
+// packet rate never touches the controller-input path.
+static constexpr uint16_t S2_AUDIO_UDP_FRAMES = 5;       // 5 ms per datagram
 static constexpr uint16_t S2_AUDIO_PCM_BYTES = S2_AUDIO_USB_FRAME_BYTES * S2_AUDIO_UDP_FRAMES;
+// The desktop audio bridge listens on the controller port + this offset so audio
+// datagrams never share the input socket. Keep it small and fixed so clients can
+// derive it without negotiation.
+static constexpr uint16_t S2_AUDIO_PORT_OFFSET = 1;
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
 static constexpr uint8_t  JOYCON_MOUSE_VERSION = 1;

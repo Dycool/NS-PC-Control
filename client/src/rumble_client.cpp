@@ -87,8 +87,10 @@ void RumbleManager::set_output(int slot, uint8_t low, uint8_t high, uint32_t dur
     states[slot].last_controller = pad_idx;
 }
 
-void pump_udp_replies(SOCKET sock, RumbleManager& rumble, S2AudioClient& audio,
+void pump_udp_replies(SOCKET sock, RumbleManager& rumble,
                       const uint8_t hmac_key[32], const int controller_for_slot[4]) {
+    // Audio has moved to its own socket/thread, so this input-reply pump no
+    // longer sees or dispatches audio datagrams.
     uint8_t buf[1024];
     for (;;) {
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, nullptr, nullptr);
@@ -97,10 +99,6 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble, S2AudioClient& audio,
 
         uint32_t magic = 0;
         std::memcpy(&magic, buf, sizeof(magic));
-
-        if (audio.handle_packet(buf, static_cast<size_t>(n), hmac_key)) {
-            continue;
-        }
 
         if (magic == ns::SERVER_INFO_MAGIC && n == sizeof(ns::ServerInfoReply)) {
             ns::ServerInfoReply reply{};

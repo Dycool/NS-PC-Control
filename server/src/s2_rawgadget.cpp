@@ -57,6 +57,14 @@ constexpr uint8_t EP_AS_OUT = 0x03;
 constexpr uint8_t EP_AS_IN = 0x04;
 constexpr size_t QUEUE_LIMIT = 32;
 constexpr size_t AUDIO_FRAME_BYTES = ns::S2_AUDIO_USB_FRAME_BYTES;
+// Server-side audio jitter buffers, in 1 ms USB frames. These absorb transient
+// scheduling/UDP hiccups so a single late tick does not drop a frame, which the
+// console (mic) or PC (playback) would otherwise hear as a click. Each queue
+// also bounds the worst-case added latency to this many milliseconds. The
+// previous value of 8 was too shallow and dropped frames under normal Wi-Fi
+// jitter, producing the audible stutter.
+constexpr size_t CONSOLE_AUDIO_QUEUE_FRAMES = 32; // console -> client (USB OUT -> UDP)
+constexpr size_t MIC_AUDIO_QUEUE_FRAMES = 32;     // client -> console (UDP -> USB IN)
 
 #pragma pack(push, 1)
 struct HidDescriptor {
@@ -709,6 +717,15 @@ void handle_control(const usb_ctrlrequest& ctrl) {
             if (enable_all_endpoints()) {
                 if (ioctl(g_rg.fd, USB_RAW_IOCTL_CONFIGURE, 0) >= 0) {
                     g_rg.state.store(S2GadgetState::HidReady, std::memory_order_release);
+                    // A completed SET_CONFIGURATION is the definitive "host is
+                    // awake and has enumerated us" signal, covering both a cold
+                    // plug-in and a wake-from-suspend re-enumeration where no
+                    // RESUME event precedes the fresh enumeration. Establishing
+                    // the authoritative lifecycle here keeps poll_switch2_sleep_state
+                    // from falsely confirming sleep during the console's init
+                    // handshake, whose natural pauses would otherwise trip the
+                    // RX-gap heuristic and reset the client session mid-handshake.
+                    mark_switch2_usb_host_resumed();
                 } else {
                     std::println(stderr, "[s2-rg] USB_RAW_IOCTL_CONFIGURE failed: {}", strerror(errno));
                     disable_all_endpoints();
@@ -954,6 +971,20 @@ void event_pump_loop() {
                 if (ev->length >= sizeof(usb_ctrlrequest))
                     handle_control(*reinterpret_cast<usb_ctrlrequest*>(ev->data));
                 break;
+            case USB_RAW_EVENT_SUSPEND:
+                // Authoritative bus lifecycle: the console stopped driving the
+                // bus (it is going to sleep, or a transient idle). Feed the
+                // sleep-state tracker directly instead of inferring sleep from an
+                // idle RX stream. poll_switch2_sleep_state() debounces this, so a
+                // brief suspend that resumes within the grace window is ignored.
+                mark_switch2_usb_host_disconnected();
+                break;
+            case USB_RAW_EVENT_RESUME:
+                // Console resumed the bus. Clears the suspended/asleep state and
+                // marks the lifecycle as authoritative so sleep detection uses
+                // these events rather than the RX-gap heuristic.
+                mark_switch2_usb_host_resumed();
+                break;
             case USB_RAW_EVENT_RESET:
                 reset_connection_state(S2GadgetState::Resetting);
                 break;
@@ -1076,7 +1107,7 @@ void as_out_loop() {
                 std::copy_n(pending.begin(), frame.size(), frame.begin());
                 pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(frame.size()));
                 std::lock_guard<std::mutex> lk(g_rg.console_audio_mtx);
-                if (g_rg.console_audio_frames.size() >= 8) g_rg.console_audio_frames.pop_front();
+                if (g_rg.console_audio_frames.size() >= CONSOLE_AUDIO_QUEUE_FRAMES) g_rg.console_audio_frames.pop_front();
                 g_rg.console_audio_frames.push_back(frame);
                 g_rg.console_audio_cv.notify_one();
             }
@@ -1478,7 +1509,7 @@ bool s2_rawgadget_queue_microphone_audio(std::span<const uint8_t> data) {
     if (data.empty() || data.size() % AUDIO_FRAME_BYTES != 0) return false;
     std::lock_guard<std::mutex> lk(g_rg.mic_audio_mtx);
     for (size_t offset = 0; offset < data.size(); offset += AUDIO_FRAME_BYTES) {
-        if (g_rg.mic_audio_frames.size() >= 8) g_rg.mic_audio_frames.pop_front();
+        if (g_rg.mic_audio_frames.size() >= MIC_AUDIO_QUEUE_FRAMES) g_rg.mic_audio_frames.pop_front();
         std::array<uint8_t, AUDIO_FRAME_BYTES> frame{};
         std::memcpy(frame.data(), data.data() + offset, AUDIO_FRAME_BYTES);
         g_rg.mic_audio_frames.push_back(frame);
