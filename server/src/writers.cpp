@@ -154,7 +154,32 @@ void writer_thread(std::stop_token stoken, int hz) {
     };
     bool s2_live[HID_PORT_COUNT] = {};
 
+    auto perform_requested_s2_reenumeration = [&]() -> bool {
+        if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2
+                || !g_ctx.switch2_usb_reenumeration_requested.exchange(
+                    false, std::memory_order_acq_rel)) {
+            return false;
+        }
+        if (g_ctx.verbose)
+            std::println("[s2] client/wake boundary; re-enumerating native USB gadget");
+        clear_switch2_usb_activity();
+        close_all_fds();
+        s2_live[0] = false;
+        if (!run_gadget_setup_if_needed(true,
+                "S2 client connected or console woke; forcing USB re-enumeration")) {
+            // A transient teardown/setup failure must remain retryable, but do
+            // not spin at full speed if the UDC is temporarily unavailable.
+            g_ctx.switch2_usb_reenumeration_requested.store(
+                true, std::memory_order_release);
+            for (int i = 0; i < 50 && !stoken.stop_requested(); ++i)
+                std::this_thread::sleep_for(ms(10));
+        }
+        return true;
+    };
+
     while (!stoken.stop_requested()) {
+        if (perform_requested_s2_reenumeration()) continue;
+
         bool all_open = true;
         for (int i = 0; i < nports; ++i) {
             if (port_uses_s2_gadget(i)) {
@@ -481,6 +506,12 @@ void writer_thread(std::stop_token stoken, int hz) {
 
             reconcile_hw_slots(snap, now_stamp);
 
+            // Reconcile first so a newly connected client selecting Joy-Con L/R
+            // updates the native S2 identity before the forced disconnect. The
+            // console then sees the requested identity in this single new USB
+            // enumeration instead of briefly enumerating the idle Pro identity.
+            if (perform_requested_s2_reenumeration()) break;
+
             // The console latches each port's type (device info/SPI) once per
             // USB session, so a changed controller identity needs one re-enumeration
             // to become visible — otherwise Joy-Con profiles keep showing up
@@ -491,10 +522,12 @@ void writer_thread(std::stop_token stoken, int hz) {
             if (s1_identity_reenumeration_due(now_stamp)) {
                 if (g_ctx.verbose)
                     std::println("Controller type changed; re-enumerating USB gadget so the console re-reads identity");
-                mark_s1_identity_enumerated();
                 clear_switch2_usb_activity();
                 close_all_fds();
-                run_gadget_setup_if_needed(true, "controller type changed; console must re-read device identity");
+                if (run_gadget_setup_if_needed(true,
+                        "controller type changed; console must re-read device identity")) {
+                    mark_s1_identity_enumerated();
+                }
                 break;
             }
 

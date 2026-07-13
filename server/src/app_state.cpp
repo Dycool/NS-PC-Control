@@ -1157,6 +1157,9 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         g_ctx.clients[i].uses_pad_presence = uses_pad_presence;
         g_ctx.clients[i].udp_rumble_enabled = false;
         reset_client_slot_streams_locked(g_ctx.clients[i]);
+        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+            g_ctx.switch2_usb_reenumeration_requested.store(true, std::memory_order_release);
+        }
         return true;
     };
 

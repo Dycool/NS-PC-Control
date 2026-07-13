@@ -983,6 +983,13 @@ void event_pump_loop() {
                 // Console resumed the bus. Clears the suspended/asleep state and
                 // marks the lifecycle as authoritative so sleep detection uses
                 // these events rather than the RX-gap heuristic.
+                // Re-enumerate once after a real suspended -> resumed edge. A
+                // fresh Raw Gadget RUN starts with suspended=false, preventing
+                // the reconnect itself from recursively requesting another one.
+                if (g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed)) {
+                    g_ctx.switch2_usb_reenumeration_requested.store(
+                        true, std::memory_order_release);
+                }
                 mark_switch2_usb_host_resumed();
                 break;
             case USB_RAW_EVENT_RESET:
@@ -1322,12 +1329,16 @@ bool s2_rawgadget_module_available() {
     return load_raw_gadget_module() && wait_for_raw_gadget_device();
 }
 
-bool s2_rawgadget_setup(bool /*force*/, const char* reason) {
+bool s2_rawgadget_setup(bool force, const char* reason) {
     if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2) return false;
-    if (s2_rawgadget_nodes_ready()) return true;
+    if (!force && s2_rawgadget_nodes_ready()) return true;
 
-    if (g_rg.fd >= 0 || g_rg.io_running.load(std::memory_order_acquire))
+    if (g_rg.fd >= 0 || g_rg.io_running.load(std::memory_order_acquire)) {
         s2_rawgadget_teardown();
+        // Keep the device detached long enough for the host controller to
+        // observe a real disconnect before USB_RAW_IOCTL_RUN reconnects it.
+        if (force) std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
 
     if (!s2_rawgadget_module_available()) {
         struct utsname info{};

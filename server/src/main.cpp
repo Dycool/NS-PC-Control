@@ -389,6 +389,7 @@ int main(int argc, char** argv) {
         // port is not auto-forwarded. LAN play needs nothing extra; remote play
         // over UPnP would require forwarding this port manually.
         s2_udp_audio_start(audio_sock);
+        std::println("[s2][audio] UDP port {} enabled", audio_port);
     }
 
     // -----------------------------------------------------------------------

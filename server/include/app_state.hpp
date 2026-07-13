@@ -206,6 +206,10 @@ struct ServerContext {
     bool switch2_dormant_udp_valid[MAX_CLIENTS]{};
     std::atomic<bool> switch2_force_next_wake{false}; // compatibility/no-op; runtime wake is RX-state based
     std::atomic<bool> switch2_delayed_wake_check_running{false};
+    // S2 owns the UDC exclusively and exposes one controller, so reconnecting
+    // the native gadget is safe on each new client/wake boundary. The writer
+    // consumes this flag to serialize teardown/recreate with USB I/O.
+    std::atomic<bool> switch2_usb_reenumeration_requested{false};
     std::atomic<uint8_t> console_player_leds[HID_PORT_COUNT]{};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};

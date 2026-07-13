@@ -822,6 +822,13 @@ static void switch2_wake_adv_worker(int burst_ms) {
     send_switch2_wake_advert_once(g_ctx.switch2_wake_mac,
                                   g_ctx.switch2_wake_adv_hex,
                                   seconds, g_ctx.verbose);
+    // The advert duration gives the console time to wake. Reconnect the sole
+    // native S2 gadget afterwards so a backend that started while the USB host
+    // was suspended cannot remain attached in an unenumerated Raw Gadget state.
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+            && !s2_gadget_io_ready(0)) {
+        g_ctx.switch2_usb_reenumeration_requested.store(true, std::memory_order_release);
+    }
     g_ctx.switch2_wake_adv_running.store(false, std::memory_order_relaxed);
 }
 
