@@ -286,6 +286,25 @@ int active_client_count(uint64_t now) {
     return count;
 }
 
+bool other_active_clients_exist(const sockaddr_in& exclude_sender, uint64_t now) {
+    if (now == 0) now = now_us();
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+        const ClientSession& c = g_ctx.clients[i];
+        if (!c.active || c.last_rx_us == 0 || elapsed_us_saturated(now, c.last_rx_us) > CLIENT_TIMEOUT_US) continue;
+        // Match by source IP only, not port: the gadget-mode request arrives on
+        // a separate ephemeral socket from the requester's gameplay session, so
+        // their source ports differ. A lone ns-client changing its own server's
+        // type must not count itself as a blocking peer. On a LAN each client
+        // has a distinct IP; this could only over-exempt if two clients shared
+        // one address behind NAT, which is not a supported deployment.
+        const bool is_excluded = c.source == InputSource::Udp
+            && c.addr.sin_addr.s_addr == exclude_sender.sin_addr.s_addr;
+        if (!is_excluded) return true;
+    }
+    return false;
+}
+
 // The physical "shape" a profile represents, independent of Switch generation.
 enum class ProfileShape : uint8_t { Pro, JoyConL, JoyConR, Pair };
 

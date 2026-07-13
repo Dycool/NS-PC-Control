@@ -108,7 +108,7 @@ MainWindow::MainWindow() {
         macroDialog->show();
     });
     connect(settingsBtn, &QPushButton::clicked, this, [this] {
-        SettingsDialog dlg(this);
+        SettingsDialog dlg(this, ipEdit->text());
         dlg.exec();
         updateUi();
     });

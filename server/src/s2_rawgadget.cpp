@@ -1001,8 +1001,8 @@ void hid_out_loop() {
         if (r > 0) {
             if (generation != g_rg.generation.load(std::memory_order_acquire)) continue;
             std::lock_guard<std::mutex> lk(g_rg.out_mtx);
-            if (g_rg.out_reports.size() < QUEUE_LIMIT)
-                g_rg.out_reports.push_back({std::vector<uint8_t>(buf.begin(), buf.begin() + r), generation});
+            if (g_rg.out_reports.size() >= QUEUE_LIMIT) g_rg.out_reports.pop_front();
+            g_rg.out_reports.push_back({std::vector<uint8_t>(buf.begin(), buf.begin() + r), generation});
             continue;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -1022,8 +1022,8 @@ void vendor_out_loop() {
         if (r > 0) {
             if (generation != g_rg.generation.load(std::memory_order_acquire)) continue;
             std::lock_guard<std::mutex> lk(g_rg.vendor_out_mtx);
-            if (g_rg.vendor_out_reports.size() < QUEUE_LIMIT)
-                g_rg.vendor_out_reports.push_back({std::vector<uint8_t>(buf.begin(), buf.begin() + r), generation});
+            if (g_rg.vendor_out_reports.size() >= QUEUE_LIMIT) g_rg.vendor_out_reports.pop_front();
+            g_rg.vendor_out_reports.push_back({std::vector<uint8_t>(buf.begin(), buf.begin() + r), generation});
             continue;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

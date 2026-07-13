@@ -46,6 +46,13 @@ static constexpr uint32_t SERVER_INFO_MAGIC = 0x4E535349u; // 'NSSI'
 static constexpr uint32_t CLIENT_NAMES_MAGIC = 0x4E53434Eu; // 'NSCN'
 static constexpr uint32_t ROSTER_MAGIC = 0x4E53524Fu; // 'NSRO'
 static constexpr uint32_t JOYCON_MOUSE_MAGIC = 0x4E534A4Du; // 'NSJM'
+// Request to switch the server's emulated USB controller family (Hori/Switch1/
+// Switch2). The server only honors this while no OTHER client is active: the
+// USB identity is a device-level property shared by every connected client, so
+// changing it mid-session would disrupt everyone but the lone requester (who is
+// exempted from its own "server is empty" check). Request and reply share a
+// magic and are told apart by size, like ServerInfoProbe/ServerInfoReply.
+static constexpr uint32_t GADGET_MODE_MAGIC = 0x4E534D44u; // 'NSMD'
 // Desktop-only Switch 2 audio tunnel. These datagrams deliberately use the
 // existing UDP socket/port but remain separate from the fixed 228-byte input
 // packet, so web/mobile protocol implementations stay unchanged.
@@ -65,6 +72,22 @@ static constexpr uint16_t S2_AUDIO_PCM_BYTES = S2_AUDIO_USB_FRAME_BYTES * S2_AUD
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
 static constexpr uint8_t  JOYCON_MOUSE_VERSION = 1;
+static constexpr uint8_t  GADGET_MODE_VERSION = 1;
+
+// Wire values for GadgetModeRequestPacket::requested_family and
+// GadgetModeReplyPacket::active_family. Mirrors the server-only
+// UsbControllerFamily enum (Switch1/Switch2/Hori) without exposing it here.
+enum GadgetFamily : uint8_t {
+    GADGET_FAMILY_SWITCH1 = 0,
+    GADGET_FAMILY_SWITCH2 = 1,
+    GADGET_FAMILY_HORI    = 2,
+};
+
+enum GadgetModeResult : uint8_t {
+    GADGET_MODE_RESULT_RESTARTING  = 0, // accepted; server is restarting its USB gadget with the new identity
+    GADGET_MODE_RESULT_UNCHANGED   = 1, // requested identity already active; nothing to do
+    GADGET_MODE_RESULT_SERVER_FULL = 2, // one or more clients are still connected; refused
+};
 
 enum ServerBackend : uint8_t {
     SERVER_BACKEND_UNKNOWN = 0,
@@ -258,6 +281,26 @@ struct ServerInfoReply {
 } NS_PACKED_ATTR;
 
 
+struct GadgetModeRequestPacket {
+    uint32_t magic = GADGET_MODE_MAGIC;
+    uint8_t  version = GADGET_MODE_VERSION;
+    uint8_t  requested_family = GADGET_FAMILY_SWITCH1;
+    uint8_t  reserved[2]{};
+    uint32_t seq = 0;
+    uint8_t  hmac[HMAC_TAG_SIZE]{};
+} NS_PACKED_ATTR;
+
+struct GadgetModeReplyPacket {
+    uint32_t magic = GADGET_MODE_MAGIC;
+    uint8_t  version = GADGET_MODE_VERSION;
+    uint8_t  result = GADGET_MODE_RESULT_RESTARTING;
+    uint8_t  active_family = GADGET_FAMILY_SWITCH1; // family running when this reply was sent
+    uint8_t  active_clients = 0;                    // populated when result == SERVER_FULL
+    uint32_t reserved = 0;
+} NS_PACKED_ATTR;
+
+static constexpr std::size_t GADGET_MODE_REQUEST_AUTH_SIZE = sizeof(GadgetModeRequestPacket) - HMAC_TAG_SIZE;
+
 struct ClientAssignmentPacket {
     uint32_t magic = CLIENT_ASSIGNMENT_MAGIC;
     uint8_t  version = CLIENT_ASSIGNMENT_VERSION;
@@ -429,6 +472,10 @@ static_assert(sizeof(ServerInfoProbe) == 8,
               "ServerInfoProbe wire layout changed");
 static_assert(sizeof(ServerInfoReply) == 16,
               "ServerInfoReply wire layout changed");
+static_assert(sizeof(GadgetModeRequestPacket) == 28,
+              "GadgetModeRequestPacket wire layout changed");
+static_assert(sizeof(GadgetModeReplyPacket) == 12,
+              "GadgetModeReplyPacket wire layout changed");
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 inline uint64_t now_us() noexcept {

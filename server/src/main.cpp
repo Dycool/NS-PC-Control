@@ -416,6 +416,11 @@ int main(int argc, char** argv) {
 
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
+    // Set by a Gadget mode request once accepted; consumed after shutdown below
+    // to re-exec this same binary with the new --hori/--s2 flag.
+    bool pending_restart = false;
+    UsbControllerFamily pending_restart_family = UsbControllerFamily::Switch1;
+
     while (g_ctx.running.load(std::memory_order_relaxed)) {
         udp_poll.revents = 0;
         int n = poll(&udp_poll, 1, 200);
@@ -473,6 +478,68 @@ int main(int argc, char** argv) {
                     reply.reserved[3] = static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count()));
                     sendto(sock, &reply, sizeof(reply), 0,
                            reinterpret_cast<const sockaddr*>(&sender), slen);
+                    continue;
+                }
+            }
+
+            // --- Gadget mode (controller family) change request ---
+            // Restarting the USB gadget subsystem for a family change is far more
+            // than "re-enumerate": Switch 2 uses a completely different Raw Gadget
+            // transport (its own char device, threads, and UAC1/UDP audio tunnels)
+            // from the legacy configfs f_hid gadget used by Switch 1/HORI. Rather
+            // than trying to tear down and stand up two unrelated USB gadget
+            // frameworks live in-process, do a full clean shutdown (identical to
+            // Ctrl+C) and re-exec the same binary with the new --hori/--s2 flag,
+            // reusing the already-proven cold-start path instead of a new one.
+            if (bytes == static_cast<ssize_t>(sizeof(ns::GadgetModeRequestPacket))) {
+                uint32_t gm_magic = 0;
+                memcpy(&gm_magic, udp_rx.data(), sizeof(gm_magic));
+                if (gm_magic == ns::GADGET_MODE_MAGIC) {
+                    ns::GadgetModeRequestPacket req{};
+                    memcpy(&req, udp_rx.data(), sizeof(req));
+                    if (req.version == ns::GADGET_MODE_VERSION
+                            && hmac_verify({g_ctx.hmac_key, 32},
+                                           {udp_rx.data(), ns::GADGET_MODE_REQUEST_AUTH_SIZE},
+                                           {udp_rx.data() + ns::GADGET_MODE_REQUEST_AUTH_SIZE, HMAC_TAG_SIZE}) == 0) {
+                        UsbControllerFamily requested = g_ctx.usb_controller_family;
+                        bool valid_family = true;
+                        switch (req.requested_family) {
+                            case ns::GADGET_FAMILY_SWITCH1: requested = UsbControllerFamily::Switch1; break;
+                            case ns::GADGET_FAMILY_SWITCH2: requested = UsbControllerFamily::Switch2; break;
+                            case ns::GADGET_FAMILY_HORI:    requested = UsbControllerFamily::Hori;    break;
+                            default: valid_family = false; break;
+                        }
+                        if (valid_family) {
+                            const uint64_t gm_now = now_us();
+                            // A lone requesting ns-client doesn't block itself: only
+                            // OTHER active sessions count as "the server isn't empty".
+                            const bool blocked_by_others = other_active_clients_exist(sender, gm_now);
+                            ns::GadgetModeReplyPacket reply{};
+                            if (blocked_by_others) {
+                                reply.result = ns::GADGET_MODE_RESULT_SERVER_FULL;
+                                reply.active_family = static_cast<uint8_t>(g_ctx.usb_controller_family);
+                                reply.active_clients = static_cast<uint8_t>(
+                                    std::clamp(active_client_count(gm_now), 0, MAX_CLIENTS));
+                            } else if (requested == g_ctx.usb_controller_family) {
+                                reply.result = ns::GADGET_MODE_RESULT_UNCHANGED;
+                                reply.active_family = static_cast<uint8_t>(g_ctx.usb_controller_family);
+                            } else {
+                                reply.result = ns::GADGET_MODE_RESULT_RESTARTING;
+                                reply.active_family = static_cast<uint8_t>(requested);
+                            }
+                            sendto(sock, &reply, sizeof(reply), 0,
+                                   reinterpret_cast<const sockaddr*>(&sender), slen);
+                            if (reply.result == ns::GADGET_MODE_RESULT_RESTARTING) {
+                                std::println("Controller type change requested by client -> {}; restarting",
+                                             usb_controller_family_name(requested));
+                                pending_restart = true;
+                                pending_restart_family = requested;
+                                g_ctx.running.store(false, std::memory_order_relaxed);
+                            }
+                        }
+                    } else if (g_ctx.verbose) {
+                        std::println("bad gadget-mode HMAC, dropped");
+                    }
                     continue;
                 }
             }
@@ -905,5 +972,29 @@ int main(int argc, char** argv) {
 
     teardown_gadget();
     std::cout << ".\n";
+
+    if (pending_restart) {
+        // Re-exec rather than reconfigure in place: same cold-start path that
+        // was already exercised above, just with the family flag swapped.
+        // Scheduling policy (e.g. `chrt -f 99`) and root privileges are process
+        // attributes that execve() preserves, so neither is lost here.
+        std::vector<std::string> restart_args;
+        restart_args.reserve(cli_args.size() + 1);
+        for (const std::string& a : cli_args) {
+            if (a != "--hori" && a != "--s2") restart_args.push_back(a);
+        }
+        if (pending_restart_family == UsbControllerFamily::Hori)        restart_args.push_back("--hori");
+        else if (pending_restart_family == UsbControllerFamily::Switch2) restart_args.push_back("--s2");
+
+        std::vector<char*> exec_argv;
+        exec_argv.reserve(restart_args.size() + 1);
+        for (std::string& a : restart_args) exec_argv.push_back(a.data());
+        exec_argv.push_back(nullptr);
+
+        std::println("Restarting ns-backend as {}...", usb_controller_family_name(pending_restart_family));
+        execv("/proc/self/exe", exec_argv.data());
+        std::println(stderr, "error: failed to restart ns-backend: {}", std::strerror(errno));
+        return 1;
+    }
     return 0;
 }

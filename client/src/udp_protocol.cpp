@@ -86,3 +86,37 @@ void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
     send_one(&pkt, ns::PACKET_SIZE, ns::PACKET_AUTH_SIZE);
 }
 
+bool send_gadget_mode_request_sync(const std::string& host, int port, ns::GadgetFamily family,
+                                   const uint8_t hmac_key[32], ns::GadgetModeReplyPacket& out_reply) {
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in dest{};
+    if (sock == INVALID_SOCKET || !resolve_udp_destination(host, port, dest)) {
+        if (sock != INVALID_SOCKET) closesocket(sock);
+        return false;
+    }
+    set_socket_nonblocking(sock);
+
+    ns::GadgetModeRequestPacket req{};
+    req.requested_family = static_cast<uint8_t>(family);
+    uint8_t full_hmac[32];
+    hmac_sha256(std::span(hmac_key, 32),
+               std::span(reinterpret_cast<const uint8_t*>(&req), ns::GADGET_MODE_REQUEST_AUTH_SIZE),
+               std::span<uint8_t, 32>(full_hmac));
+    std::memcpy(req.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+
+    const uint64_t deadline = ns::now_us() + 1500000ULL;
+    for (int i = 0; ns::now_us() < deadline; ++i) {
+        if (i < 3) send_all_udp(sock, dest, std::span(reinterpret_cast<const uint8_t*>(&req), sizeof(req)));
+        ns::GadgetModeReplyPacket reply{};
+        int n = (int)recvfrom(sock, reinterpret_cast<char*>(&reply), sizeof(reply), 0, nullptr, nullptr);
+        if (n == sizeof(reply) && reply.magic == ns::GADGET_MODE_MAGIC && reply.version == ns::GADGET_MODE_VERSION) {
+            out_reply = reply;
+            closesocket(sock);
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    closesocket(sock);
+    return false;
+}
+

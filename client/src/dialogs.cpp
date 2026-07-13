@@ -5,6 +5,9 @@
 #include "mouse_input.hpp"
 #include "qt_helpers.hpp"
 #include "stream_runtime.hpp"
+#include "udp_protocol.hpp"
+#include "shared/sha256.h"
+#include <QCoreApplication>
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QFrame>
@@ -267,7 +270,7 @@ void BindingsDialog::refresh() {
     }
 }
 
-SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
+SettingsDialog::SettingsDialog(QWidget* parent, const QString& host) : QDialog(parent), serverHost(host) {
     setWindowTitle("Settings");
     setModal(true);
     setMinimumWidth(420);
@@ -396,6 +399,17 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     joyconHorizontalBox->setChecked(g_joyconHorizontalMode.load());
     outer->addWidget(joyconHorizontalBox);
 
+    auto* sep = new QFrame(this);
+    sep->setFrameShape(QFrame::HLine);
+    sep->setFrameShadow(QFrame::Sunken);
+    outer->addWidget(sep);
+
+    serverTypeBtn = new QPushButton("Change Server Type...", this);
+    outer->addWidget(serverTypeBtn);
+    connect(serverTypeBtn, &QPushButton::clicked, this, [this] {
+        GadgetModeDialog dlg(this, serverHost);
+        dlg.exec();
+    });
 
     auto* buttons = new QGridLayout();
     QPushButton* save = new QPushButton("Save", this);
@@ -536,6 +550,105 @@ void SettingsDialog::saveSettings() {
     g_sdlInput.set_gyro_enabled(gyro);
     if (!rumble) g_sdlInput.stop_all_rumble();
     accept();
+}
+
+GadgetModeDialog::GadgetModeDialog(QWidget* parent, QString host) : QDialog(parent), serverHost(std::move(host)) {
+    setWindowTitle("Change Server Type");
+    setModal(true);
+    setMinimumWidth(380);
+    auto* outer = new QVBoxLayout(this);
+
+    auto* info = new QLabel(
+        "Choose the USB controller identity the server should emulate.\n"
+        "The server only accepts this while no other client is connected "
+        "and will briefly restart its USB gadget after accepting the change.", this);
+    info->setWordWrap(true);
+    outer->addWidget(info);
+
+    auto* row = new QGridLayout();
+    row->addWidget(new QLabel("Controller type:", this), 0, 0);
+    typeBox = new QComboBox(this);
+    typeBox->addItem("HORI", ns::GADGET_FAMILY_HORI);
+    typeBox->addItem("Switch 1 (Pro Controller)", ns::GADGET_FAMILY_SWITCH1);
+    typeBox->addItem("Switch 2 (Pro Controller 2)", ns::GADGET_FAMILY_SWITCH2);
+    typeBox->setCurrentIndex(1);
+    row->addWidget(typeBox, 0, 1);
+    outer->addLayout(row);
+
+    statusLabel = new QLabel(this);
+    statusLabel->setWordWrap(true);
+    outer->addWidget(statusLabel);
+
+    auto* buttons = new QGridLayout();
+    sendBtn = new QPushButton("Send", this);
+    cancelBtn = new QPushButton("Cancel", this);
+    buttons->addWidget(sendBtn, 0, 2);
+    buttons->addWidget(cancelBtn, 0, 3);
+    outer->addLayout(buttons);
+
+    connect(sendBtn, &QPushButton::clicked, this, [this] { sendRequest(); });
+    connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
+}
+
+void GadgetModeDialog::sendRequest() {
+    if (serverHost.trimmed().isEmpty()) {
+        statusLabel->setText("Enter the server's IP on the main window first.");
+        return;
+    }
+    sendBtn->setEnabled(false);
+    cancelBtn->setEnabled(false);
+    typeBox->setEnabled(false);
+    statusLabel->setText("Sending request...");
+    QCoreApplication::processEvents();
+
+    // Honour an optional ip:port just like the main connect field does, rather
+    // than assuming DEFAULT_PORT.
+    std::string host;
+    int port = ns::DEFAULT_PORT;
+    if (!parse_host_port(q_to_std(serverHost), host, port)) {
+        sendBtn->setEnabled(true);
+        cancelBtn->setEnabled(true);
+        typeBox->setEnabled(true);
+        statusLabel->setText("Enter a valid server IP on the main window first.");
+        return;
+    }
+
+    const auto family = static_cast<ns::GadgetFamily>(typeBox->currentData().toInt());
+    uint8_t hmac_key[32];
+    derive_key(ns::DEFAULT_SECRET, hmac_key);
+    ns::GadgetModeReplyPacket reply{};
+    const bool got_reply = send_gadget_mode_request_sync(host, port, family, hmac_key, reply);
+
+    sendBtn->setEnabled(true);
+    cancelBtn->setEnabled(true);
+    typeBox->setEnabled(true);
+
+    if (!got_reply) {
+        statusLabel->setText("No response from server. Check the IP and that it's reachable.");
+        return;
+    }
+    switch (reply.result) {
+        case ns::GADGET_MODE_RESULT_RESTARTING:
+            // If this client was streaming, the server session it was using is
+            // gone now. Drop the local connection so its sender thread stops
+            // hammering a server that's mid-restart, then prompt to reconnect.
+            stop_connection();
+            QMessageBox::information(this, "Server restarting",
+                "The server accepted the change and is restarting its USB gadget. "
+                "Reconnect in a few seconds.");
+            accept();
+            return;
+        case ns::GADGET_MODE_RESULT_UNCHANGED:
+            statusLabel->setText("The server is already running that controller type.");
+            return;
+        case ns::GADGET_MODE_RESULT_SERVER_FULL:
+            statusLabel->setText(QString("Server is full: %1 client(s) still connected. Disconnect them first.")
+                                      .arg(reply.active_clients));
+            return;
+        default:
+            statusLabel->setText("Unexpected response from server.");
+            return;
+    }
 }
 
 bool validate_macro_hotkey_for_entry_qt(const std::string& hotkey, int skip_index, QWidget* parent) {

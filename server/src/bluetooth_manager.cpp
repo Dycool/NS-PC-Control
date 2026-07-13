@@ -336,7 +336,7 @@ class BluezManager {
 public:
     BluezManager() = default;
     void run();
-    static void disconnect_gamepads();
+    static void disconnect_gamepads(bool expect_reply = true);
     void run_pairing_wizard();
 
 private:
@@ -372,10 +372,11 @@ private:
     bool            call_device_method(const std::string& path,
                                        const std::string& method,
                                        std::chrono::milliseconds timeout,
-                                       std::string_view success_err = "");
+                                       std::string_view success_err = "",
+                                       bool expect_reply = true);
     bool            pair_device(const DeviceInfo& dev);
     bool            connect_device_once(const DeviceInfo& dev);
-    bool            disconnect_device(const DeviceInfo& dev);
+    bool            disconnect_device(const DeviceInfo& dev, bool expect_reply = true);
     void            open_pair_window(const char* reason);
     void            close_pair_window();
     void            note_connected(const DeviceInfo& dev);
@@ -586,8 +587,20 @@ bool BluezManager::set_trusted(const DeviceInfo& dev, bool trusted) {
 bool BluezManager::call_device_method(const std::string& path,
                                       const std::string& method,
                                       std::chrono::milliseconds timeout,
-                                      std::string_view success_err) {
+                                      std::string_view success_err,
+                                      bool expect_reply) {
     try {
+        if (!expect_reply) {
+            // Fire-and-forget: BlueZ still processes the request, but we don't
+            // block waiting for its reply. Used only on the shutdown path,
+            // where waiting up to DBUS_CONNECT_TIMEOUT per connected gamepad
+            // (observed up to ~10s with 4 controllers) made the server slow
+            // to stop for no benefit, since the process exits right after.
+            proxy(path)->callMethod(method)
+                        .onInterface(DEVICE_IFACE)
+                        .dontExpectReply();
+            return true;
+        }
         proxy(path)->callMethod(method)
                     .onInterface(DEVICE_IFACE)
                     .withTimeout(timeout)
@@ -615,10 +628,10 @@ bool BluezManager::connect_device_once(const DeviceInfo& dev) {
                               "org.bluez.Error.AlreadyConnected");
 }
 
-bool BluezManager::disconnect_device(const DeviceInfo& dev) {
+bool BluezManager::disconnect_device(const DeviceInfo& dev, bool expect_reply) {
     if (!connection || dev.path.empty() || !dev.connected) return true;
     return call_device_method(dev.path, "Disconnect", DBUS_CONNECT_TIMEOUT,
-                              "org.bluez.Error.NotConnected");
+                              "org.bluez.Error.NotConnected", expect_reply);
 }
 
 // ---------------------------------------------------------------------------
@@ -762,16 +775,15 @@ void BluezManager::run() {
 // Static helpers exposed via the public API
 // ---------------------------------------------------------------------------
 
-void BluezManager::disconnect_gamepads() {
+void BluezManager::disconnect_gamepads(bool expect_reply) {
     BluezManager mgr;
     if (!mgr.connect_bus() || !mgr.ensure_adapter()) return;
     for (const auto& dev : mgr.list_devices()
                          | std::views::filter([](const auto& d) {
                                return d.connected && d.is_controller_like();
                            })) {
-        if (g_ctx.verbose) std::println("[bt] disconnecting {} ({}) because Switch suspended",
-                                        dev.display_name(), dev.address);
-        (void)mgr.disconnect_device(dev);
+        if (g_ctx.verbose) std::println("[bt] disconnecting {} ({})", dev.display_name(), dev.address);
+        (void)mgr.disconnect_device(dev, expect_reply);
     }
     mgr.close_bus();
 }
@@ -880,7 +892,7 @@ class BluezManager {
 public:
     BluezManager() = default;
     void run()               { std::println(stderr, "[bt] built without BlueZ D-Bus controller manager"); }
-    static void disconnect_gamepads() {}
+    static void disconnect_gamepads(bool = true) {}
 };
 } // namespace
 
@@ -935,8 +947,8 @@ void bluetooth_manager_stop() {
     if (g_manager_thread.joinable()) g_manager_thread.join();
 }
 
-void bluetooth_manager_disconnect_connected_gamepads() {
-    BluezManager::disconnect_gamepads();
+void bluetooth_manager_disconnect_connected_gamepads(bool expect_reply) {
+    BluezManager::disconnect_gamepads(expect_reply);
 }
 
 bool run_bluetooth_pairing_wizard() {

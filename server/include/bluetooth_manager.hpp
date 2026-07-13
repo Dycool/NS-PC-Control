@@ -9,7 +9,11 @@
 void bluetooth_manager_runtime_setup(bool verbose);
 void bluetooth_manager_start();
 void bluetooth_manager_stop();
-void bluetooth_manager_disconnect_connected_gamepads();
+// expect_reply=false is fire-and-forget (BlueZ still processes the request,
+// but the call returns immediately instead of blocking up to DBUS_CONNECT_TIMEOUT
+// per connected gamepad). Use false only when about to exit anyway (shutdown);
+// keep the default true where the caller needs the disconnect confirmed.
+void bluetooth_manager_disconnect_connected_gamepads(bool expect_reply = true);
 void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled);
 // Ask the running manager to open a 2-minute pairing window (thread-safe; no-op if the
 // manager isn't running). Used to auto-pair when the Switch enters its controller-pairing screen.

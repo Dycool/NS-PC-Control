@@ -294,7 +294,11 @@ void bluetooth_input_thread(std::stop_token stoken) {
     input.stop_all_rumble();
     bluetooth_manager_set_proactive_reconnect_enabled(false);
     input.disconnect_all();
-    bluetooth_manager_disconnect_connected_gamepads();
+    // Fire-and-forget here: the process exits right after, so there's no reason
+    // to block on each gamepad's Disconnect() reply (up to DBUS_CONNECT_TIMEOUT
+    // per controller - observed adding up to ~10s of shutdown latency with 4
+    // connected). BlueZ still processes the request after we return.
+    bluetooth_manager_disconnect_connected_gamepads(false);
     bluetooth_manager_stop();
     input.stop();
     if (g_ctx.verbose) std::println("[bt] Bluetooth/local SDL controller input stopped");

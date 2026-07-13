@@ -243,6 +243,10 @@ void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr);
 bool any_recent_client_active(uint64_t now);
 int active_client_count(uint64_t now = 0);
+// Like active_client_count() > 0, but ignores a single UDP session matching
+// exclude_sender. Lets a lone requesting ns-client (not yet counted as "using"
+// the server for anything else) treat the server as empty for itself.
+bool other_active_clients_exist(const sockaddr_in& exclude_sender, uint64_t now = 0);
 int configured_client_capacity();
 int configured_virtual_port_count();
 int requested_virtual_slots_for_report(const ns::MultiReport& report, const bool pad_present[4], bool reserve_when_idle = true);

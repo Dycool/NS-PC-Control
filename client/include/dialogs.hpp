@@ -52,9 +52,10 @@ private:
 
 class SettingsDialog : public QDialog {
 public:
-    explicit SettingsDialog(QWidget* parent = nullptr);
+    explicit SettingsDialog(QWidget* parent = nullptr, const QString& serverHost = QString());
 
 private:
+    QString serverHost;
     QCheckBox* gyroBox = nullptr;
     QCheckBox* rumbleBox = nullptr;
     QComboBox* switch2AudioDeviceBox = nullptr;
@@ -68,11 +69,30 @@ private:
     QLabel* mouseSensitivityLabel = nullptr;
     QSlider* mouseSensitivitySlider = nullptr;
     QLabel* mouseSensitivityValue = nullptr;
+    QPushButton* serverTypeBtn = nullptr;
 
     void updateMouseModeControls();
     void updateJoyconHorizontalControl();
     bool joyconMouseModeAvailable() const;
     void saveSettings();
+};
+
+// Lets the user ask the server to switch its emulated USB controller family
+// (HORI/Switch 1/Switch 2). The server only accepts this while it has no
+// active clients, so this is a standalone request/reply exchange rather than
+// something tied to the main gameplay connection.
+class GadgetModeDialog : public QDialog {
+public:
+    GadgetModeDialog(QWidget* parent, QString serverHost);
+
+private:
+    QString serverHost;
+    QComboBox* typeBox = nullptr;
+    QLabel* statusLabel = nullptr;
+    QPushButton* sendBtn = nullptr;
+    QPushButton* cancelBtn = nullptr;
+
+    void sendRequest();
 };
 
 bool validate_macro_hotkey_for_entry_qt(const std::string& hotkey, int skip_index, QWidget* parent);

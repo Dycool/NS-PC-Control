@@ -21,3 +21,11 @@ bool resolve_udp_destination(const std::string& host, int port, sockaddr_in& des
 int send_all_udp(SOCKET sock, const sockaddr_in& dest, std::span<const uint8_t> data);
 void send_udp_disconnect_packet(SOCKET sock, const sockaddr_in& dest,
                                 const uint8_t hmac_key[32], uint32_t seq);
+
+// One-off, connectionless request asking the server to switch its emulated USB
+// controller family. Opens its own socket and blocks for up to ~1 second
+// waiting for a GadgetModeReplyPacket. Returns false only when the server never
+// replied (bad host, unreachable, or dropped packet); check out_reply.result
+// for the server's actual decision (restarting/unchanged/server full).
+bool send_gadget_mode_request_sync(const std::string& host, int port, ns::GadgetFamily family,
+                                   const uint8_t hmac_key[32], ns::GadgetModeReplyPacket& out_reply);
