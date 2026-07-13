@@ -37,6 +37,20 @@ jobs:
           set -euo pipefail
           apt-get update
           apt-get install -y ca-certificates curl gnupg gcc make libc6-dev kmod
+          # Raspberry Pi Foundation's apt signing key still carries a SHA-1
+          # binding signature. Debian trixie's sqv backend hard-rejects those
+          # since 2026-02-01, breaking `apt-get update` for this repo only
+          # (present since our first trixie run; bookworm's older apt has no
+          # sqv config and is unaffected). Extend apt's own documented
+          # grace-period knob for legacy repos rather than disabling signature
+          # verification outright (`trusted=yes`) for the source. Remove this
+          # once Raspberry Pi re-signs their key with a modern hash.
+          if [ -f /usr/share/apt/default-sequoia.config ]; then
+            mkdir -p /etc/crypto-policies/back-ends
+            sed 's/^sha1\.second_preimage_resistance = .*/sha1.second_preimage_resistance = 2027-07-01    # TODO: remove once archive.raspberrypi.com re-signs with a non-SHA1 key/' \
+              /usr/share/apt/default-sequoia.config \
+              > /etc/crypto-policies/back-ends/apt-sequoia.config
+          fi
           curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
             | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
           echo 'deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] https://archive.raspberrypi.com/debian/ ${{ matrix.suite }} main' \
