@@ -726,7 +726,18 @@ void handle_control(const usb_ctrlrequest& ctrl) {
                     // from falsely confirming sleep during the console's init
                     // handshake, whose natural pauses would otherwise trip the
                     // RX-gap heuristic and reset the client session mid-handshake.
+                    const bool deferred_reenumeration =
+                        g_ctx.switch2_usb_reenumeration_after_resume.exchange(
+                            false, std::memory_order_acq_rel);
                     mark_switch2_usb_host_resumed();
+                    if (deferred_reenumeration && any_recent_client_active(now_us())) {
+                        if (g_ctx.verbose) {
+                            std::println("[s2-rg] host configured without RESUME; "
+                                         "performing deferred client hot-plug");
+                        }
+                        g_ctx.switch2_usb_reenumeration_requested.store(
+                            true, std::memory_order_release);
+                    }
                 } else {
                     std::println(stderr, "[s2-rg] USB_RAW_IOCTL_CONFIGURE failed: {}", strerror(errno));
                     disable_all_endpoints();
@@ -979,19 +990,32 @@ void event_pump_loop() {
                 // idle RX stream. poll_switch2_sleep_state() debounces this, so a
                 // brief suspend that resumes within the grace window is ignored.
                 mark_switch2_usb_host_disconnected();
+                if (g_ctx.verbose) std::println("[s2-rg] USB suspend");
                 break;
             case USB_RAW_EVENT_RESUME:
                 // Console resumed the bus. Clears the suspended/asleep state and
                 // marks the lifecycle as authoritative so sleep detection uses
                 // these events rather than the RX-gap heuristic.
-                // Re-enumerate once after a real suspended -> resumed edge. A
-                // fresh Raw Gadget RUN starts with suspended=false, preventing
-                // the reconnect itself from recursively requesting another one.
-                if (g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed)) {
+                // A client that arrived while suspended deferred its virtual
+                // hot-plug until this observable wake edge. Do not recycle the
+                // gadget for an ordinary transient suspend/resume with no new
+                // client; the configured USB session can continue normally.
+                const bool was_suspended =
+                    g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed);
+                const bool deferred_reenumeration =
+                    g_ctx.switch2_usb_reenumeration_after_resume.exchange(
+                        false, std::memory_order_acq_rel);
+                mark_switch2_usb_host_resumed();
+                const bool client_active = any_recent_client_active(now_us());
+                if (deferred_reenumeration && client_active) {
                     g_ctx.switch2_usb_reenumeration_requested.store(
                         true, std::memory_order_release);
                 }
-                mark_switch2_usb_host_resumed();
+                if (g_ctx.verbose) {
+                    std::println("[s2-rg] USB resume (was_suspended={}, "
+                                 "deferred_hotplug={}, active_client={})",
+                                 was_suspended, deferred_reenumeration, client_active);
+                }
                 break;
             case USB_RAW_EVENT_RESET:
                 // A reset tears down the configured endpoints just like a

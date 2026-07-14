@@ -827,6 +827,11 @@ static void switch2_wake_adv_worker(int burst_ms) {
     // was suspended cannot remain attached in an unenumerated Raw Gadget state.
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
             && !s2_gadget_io_ready(0)) {
+        // This is the fallback for a host that never delivered RESUME or a new
+        // SET_CONFIGURATION. It supersedes the deferred wake-edge request so
+        // the successful fallback enumeration is not immediately recycled.
+        g_ctx.switch2_usb_reenumeration_after_resume.store(
+            false, std::memory_order_release);
         g_ctx.switch2_usb_reenumeration_requested.store(true, std::memory_order_release);
     }
     g_ctx.switch2_wake_adv_running.store(false, std::memory_order_relaxed);

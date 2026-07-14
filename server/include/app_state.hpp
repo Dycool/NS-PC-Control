@@ -217,6 +217,11 @@ struct ServerContext {
     // the native gadget is safe on each new client/wake boundary. The writer
     // consumes this flag to serialize teardown/recreate with USB I/O.
     std::atomic<bool> switch2_usb_reenumeration_requested{false};
+    // A client can connect while the console is suspended. Reconnecting Raw
+    // Gadget before the console wakes is not an observable hot-plug and clears
+    // the suspend edge we need. Defer that reconnect until RESUME (or the next
+    // successful SET_CONFIGURATION when the host skips a RESUME event).
+    std::atomic<bool> switch2_usb_reenumeration_after_resume{false};
     std::atomic<uint8_t> console_player_leds[HID_PORT_COUNT]{};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};

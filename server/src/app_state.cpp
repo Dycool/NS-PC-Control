@@ -1254,7 +1254,23 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         g_ctx.clients[i].udp_rumble_enabled = false;
         reset_client_slot_streams_locked(g_ctx.clients[i]);
         if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-            g_ctx.switch2_usb_reenumeration_requested.store(true, std::memory_order_release);
+            // An awake host can observe the disconnect immediately. While the
+            // console is suspended, however, reconnecting Raw Gadget here is
+            // invisible to it and erases the suspended -> resumed edge. Keep
+            // the intentional virtual hot-plug, but perform it after wake.
+            if (switch2_usb_host_recently_active(now)) {
+                g_ctx.switch2_usb_reenumeration_after_resume.store(
+                    false, std::memory_order_release);
+                g_ctx.switch2_usb_reenumeration_requested.store(
+                    true, std::memory_order_release);
+            } else {
+                g_ctx.switch2_usb_reenumeration_after_resume.store(
+                    true, std::memory_order_release);
+                if (g_ctx.verbose) {
+                    std::println("[s2] client connected while USB host is inactive; "
+                                 "deferring re-enumeration until console resume");
+                }
+            }
         }
         return true;
     };
