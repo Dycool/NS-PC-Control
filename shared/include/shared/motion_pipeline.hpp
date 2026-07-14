@@ -33,10 +33,6 @@ public:
 
     uint64_t last_accel_us() const noexcept { return accel_.last_input_us; }
     uint64_t last_gyro_us() const noexcept { return gyro_.last_input_us; }
-    bool gyro_bias_ready() const noexcept { return gyro_bias_ready_; }
-    float gyro_bias(int axis) const noexcept {
-        return (axis >= 0 && axis < 3) ? gyro_bias_[axis] : 0.0f;
-    }
 
 private:
     struct TimedVec3 {
@@ -56,12 +52,6 @@ private:
     Stream accel_;
     Stream gyro_;
 
-    float gyro_bias_[3]{};
-    double gyro_bias_sum_[3]{};
-    uint32_t gyro_bias_sample_count_ = 0;
-    uint64_t gyro_stationary_since_us_ = 0;
-    uint64_t gyro_bias_last_update_us_ = 0;
-    bool gyro_bias_ready_ = false;
     uint64_t last_emitted_gyro_input_us_ = 0;
     uint64_t last_emitted_accel_input_us_ = 0;
     MotionReport last_output_samples_[3]{};
@@ -72,8 +62,6 @@ private:
     static bool interpolate(const Stream& stream, uint64_t timestamp_us,
                             uint64_t stale_after_us, float out[3]);
     static uint64_t stale_timeout_us(const Stream& stream);
-    bool accel_indicates_stationary(uint64_t timestamp_us) const;
-    void update_gyro_bias(uint64_t timestamp_us, const float raw[3]);
 };
 
 } // namespace ns

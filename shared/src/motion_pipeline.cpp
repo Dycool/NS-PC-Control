@@ -9,18 +9,7 @@ namespace {
 constexpr float TWO_PI = 6.28318530717958647692f;
 constexpr float ACCEL_CUTOFF_HZ = 0.0f;  // 0 = raw passthrough (no smoothing)
 constexpr float GYRO_CUTOFF_HZ = 0.0f;   // 0 = raw passthrough (no smoothing)
-// 2.0 counts (~0.12 deg/s) sits above the bias-corrected DS4/DualSense noise
-// floor but no longer bites into slow precision aiming: the previous 6.0
-// (~0.37 deg/s) removed a constant 0.37 deg/s from every rotation, a 7% error
-// at 5 deg/s. The adaptive bias estimator handles drift; the deadzone only
-// needs to gate residual noise.
 constexpr float GYRO_SOFT_DEADZONE = 2.0f;       // ~0.12 degrees/second
-constexpr float GYRO_STATIONARY_LIMIT = 48.0f;  // ~2.93 degrees/second
-constexpr float ACCEL_ONE_G = 4096.0f;
-constexpr float ACCEL_STATIONARY_TOLERANCE = 0.08f * ACCEL_ONE_G;
-constexpr uint64_t BIAS_STARTUP_US = 750'000;
-constexpr uint32_t BIAS_MIN_SAMPLES = 20;
-constexpr float BIAS_ADAPT_TIME_CONSTANT_S = 12.0f;
 constexpr uint64_t HISTORY_US = 250'000;
 constexpr uint64_t MIN_STALE_US = 50'000;
 constexpr uint64_t MAX_STALE_US = 150'000;
@@ -39,21 +28,11 @@ int16_t gyro_i16(float value) {
     return motion_i16(soft_deadzone(value));
 }
 
-float vec_magnitude(const float v[3]) {
-    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
 } // namespace
 
 void MotionPipeline::reset() {
     accel_ = Stream{};
     gyro_ = Stream{};
-    std::fill_n(gyro_bias_, 3, 0.0f);
-    std::fill_n(gyro_bias_sum_, 3, 0.0);
-    gyro_bias_sample_count_ = 0;
-    gyro_stationary_since_us_ = 0;
-    gyro_bias_last_update_us_ = 0;
-    gyro_bias_ready_ = false;
     last_emitted_gyro_input_us_ = 0;
     last_emitted_accel_input_us_ = 0;
     for (auto& sample : last_output_samples_) sample.reset();
@@ -77,12 +56,6 @@ void MotionPipeline::configure(bool has_accel, float accel_rate_hz,
         gyro_.filter_ready = false;
         gyro_.last_input_us = 0;
         last_emitted_gyro_input_us_ = 0;
-        std::fill_n(gyro_bias_, 3, 0.0f);
-        std::fill_n(gyro_bias_sum_, 3, 0.0);
-        gyro_bias_sample_count_ = 0;
-        gyro_stationary_since_us_ = 0;
-        gyro_bias_last_update_us_ = 0;
-        gyro_bias_ready_ = false;
     }
 }
 
@@ -119,70 +92,9 @@ void MotionPipeline::push_accel(uint64_t timestamp_us, float x, float y, float z
     push(accel_, timestamp_us, x, y, z, ACCEL_CUTOFF_HZ);
 }
 
-bool MotionPipeline::accel_indicates_stationary(uint64_t timestamp_us) const {
-    if (!accel_.available) return true;
-    if (!accel_.filter_ready || accel_.last_input_us == 0) return false;
-    if (timestamp_us > accel_.last_input_us
-            && timestamp_us - accel_.last_input_us > stale_timeout_us(accel_)) {
-        return false;
-    }
-    const float magnitude = vec_magnitude(accel_.filtered);
-    return std::abs(magnitude - ACCEL_ONE_G) <= ACCEL_STATIONARY_TOLERANCE;
-}
-
-void MotionPipeline::update_gyro_bias(uint64_t timestamp_us, const float raw[3]) {
-    float corrected_for_test[3] = {
-        raw[0] - gyro_bias_[0],
-        raw[1] - gyro_bias_[1],
-        raw[2] - gyro_bias_[2],
-    };
-    const bool stationary = accel_indicates_stationary(timestamp_us)
-        && vec_magnitude(corrected_for_test) <= GYRO_STATIONARY_LIMIT;
-
-    if (!stationary) {
-        gyro_stationary_since_us_ = 0;
-        gyro_bias_sample_count_ = 0;
-        std::fill_n(gyro_bias_sum_, 3, 0.0);
-        gyro_bias_last_update_us_ = timestamp_us;
-        return;
-    }
-
-    if (gyro_stationary_since_us_ == 0) {
-        gyro_stationary_since_us_ = timestamp_us;
-        gyro_bias_sample_count_ = 0;
-        std::fill_n(gyro_bias_sum_, 3, 0.0);
-    }
-
-    if (!gyro_bias_ready_) {
-        for (int axis = 0; axis < 3; ++axis) gyro_bias_sum_[axis] += raw[axis];
-        ++gyro_bias_sample_count_;
-        if (timestamp_us - gyro_stationary_since_us_ >= BIAS_STARTUP_US
-                && gyro_bias_sample_count_ >= BIAS_MIN_SAMPLES) {
-            for (int axis = 0; axis < 3; ++axis) {
-                gyro_bias_[axis] = static_cast<float>(
-                    gyro_bias_sum_[axis] / static_cast<double>(gyro_bias_sample_count_));
-            }
-            gyro_bias_ready_ = true;
-            gyro_bias_last_update_us_ = timestamp_us;
-        }
-        return;
-    }
-
-    const uint64_t dt_us = gyro_bias_last_update_us_ == 0
-        ? 0 : timestamp_us - gyro_bias_last_update_us_;
-    gyro_bias_last_update_us_ = timestamp_us;
-    if (dt_us == 0) return;
-    const float dt_s = std::min(static_cast<float>(dt_us) / 1'000'000.0f, 0.1f);
-    const float alpha = 1.0f - std::exp(-dt_s / BIAS_ADAPT_TIME_CONSTANT_S);
-    for (int axis = 0; axis < 3; ++axis)
-        gyro_bias_[axis] += alpha * (raw[axis] - gyro_bias_[axis]);
-}
-
 void MotionPipeline::push_gyro(uint64_t timestamp_us, float x, float y, float z) {
     if (!gyro_.available || timestamp_us == 0) return;
     if (gyro_.last_input_us != 0 && timestamp_us <= gyro_.last_input_us) return;
-
-
     push(gyro_, timestamp_us, x, y, z, GYRO_CUTOFF_HZ);
 }
 
