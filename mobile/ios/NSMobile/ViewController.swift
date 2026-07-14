@@ -1208,10 +1208,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         let g0 = motion.gravity
         let r0 = motion.rotationRate
 
-        // Phone/touch gyro is intentionally NOT dynamic-orientation based.
-        // It is only meant for the locked landscape pose where the phone top is on the left.
-        let g = remapForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
-        let r = remapForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
+        // Pro Controller touch motion follows the locked landscape UI. A single
+        // Joy-Con L or R is physically held vertically on top of the phone, with
+        // both tops aligned, so Joy-Con motion stays in the phone's natural axes.
+        let g = remapPhoneMotionForController(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
+        let r = remapPhoneMotionForController(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
 
         let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
                                                   rotationX: r.0, rotationY: r.1, rotationZ: r.2)
@@ -1230,6 +1231,17 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             let fresh = state.revision != state.sentRevision
             state.sentRevision = state.revision
             return (state.samples, fresh)
+        }
+    }
+
+    private func remapPhoneMotionForController(x: Float, y: Float, z: Float) -> (Float, Float, Float) {
+        switch touchControllerType {
+        case ProtocolWire.controllerTypeJoyConL, ProtocolWire.controllerTypeJoyConR:
+            // The phone is physically portrait like a vertical Joy-Con, directly
+            // underneath it with both tops aligned. Ignore the landscape UI rotation.
+            return (x, y, z)
+        default:
+            return remapForLandscapeTopOnLeft(x: x, y: y, z: z)
         }
     }
 

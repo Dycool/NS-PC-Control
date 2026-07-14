@@ -568,10 +568,12 @@ class MainActivity : AppCompatActivity() {
 
         val accel = if (hasLatestPhoneGravity) latestPhoneGravity else latestPhoneAccel
 
-        // Touch/phone gyro: must follow the screen orientation.
-        // Android sensor axes stay in device/natural coordinates, so landscape needs this.
-        val a = remapSensorForDisplay(accel)
-        val g = remapSensorForDisplay(latestPhoneGyro)
+        // Pro Controller touch motion follows the forced landscape display.
+        // A single Joy-Con L or R is physically held vertically, with the phone's
+        // top matching the Joy-Con's top, so its motion must stay in the phone's
+        // natural axes instead of being rotated into the landscape UI frame.
+        val a = remapPhoneSensorForController(accel)
+        val g = remapPhoneSensorForController(latestPhoneGyro)
 
         val sample = NativeProtocol.nativePhoneMotion(
             a[0], a[1], a[2],
@@ -610,6 +612,21 @@ class MainActivity : AppCompatActivity() {
             else -> floatArrayOf(v[0], v[1], v[2])
         }
     }
+
+    private fun remapPhoneSensorForController(v: FloatArray): FloatArray =
+        when (touchControllerType) {
+            Protocol.CONTROLLER_TYPE_JOYCON_L,
+            Protocol.CONTROLLER_TYPE_JOYCON_R -> {
+                // The app is landscape, but the phone itself is held portrait like a
+                // vertical Joy-Con, directly underneath it with both tops aligned.
+                // Keep Android's natural device axes: +X points right, +Y points
+                // toward the phone/Joy-Con top, and +Z points out of the screen.
+                // ns_motion_from_android then maps that physical pose to the common
+                // Switch frame (X = forward, Y = left, Z = up).
+                floatArrayOf(v[0], v[1], v[2])
+            }
+            else -> remapSensorForDisplay(v)
+        }
 
     @Suppress("DEPRECATION")
     private fun legacyDisplayRotation(): Int = windowManager.defaultDisplay.rotation
