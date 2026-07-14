@@ -1,11 +1,10 @@
 (function () {
     const PRO = 3, JOYCON_L = 1, JOYCON_R = 2;
 
-    // These were the original upright/portrait Joy-Con defaults. Keep them only
-    // so installations that implicitly saved the old defaults can be migrated
-    // to the corrected landscape layout without touching genuinely customised
-    // layouts.
-    const legacyJoyconLayouts = {
+    // Previous Joy-Con defaults from the first landscape pass. If a saved
+    // layout still matches these exactly, silently migrate it to the refined
+    // defaults below; genuinely customized layouts remain untouched.
+    const legacyDefaults = {
         [JOYCON_L]: {
             'btn-zl': {l:33, t:2, w:34, h:7}, 'btn-l': {l:35, t:10, w:30, h:7},
             'btn-sl': {l:64, t:34, w:5, h:16}, 'btn-sr': {l:64, t:54, w:5, h:16},
@@ -34,24 +33,25 @@
             'abxy': {l:78, t:35, w:16},
             'rstick': {l:62, t:60, w:16}, 'btn-rs': {l:85, t:80, w:5}
         },
-        // A single Joy-Con is used sideways. The touch surface/editor is always
-        // landscape, so spread the controls across the available width instead
-        // of drawing an upright controller in the middle of the screen.
+        // Joy-Con (L), upright within a landscape screen: stick in the upper
+        // half, - on the inner top-right of the stick, capture below on the
+        // inner side, and larger touch targets overall.
         [JOYCON_L]: {
-            'btn-zl': {l:1.5, t:25, w:7, h:20}, 'btn-l': {l:1.5, t:55, w:7, h:20},
-            'btn-sl': {l:35, t:10, w:12, h:8}, 'btn-sr': {l:53, t:10, w:12, h:8},
-            'btn-minus': {l:51, t:29, w:4}, 'btn-capture': {l:51, t:68, w:4},
-            'lstick': {l:16, t:34, w:15}, 'btn-ls': {l:34, t:67, w:4},
-            'dpad': {l:69, t:34, w:15}
+            'btn-zl': {l:31, t:2, w:38, h:8}, 'btn-l': {l:34, t:11, w:32, h:7},
+            'btn-sl': {l:64, t:33, w:6, h:16}, 'btn-sr': {l:64, t:53, w:6, h:16},
+            'btn-minus': {l:57, t:18, w:6}, 'btn-capture': {l:59, t:75, w:6},
+            'lstick': {l:38, t:22, w:19}, 'btn-ls': {l:34, t:46, w:6},
+            'dpad': {l:40, t:56, w:19}
         },
-        // Joy-Con (R) is also sideways: stick on the left, face buttons on the
-        // right, rail buttons along the top, and R/ZR on the outer edge.
+        // Joy-Con (R), matching the real controller more closely: + on the
+        // inner top-left, ABXY above/right, stick below, Home below on the
+        // inner side, and larger touch targets overall.
         [JOYCON_R]: {
-            'btn-zr': {l:91.5, t:25, w:7, h:20}, 'btn-r': {l:91.5, t:55, w:7, h:20},
-            'btn-sl': {l:35, t:10, w:12, h:8}, 'btn-sr': {l:53, t:10, w:12, h:8},
-            'btn-plus': {l:45, t:29, w:4}, 'btn-home': {l:45, t:68, w:4},
-            'abxy': {l:69, t:34, w:15},
-            'rstick': {l:16, t:34, w:15}, 'btn-rs': {l:34, t:67, w:4}
+            'btn-zr': {l:31, t:2, w:38, h:8}, 'btn-r': {l:34, t:11, w:32, h:7},
+            'btn-sl': {l:30, t:33, w:6, h:16}, 'btn-sr': {l:30, t:53, w:6, h:16},
+            'btn-plus': {l:37, t:18, w:6}, 'btn-home': {l:37, t:75, w:6},
+            'abxy': {l:44, t:22, w:19},
+            'rstick': {l:39, t:56, w:19}, 'btn-rs': {l:58, t:70, w:6}
         }
     };
 
@@ -59,18 +59,36 @@
     const clone = value => JSON.parse(JSON.stringify(value));
     const storageKey = type => `nswc_layout_${type}`;
 
-    function sameDefaultLayout(value, expected) {
-        if (!value || typeof value !== 'object') return false;
-        const ids = Object.keys(expected);
-        if (Object.keys(value).length !== ids.length) return false;
-        return ids.every(id => {
-            const a = value[id], b = expected[id];
-            if (!a || typeof a !== 'object') return false;
-            return ['l', 't', 'w', 'h', 'hide'].every(key => {
-                const av = a[key], bv = b[key];
-                return av === bv || (av == null && bv == null);
-            });
-        });
+    function isPlainObject(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    function sameValue(a, b) {
+        if (a === b) return true;
+        if (typeof a !== typeof b) return false;
+        if (Array.isArray(a) || Array.isArray(b)) return false;
+        if (!isPlainObject(a) || !isPlainObject(b)) return false;
+        const aKeys = Object.keys(a).sort();
+        const bKeys = Object.keys(b).sort();
+        if (aKeys.length !== bKeys.length) return false;
+        for (let i = 0; i < aKeys.length; i++) if (aKeys[i] !== bKeys[i]) return false;
+        for (const key of aKeys) {
+            const av = a[key], bv = b[key];
+            if (isPlainObject(av) || isPlainObject(bv)) {
+                if (!sameValue(av, bv)) return false;
+            } else if (av !== bv) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function maybeMigrate(type, parsed) {
+        if (type === JOYCON_L || type === JOYCON_R) {
+            const legacy = legacyDefaults[type];
+            if (legacy && sameValue(parsed, legacy)) return clone(layouts[type]);
+        }
+        return parsed;
     }
 
     function load(type) {
@@ -80,19 +98,7 @@
         if (raw) {
             try {
                 const parsed = JSON.parse(raw);
-                if (parsed && typeof parsed === 'object') {
-                    // saveLayout() historically wrote all three profiles, so an
-                    // untouched Joy-Con profile may still be persisted with the
-                    // broken portrait default. Upgrade only exact old defaults;
-                    // never overwrite a user-customised layout.
-                    if ((type === JOYCON_L || type === JOYCON_R)
-                        && sameDefaultLayout(parsed, legacyJoyconLayouts[type])) {
-                        const migrated = clone(layouts[type]);
-                        localStorage.setItem(storageKey(type), JSON.stringify(migrated));
-                        return migrated;
-                    }
-                    return parsed;
-                }
+                if (parsed && typeof parsed === 'object') return maybeMigrate(type, parsed);
             } catch (_) {}
         }
         return clone(layouts[type] || layouts[PRO]);

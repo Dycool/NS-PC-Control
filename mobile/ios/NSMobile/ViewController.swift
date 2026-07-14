@@ -148,45 +148,6 @@ private enum ProtocolWire {
         return out
     }
 
-    private static func readMotionI16(_ sample: [UInt8], _ offset: Int) -> Int {
-        let raw = UInt16(sample[offset]) | (UInt16(sample[offset + 1]) << 8)
-        return Int(Int16(bitPattern: raw))
-    }
-
-    private static func writeMotionI16(_ sample: inout [UInt8], _ offset: Int, _ value: Int) {
-        let clamped = min(max(value, Int(Int16.min)), Int(Int16.max))
-        let raw = UInt16(bitPattern: Int16(clamped))
-        sample[offset] = UInt8(raw & 0x00ff)
-        sample[offset + 1] = UInt8((raw >> 8) & 0x00ff)
-    }
-
-    static func applyJoyConHorizontalMotion(_ sample: [UInt8], controllerType: Int) -> [UInt8] {
-        guard sample.count >= motionSampleSize,
-              controllerType == controllerTypeJoyConL || controllerType == controllerTypeJoyConR else {
-            return sample
-        }
-
-        // Same final-space transform as the desktop client's horizontal mode:
-        // the Pro-normalised packet is rotated +/-90 degrees around its X axis.
-        var out = sample
-        let oldAy = readMotionI16(out, 2)
-        let oldAz = readMotionI16(out, 4)
-        let oldGy = readMotionI16(out, 8)
-        let oldGz = readMotionI16(out, 10)
-        if controllerType == controllerTypeJoyConL {
-            writeMotionI16(&out, 2, -oldAz)
-            writeMotionI16(&out, 4, oldAy)
-            writeMotionI16(&out, 8, -oldGz)
-            writeMotionI16(&out, 10, oldGy)
-        } else {
-            writeMotionI16(&out, 2, oldAz)
-            writeMotionI16(&out, 4, -oldAy)
-            writeMotionI16(&out, 8, oldGz)
-            writeMotionI16(&out, 10, -oldGy)
-        }
-        return out
-    }
-
     static func initFrame(flags: Int, seq: UInt32, timestampUs: UInt64) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: frameSize)
         out.withUnsafeMutableBufferPointer { b in
@@ -348,7 +309,9 @@ private final class PhysicalPad {
 }
 
 final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, URLSessionWebSocketDelegate, UIGestureRecognizerDelegate {
-    var orientationMask: UIInterfaceOrientationMask = .allButUpsideDown
+    var orientationMask: UIInterfaceOrientationMask = .landscapeRight
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientationMask }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .landscapeRight }
 
     private let connectView = UIView()
     private let hostField = UITextField()
@@ -694,10 +657,10 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         currentPage = page
         if page == .touchControls || page == .editor {
             deactivateControlClient()
-            setLandscapeMode(true)
+            lockLandscapeOrientation()
             setFullscreen(true)
         } else {
-            setLandscapeMode(false)
+            lockLandscapeOrientation()
             setFullscreen(false)
         }
         load(page: page)
@@ -713,18 +676,16 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         enterPage(page)
     }
 
-    private func setLandscapeMode(_ landscape: Bool) {
-        // Touch gyro is calibrated only for this physical pose:
-        // portrait turned to landscape with the phone top/camera/notch on the LEFT.
-        // In UIKit interface-orientation terms, that is landscapeRight.
-        orientationMask = landscape ? .landscapeRight : .allButUpsideDown
-        if landscape { currentOrientation = .landscapeRight }
+    private func lockLandscapeOrientation() {
+        // The whole app uses one physical landscape pose: portrait turned with
+        // the phone top/camera/notch on the LEFT. This also keeps touch gyro
+        // calibration stable and prevents a 180-degree landscape flip.
+        orientationMask = .landscapeRight
+        currentOrientation = .landscapeRight
         if #available(iOS 16.0, *) {
             view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: orientationMask))
         }
-        if landscape {
-            UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
-        }
+        UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         if #available(iOS 16.0, *) {
             setNeedsUpdateOfSupportedInterfaceOrientations()
         }
@@ -810,16 +771,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             }
         case "onTouchControllerType":
             if let first = args.first {
-                let normalized = ViewController.normalizedControllerType(intArg(first))
-                if touchControllerType != normalized {
-                    touchControllerType = normalized
-                    phoneMotion.withLock { state in
-                        state.count = 0
-                        state.revision &+= 1
-                        state.sentRevision = .max
-                        state.samples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
-                    }
-                }
+                touchControllerType = ViewController.normalizedControllerType(intArg(first))
             }
         case "onPhysicalControllerType":
             if !(controlClientActive && activeClientMode == .physical), let first = args.first {
@@ -973,7 +925,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func disconnect() {
         deactivateControlClient()
         connected = false
-        setLandscapeMode(false)
+        lockLandscapeOrientation()
         setFullscreen(false)
         webView.loadHTMLString("", baseURL: nil)
         webView.removeFromSuperview()
@@ -1253,11 +1205,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         let g = remapForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
         let r = remapForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
 
-        let sample = ProtocolWire.applyJoyConHorizontalMotion(
-            ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
-                                         rotationX: r.0, rotationY: r.1, rotationZ: r.2),
-            controllerType: touchControllerType
-        )
+        let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
+                                                  rotationX: r.0, rotationY: r.1, rotationZ: r.2)
         phoneMotion.withLock { state in
             state.samples[0] = state.samples[1]
             state.samples[1] = state.samples[2]
@@ -1439,15 +1388,12 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 }
 
                 let r = motion.rotationRate
-                let sample = ProtocolWire.applyJoyConHorizontalMotion(
-                    ProtocolWire.motionFromControllerApple(accelX: Float(accel.x),
-                                                           accelY: Float(accel.y),
-                                                           accelZ: Float(accel.z),
-                                                           rotationX: Float(r.x),
-                                                           rotationY: Float(r.y),
-                                                           rotationZ: Float(r.z)),
-                    controllerType: physicalControllerType
-                )
+                let sample = ProtocolWire.motionFromControllerApple(accelX: Float(accel.x),
+                                                                            accelY: Float(accel.y),
+                                                                            accelZ: Float(accel.z),
+                                                                            rotationX: Float(r.x),
+                                                                            rotationY: Float(r.y),
+                                                                            rotationZ: Float(r.z))
                 pad.motionSamples[0] = pad.motionSamples[1]
                 pad.motionSamples[1] = pad.motionSamples[2]
                 pad.motionSamples[2] = sample
