@@ -18,6 +18,6 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         if let vc = window?.rootViewController as? ViewController {
             return vc.orientationMask
         }
-        return .landscapeRight
+        return .allButUpsideDown
     }
 }

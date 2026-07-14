@@ -309,9 +309,7 @@ private final class PhysicalPad {
 }
 
 final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, URLSessionWebSocketDelegate, UIGestureRecognizerDelegate {
-    var orientationMask: UIInterfaceOrientationMask = .landscapeRight
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientationMask }
-    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .landscapeRight }
+    var orientationMask: UIInterfaceOrientationMask = .allButUpsideDown
 
     private let connectView = UIView()
     private let hostField = UITextField()
@@ -657,10 +655,10 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         currentPage = page
         if page == .touchControls || page == .editor {
             deactivateControlClient()
-            lockLandscapeOrientation()
+            setLandscapeMode(true)
             setFullscreen(true)
         } else {
-            lockLandscapeOrientation()
+            setLandscapeMode(false)
             setFullscreen(false)
         }
         load(page: page)
@@ -676,16 +674,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         enterPage(page)
     }
 
-    private func lockLandscapeOrientation() {
-        // The whole app uses one physical landscape pose: portrait turned with
-        // the phone top/camera/notch on the LEFT. This also keeps touch gyro
-        // calibration stable and prevents a 180-degree landscape flip.
-        orientationMask = .landscapeRight
-        currentOrientation = .landscapeRight
+    private func setLandscapeMode(_ landscape: Bool) {
+        // Touch gyro is calibrated only for this physical pose:
+        // portrait turned to landscape with the phone top/camera/notch on the LEFT.
+        // In UIKit interface-orientation terms, that is landscapeRight.
+        orientationMask = landscape ? .landscapeRight : .allButUpsideDown
+        if landscape { currentOrientation = .landscapeRight }
         if #available(iOS 16.0, *) {
             view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: orientationMask))
         }
-        UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+        if landscape {
+            UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+        }
         if #available(iOS 16.0, *) {
             setNeedsUpdateOfSupportedInterfaceOrientations()
         }
@@ -925,7 +925,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private func disconnect() {
         deactivateControlClient()
         connected = false
-        lockLandscapeOrientation()
+        setLandscapeMode(false)
         setFullscreen(false)
         webView.loadHTMLString("", baseURL: nil)
         webView.removeFromSuperview()

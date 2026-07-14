@@ -781,7 +781,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         } else {
-            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
             if (Build.VERSION.SDK_INT >= 30) {
                 window.insetsController?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
             } else {
