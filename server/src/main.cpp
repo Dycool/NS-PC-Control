@@ -976,22 +976,26 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     std::cout << "Shutting down" << std::flush;
 
+    // Broadcast every stop condition before waiting for any subsystem. Joins
+    // below remain ordered only to protect dependencies (the USB writer must
+    // leave before gadget teardown); the workers themselves exit concurrently.
     g_ctx.running.store(false, std::memory_order_relaxed);
-    upnp_remove_mapping(port);
-    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-        s2_udp_audio_stop();
-        if (audio_sock >= 0) close(audio_sock);
-    }
-    close(sock);
-    std::cout << "." << std::flush;
-
     wt.request_stop();
     st.request_stop();
     if (web_thread.joinable()) web_thread.request_stop();
     if (bluetooth_thread.joinable()) {
-        // Stop BlueZ first so Ctrl+C isn't held up by an in-flight reconnect/pair tick.
-        bluetooth_manager_stop();
         bluetooth_thread.request_stop();
+        bluetooth_manager_request_stop();
+    }
+
+    // Router cleanup can be network-bound and has no dependency on the worker
+    // threads. Run it alongside their shutdown, but join it before exit/exec.
+    std::thread upnp_cleanup([port] { upnp_remove_mapping(port); });
+
+    close(sock);
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+        s2_udp_audio_stop();
+        if (audio_sock >= 0) close(audio_sock);
     }
     std::cout << "." << std::flush;
 
@@ -1001,6 +1005,7 @@ int main(int argc, char** argv) {
     if (web_thread.joinable())       { web_thread.join();       std::cout << "." << std::flush; }
 
     teardown_gadget();
+    if (upnp_cleanup.joinable()) upnp_cleanup.join();
     std::cout << ".\n";
 
     if (pending_restart) {

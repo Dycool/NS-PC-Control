@@ -1262,8 +1262,20 @@ static void build_s2_joycon_report(const HIDReport& src,
     if (mouse) {
         constexpr uint8_t MOUSE_ON_SURFACE = 0x17;
         constexpr uint8_t MOUSE_OFF_SURFACE = 0xff;
-        const uint16_t dx = static_cast<uint16_t>(mouse->dx);
-        const uint16_t dy = static_cast<uint16_t>(mouse->dy);
+        int16_t mouse_dx = mouse->dx;
+        const int16_t mouse_dy = mouse->dy;
+        if (mouse->active && mouse->scroll_y != 0
+                && mouse_dx == 0 && mouse_dy == 0) {
+            // A real Joy-Con scrolls with its analog stick while its optical
+            // sensor continues producing on-surface reports. A wheel-only PC
+            // event otherwise gives us a perfectly static optical block, so
+            // the console switches back to gamepad navigation and hides the
+            // pointer. Alternate one sensor count in place while scrolling;
+            // consecutive reports cancel, limiting displacement to one count.
+            mouse_dx = (timer & 1u) != 0 ? 1 : -1;
+        }
+        const uint16_t dx = static_cast<uint16_t>(mouse_dx);
+        const uint16_t dy = static_cast<uint16_t>(mouse_dy);
         // Surface state follows the mode, not whether this individual 4 ms
         // report happened to contain motion. Alternating on/off during idle
         // made Switch UI hover selection visibly blink.
@@ -1276,10 +1288,12 @@ static void build_s2_joycon_report(const HIDReport& src,
         out[0x0C] = static_cast<uint8_t>(dy & 0xFFu);
         out[0x0D] = static_cast<uint8_t>(dy >> 8);
         out[0x0E] = surface;
-        if (g_ctx.verbose && (mouse->dx != 0 || mouse->dy != 0)) {
+        if (g_ctx.verbose
+                && (mouse_dx != 0 || mouse_dy != 0 || mouse->scroll_y != 0)) {
             std::println("[s2][mouse][report] port={} report_id=0x{:02x} counter={} "
-                         "dx={} dy={} surface={} motion_len={} bytes[0x09..0x0e]={}",
-                         port, out[0], out[1], mouse->dx, mouse->dy, surface,
+                         "dx={} dy={} scroll_y={} surface={} motion_len={} bytes[0x09..0x0e]={}",
+                         port, out[0], out[1], mouse_dx, mouse_dy,
+                         mouse->scroll_y, surface,
                          out[16],
                          s2_hex(std::span<const uint8_t>(out + 0x09, 6)));
         }

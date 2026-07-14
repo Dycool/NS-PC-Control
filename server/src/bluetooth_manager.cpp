@@ -942,8 +942,12 @@ void bluetooth_manager_set_proactive_reconnect_enabled(bool enabled) {
     }
 }
 
-void bluetooth_manager_stop() {
+void bluetooth_manager_request_stop() {
     g_manager_running.store(false, std::memory_order_relaxed);
+}
+
+void bluetooth_manager_stop() {
+    bluetooth_manager_request_stop();
     if (g_manager_thread.joinable()) g_manager_thread.join();
 }
 

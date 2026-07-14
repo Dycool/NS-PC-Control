@@ -1318,14 +1318,48 @@ void ensure_signal_installed() {
         sigaction(SIGUSR1, &sa, nullptr);
     });
 }
-void join_with_signal(std::thread& t, std::atomic<bool>& exited) {
-    if (!t.joinable()) return;
-    pthread_t h = t.native_handle();
-    while (!exited.load(std::memory_order_acquire)) {
-        pthread_kill(h, SIGUSR1);
+void signal_rawgadget_workers() {
+    auto signal = [](std::thread& thread) {
+        if (thread.joinable()) pthread_kill(thread.native_handle(), SIGUSR1);
+    };
+    signal(g_rg.event_thread);
+    signal(g_rg.hid_in_thread);
+    signal(g_rg.hid_out_thread);
+    signal(g_rg.vendor_in_thread);
+    signal(g_rg.vendor_out_thread);
+    signal(g_rg.as_out_thread);
+    signal(g_rg.as_in_thread);
+}
+
+void join_rawgadget_workers() {
+    // All workers were told to stop before entering this wait. Keep nudging
+    // only the threads still blocked in an interruptible Raw Gadget ioctl, but
+    // do it as one group instead of completely draining one before waking the
+    // next one.
+    auto all_exited = [] {
+        return (!g_rg.event_thread.joinable() || g_rg.event_exited.load(std::memory_order_acquire))
+            && (!g_rg.hid_in_thread.joinable() || g_rg.hid_in_exited.load(std::memory_order_acquire))
+            && (!g_rg.hid_out_thread.joinable() || g_rg.hid_out_exited.load(std::memory_order_acquire))
+            && (!g_rg.vendor_in_thread.joinable() || g_rg.vendor_in_exited.load(std::memory_order_acquire))
+            && (!g_rg.vendor_out_thread.joinable() || g_rg.vendor_out_exited.load(std::memory_order_acquire))
+            && (!g_rg.as_out_thread.joinable() || g_rg.as_out_exited.load(std::memory_order_acquire))
+            && (!g_rg.as_in_thread.joinable() || g_rg.as_in_exited.load(std::memory_order_acquire));
+    };
+    while (!all_exited()) {
+        signal_rawgadget_workers();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    t.join();
+
+    auto join = [](std::thread& thread) {
+        if (thread.joinable()) thread.join();
+    };
+    join(g_rg.event_thread);
+    join(g_rg.hid_in_thread);
+    join(g_rg.hid_out_thread);
+    join(g_rg.vendor_in_thread);
+    join(g_rg.vendor_out_thread);
+    join(g_rg.as_out_thread);
+    join(g_rg.as_in_thread);
 }
 
 bool udc_unbind_configfs_gadget() {
@@ -1573,6 +1607,11 @@ void s2_rawgadget_teardown() {
     g_rg.vendor_in_cv.notify_all();
     g_rg.console_audio_cv.notify_all();
 
+    // Broadcast first. This releases every blocking EVENT_FETCH/EP_READ/
+    // EP_WRITE concurrently; endpoint disable and joins below then collect
+    // workers that are already on their way out.
+    signal_rawgadget_workers();
+
     disable_all_endpoints();
 
     const int fd = g_rg.fd.exchange(-1, std::memory_order_acq_rel);
@@ -1582,13 +1621,7 @@ void s2_rawgadget_teardown() {
     // handles into the next Raw Gadget file descriptor.
     clear_endpoint_handles();
 
-    join_with_signal(g_rg.event_thread, g_rg.event_exited);
-    join_with_signal(g_rg.hid_in_thread, g_rg.hid_in_exited);
-    join_with_signal(g_rg.hid_out_thread, g_rg.hid_out_exited);
-    join_with_signal(g_rg.vendor_in_thread, g_rg.vendor_in_exited);
-    join_with_signal(g_rg.vendor_out_thread, g_rg.vendor_out_exited);
-    join_with_signal(g_rg.as_out_thread, g_rg.as_out_exited);
-    join_with_signal(g_rg.as_in_thread, g_rg.as_in_exited);
+    join_rawgadget_workers();
 
     g_rg.state.store(S2GadgetState::Stopped, std::memory_order_release);
     g_rg.as_out_alt.store(0);

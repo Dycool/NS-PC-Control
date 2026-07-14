@@ -234,15 +234,14 @@ void s2_udp_audio_start(int udp_socket) {
 }
 
 void s2_udp_audio_stop() {
-    if (g_audio_playback_thread.joinable()) {
-        g_audio_playback_thread.request_stop();
-        g_audio_playback_thread.join();
-    }
-    if (g_audio_capture_thread.joinable()) {
-        g_audio_capture_thread.request_stop();
-        g_audio_capture_thread.join();
-    }
+    // Stop publication first, then broadcast to both directions before waiting
+    // for either. Each loop has at most a 5 ms blocking poll/wait, so they now
+    // drain concurrently instead of serially.
     g_audio_socket.store(-1, std::memory_order_relaxed);
+    if (g_audio_playback_thread.joinable()) g_audio_playback_thread.request_stop();
+    if (g_audio_capture_thread.joinable()) g_audio_capture_thread.request_stop();
+    if (g_audio_playback_thread.joinable()) g_audio_playback_thread.join();
+    if (g_audio_capture_thread.joinable()) g_audio_capture_thread.join();
     std::lock_guard<std::mutex> lk(g_audio_endpoint.mutex);
     clear_endpoint_locked();
 }

@@ -8,6 +8,9 @@
 // load uhid, and install missing runtime packages on Debian/Raspberry Pi OS.
 void bluetooth_manager_runtime_setup(bool verbose);
 void bluetooth_manager_start();
+// Non-blocking half of shutdown. Use this when several subsystems should begin
+// stopping together; bluetooth_manager_stop() remains the request-and-join API.
+void bluetooth_manager_request_stop();
 void bluetooth_manager_stop();
 // expect_reply=false is fire-and-forget (BlueZ still processes the request,
 // but the call returns immediately instead of blocking up to DBUS_CONNECT_TIMEOUT
