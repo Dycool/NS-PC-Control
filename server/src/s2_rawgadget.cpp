@@ -730,7 +730,7 @@ void handle_control(const usb_ctrlrequest& ctrl) {
                         g_ctx.switch2_usb_reenumeration_after_resume.exchange(
                             false, std::memory_order_acq_rel);
                     mark_switch2_usb_host_resumed();
-                    if (deferred_reenumeration && any_recent_client_active(now_us())) {
+                    if (deferred_reenumeration && any_recent_client_active(ns::now_us())) {
                         if (g_ctx.verbose) {
                             std::println("[s2-rg] host configured without RESUME; "
                                          "performing deferred client hot-plug");
@@ -992,7 +992,7 @@ void event_pump_loop() {
                 mark_switch2_usb_host_disconnected();
                 if (g_ctx.verbose) std::println("[s2-rg] USB suspend");
                 break;
-            case USB_RAW_EVENT_RESUME:
+            case USB_RAW_EVENT_RESUME: {
                 // Console resumed the bus. Clears the suspended/asleep state and
                 // marks the lifecycle as authoritative so sleep detection uses
                 // these events rather than the RX-gap heuristic.
@@ -1006,7 +1006,7 @@ void event_pump_loop() {
                     g_ctx.switch2_usb_reenumeration_after_resume.exchange(
                         false, std::memory_order_acq_rel);
                 mark_switch2_usb_host_resumed();
-                const bool client_active = any_recent_client_active(now_us());
+                const bool client_active = any_recent_client_active(ns::now_us());
                 if (deferred_reenumeration && client_active) {
                     g_ctx.switch2_usb_reenumeration_requested.store(
                         true, std::memory_order_release);
@@ -1017,6 +1017,7 @@ void event_pump_loop() {
                                  was_suspended, deferred_reenumeration, client_active);
                 }
                 break;
+            }
             case USB_RAW_EVENT_RESET:
                 // A reset tears down the configured endpoints just like a
                 // transient disconnect. Preserve that lifecycle evidence while
