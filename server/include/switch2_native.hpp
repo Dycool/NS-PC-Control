@@ -5,9 +5,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 struct usb_ctrlrequest;
+
+std::string s2_hex(std::span<const uint8_t> data);
 
 // Native Switch 2 Pro Controller USB backend, ported from PicoSwitch2's
 // ns2-testing model: HID interface for report 0x09/rumble 0x02 plus a

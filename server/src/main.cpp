@@ -601,6 +601,9 @@ int main(int argc, char** argv) {
                     }
                     if (client_idx >= 0) {
                         update_joycon_mouse_stream(client_idx, mouse, now_us());
+                    } else if (g_ctx.verbose) {
+                        std::println("[s2][mouse][udp-rx] packet from {}:{} matched no active UDP client; dropped",
+                                     inet_ntoa(sender.sin_addr), ntohs(sender.sin_port));
                     }
                     continue;
                 }

@@ -1,5 +1,6 @@
 #include "app_state.hpp"
 #include "gadget_wakeup.hpp"
+#include "switch2_native.hpp"
 #include "shared/sha256.h"
 
 #include <print>
@@ -1056,6 +1057,15 @@ bool client_session_is_source(int client_idx, InputSource source) {
 }
 
 bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& packet, uint64_t now) {
+    if (g_ctx.verbose) {
+        std::println("[s2][mouse][udp-rx] t_us={} client={} subpad={} flags=0x{:02x} seq={} "
+                     "delta_x={} delta_y={} surface={} raw={}",
+                     now, client_idx, packet.subpad, packet.flags, packet.seq,
+                     packet.delta_x, packet.delta_y, packet.surface,
+                     s2_hex(std::span<const uint8_t>(
+                         reinterpret_cast<const uint8_t*>(&packet),
+                         sizeof(packet) - ns::HMAC_TAG_SIZE)));
+    }
     if (client_idx < 0 || client_idx >= MAX_CLIENTS || packet.subpad >= 4) return false;
     std::lock_guard<std::mutex> lk(g_ctx.mtx[client_idx]);
     ClientSession& c = g_ctx.clients[client_idx];
@@ -1065,6 +1075,10 @@ bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& pac
     const uint32_t seq = packet.seq;
     if (!c.joycon_mouse_first_packet[subpad]
             && static_cast<int32_t>(seq - c.joycon_mouse_last_seq[subpad]) <= 0) {
+        if (g_ctx.verbose) {
+            std::println("[s2][mouse][udp-rx] dropped stale/duplicate seq={} (last={}) client={} subpad={}",
+                         seq, c.joycon_mouse_last_seq[subpad], client_idx, subpad);
+        }
         return false;
     }
     c.joycon_mouse_first_packet[subpad] = false;
@@ -1093,6 +1107,11 @@ bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& pac
     c.joycon_mouse_pending_y[subpad] = std::clamp<int64_t>(
         c.joycon_mouse_pending_y[subpad] + packet.delta_y,
         -MAX_PENDING, MAX_PENDING);
+    if (g_ctx.verbose) {
+        std::println("[s2][mouse][accum] client={} subpad={} pending_x={} pending_y={}",
+                     client_idx, subpad,
+                     c.joycon_mouse_pending_x[subpad], c.joycon_mouse_pending_y[subpad]);
+    }
     return true;
 }
 
@@ -1107,6 +1126,10 @@ JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
     if (!c.joycon_mouse_active[subpad]
             || c.joycon_mouse_last_rx_us[subpad] == 0
             || elapsed_us_saturated(now, c.joycon_mouse_last_rx_us[subpad]) > JOYCON_MOUSE_TIMEOUT_US) {
+        if (g_ctx.verbose && c.joycon_mouse_active[subpad]) {
+            std::println("[s2][mouse][consume] client={} subpad={} stream timed out; deactivating",
+                         client_idx, subpad);
+        }
         c.joycon_mouse_active[subpad] = false;
         c.joycon_mouse_pending_x[subpad] = 0;
         c.joycon_mouse_pending_y[subpad] = 0;
@@ -1116,6 +1139,13 @@ JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
     // Do not queue movement while the console has the mouse feature disabled;
     // otherwise enabling it later would produce a large stale cursor jump.
     if (!feature_enabled) {
+        if (g_ctx.verbose
+                && (c.joycon_mouse_pending_x[subpad] != 0 || c.joycon_mouse_pending_y[subpad] != 0)) {
+            std::println("[s2][mouse][consume] client={} subpad={} console feature disabled; "
+                         "discarding pending_x={} pending_y={}",
+                         client_idx, subpad,
+                         c.joycon_mouse_pending_x[subpad], c.joycon_mouse_pending_y[subpad]);
+        }
         c.joycon_mouse_pending_x[subpad] = 0;
         c.joycon_mouse_pending_y[subpad] = 0;
         return out;
@@ -1131,6 +1161,12 @@ JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
     out.dy = static_cast<int16_t>(dy);
     out.surface = c.joycon_mouse_surface[subpad];
     out.active = true;
+    if (g_ctx.verbose && (dx != 0 || dy != 0)) {
+        std::println("[s2][mouse][consume] client={} subpad={} emit dx={} dy={} surface={} "
+                     "remaining_pending_x={} remaining_pending_y={}",
+                     client_idx, subpad, out.dx, out.dy, out.surface,
+                     c.joycon_mouse_pending_x[subpad], c.joycon_mouse_pending_y[subpad]);
+    }
     return out;
 }
 

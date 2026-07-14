@@ -1222,6 +1222,11 @@ static void build_s2_joycon_report(const HIDReport& src,
         out[0x0C] = static_cast<uint8_t>(dy & 0xFFu);
         out[0x0D] = static_cast<uint8_t>(dy >> 8);
         out[0x0E] = mouse->surface;
+        if (g_ctx.verbose && (mouse->dx != 0 || mouse->dy != 0)) {
+            std::println("[s2][mouse][report] port={} report_id=0x{:02x} dx={} dy={} surface={} bytes[0x09..0x0e]={}",
+                         port, out[0], mouse->dx, mouse->dy, mouse->surface,
+                         s2_hex(std::span<const uint8_t>(out + 0x09, 6)));
+        }
     }
     out[15] = (right && controller_port_supports_amiibo(port))
         ? amiibo_nfc_report_state(port) : 0x00;
