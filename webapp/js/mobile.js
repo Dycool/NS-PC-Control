@@ -4,7 +4,7 @@ const CONTROLLER_JOYCON_L = 1, CONTROLLER_JOYCON_R = 2, CONTROLLER_PRO = 3;
 const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
 let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || String(CONTROLLER_PRO));
 if (![CONTROLLER_JOYCON_L, CONTROLLER_JOYCON_R, CONTROLLER_PRO].includes(controllerType)) controllerType = CONTROLLER_PRO;
-if (!nativeMobileHost) controllerType = CONTROLLER_PRO;
+if (!nativeMobileHost && !isMobileClient) controllerType = CONTROLLER_PRO;
 const defLayout = NSControllerLayouts[controllerType];
 let layout = nsLoadControllerLayout(controllerType);
 const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
@@ -299,7 +299,7 @@ function setupJoystick(baseId, knobId, axisX, axisY) {
         
         let physX = dx, physY = dy;
         if (controllerType === 1) { // JOYCON_L
-            physX = dy; physY = dx;
+            physX = -dy; physY = dx;
         } else if (controllerType === 2) { // JOYCON_R
             physX = dy; physY = -dx;
         }
@@ -384,7 +384,7 @@ function sendPacket() {
         view.setUint8(off + 46, batteryFlags);
     }
     view.setUint8(off + 7, PAD_PRESENT | state.extraButtons);
-    view.setUint8(off + 47, CONTROLLER_PRO);
+    view.setUint8(off + 47, controllerType);
     for(let p=1; p<4; p++) {
         off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);
         view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);

@@ -1,6 +1,7 @@
 const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
+const isMobileClient = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || (\'ontouchstart\' in window && navigator.maxTouchPoints > 0);
 let controllerType = 3;
-if (nativeMobileHost) {
+if (nativeMobileHost || isMobileClient) {
     controllerType = parseInt(localStorage.getItem('nswc_controller_type') || '3');
     if (![1,2,3].includes(controllerType)) controllerType = 3;
 } else {
@@ -39,7 +40,7 @@ function applyLayout() {
 applyLayout();
 if (nativeMobileHost) document.getElementById('controllerType').value = String(controllerType);
 function changeControllerType() {
-    if (!nativeMobileHost) return;
+    if (!nativeMobileHost && !isMobileClient) return;
     layouts[controllerType] = layout;
     controllerType = parseInt(document.getElementById('controllerType').value);
     defLayout = NSControllerLayouts[controllerType];
