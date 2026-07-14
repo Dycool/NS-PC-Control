@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -1095,7 +1096,42 @@ void vendor_in_loop() {
         }
         if (g_rg.vendor_in_h < 0 || report.empty()) continue;
         if (report_gen != g_rg.generation.load(std::memory_order_relaxed)) continue;
-        raw_ep_write(g_rg.vendor_in_h, report.data(), report.size());
+
+        // Vendor responses are part of the controller initialisation handshake.
+        // Unlike periodic HID input, they cannot be dropped when the UDC briefly
+        // reports its request queue as busy: the console will retry the command
+        // a few times and then reject the controller. The dwc2 Raw Gadget path
+        // can transiently return EAGAIN while endpoints settle after a forced
+        // re-enumeration, so retain the response and retry for a short window.
+        ssize_t written = -1;
+        int write_errno = 0;
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            if (!g_rg.io_running.load(std::memory_order_relaxed)
+                    || report_gen != g_rg.generation.load(std::memory_order_relaxed)
+                    || g_rg.vendor_in_h < 0) {
+                write_errno = ECANCELED;
+                break;
+            }
+            written = raw_ep_write(g_rg.vendor_in_h, report.data(), report.size());
+            if (written >= 0) break;
+            write_errno = errno;
+            if (write_errno == EINTR) continue;
+            if (write_errno != EAGAIN && write_errno != EWOULDBLOCK) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (g_ctx.verbose) {
+            const uint8_t id = report.empty() ? 0 : report[0];
+            const uint8_t sub = report.size() > 3 ? report[3] : 0;
+            if (written >= 0) {
+                std::println("[s2][vendor][ep-tx] id=0x{:02x} sub=0x{:02x} "
+                             "len={} result={}", id, sub, report.size(), written);
+            } else {
+                std::println(stderr,
+                             "[s2][vendor][ep-tx] id=0x{:02x} sub=0x{:02x} "
+                             "len={} failed: {}",
+                             id, sub, report.size(), strerror(write_errno));
+            }
+        }
     }
     g_rg.vendor_in_exited.store(true, std::memory_order_release);
 }

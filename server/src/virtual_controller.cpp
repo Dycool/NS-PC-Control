@@ -1214,6 +1214,17 @@ static void build_s2_joycon_report(const HIDReport& src,
     // Observed as 0x38 in steady-state Joy-Con 2 reports across pairing,
     // reconnect, wake, OTA, and mouse-mode captures (0x30 during init only).
     out[9] = 0x38;
+
+    if (mouse && mouse->active) {
+        MotionReport stationary[3]{};
+        for (auto& sample : stationary) sample.ax = 4096;
+        write_s2_pro_motion_block(out, 16, 17, stationary, true, true,
+                                  motion_time_us, port);
+    } else {
+        write_s2_joycon_motion_block(out, 16, 17, motion_samples, has_motion,
+                                      imu_enabled, motion_time_us, port, right);
+    }
+
     if (mouse && mouse->active) {
         constexpr uint8_t MOUSE_SURFACE_MOVING = 0x17;
         constexpr uint8_t MOUSE_SURFACE_IDLE = 0xff;
@@ -1230,15 +1241,14 @@ static void build_s2_joycon_report(const HIDReport& src,
         out[0x0E] = surface;
         if (g_ctx.verbose && (mouse->dx != 0 || mouse->dy != 0)) {
             std::println("[s2][mouse][report] port={} report_id=0x{:02x} counter={} "
-                         "dx={} dy={} surface={} bytes[0x09..0x0e]={}",
+                         "dx={} dy={} surface={} motion_len={} bytes[0x09..0x0e]={}",
                          port, out[0], out[1], mouse->dx, mouse->dy, surface,
+                         out[16],
                          s2_hex(std::span<const uint8_t>(out + 0x09, 6)));
         }
     }
     out[15] = (right && controller_port_supports_amiibo(port))
         ? amiibo_nfc_report_state(port) : 0x00;
-    write_s2_joycon_motion_block(out, 16, 17, motion_samples, has_motion,
-                                  imu_enabled, motion_time_us, port, right);
 }
 
 // S2 report builder. Pro Controller 2 uses report 0x09; Joy-Con 2 L/R use
