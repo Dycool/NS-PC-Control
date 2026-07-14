@@ -1,21 +1,25 @@
-const defLayout = {
-    'btn-zl': {l:4, t:4, w:14, h:8}, 'btn-l': {l:4, t:14, w:14, h:8},
-    'btn-zr': {l:82, t:4, w:14, h:8}, 'btn-r': {l:82, t:14, w:14, h:8},
-    'btn-sl': {l:38, t:29, w:9, h:7}, 'btn-sr': {l:53, t:29, w:9, h:7},
-    'btn-minus': {l:38, t:5, w:6}, 'btn-plus': {l:56, t:5, w:6},
-    'btn-capture': {l:42, t:18, w:5}, 'btn-home': {l:53, t:18, w:5},
-    'lstick': {l:6, t:35, w:16}, 'btn-ls': {l:2, t:65, w:5},
-    'dpad': {l:22, t:60, w:16},
-    'abxy': {l:78, t:35, w:16},
-    'rstick': {l:62, t:60, w:16}, 'btn-rs': {l:85, t:80, w:5}
-};
-let layout = JSON.parse(localStorage.getItem('nswc_layout')) || defLayout;
+const CONTROLLER_JOYCON_L = 1, CONTROLLER_JOYCON_R = 2, CONTROLLER_PRO = 3;
+// Joy-Con selection is a native-app feature. A normal browser is a generic
+// Pro source and lets the server choose S1 Pro, S2 Pro, or HORI.
+const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
+let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || String(CONTROLLER_PRO));
+if (![CONTROLLER_JOYCON_L, CONTROLLER_JOYCON_R, CONTROLLER_PRO].includes(controllerType)) controllerType = CONTROLLER_PRO;
+if (!nativeMobileHost) controllerType = CONTROLLER_PRO;
+const defLayout = NSControllerLayouts[controllerType];
+let layout = nsLoadControllerLayout(controllerType);
+const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
+const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
+function allowedForController(id) {
+    if (controllerType === CONTROLLER_PRO) return id !== 'btn-sl' && id !== 'btn-sr';
+    return controllerType === CONTROLLER_JOYCON_L ? joyconLeftOnly.has(id) : joyconRightOnly.has(id);
+}
 function applyLayout() {
-    for(let id in defLayout) {
+    nsApplyControllerSkin(document.getElementById('gamepad'), controllerType);
+    for(let id of NSControllerControlIds) {
         let el = document.getElementById(id);
         if(!el) continue;
-        let conf = layout[id] || defLayout[id];
-        if(conf.hide) { el.style.display = 'none'; }
+        let conf = layout[id] || defLayout[id] || NSControllerLayouts[CONTROLLER_PRO][id];
+        if(conf.hide || !allowedForController(id)) { el.style.display = 'none'; }
         else {
             if(id === 'dpad' || id === 'abxy') el.style.display = 'grid';
             else el.style.display = 'flex';
@@ -26,20 +30,6 @@ function applyLayout() {
     }
 }
 applyLayout();
-const CONTROLLER_JOYCON_L = 1, CONTROLLER_JOYCON_R = 2, CONTROLLER_PRO = 3;
-// Joy-Con selection is a native-app feature. A normal browser is a generic
-// Pro source and lets the server choose S1 Pro, S2 Pro, or HORI.
-const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
-let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || String(CONTROLLER_PRO));
-if (![CONTROLLER_JOYCON_L, CONTROLLER_JOYCON_R, CONTROLLER_PRO].includes(controllerType)) controllerType = CONTROLLER_PRO;
-if (!nativeMobileHost) controllerType = CONTROLLER_PRO;
-const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
-const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
-for (const id of Object.keys(defLayout)) {
-    const joyconAllowed = controllerType === CONTROLLER_JOYCON_L ? joyconLeftOnly : joyconRightOnly;
-    const allowed = controllerType === CONTROLLER_PRO ? id !== 'btn-sl' && id !== 'btn-sr' : joyconAllowed.has(id);
-    if (!allowed) { const el = document.getElementById(id); if (el) el.style.display = 'none'; }
-}
 const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
 const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341, CLIENT_ASSIGNMENT_SIZE = 16;
 const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02, CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;

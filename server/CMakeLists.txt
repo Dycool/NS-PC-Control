@@ -160,6 +160,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/mobile.css >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/editor.css >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/bridge.js  >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/controller_layouts.js >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/index.js   >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/mobile.js  >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/editor.js  >> ${WEBAPP_EMBED}
@@ -171,6 +172,7 @@ add_custom_command(
         ${WEBAPP_DIR}/css/mobile.css
         ${WEBAPP_DIR}/css/editor.css
         ${WEBAPP_DIR}/js/bridge.js
+        ${WEBAPP_DIR}/js/controller_layouts.js
         ${WEBAPP_DIR}/js/index.js
         ${WEBAPP_DIR}/js/mobile.js
         ${WEBAPP_DIR}/js/editor.js

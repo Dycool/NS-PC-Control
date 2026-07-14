@@ -7,8 +7,8 @@ namespace ns {
 namespace {
 
 constexpr float TWO_PI = 6.28318530717958647692f;
-constexpr float ACCEL_CUTOFF_HZ = 30.0f;
-constexpr float GYRO_CUTOFF_HZ = 35.0f;
+constexpr float ACCEL_CUTOFF_HZ = 0.0f;  // 0 = raw passthrough (no smoothing)
+constexpr float GYRO_CUTOFF_HZ = 0.0f;   // 0 = raw passthrough (no smoothing)
 // 2.0 counts (~0.12 deg/s) sits above the bias-corrected DS4/DualSense noise
 // floor but no longer bites into slow precision aiming: the previous 6.0
 // (~0.37 deg/s) removed a constant 0.37 deg/s from every rotation, a 7% error
@@ -92,7 +92,7 @@ void MotionPipeline::push(Stream& stream, uint64_t timestamp_us,
     if (stream.last_input_us != 0 && timestamp_us <= stream.last_input_us) return;
 
     const float input[3] = {x, y, z};
-    if (!stream.filter_ready) {
+    if (!stream.filter_ready || cutoff_hz <= 0.0f) {
         std::copy_n(input, 3, stream.filtered);
         stream.filter_ready = true;
     } else {

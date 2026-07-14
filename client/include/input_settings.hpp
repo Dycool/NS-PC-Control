@@ -69,6 +69,7 @@ void update_keyboard_state_cache();
 bool key_is_down(const std::string& name_raw);
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode);
 void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_type);
+void apply_joycon_horizontal_motion_transform(ns::MotionReport& m, int controller_type);
 
 bool is_mouse_button_name(const std::string& name);
 bool mouse_mode_active();

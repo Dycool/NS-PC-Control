@@ -63,6 +63,7 @@ static const StaticResource RESOURCES[] = {
     {"/css/mobile.css", css_mobile_css, css_mobile_css_len, "text/css; charset=utf-8"},
     {"/css/editor.css", css_editor_css, css_editor_css_len, "text/css; charset=utf-8"},
     {"/js/bridge.js", js_bridge_js, js_bridge_js_len, "application/javascript; charset=utf-8"},
+    {"/js/controller_layouts.js", js_controller_layouts_js, js_controller_layouts_js_len, "application/javascript; charset=utf-8"},
     {"/js/index.js", js_index_js, js_index_js_len, "application/javascript; charset=utf-8"},
     {"/js/mobile.js", js_mobile_js, js_mobile_js_len, "application/javascript; charset=utf-8"},
     {"/js/editor.js", js_editor_js, js_editor_js_len, "application/javascript; charset=utf-8"}

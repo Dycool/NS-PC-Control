@@ -519,3 +519,21 @@ void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_ty
         if (face & ns::BTN_A) rep.buttons |= ns::BTN_X;
     }
 }
+
+void apply_joycon_horizontal_motion_transform(ns::MotionReport& m, int controller_type) {
+    const bool left = controller_type == ns::CONTROLLER_TYPE_JOYCON_L;
+    const bool right = controller_type == ns::CONTROLLER_TYPE_JOYCON_R;
+    if (!left && !right) return;
+
+    // Motion is in the Pro-normalised frame (X = forward, Y = left, Z = up).
+    // Rotate Y/Z the same way the stick is rotated above so a physical
+    // gesture lands on the same in-game axis in both orientations.
+    const auto rotate = [left](int16_t& y, int16_t& z) {
+        const int16_t old_y = y;
+        const int16_t old_z = z;
+        if (left) { y = static_cast<int16_t>(-old_z); z = old_y; }
+        else      { y = old_z;                        z = static_cast<int16_t>(-old_y); }
+    };
+    rotate(m.ay, m.az);
+    rotate(m.gy, m.gz);
+}

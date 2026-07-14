@@ -1,15 +1,3 @@
-const defLayout = {
-    'btn-zl': {l:4, t:4, w:14, h:8}, 'btn-l': {l:4, t:14, w:14, h:8},
-    'btn-zr': {l:82, t:4, w:14, h:8}, 'btn-r': {l:82, t:14, w:14, h:8},
-    'btn-sl': {l:38, t:29, w:9, h:7}, 'btn-sr': {l:53, t:29, w:9, h:7},
-    'btn-minus': {l:38, t:5, w:6}, 'btn-plus': {l:56, t:5, w:6},
-    'btn-capture': {l:42, t:18, w:5}, 'btn-home': {l:53, t:18, w:5},
-    'lstick': {l:6, t:35, w:16}, 'btn-ls': {l:2, t:65, w:5},
-    'dpad': {l:22, t:60, w:16},
-    'abxy': {l:78, t:35, w:16},
-    'rstick': {l:62, t:60, w:16}, 'btn-rs': {l:85, t:80, w:5}
-};
-let layout = JSON.parse(localStorage.getItem('nswc_layout')) || defLayout;
 const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
 let controllerType = 3;
 if (nativeMobileHost) {
@@ -19,6 +7,13 @@ if (nativeMobileHost) {
     document.querySelector('label[for="controllerType"]')?.remove();
     document.getElementById('controllerType')?.remove();
 }
+const layouts = {
+    1: nsLoadControllerLayout(1),
+    2: nsLoadControllerLayout(2),
+    3: nsLoadControllerLayout(3)
+};
+let defLayout = NSControllerLayouts[controllerType];
+let layout = layouts[controllerType];
 const joyconLeftOnly = new Set(['btn-zl','btn-l','btn-minus','btn-capture','lstick','btn-ls','dpad','btn-sl','btn-sr']);
 const joyconRightOnly = new Set(['btn-zr','btn-r','btn-plus','btn-home','rstick','btn-rs','abxy','btn-sl','btn-sr']);
 function allowedForController(id) {
@@ -26,10 +21,11 @@ function allowedForController(id) {
     return controllerType === 1 ? joyconLeftOnly.has(id) : joyconRightOnly.has(id);
 }
 function applyLayout() {
-    for(let id in defLayout) {
+    nsApplyControllerSkin(document.getElementById('gamepad'), controllerType);
+    for(let id of NSControllerControlIds) {
         let el = document.getElementById(id);
         if(!el) continue;
-        let conf = layout[id] || defLayout[id];
+        let conf = layout[id] || defLayout[id] || NSControllerLayouts[3][id];
         if(conf.hide || !allowedForController(id)) { el.style.display = 'none'; }
         else {
             if(id === 'dpad' || id === 'abxy') el.style.display = 'grid';
@@ -44,13 +40,16 @@ applyLayout();
 if (nativeMobileHost) document.getElementById('controllerType').value = String(controllerType);
 function changeControllerType() {
     if (!nativeMobileHost) return;
+    layouts[controllerType] = layout;
     controllerType = parseInt(document.getElementById('controllerType').value);
+    defLayout = NSControllerLayouts[controllerType];
+    layout = layouts[controllerType];
     applyLayout(); populateAdd(); checkOverlaps();
 }
 function populateAdd() {
     let sel = document.getElementById('addSel'); sel.innerHTML = '<option value="">+ Add Button</option>';
-    for(let id in defLayout) {
-        let conf = layout[id] || defLayout[id];
+    for(let id of NSControllerControlIds) {
+        let conf = layout[id] || defLayout[id] || NSControllerLayouts[3][id];
         if(conf.hide && allowedForController(id)) { let opt = document.createElement('option'); opt.value = id; opt.innerText = id; sel.appendChild(opt); }
     }
 }
@@ -58,7 +57,7 @@ populateAdd();
 function addBtn() {
     let val = document.getElementById('addSel').value;
     if(!val) return;
-    if(!layout[val]) layout[val] = {...defLayout[val]};
+    if(!layout[val]) layout[val] = {...(defLayout[val] || NSControllerLayouts[3][val])};
     layout[val].hide = false; layout[val].l = 45; layout[val].t = 15;
     applyLayout(); populateAdd(); checkOverlaps();
 }
@@ -112,7 +111,7 @@ document.getElementById('gamepad').addEventListener('touchstart', e => {
     let el = e.target.closest('.edit-item'); if(!el) return;
     e.preventDefault();
     if (deleteMode) {
-        if(!layout[el.id]) layout[el.id] = {...defLayout[el.id]};
+        if(!layout[el.id]) layout[el.id] = {...(defLayout[el.id] || NSControllerLayouts[3][el.id])};
         layout[el.id].hide = true; applyLayout(); populateAdd(); checkOverlaps(); return;
     }
     activeEl = el; if(!layout[el.id]) layout[el.id] = {...defLayout[el.id]};
@@ -146,13 +145,19 @@ document.getElementById('gamepad').addEventListener('touchend', e => {
 setTimeout(checkOverlaps, 500);
 function saveLayout() {
     if(checkOverlaps()) { alert('Fix overlapping buttons (red) before saving!'); return; }
-    localStorage.setItem('nswc_layout', JSON.stringify(layout));
+    layouts[controllerType] = layout;
+    for (const type of [1, 2, 3]) {
+        localStorage.setItem(nsControllerLayoutStorageKey(type), JSON.stringify(layouts[type]));
+    }
+    // Keep the legacy key as the Pro layout for older app/web bundles.
+    localStorage.setItem('nswc_layout', JSON.stringify(layouts[3]));
     if (nativeMobileHost) localStorage.setItem('nswc_controller_type', String(controllerType));
     window.location.href = 'mobile.html';
 }
 function resetLayout() {
     if(confirm('Are you sure you want to reset all buttons to their default positions and sizes?')) {
-        layout = JSON.parse(JSON.stringify(defLayout));
+        layout = nsCloneControllerLayout(defLayout);
+        layouts[controllerType] = layout;
         applyLayout();
         populateAdd();
         checkOverlaps();

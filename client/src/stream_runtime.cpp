@@ -350,7 +350,12 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     if (g_joyconHorizontalMode.load(std::memory_order_relaxed)) {
         const int controller_type = g_controllerType.load(std::memory_order_relaxed);
         for (int i = 0; i < 4; ++i) {
-            if (frame.present[i]) apply_joycon_horizontal_transform(frame.reports[i], controller_type);
+            if (!frame.present[i]) continue;
+            apply_joycon_horizontal_transform(frame.reports[i], controller_type);
+            if (frame.has_motion[i]) {
+                for (auto& sample : frame.motion[i])
+                    apply_joycon_horizontal_motion_transform(sample, controller_type);
+            }
         }
     }
 }
