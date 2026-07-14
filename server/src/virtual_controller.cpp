@@ -1211,7 +1211,9 @@ static void build_s2_joycon_report(const HIDReport& src,
     }
 
     out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
-    out[9] = 0x00; // payload offset 0x08 remains unknown in public captures.
+    // Observed as 0x38 in steady-state Joy-Con 2 reports across pairing,
+    // reconnect, wake, OTA, and mouse-mode captures (0x30 during init only).
+    out[9] = 0x38;
     if (mouse && mouse->active) {
         constexpr uint8_t MOUSE_SURFACE_MOVING = 0x17;
         constexpr uint8_t MOUSE_SURFACE_IDLE = 0xff;
