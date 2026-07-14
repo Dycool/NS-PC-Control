@@ -103,7 +103,6 @@ set(NS_CLIENT_EXTRA_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/udp_protocol.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/cli.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../shared/src/macros.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/../shared/src/motion_pipeline.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../shared/src/sdl_input.cpp"
 )
 set(NS_CLIENT_QRC "${CMAKE_CURRENT_LIST_DIR}/resources.qrc")

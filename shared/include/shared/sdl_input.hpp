@@ -1,7 +1,6 @@
 #pragma once
 
 #include "protocol.hpp"
-#include "motion_pipeline.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -82,12 +81,6 @@ public:
 
 private:
     struct Device {
-        struct SensorClock {
-            uint64_t base_sensor_ns = 0;
-            uint64_t base_event_ns = 0;
-            uint64_t last_sensor_ns = 0;
-        };
-
         SDL_Gamepad* pad = nullptr;
         SDL_JoystickID id = 0;
         int slot = -1;
@@ -104,9 +97,8 @@ private:
         uint16_t pid = 0;
         float accel_rate_hz = 0.0f;
         float gyro_rate_hz = 0.0f;
-        SensorClock accel_clock{};
-        SensorClock gyro_clock{};
-        ns::MotionPipeline motion_pipeline{};
+        bool has_motion_samples = false;
+        ns::MotionReport motion_samples[3]{};
     };
 
     struct Command {
@@ -166,8 +158,6 @@ private:
     static Uint16 motor_word(uint8_t v);
     static bool button(SDL_Gamepad* pad, SDL_GamepadButton b);
     static bool report_non_neutral(const ns::HoriHIDReport& r);
-    static uint64_t sensor_event_time_us(Device::SensorClock& clock,
-                                         uint64_t event_ns, uint64_t sensor_ns);
 
     void thread_main();
     bool init_sdl();
@@ -186,7 +176,7 @@ private:
     ns::HoriHIDReport map_gamepad(const Device& d) const;
     void apply_motion(Device& d, ns::MotionReport out_samples[3],
                       bool& has_motion, bool& motion_sample_fresh);
-    void handle_sensor_event(const SDL_GamepadSensorEvent& event);
+    void push_motion_sample(Device& d, const ns::MotionReport& sample);
     Device* device_for_slot_locked(int slot);
     int first_free_slot_locked() const;
     bool has_device_locked(SDL_JoystickID id) const;
