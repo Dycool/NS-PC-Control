@@ -128,7 +128,6 @@ void writer_thread(std::stop_token stoken, int hz) {
     };
     HwSlot hw_slots[HID_PORT_COUNT];
     ControllerRuntime rt[HID_PORT_COUNT];
-    uint64_t last_motion_generation[HID_PORT_COUNT]{};
     for (int i = 0; i < HID_PORT_COUNT; ++i) rt[i].ctrl = i;
 
     int hidg_fd[HID_PORT_COUNT] = {-1, -1, -1, -1};
@@ -452,8 +451,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                     }
                 }
                 hw_slots[h] = next_slots[h];
-                if (old.client_idx != hw_slots[h].client_idx || old.sub_idx != hw_slots[h].sub_idx)
-                    last_motion_generation[h] = 0;
                 if (hw_slots[h].client_idx != -1) {
                     const int c = hw_slots[h].client_idx;
                     const int s = hw_slots[h].sub_idx;
@@ -692,40 +689,19 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 if (port_needed) report_for_port = out_reports[h];
                                 const MotionReport* motion_for_port = nullptr;
                                 bool has_motion_for_port = false;
-                                bool motion_fresh_for_port = false;
                                 MotionReport prepared_motion[3]{};
                                 if (port_needed) {
                                     int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                     const HIDReport& source_report = get_hid_report(snap[cidx], sidx);
                                     has_motion_for_port = source_report.has_motion != 0;
-                                    const uint8_t motion_status = source_report.reserved[1];
-                                    const bool source_declares_fresh =
-                                        ((motion_status & ns::EXT_STATUS_MOTION_FRESH_VALID)
-                                            ? (motion_status & ns::EXT_STATUS_MOTION_FRESH) != 0
-                                            : true);
-                                    const uint64_t generation = snap[cidx].report_generation;
-                                    motion_fresh_for_port = has_motion_for_port
-                                        && generation != last_motion_generation[h]
-                                        && source_declares_fresh;
-                                    last_motion_generation[h] = generation;
                                     if (has_motion_for_port) {
-                                        for (int idx = 0; idx < 3; ++idx) {
+                                        for (int idx = 0; idx < 3; ++idx)
                                             prepared_motion[idx] = source_report.motion[idx];
-                                            if (!motion_fresh_for_port) {
-                                                // Acceleration is a level; gyro is an increment.
-                                                // Keep gravity available while consuming each
-                                                // physical gyro sample at most once.
-                                                prepared_motion[idx].gx = 0;
-                                                prepared_motion[idx].gy = 0;
-                                                prepared_motion[idx].gz = 0;
-                                            }
-                                        }
                                         motion_for_port = prepared_motion;
                                     }
                                     if (hw_slots[h].pair_member && !hw_slots[h].pair_right && !g_port_switch2[h]) {
                                         motion_for_port = nullptr;
                                         has_motion_for_port = false;
-                                        motion_fresh_for_port = false;
                                     }
                                     if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_R
                                             && !g_port_switch2[h]) {
