@@ -1,6 +1,7 @@
 html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; height: 100%; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; font-family:sans-serif; }
 #gamepad { position: fixed; top: env(safe-area-inset-top, 0px); right: env(safe-area-inset-right, 0px); bottom: env(safe-area-inset-bottom, 0px); left: env(safe-area-inset-left, 0px); box-sizing: border-box; }
-#gamepad.controller-joycon-l, #gamepad.controller-joycon-r { background: #00b7d6; }
+#gamepad.controller-joycon-l { background: #00b7d6; }
+#gamepad.controller-joycon-r { background: #ff3c28; }
 #rotate-msg { display:none; position:absolute; inset:0; background:#000; z-index:9999; justify-content:center; align-items:center; text-align:center; padding:20px; font-size:18px; }
 @media (orientation: portrait) { #rotate-msg { display:flex; } #gamepad { display:none; } }
 
@@ -24,7 +25,7 @@ html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; he
 /* Shared Joy-Con template: SL/SR horizontal at the top; the rest keeps the
    90º look. */
 #gamepad.controller-joycon-l { --joycon-face-rotation: -90deg; }
-#gamepad.controller-joycon-r { --joycon-face-rotation: -90deg; }
+#gamepad.controller-joycon-r { --joycon-face-rotation: 90deg; }
 #gamepad.controller-joycon-l #btn-zl,
 #gamepad.controller-joycon-l #btn-l,
 #gamepad.controller-joycon-l #btn-minus,
@@ -73,3 +74,10 @@ html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; he
 #editor-bar button, #editor-bar select { padding: 10px; font-size: 16px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer; }
 #toggleDel { background: #555; color: white; transition: 0.2s; }
 #toggleDel.active { background: #e33; }
+
+/* Rotate labels for horizontal Joy-Con usage */
+body.joycon-l .btn:not(#btn-sl):not(#btn-sr) .label,
+body.joycon-r .btn:not(#btn-sl):not(#btn-sr) .label {
+    display: inline-block;
+    transform: rotate(-90deg);
+}

@@ -34,18 +34,18 @@
         },
         // Shared Joy-Con layout template: L and R look almost the same.
         [JOYCON_L]: {
-            'btn-zl': {l:2, t:28, w:10, h:22}, 'btn-l': {l:14, t:31, w:8, h:15},
-            'btn-sl': {l:34, t:9, w:14, h:8}, 'btn-sr': {l:53, t:9, w:14, h:8},
-            'btn-minus': {l:25, t:22, w:8}, 'btn-capture': {l:76, t:24, w:8},
-            'lstick': {l:29, t:33, w:24}, 'btn-ls': {l:50, t:58, w:8},
-            'dpad': {l:62, t:34, w:24}
+            'btn-zl': {l: 2.56, t: 49.63, w: 10, h: 22}, 'btn-l': {l: 14.34, t: 54.16, w: 8, h: 15},
+            'btn-sl': {l: 34, t: 9, w: 14, h: 8}, 'btn-sr': {l: 53, t: 9, w: 14, h: 8},
+            'btn-minus': {l: 18.35, t: 26.33, w: 8}, 'btn-capture': {l: 82.88, t: 26.29, w: 8},
+            'lstick': {l: 28.44, t: 35.80, w: 24}, 'btn-ls': {l: 83.26, t: 73.78, w: 8},
+            'dpad': {l: 58.28, t: 32.98, w: 24}
         },
         [JOYCON_R]: {
-            'btn-zr': {l:2, t:28, w:10, h:22}, 'btn-r': {l:14, t:31, w:8, h:15},
-            'btn-sl': {l:34, t:9, w:14, h:8}, 'btn-sr': {l:53, t:9, w:14, h:8},
-            'btn-plus': {l:25, t:22, w:8}, 'btn-home': {l:76, t:24, w:8},
-            'rstick': {l:29, t:33, w:24}, 'btn-rs': {l:50, t:58, w:8},
-            'abxy': {l:62, t:34, w:24}
+            'btn-zr': {l: 2.56, t: 49.63, w: 10, h: 22}, 'btn-r': {l: 14.34, t: 54.16, w: 8, h: 15},
+            'btn-sl': {l: 34, t: 9, w: 14, h: 8}, 'btn-sr': {l: 53, t: 9, w: 14, h: 8},
+            'btn-plus': {l: 18.35, t: 26.33, w: 8}, 'btn-home': {l: 82.88, t: 26.29, w: 8},
+            'rstick': {l: 58.28, t: 32.98, w: 24}, 'btn-rs': {l: 83.26, t: 73.78, w: 8},
+            'abxy': {l: 28.44, t: 35.80, w: 24}
         }
     };
 

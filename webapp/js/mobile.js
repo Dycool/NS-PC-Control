@@ -296,8 +296,16 @@ function setupJoystick(baseId, knobId, axisX, axisY) {
         let dist = Math.sqrt(dx*dx + dy*dy);
         if (dist > maxDist) { dx = (dx/dist)*maxDist; dy = (dy/dist)*maxDist; }
         knob.style.transform = `translate(${dx}px, ${dy}px)`;
-        state[axisX] = Math.round(((dx / maxDist) + 1) * 127.5);
-        state[axisY] = Math.round(((dy / maxDist) + 1) * 127.5);
+        
+        let physX = dx, physY = dy;
+        if (controllerType === 1) { // JOYCON_L
+            physX = dy; physY = dx;
+        } else if (controllerType === 2) { // JOYCON_R
+            physX = dy; physY = -dx;
+        }
+        
+        state[axisX] = Math.round(((physX / maxDist) + 1) * 127.5);
+        state[axisY] = Math.round(((physY / maxDist) + 1) * 127.5);
         publishTouchState();
     }
 }
