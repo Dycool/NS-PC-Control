@@ -81,7 +81,7 @@ static constexpr uint16_t S2_AUDIO_PCM_BYTES = S2_AUDIO_USB_FRAME_BYTES * S2_AUD
 static constexpr uint16_t S2_AUDIO_PORT_OFFSET = 1;
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
-static constexpr uint8_t  JOYCON_MOUSE_VERSION = 1;
+static constexpr uint8_t  JOYCON_MOUSE_VERSION = 2;
 static constexpr uint8_t  GADGET_MODE_VERSION = 1;
 
 // Wire values for GadgetModeRequestPacket::requested_family and
@@ -394,7 +394,6 @@ struct JoyconMousePacket {
     uint8_t  version = JOYCON_MOUSE_VERSION;
     uint8_t  flags = 0;
     uint8_t  subpad = 0;
-    uint8_t  surface = 0; // Report 0x07/0x08 trailing mouse byte; 0 = contact/default.
     uint32_t seq = 0;
     int32_t  delta_x = 0;
     int32_t  delta_y = 0;
@@ -470,7 +469,7 @@ static_assert(sizeof(ClientNamesPacket) == 224,
               "ClientNamesPacket wire layout changed");
 static_assert(sizeof(RosterPacket) == 208,
               "RosterPacket wire layout changed");
-static_assert(sizeof(JoyconMousePacket) == 44,
+static_assert(sizeof(JoyconMousePacket) == 43,
               "JoyconMousePacket wire layout changed");
 
 static_assert(sizeof(S2AudioCapabilitiesPacket) == 36,

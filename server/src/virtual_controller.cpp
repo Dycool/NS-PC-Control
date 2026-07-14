@@ -1213,18 +1213,22 @@ static void build_s2_joycon_report(const HIDReport& src,
     out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
     out[9] = 0x00; // payload offset 0x08 remains unknown in public captures.
     if (mouse && mouse->active) {
+        constexpr uint8_t MOUSE_SURFACE_MOVING = 0x17;
+        constexpr uint8_t MOUSE_SURFACE_IDLE = 0xff;
         const uint16_t dx = static_cast<uint16_t>(mouse->dx);
         const uint16_t dy = static_cast<uint16_t>(mouse->dy);
+        const uint8_t surface = (mouse->dx != 0 || mouse->dy != 0)
+            ? MOUSE_SURFACE_MOVING : MOUSE_SURFACE_IDLE;
         // hid_reports.md offsets are relative to the payload after report ID:
         // 0x09 = Delta X, 0x0B = Delta Y, 0x0D = unknown/likely LOD.
         out[0x0A] = static_cast<uint8_t>(dx & 0xFFu);
         out[0x0B] = static_cast<uint8_t>(dx >> 8);
         out[0x0C] = static_cast<uint8_t>(dy & 0xFFu);
         out[0x0D] = static_cast<uint8_t>(dy >> 8);
-        out[0x0E] = mouse->surface;
+        out[0x0E] = surface;
         if (g_ctx.verbose && (mouse->dx != 0 || mouse->dy != 0)) {
             std::println("[s2][mouse][report] port={} report_id=0x{:02x} dx={} dy={} surface={} bytes[0x09..0x0e]={}",
-                         port, out[0], mouse->dx, mouse->dy, mouse->surface,
+                         port, out[0], mouse->dx, mouse->dy, surface,
                          s2_hex(std::span<const uint8_t>(out + 0x09, 6)));
         }
     }

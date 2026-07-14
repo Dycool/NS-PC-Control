@@ -138,7 +138,6 @@ void build_standard_report(const ns::HIDReport& src,
 struct S2JoyconMouseInput {
     int16_t dx = 0;
     int16_t dy = 0;
-    uint8_t surface = 0;
     bool active = false;
 };
 

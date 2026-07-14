@@ -1008,7 +1008,6 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.joycon_mouse_last_rx_us[s] = 0;
         c.joycon_mouse_pending_x[s] = 0;
         c.joycon_mouse_pending_y[s] = 0;
-        c.joycon_mouse_surface[s] = 0;
     }
     c.udp_last_server_state_seq = 0;
 }
@@ -1059,9 +1058,9 @@ bool client_session_is_source(int client_idx, InputSource source) {
 bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& packet, uint64_t now) {
     if (g_ctx.verbose) {
         std::println("[s2][mouse][udp-rx] t_us={} client={} subpad={} flags=0x{:02x} seq={} "
-                     "delta_x={} delta_y={} surface={} raw={}",
+                     "delta_x={} delta_y={} raw={}",
                      now, client_idx, packet.subpad, packet.flags, packet.seq,
-                     packet.delta_x, packet.delta_y, packet.surface,
+                     packet.delta_x, packet.delta_y,
                      s2_hex(std::span<const uint8_t>(
                          reinterpret_cast<const uint8_t*>(&packet),
                          sizeof(packet) - ns::HMAC_TAG_SIZE)));
@@ -1084,7 +1083,6 @@ bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& pac
     c.joycon_mouse_first_packet[subpad] = false;
     c.joycon_mouse_last_seq[subpad] = seq;
     c.joycon_mouse_last_rx_us[subpad] = now;
-    c.joycon_mouse_surface[subpad] = packet.surface;
 
     const bool active = (packet.flags & ns::JOYCON_MOUSE_FLAG_ACTIVE) != 0;
     const bool was_active = c.joycon_mouse_active[subpad];
@@ -1159,12 +1157,11 @@ JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
     c.joycon_mouse_pending_y[subpad] -= dy;
     out.dx = static_cast<int16_t>(dx);
     out.dy = static_cast<int16_t>(dy);
-    out.surface = c.joycon_mouse_surface[subpad];
     out.active = true;
     if (g_ctx.verbose && (dx != 0 || dy != 0)) {
-        std::println("[s2][mouse][consume] client={} subpad={} emit dx={} dy={} surface={} "
+        std::println("[s2][mouse][consume] client={} subpad={} emit dx={} dy={} "
                      "remaining_pending_x={} remaining_pending_y={}",
-                     client_idx, subpad, out.dx, out.dy, out.surface,
+                     client_idx, subpad, out.dx, out.dy,
                      c.joycon_mouse_pending_x[subpad], c.joycon_mouse_pending_y[subpad]);
     }
     return out;

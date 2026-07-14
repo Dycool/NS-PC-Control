@@ -731,7 +731,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         if (sample.active) {
                                             native_mouse.dx = sample.dx;
                                             native_mouse.dy = sample.dy;
-                                            native_mouse.surface = sample.surface;
                                             native_mouse.active = true;
                                             native_mouse_ptr = &native_mouse;
                                         }

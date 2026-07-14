@@ -129,7 +129,6 @@ struct ClientSession {
     uint64_t joycon_mouse_last_rx_us[4]{};
     int64_t joycon_mouse_pending_x[4]{};
     int64_t joycon_mouse_pending_y[4]{};
-    uint8_t joycon_mouse_surface[4]{};
 
     // Amiibo support
     bool amiibo_request_pending[4] = {};
@@ -144,7 +143,6 @@ struct ClientSession {
 struct JoyconMouseSample {
     int16_t dx = 0;
     int16_t dy = 0;
-    uint8_t surface = 0;
     bool active = false;
 };
 

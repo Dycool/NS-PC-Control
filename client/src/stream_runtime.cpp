@@ -415,10 +415,6 @@ static void send_joycon_mouse_update(SOCKET sock,
     ns::JoyconMousePacket pkt{};
     pkt.flags = active ? ns::JOYCON_MOUSE_FLAG_ACTIVE : 0;
     pkt.subpad = 0;
-    // The public report map still labels this byte unknown/likely LOD. A zero
-    // value is the neutral/contact value used by the initial implementation;
-    // it is isolated here for easy adjustment after hardware capture testing.
-    pkt.surface = 0;
     pkt.seq = seq++;
     pkt.delta_x = dx;
     pkt.delta_y = dy;
