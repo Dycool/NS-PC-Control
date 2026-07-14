@@ -578,8 +578,8 @@ class MainActivity : AppCompatActivity() {
             g[0], g[1], g[2]
         )
 
-        latestMotionSamples[0] = latestMotionSamples[1]
-        latestMotionSamples[1] = latestMotionSamples[2]
+        latestMotionSamples[0] = sample
+        latestMotionSamples[1] = sample
         latestMotionSamples[2] = sample
         if (latestMotionSampleCount < Protocol.MOTION_SAMPLE_COUNT) latestMotionSampleCount++
         phoneMotionRevision++
@@ -1241,8 +1241,8 @@ class MainActivity : AppCompatActivity() {
         val sample = NativeProtocol.nativePhoneMotion(a[0], a[1], a[2], g[0], g[1], g[2])
 
         val pad = physicalPads[slot]
-        pad.motionSamples[0] = pad.motionSamples[1]
-        pad.motionSamples[1] = pad.motionSamples[2]
+        pad.motionSamples[0] = sample
+        pad.motionSamples[1] = sample
         pad.motionSamples[2] = sample
         if (pad.motionSampleCount < Protocol.MOTION_SAMPLE_COUNT) pad.motionSampleCount++
         pad.hasMotion = pad.motionSampleCount >= Protocol.MOTION_SAMPLE_COUNT

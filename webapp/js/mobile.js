@@ -122,7 +122,7 @@ function onDeviceMotion(e) {
         clampI16(-g[2] * gyroScale), clampI16(-g[0] * gyroScale), clampI16(g[1] * gyroScale)
     ];
     for (let i=3; i<6; i++) if (Math.abs(sample[i]) <= 32) sample[i] = 0;
-    motionSamples.push(sample); if (motionSamples.length > 3) motionSamples.shift();
+    motionSamples = [sample, sample, sample];
     motionRevision++;
 }
 async function enableMotion() {
