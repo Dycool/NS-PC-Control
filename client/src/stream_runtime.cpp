@@ -56,10 +56,10 @@ void clear_amiibo_paths() {
     for (QString& path : g_amiiboPaths) path.clear();
 }
 
-static void sleep_while_running(std::atomic<bool>& running, std::chrono::milliseconds duration) {
-    constexpr auto SLICE = std::chrono::milliseconds(20);
+static void sleep_while_running(std::atomic<bool>& running, std::chrono::microseconds duration) {
+    constexpr auto SLICE = std::chrono::microseconds(20'000);
     auto remaining = duration;
-    while (running.load(std::memory_order_relaxed) && remaining > std::chrono::milliseconds::zero()) {
+    while (running.load(std::memory_order_relaxed) && remaining > std::chrono::microseconds::zero()) {
         const auto chunk = std::min(remaining, SLICE);
         std::this_thread::sleep_for(chunk);
         remaining -= chunk;
@@ -229,7 +229,6 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
             apply_keyboard_to_report(frame.reports[0], false);
             if (mouse_mode_active())
                 mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
-            if (native_mouse) apply_joycon_mouse_buttons(frame.reports[0]);
             frame.present[0] = true;
             frame.active_count = 1;
             return;
@@ -282,7 +281,6 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
                 frame.present[0] = true;
                 frame.active_count = 1;
             }
-            apply_joycon_mouse_buttons(frame.reports[0]);
         }
         return;
     }
@@ -397,27 +395,36 @@ static void send_joycon_mouse_update(SOCKET sock,
                                      const uint8_t hmac_key[32],
                                      uint32_t& seq,
                                      uint64_t& last_send_us,
-                                     bool& was_active,
+                                     uint8_t& last_flags,
                                      bool force_disable = false) {
     const bool active = !force_disable && joycon_mouse_mode_active();
-    int32_t dx = 0, dy = 0;
-    if (active) mouse_consume_joycon_delta(dx, dy);
+    int32_t dx = 0, dy = 0, scroll_y = 0;
+    bool left = false, right = false;
+    if (active) {
+        mouse_consume_joycon_input(dx, dy, scroll_y);
+        mouse_joycon_button_state(left, right);
+    }
+
+    uint8_t flags = active ? ns::JOYCON_MOUSE_FLAG_ACTIVE : 0;
+    if (left) flags |= ns::JOYCON_MOUSE_FLAG_LEFT_BUTTON;
+    if (right) flags |= ns::JOYCON_MOUSE_FLAG_RIGHT_BUTTON;
 
     const uint64_t now = ns::now_us();
     constexpr uint64_t KEEPALIVE_US = 50'000ULL;
-    const bool state_changed = active != was_active;
-    if (!state_changed && dx == 0 && dy == 0
+    const bool state_changed = flags != last_flags;
+    if (!state_changed && dx == 0 && dy == 0 && scroll_y == 0
             && last_send_us != 0 && now - last_send_us < KEEPALIVE_US) {
         return;
     }
-    if (!active && !was_active && !force_disable) return;
+    if (!active && last_flags == 0 && !force_disable) return;
 
     ns::JoyconMousePacket pkt{};
-    pkt.flags = active ? ns::JOYCON_MOUSE_FLAG_ACTIVE : 0;
+    pkt.flags = flags;
     pkt.subpad = 0;
     pkt.seq = seq++;
     pkt.delta_x = dx;
     pkt.delta_y = dy;
+    pkt.scroll_y = scroll_y;
     pkt.ts_us = now;
 
     uint8_t full_hmac[32];
@@ -428,7 +435,7 @@ static void send_joycon_mouse_update(SOCKET sock,
     send_all_udp(sock, dest,
                  std::span(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
     last_send_us = now;
-    was_active = active;
+    last_flags = flags;
 }
 
 static void set_roster_name(ns::RosterEntry& e, const std::string& name) {
@@ -579,7 +586,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     uint32_t seq = 0;
     uint32_t joycon_mouse_seq = 0;
     uint64_t joycon_mouse_last_send_us = 0;
-    bool joycon_mouse_was_active = false;
+    uint8_t joycon_mouse_last_flags = 0;
     RumbleManager rumble;
     // Desktop Switch 2 audio runs on its own socket/thread (GUI client only) so
     // it never shares this input loop. Started only after the server is known
@@ -612,14 +619,17 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             last_kb_poll_us = loop_start_us;
         }
 
-        const bool input_frame_due = next_input_frame_us == 0
-            || loop_start_us >= next_input_frame_us;
+        if (next_input_frame_us == 0) next_input_frame_us = loop_start_us;
+        const bool input_frame_due = loop_start_us >= next_input_frame_us;
         if (input_frame_due) {
             // Keep controller traffic at the established 250 Hz even while the
             // loop polls audio every millisecond. This avoids wasting UDP/CPU
             // budget and leaves headroom under the server's packet-rate limit.
-            next_input_frame_us = loop_start_us
-                + static_cast<uint64_t>(ns::LEGACY_UDP_INTERVAL_MS) * 1000ULL;
+            constexpr uint64_t INPUT_FRAME_US =
+                static_cast<uint64_t>(ns::LEGACY_UDP_INTERVAL_MS) * 1000ULL;
+            next_input_frame_us += INPUT_FRAME_US;
+            if (loop_start_us > next_input_frame_us + 8 * INPUT_FRAME_US)
+                next_input_frame_us = loop_start_us + INPUT_FRAME_US;
             g_sdlInput.poll();
             build_client_frame(frame, sdl_filters, true, g_keyboardMode.load());
 
@@ -641,7 +651,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             send_client_frame(sock, dest, cfg.hmac_key, seq, frame);
             send_joycon_mouse_update(sock, dest, cfg.hmac_key,
                                      joycon_mouse_seq, joycon_mouse_last_send_us,
-                                     joycon_mouse_was_active);
+                                     joycon_mouse_last_flags);
             ++g_packetCount;
         }
         // Audio (capability negotiation, mic, playback) is handled entirely by
@@ -679,9 +689,16 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
 
         if (frame.active_count > 0) {
             no_controllers_printed = false;
-            // Input runs at the controller tick only. Audio has its own thread, so
-            // this loop no longer spins at 1 ms for packetisation.
-            sleep_while_running(running, std::chrono::milliseconds(ns::LEGACY_UDP_INTERVAL_MS));
+            // Sleep only for the remainder of the absolute 4 ms frame. Sleeping
+            // another full tick after polling/signing made the actual mouse
+            // cadence roughly processing-time + 4 ms (commonly 9-10 ms).
+            const uint64_t sleep_now_us = ns::now_us();
+            if (next_input_frame_us > sleep_now_us) {
+                sleep_while_running(running, std::chrono::microseconds(
+                    next_input_frame_us - sleep_now_us));
+            } else {
+                std::this_thread::yield();
+            }
         } else {
             if (cfg.print_cli_waiting_messages && !no_controllers_printed) {
                 std::println("No controllers detected - waiting for connections...");
@@ -695,10 +712,10 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     // teardown when this function returns (running is already false here) via its
     // jthread destructor; nothing to do for audio on this path.
     rumble.stop_all();
-    if (joycon_mouse_was_active) {
+    if (joycon_mouse_last_flags & ns::JOYCON_MOUSE_FLAG_ACTIVE) {
         send_joycon_mouse_update(sock, dest, cfg.hmac_key,
                                  joycon_mouse_seq, joycon_mouse_last_send_us,
-                                 joycon_mouse_was_active, true);
+                                 joycon_mouse_last_flags, true);
     }
     send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++);
     closesocket(sock);

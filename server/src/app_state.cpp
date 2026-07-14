@@ -1006,8 +1006,14 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
         c.joycon_mouse_first_packet[s] = true;
         c.joycon_mouse_last_seq[s] = 0;
         c.joycon_mouse_last_rx_us[s] = 0;
+        c.joycon_mouse_last_client_ts_us[s] = 0;
         c.joycon_mouse_pending_x[s] = 0;
         c.joycon_mouse_pending_y[s] = 0;
+        c.joycon_mouse_smoothing_frames[s] = 0;
+        c.joycon_mouse_left_down[s] = false;
+        c.joycon_mouse_right_down[s] = false;
+        c.joycon_mouse_scroll_direction[s] = 0;
+        c.joycon_mouse_scroll_until_us[s] = 0;
     }
     c.udp_last_server_state_seq = 0;
 }
@@ -1058,9 +1064,9 @@ bool client_session_is_source(int client_idx, InputSource source) {
 bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& packet, uint64_t now) {
     if (g_ctx.verbose) {
         std::println("[s2][mouse][udp-rx] t_us={} client={} subpad={} flags=0x{:02x} seq={} "
-                     "delta_x={} delta_y={} raw={}",
+                     "delta_x={} delta_y={} scroll_y={} raw={}",
                      now, client_idx, packet.subpad, packet.flags, packet.seq,
-                     packet.delta_x, packet.delta_y,
+                     packet.delta_x, packet.delta_y, packet.scroll_y,
                      s2_hex(std::span<const uint8_t>(
                          reinterpret_cast<const uint8_t*>(&packet),
                          sizeof(packet) - ns::HMAC_TAG_SIZE)));
@@ -1087,13 +1093,21 @@ bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& pac
     const bool active = (packet.flags & ns::JOYCON_MOUSE_FLAG_ACTIVE) != 0;
     const bool was_active = c.joycon_mouse_active[subpad];
     c.joycon_mouse_active[subpad] = active;
+    c.joycon_mouse_left_down[subpad] = active
+        && (packet.flags & ns::JOYCON_MOUSE_FLAG_LEFT_BUTTON) != 0;
+    c.joycon_mouse_right_down[subpad] = active
+        && (packet.flags & ns::JOYCON_MOUSE_FLAG_RIGHT_BUTTON) != 0;
     if (g_ctx.verbose && active != was_active) {
         std::println("[s2][mouse] UDP stream {} for client {} subpad {}",
                      active ? "enabled" : "disabled", client_idx, subpad);
     }
     if (!active) {
+        c.joycon_mouse_last_client_ts_us[subpad] = 0;
         c.joycon_mouse_pending_x[subpad] = 0;
         c.joycon_mouse_pending_y[subpad] = 0;
+        c.joycon_mouse_smoothing_frames[subpad] = 0;
+        c.joycon_mouse_scroll_direction[subpad] = 0;
+        c.joycon_mouse_scroll_until_us[subpad] = 0;
         return true;
     }
 
@@ -1105,6 +1119,31 @@ bool update_joycon_mouse_stream(int client_idx, const ns::JoyconMousePacket& pac
     c.joycon_mouse_pending_y[subpad] = std::clamp<int64_t>(
         c.joycon_mouse_pending_y[subpad] + packet.delta_y,
         -MAX_PENDING, MAX_PENDING);
+    if (packet.delta_x != 0 || packet.delta_y != 0) {
+        uint64_t frame_count = 1;
+        const uint64_t previous_ts = c.joycon_mouse_last_client_ts_us[subpad];
+        if (previous_ts != 0 && packet.ts_us > previous_ts) {
+            frame_count = std::clamp<uint64_t>(
+                (packet.ts_us - previous_ts + 3'999ULL) / 4'000ULL, 1, 4);
+        }
+        c.joycon_mouse_smoothing_frames[subpad] = std::max<uint8_t>(
+            c.joycon_mouse_smoothing_frames[subpad],
+            static_cast<uint8_t>(frame_count));
+    }
+    c.joycon_mouse_last_client_ts_us[subpad] = packet.ts_us;
+
+    if (packet.scroll_y != 0) {
+        const int direction = packet.scroll_y > 0 ? 1 : -1;
+        const int64_t signed_units = static_cast<int64_t>(packet.scroll_y);
+        const uint64_t units = static_cast<uint64_t>(std::min<int64_t>(
+            signed_units >= 0 ? signed_units : -signed_units, 8LL * 120LL));
+        const uint64_t notches = std::clamp<uint64_t>((units + 119) / 120, 1, 8);
+        const uint64_t base = c.joycon_mouse_scroll_direction[subpad] == direction
+                && c.joycon_mouse_scroll_until_us[subpad] > now
+            ? c.joycon_mouse_scroll_until_us[subpad] : now;
+        c.joycon_mouse_scroll_direction[subpad] = static_cast<int8_t>(direction);
+        c.joycon_mouse_scroll_until_us[subpad] = base + notches * 40'000ULL;
+    }
     if (g_ctx.verbose) {
         std::println("[s2][mouse][accum] client={} subpad={} pending_x={} pending_y={}",
                      client_idx, subpad,
@@ -1129,8 +1168,14 @@ JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
                          client_idx, subpad);
         }
         c.joycon_mouse_active[subpad] = false;
+        c.joycon_mouse_last_client_ts_us[subpad] = 0;
         c.joycon_mouse_pending_x[subpad] = 0;
         c.joycon_mouse_pending_y[subpad] = 0;
+        c.joycon_mouse_smoothing_frames[subpad] = 0;
+        c.joycon_mouse_left_down[subpad] = false;
+        c.joycon_mouse_right_down[subpad] = false;
+        c.joycon_mouse_scroll_direction[subpad] = 0;
+        c.joycon_mouse_scroll_until_us[subpad] = 0;
         return out;
     }
 
@@ -1146,17 +1191,35 @@ JoyconMouseSample consume_joycon_mouse_stream(int client_idx, int subpad,
         }
         c.joycon_mouse_pending_x[subpad] = 0;
         c.joycon_mouse_pending_y[subpad] = 0;
+        c.joycon_mouse_smoothing_frames[subpad] = 0;
+        c.joycon_mouse_scroll_direction[subpad] = 0;
+        c.joycon_mouse_scroll_until_us[subpad] = 0;
         return out;
     }
 
-    const int64_t dx = std::clamp<int64_t>(c.joycon_mouse_pending_x[subpad],
-                                            INT16_MIN, INT16_MAX);
-    const int64_t dy = std::clamp<int64_t>(c.joycon_mouse_pending_y[subpad],
-                                            INT16_MIN, INT16_MAX);
+    const int64_t smoothing_frames = std::max<int64_t>(
+        c.joycon_mouse_smoothing_frames[subpad], 1);
+    auto smoothed_axis = [smoothing_frames](int64_t pending) {
+        int64_t value = pending / smoothing_frames;
+        if (value == 0 && pending != 0) value = pending > 0 ? 1 : -1;
+        return std::clamp<int64_t>(value, INT16_MIN, INT16_MAX);
+    };
+    const int64_t dx = smoothed_axis(c.joycon_mouse_pending_x[subpad]);
+    const int64_t dy = smoothed_axis(c.joycon_mouse_pending_y[subpad]);
     c.joycon_mouse_pending_x[subpad] -= dx;
     c.joycon_mouse_pending_y[subpad] -= dy;
+    if (c.joycon_mouse_smoothing_frames[subpad] != 0)
+        --c.joycon_mouse_smoothing_frames[subpad];
     out.dx = static_cast<int16_t>(dx);
     out.dy = static_cast<int16_t>(dy);
+    out.left_down = c.joycon_mouse_left_down[subpad];
+    out.right_down = c.joycon_mouse_right_down[subpad];
+    if (now < c.joycon_mouse_scroll_until_us[subpad]) {
+        out.scroll_y = c.joycon_mouse_scroll_direction[subpad];
+    } else {
+        c.joycon_mouse_scroll_direction[subpad] = 0;
+        c.joycon_mouse_scroll_until_us[subpad] = 0;
+    }
     out.active = true;
     if (g_ctx.verbose && (dx != 0 || dy != 0)) {
         std::println("[s2][mouse][consume] client={} subpad={} emit dx={} dy={} "

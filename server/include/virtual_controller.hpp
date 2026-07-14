@@ -138,6 +138,9 @@ void build_standard_report(const ns::HIDReport& src,
 struct S2JoyconMouseInput {
     int16_t dx = 0;
     int16_t dy = 0;
+    int8_t scroll_y = 0;
+    bool left_down = false;
+    bool right_down = false;
     bool active = false;
 };
 

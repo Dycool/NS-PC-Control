@@ -732,10 +732,13 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         const JoyconMouseSample sample = consume_joycon_mouse_stream(
                                             hw_slots[h].client_idx, hw_slots[h].sub_idx,
                                             now_stamp, mouse_feature_enabled);
-                                        if (sample.active) {
+                                        if (mouse_feature_enabled) {
                                             native_mouse.dx = sample.dx;
                                             native_mouse.dy = sample.dy;
-                                            native_mouse.active = true;
+                                            native_mouse.scroll_y = sample.scroll_y;
+                                            native_mouse.left_down = sample.left_down;
+                                            native_mouse.right_down = sample.right_down;
+                                            native_mouse.active = sample.active;
                                             native_mouse_ptr = &native_mouse;
                                         }
                                     }

@@ -127,8 +127,14 @@ struct ClientSession {
     bool joycon_mouse_first_packet[4]{true, true, true, true};
     uint32_t joycon_mouse_last_seq[4]{};
     uint64_t joycon_mouse_last_rx_us[4]{};
+    uint64_t joycon_mouse_last_client_ts_us[4]{};
     int64_t joycon_mouse_pending_x[4]{};
     int64_t joycon_mouse_pending_y[4]{};
+    uint8_t joycon_mouse_smoothing_frames[4]{};
+    bool joycon_mouse_left_down[4]{};
+    bool joycon_mouse_right_down[4]{};
+    int8_t joycon_mouse_scroll_direction[4]{};
+    uint64_t joycon_mouse_scroll_until_us[4]{};
 
     // Amiibo support
     bool amiibo_request_pending[4] = {};
@@ -143,6 +149,9 @@ struct ClientSession {
 struct JoyconMouseSample {
     int16_t dx = 0;
     int16_t dy = 0;
+    int8_t scroll_y = 0;
+    bool left_down = false;
+    bool right_down = false;
     bool active = false;
 };
 

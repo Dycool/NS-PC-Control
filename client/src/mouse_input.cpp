@@ -17,6 +17,7 @@ namespace {
 
 std::atomic<long long> g_acc_dx{0};
 std::atomic<long long> g_acc_dy{0};
+std::atomic<long long> g_acc_scroll_y{0};
 std::atomic<bool> g_joycon_left_down{false};
 std::atomic<bool> g_joycon_right_down{false};
 
@@ -59,6 +60,11 @@ public:
                     g_joycon_right_down.store(true, std::memory_order_relaxed);
                 if (mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
                     g_joycon_right_down.store(false, std::memory_order_relaxed);
+                if (mouse.usButtonFlags & RI_MOUSE_WHEEL) {
+                    g_acc_scroll_y.fetch_add(
+                        static_cast<SHORT>(mouse.usButtonData),
+                        std::memory_order_relaxed);
+                }
             } else {
                 g_joycon_left_down.store(false, std::memory_order_relaxed);
                 g_joycon_right_down.store(false, std::memory_order_relaxed);
@@ -105,6 +111,7 @@ bool mouse_input_native_joycon_supported() { return true; }
 void mouse_input_reset() {
     g_acc_dx.store(0, std::memory_order_relaxed);
     g_acc_dy.store(0, std::memory_order_relaxed);
+    g_acc_scroll_y.store(0, std::memory_order_relaxed);
     g_last_us = 0;
     g_smooth_x = 0.0;
     g_smooth_y = 0.0;
@@ -147,9 +154,10 @@ void mouse_apply_right_stick(uint8_t& rx, uint8_t& ry) {
     ry = to_byte(g_smooth_y);
 }
 
-void mouse_consume_joycon_delta(int32_t& dx, int32_t& dy) {
+void mouse_consume_joycon_input(int32_t& dx, int32_t& dy, int32_t& scroll_y) {
     const long long raw_x = g_acc_dx.exchange(0, std::memory_order_relaxed);
     const long long raw_y = g_acc_dy.exchange(0, std::memory_order_relaxed);
+    const long long raw_scroll_y = g_acc_scroll_y.exchange(0, std::memory_order_relaxed);
     const double sensitivity = g_mouseSensitivity.load(std::memory_order_relaxed);
 
     const double scaled_x = static_cast<double>(raw_x) * sensitivity + g_joycon_residual_x;
@@ -162,6 +170,8 @@ void mouse_consume_joycon_delta(int32_t& dx, int32_t& dy) {
     dx = static_cast<int32_t>(std::clamp<long long>(rounded_x,
         std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()));
     dy = static_cast<int32_t>(std::clamp<long long>(rounded_y,
+        std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()));
+    scroll_y = static_cast<int32_t>(std::clamp<long long>(raw_scroll_y,
         std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()));
 }
 
@@ -179,7 +189,9 @@ void mouse_input_stop() {}
 bool mouse_input_native_joycon_supported() { return false; }
 void mouse_input_reset() {}
 void mouse_apply_right_stick(uint8_t&, uint8_t&) {}
-void mouse_consume_joycon_delta(int32_t& dx, int32_t& dy) { dx = 0; dy = 0; }
+void mouse_consume_joycon_input(int32_t& dx, int32_t& dy, int32_t& scroll_y) {
+    dx = 0; dy = 0; scroll_y = 0;
+}
 void mouse_joycon_button_state(bool& left, bool& right) { left = false; right = false; }
 
 #endif

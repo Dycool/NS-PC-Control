@@ -135,22 +135,6 @@ bool mouse_capture_active() {
     return mouse_mode_active() || joycon_mouse_mode_active();
 }
 
-void apply_joycon_mouse_buttons(ns::HoriHIDReport& rep) {
-    if (!joycon_mouse_mode_active()) return;
-    bool left = false, right = false;
-    mouse_joycon_button_state(left, right);
-    const int type = g_controllerType.load(std::memory_order_relaxed);
-    if (type == ns::CONTROLLER_TYPE_JOYCON_R) {
-        // Physical Joy-Con 2 mouse posture: R is the primary click and ZR the
-        // secondary click. Preserve any controller/keyboard buttons by ORing.
-        if (left) rep.buttons |= ns::BTN_R;
-        if (right) rep.buttons |= ns::BTN_ZR;
-    } else if (type == ns::CONTROLLER_TYPE_JOYCON_L) {
-        if (left) rep.buttons |= ns::BTN_L;
-        if (right) rep.buttons |= ns::BTN_ZL;
-    }
-}
-
 bool is_valid_key_code(const std::string& s) {
     std::string c = normalize_key_name(s);
     if (c.empty()) return true;

@@ -81,7 +81,7 @@ static constexpr uint16_t S2_AUDIO_PCM_BYTES = S2_AUDIO_USB_FRAME_BYTES * S2_AUD
 static constexpr uint16_t S2_AUDIO_PORT_OFFSET = 1;
 static constexpr uint8_t  SERVER_INFO_VERSION = 1;
 static constexpr uint8_t  CLIENT_ASSIGNMENT_VERSION = 1;
-static constexpr uint8_t  JOYCON_MOUSE_VERSION = 2;
+static constexpr uint8_t  JOYCON_MOUSE_VERSION = 3;
 static constexpr uint8_t  GADGET_MODE_VERSION = 1;
 
 // Wire values for GadgetModeRequestPacket::requested_family and
@@ -200,6 +200,8 @@ static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP    = 0x04;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
 static constexpr uint8_t JOYCON_MOUSE_FLAG_ACTIVE = 0x01;
+static constexpr uint8_t JOYCON_MOUSE_FLAG_LEFT_BUTTON = 0x02;
+static constexpr uint8_t JOYCON_MOUSE_FLAG_RIGHT_BUTTON = 0x04;
 
 
 // ── Legacy input reports ─────────────────────────────────────────────────────
@@ -397,6 +399,9 @@ struct JoyconMousePacket {
     uint32_t seq = 0;
     int32_t  delta_x = 0;
     int32_t  delta_y = 0;
+    // Semantic PC wheel delta. The server owns conversion to the selected
+    // Joy-Con's stick/report representation.
+    int32_t  scroll_y = 0;
     uint64_t ts_us = 0;
     uint8_t  hmac[HMAC_TAG_SIZE]{};
 } NS_PACKED_ATTR;
@@ -469,7 +474,7 @@ static_assert(sizeof(ClientNamesPacket) == 224,
               "ClientNamesPacket wire layout changed");
 static_assert(sizeof(RosterPacket) == 208,
               "RosterPacket wire layout changed");
-static_assert(sizeof(JoyconMousePacket) == 43,
+static_assert(sizeof(JoyconMousePacket) == 47,
               "JoyconMousePacket wire layout changed");
 
 static_assert(sizeof(S2AudioCapabilitiesPacket) == 36,

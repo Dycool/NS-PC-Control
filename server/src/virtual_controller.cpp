@@ -1183,7 +1183,16 @@ static void build_s2_joycon_report(const HIDReport& src,
     out[1] = timer;
     out[2] = s2_power_info_from_hid(src);
 
-    const uint16_t btn = src.input.buttons;
+    uint16_t btn = src.input.buttons;
+    if (mouse && mouse->active) {
+        if (right) {
+            if (mouse->left_down) btn |= BTN_R;
+            if (mouse->right_down) btn |= BTN_ZR;
+        } else {
+            if (mouse->left_down) btn |= BTN_L;
+            if (mouse->right_down) btn |= BTN_ZL;
+        }
+    }
     const uint8_t extra = static_cast<uint8_t>(src.input.vendor & EXT_BUTTON_MASK);
     const uint8_t hat = src.input.hat;
     if (right) {
@@ -1196,7 +1205,9 @@ static void build_s2_joycon_report(const HIDReport& src,
         out[4] = (btn & BTN_ZR ? 0x80 : 0) | (btn & BTN_R ? 0x40 : 0) |
                  (extra & EXT_BUTTON_SL ? 0x80 : 0) | (extra & EXT_BUTTON_SR ? 0x40 : 0) |
                  (extra & EXT_BUTTON_C ? 0x10 : 0) | (btn & BTN_HOME ? 0x01 : 0);
-        pack_stick_12(out + 6, src.input.rx, src.input.ry);
+        const uint8_t scroll_y = mouse && mouse->active && mouse->scroll_y != 0
+            ? (mouse->scroll_y > 0 ? 0 : 255) : src.input.ry;
+        pack_stick_12(out + 6, src.input.rx, scroll_y);
     } else {
         out[3] = (btn & BTN_LSTICK ? 0x80 : 0) | (btn & BTN_MINUS ? 0x40 : 0) |
                  (btn & BTN_ZL ? 0x20 : 0) | (btn & BTN_L ? 0x10 : 0) |
@@ -1207,7 +1218,9 @@ static void build_s2_joycon_report(const HIDReport& src,
         out[4] = (btn & BTN_ZL ? 0x80 : 0) | (btn & BTN_L ? 0x40 : 0) |
                  (extra & EXT_BUTTON_SL ? 0x80 : 0) | (extra & EXT_BUTTON_SR ? 0x40 : 0) |
                  (btn & BTN_CAPTURE ? 0x01 : 0);
-        pack_stick_12(out + 6, src.input.lx, src.input.ly);
+        const uint8_t scroll_y = mouse && mouse->active && mouse->scroll_y != 0
+            ? (mouse->scroll_y > 0 ? 0 : 255) : src.input.ly;
+        pack_stick_12(out + 6, src.input.lx, scroll_y);
     }
 
     out[5] = 0x07; // observed constant for Joy-Con 2 report 0x07/0x08
@@ -1215,7 +1228,7 @@ static void build_s2_joycon_report(const HIDReport& src,
     // reconnect, wake, OTA, and mouse-mode captures (0x30 during init only).
     out[9] = 0x38;
 
-    if (mouse && mouse->active) {
+    if (mouse) {
         MotionReport stationary[3]{};
         for (auto& sample : stationary) sample.ax = 4096;
         write_s2_pro_motion_block(out, 16, 17, stationary, true, true,
@@ -1225,13 +1238,16 @@ static void build_s2_joycon_report(const HIDReport& src,
                                       imu_enabled, motion_time_us, port, right);
     }
 
-    if (mouse && mouse->active) {
-        constexpr uint8_t MOUSE_SURFACE_MOVING = 0x17;
-        constexpr uint8_t MOUSE_SURFACE_IDLE = 0xff;
+    if (mouse) {
+        constexpr uint8_t MOUSE_ON_SURFACE = 0x17;
+        constexpr uint8_t MOUSE_OFF_SURFACE = 0xff;
         const uint16_t dx = static_cast<uint16_t>(mouse->dx);
         const uint16_t dy = static_cast<uint16_t>(mouse->dy);
-        const uint8_t surface = (mouse->dx != 0 || mouse->dy != 0)
-            ? MOUSE_SURFACE_MOVING : MOUSE_SURFACE_IDLE;
+        // Surface state follows the mode, not whether this individual 4 ms
+        // report happened to contain motion. Alternating on/off during idle
+        // made Switch UI hover selection visibly blink.
+        const uint8_t surface = mouse->active
+            ? MOUSE_ON_SURFACE : MOUSE_OFF_SURFACE;
         // hid_reports.md offsets are relative to the payload after report ID:
         // 0x09 = Delta X, 0x0B = Delta Y, 0x0D = unknown/likely LOD.
         out[0x0A] = static_cast<uint8_t>(dx & 0xFFu);

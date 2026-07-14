@@ -76,5 +76,4 @@ bool mouse_mode_active();
 bool joycon_mouse_mode_supported();
 bool joycon_mouse_mode_active();
 bool mouse_capture_active();
-void apply_joycon_mouse_buttons(ns::HoriHIDReport& rep);
 void clear_mouse_button_inputs();
