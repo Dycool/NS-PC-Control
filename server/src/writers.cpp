@@ -112,6 +112,10 @@ void writer_thread(std::stop_token stoken, int hz) {
     // S2 exposes exactly one native Raw Gadget controller. S1/HORI retain
     // the established four-port legacy layout.
     const int nports = configured_virtual_port_count();
+    // S2 report 0x07/0x08/0x09 uses a counter that advances once per input
+    // report. The legacy 5 ms wall-clock timer repeats values at S2's 4 ms
+    // report interval, which can make relative input reports look stale.
+    uint8_t s2_report_counter[HID_PORT_COUNT]{};
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -737,7 +741,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                     }
                                     build_s2_pro_report(report_for_port, nullptr,
                                                         false, false,
-                                                        pro_timer_from_us(now_stamp), now_stamp,
+                                                        s2_report_counter[h]++, now_stamp,
                                                         h, write_buf, native_mouse_ptr);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
