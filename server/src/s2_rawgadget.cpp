@@ -423,11 +423,59 @@ int raw_ep_enable(const void* desc, size_t desc_len) {
     std::memcpy(buf.data(), desc, desc_len);
     return ioctl(g_rg.fd, USB_RAW_IOCTL_EP_ENABLE, buf.data());
 }
-void raw_ep_disable(std::atomic<int>& handle) {
-    const int current = handle.exchange(-1, std::memory_order_acq_rel);
-    if (current < 0 || g_rg.fd < 0) return;
-    const uint32_t ep = static_cast<uint32_t>(current);
-    ioctl(g_rg.fd, USB_RAW_IOCTL_EP_DISABLE, ep);
+
+std::thread* endpoint_worker_for(std::atomic<int>& handle) {
+    if (&handle == &g_rg.hid_in_h) return &g_rg.hid_in_thread;
+    if (&handle == &g_rg.hid_out_h) return &g_rg.hid_out_thread;
+    if (&handle == &g_rg.vendor_in_h) return &g_rg.vendor_in_thread;
+    if (&handle == &g_rg.vendor_out_h) return &g_rg.vendor_out_thread;
+    if (&handle == &g_rg.as_out_h) return &g_rg.as_out_thread;
+    if (&handle == &g_rg.as_in_h) return &g_rg.as_in_thread;
+    return nullptr;
+}
+
+bool raw_ep_disable(std::atomic<int>& handle) {
+    const int current = handle.load(std::memory_order_acquire);
+    if (current < 0) return true;
+    if (g_rg.fd < 0) {
+        handle.store(-1, std::memory_order_release);
+        return true;
+    }
+
+    // The embedded Raw Gadget driver intentionally refuses EP_DISABLE while
+    // an endpoint request is queued. Interrupt the worker's blocking ioctl;
+    // raw_process_ep_io() then dequeues and completes that request before it
+    // returns EINTR. Retry only until that concrete in-flight state is gone.
+    std::thread* worker = endpoint_worker_for(handle);
+    if (worker && worker->joinable()) pthread_kill(worker->native_handle(), SIGUSR1);
+
+    int disable_errno = 0;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        const uint32_t ep = static_cast<uint32_t>(current);
+        if (ioctl(g_rg.fd, USB_RAW_IOCTL_EP_DISABLE, ep) == 0) {
+            handle.store(-1, std::memory_order_release);
+            return true;
+        }
+        disable_errno = errno;
+        if (disable_errno == EINTR) continue;
+        if (disable_errno != EINVAL && disable_errno != EBUSY) break;
+        if (worker && worker->joinable()) pthread_kill(worker->native_handle(), SIGUSR1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (g_ctx.verbose) {
+        std::println(stderr, "[s2-rg] endpoint {} disable did not quiesce: {}",
+                     current, strerror(disable_errno));
+    }
+    return false;
+}
+
+void clear_endpoint_handles() {
+    g_rg.as_out_h.store(-1, std::memory_order_release);
+    g_rg.as_in_h.store(-1, std::memory_order_release);
+    g_rg.hid_in_h.store(-1, std::memory_order_release);
+    g_rg.hid_out_h.store(-1, std::memory_order_release);
+    g_rg.vendor_out_h.store(-1, std::memory_order_release);
+    g_rg.vendor_in_h.store(-1, std::memory_order_release);
 }
 
 void disable_all_endpoints() {
@@ -536,15 +584,15 @@ bool enable_all_endpoints() {
     vend_out_d.bEndpointAddress = EP_VENDOR; vend_out_d.bmAttributes = USB_ENDPOINT_XFER_BULK;
     vend_out_d.wMaxPacketSize = htole16(PRO_REPORT_SIZE);
     PlainEndpointDesc vend_in_d = vend_out_d; vend_in_d.bEndpointAddress = USB_DIR_IN | EP_VENDOR;
-    g_rg.as_out_h = enable_audio_endpoint(false);
-    g_rg.as_in_h = enable_audio_endpoint(true);
+    // AudioStreaming interfaces start at alternate setting 0, whose
+    // descriptors expose no endpoints. Create their isochronous endpoints
+    // only when SET_INTERFACE selects alternate setting 1.
     g_rg.hid_in_h = raw_ep_enable(&hid_in_d, sizeof(hid_in_d));
     g_rg.hid_out_h = raw_ep_enable(&hid_out_d, sizeof(hid_out_d));
     g_rg.vendor_out_h = raw_ep_enable(&vend_out_d, sizeof(vend_out_d));
     g_rg.vendor_in_h = raw_ep_enable(&vend_in_d, sizeof(vend_in_d));
 
-    const bool ok = g_rg.as_out_h >= 0 && g_rg.as_in_h >= 0
-                 && g_rg.hid_in_h >= 0 && g_rg.hid_out_h >= 0
+    const bool ok = g_rg.hid_in_h >= 0 && g_rg.hid_out_h >= 0
                  && g_rg.vendor_out_h >= 0 && g_rg.vendor_in_h >= 0;
     if (!ok) disable_all_endpoints();
     return ok;
@@ -554,8 +602,10 @@ bool transition_audio_alt(uint16_t interface_number, uint16_t alt) {
     std::atomic<int>& handle = interface_number == 3 ? g_rg.as_out_h : g_rg.as_in_h;
     std::atomic<int>& selected_alt = interface_number == 3 ? g_rg.as_out_alt : g_rg.as_in_alt;
     if (alt == 0) {
-        raw_ep_disable(handle);
+        // Stop the worker before disabling so the driver's queued-URB guard
+        // can drain the blocking ISO request cleanly.
         selected_alt.store(0, std::memory_order_release);
+        const bool disabled = raw_ep_disable(handle);
         if (interface_number == 3) {
             std::lock_guard<std::mutex> lk(g_rg.console_audio_mtx);
             g_rg.console_audio_frames.clear();
@@ -564,6 +614,11 @@ bool transition_audio_alt(uint16_t interface_number, uint16_t alt) {
             g_rg.mic_audio_frames.clear();
         }
         publish_audio_state();
+        if (!disabled && g_ctx.verbose) {
+            std::println(stderr, "[s2-rg] audio interface {} remains internally enabled at alt 0; "
+                                 "will reuse its endpoint on the next alt 1",
+                         interface_number);
+        }
         return true;
     }
     if (handle.load(std::memory_order_acquire) < 0) {
@@ -704,8 +759,32 @@ void handle_control(const usb_ctrlrequest& ctrl) {
             raw_ep0_stall();
             return;
         }
+        const auto previous_state = g_rg.state.load(std::memory_order_acquire);
+        const bool already_configured = previous_state >= S2GadgetState::Configured
+                                     && previous_state < S2GadgetState::Resetting;
         raw_ep0_ack_out(0);
         if (value == 1) {
+            // A sleeping console may send SET_CONFIGURATION on the preserved
+            // pre-suspend Raw Gadget session without first delivering RESUME.
+            // If a new client is waiting, this request is the wake edge: ACK it
+            // and let the writer perform the intentional fresh hot-plug. Trying
+            // to tear down/re-enable live endpoints here races their queued I/O.
+            const bool deferred_reenumeration =
+                g_ctx.switch2_usb_reenumeration_after_resume.load(
+                    std::memory_order_acquire);
+            if (already_configured && deferred_reenumeration
+                    && any_recent_client_active(ns::now_us())) {
+                g_ctx.switch2_usb_reenumeration_after_resume.store(
+                    false, std::memory_order_release);
+                mark_switch2_usb_host_resumed();
+                g_ctx.switch2_usb_reenumeration_requested.store(
+                    true, std::memory_order_release);
+                if (g_ctx.verbose) {
+                    std::println("[s2-rg] configured session woke without RESUME; "
+                                 "scheduling deferred client hot-plug");
+                }
+                return;
+            }
             g_rg.generation.fetch_add(1, std::memory_order_relaxed);
             g_rg.halted_endpoints.store(0, std::memory_order_release);
             g_rg.fu_playback.mute.store(false, std::memory_order_release);
@@ -786,7 +865,11 @@ void handle_control(const usb_ctrlrequest& ctrl) {
                 static_cast<int>(g_rg.state.load(std::memory_order_acquire)),
                 g_rg.as_out_alt.load(std::memory_order_acquire),
                 g_rg.as_in_alt.load(std::memory_order_acquire), errno, strerror(errno));
-            g_rg.state.store(S2GadgetState::Failed, std::memory_order_release);
+            // Audio is optional to controller HID/vendor operation. Preserve
+            // the controller transport if an ISO endpoint cannot transition;
+            // a later SET_INTERFACE can retry without forcing users to cycle
+            // the entire controller connection.
+            publish_audio_state();
         }
         return;
     }
@@ -1494,6 +1577,10 @@ void s2_rawgadget_teardown() {
 
     const int fd = g_rg.fd.exchange(-1, std::memory_order_acq_rel);
     if (fd >= 0) close(fd);
+    // Closing Raw Gadget releases every endpoint even if EP_DISABLE could not
+    // finish while a worker was being interrupted. Never carry those integer
+    // handles into the next Raw Gadget file descriptor.
+    clear_endpoint_handles();
 
     join_with_signal(g_rg.event_thread, g_rg.event_exited);
     join_with_signal(g_rg.hid_in_thread, g_rg.hid_in_exited);
