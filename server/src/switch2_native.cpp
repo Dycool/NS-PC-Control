@@ -17,6 +17,17 @@
 
 using namespace ns;
 
+std::string s2_hex(std::span<const uint8_t> data) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.resize(data.size() * 2);
+    for (size_t i = 0; i < data.size(); ++i) {
+        out[i * 2] = kHex[data[i] >> 4];
+        out[i * 2 + 1] = kHex[data[i] & 0x0f];
+    }
+    return out;
+}
+
 namespace {
 
 constexpr uint32_t FACTORY_BASE = 0x13000u;
@@ -40,17 +51,6 @@ constexpr uint32_t DEFAULT_FEATURE_MASK = FEATURE_BUTTONS | FEATURE_STICKS | FEA
 constexpr std::array<uint8_t, 12> EMULATED_FIRMWARE_VERSION = {
     0x02, 0x09, 0x63, 0x02, 0x0C, 0x09, 0x09, 0x00, 0x00, 0x09, 0x09, 0x00
 };
-
-std::string s2_hex(std::span<const uint8_t> data) {
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
-    out.resize(data.size() * 2);
-    for (size_t i = 0; i < data.size(); ++i) {
-        out[i * 2] = kHex[data[i] >> 4];
-        out[i * 2 + 1] = kHex[data[i] & 0x0f];
-    }
-    return out;
-}
 
 struct NativeState {
     bool streaming = false;
