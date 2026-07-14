@@ -1216,8 +1216,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
                                                   rotationX: r.0, rotationY: r.1, rotationZ: r.2)
         phoneMotion.withLock { state in
-            state.samples[0] = sample
-            state.samples[1] = sample
+            state.samples[0] = state.samples[1]
+            state.samples[1] = state.samples[2]
             state.samples[2] = sample
             if state.count < ProtocolWire.motionSampleCount { state.count += 1 }
             state.revision &+= 1
@@ -1402,8 +1402,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                                                                             rotationX: Float(r.x),
                                                                             rotationY: Float(r.y),
                                                                             rotationZ: Float(r.z))
-                pad.motionSamples[0] = sample
-                pad.motionSamples[1] = sample
+                pad.motionSamples[0] = pad.motionSamples[1]
+                pad.motionSamples[1] = pad.motionSamples[2]
                 pad.motionSamples[2] = sample
                 if pad.motionSampleCount < ProtocolWire.motionSampleCount { pad.motionSampleCount += 1 }
                 pad.hasMotion = pad.motionSampleCount >= ProtocolWire.motionSampleCount

@@ -22,7 +22,9 @@ function allowedForController(id) {
     return controllerType === 1 ? joyconLeftOnly.has(id) : joyconRightOnly.has(id);
 }
 function applyLayout() {
-    nsApplyControllerSkin(document.getElementById('gamepad'), controllerType);
+    const gamepad = document.getElementById('gamepad');
+    nsApplyControllerSkin(gamepad, controllerType);
+    nsApplyControllerFaceButtons(gamepad, controllerType);
     for(let id of NSControllerControlIds) {
         let el = document.getElementById(id);
         if(!el) continue;

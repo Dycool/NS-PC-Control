@@ -31,6 +31,7 @@ html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; he
 #gamepad.controller-joycon-l #btn-minus,
 #gamepad.controller-joycon-l #btn-capture,
 #gamepad.controller-joycon-l #btn-ls,
+#gamepad.controller-joycon-l #dpad,
 #gamepad.controller-joycon-r #btn-zr,
 #gamepad.controller-joycon-r #btn-r,
 #gamepad.controller-joycon-r #btn-plus,
@@ -44,6 +45,13 @@ html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; he
 #gamepad.controller-joycon-r #btn-sl,
 #gamepad.controller-joycon-r #btn-sr {
     transform: none;
+}
+#gamepad.controller-joycon-r #abxy {
+    transform: none;
+}
+#gamepad.controller-joycon-r #abxy .btn {
+    transform: rotate(var(--joycon-face-rotation));
+    transform-origin: center center;
 }
 .btn { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.2); display:flex; justify-content:center; align-items:center; font-weight:bold; color:#ddd; font-size:16px; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
 .btn, .joystick, .cross { touch-action:none; -webkit-tap-highlight-color: transparent; -webkit-touch-callout:none; }
@@ -71,9 +79,9 @@ html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; he
 #toggleDel { background: #555; color: white; transition: 0.2s; }
 #toggleDel.active { background: #e33; }
 
-/* Rotate labels for horizontal Joy-Con usage */
-#gamepad.controller-joycon-l .btn:not(#btn-sl):not(#btn-sr):not(.btn-circle) .label,
-#gamepad.controller-joycon-r .btn:not(#btn-sl):not(#btn-sr):not(.btn-circle) .label {
+/* Keep labels attached to the controls; Joy-Con R face buttons stay in the physical X/Y/A/B orientation. */
+#gamepad.controller-joycon-l .label,
+#gamepad.controller-joycon-r .label {
     display: inline-block;
-    transform: rotate(90deg);
+    transform: none;
 }

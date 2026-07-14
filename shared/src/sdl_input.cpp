@@ -562,8 +562,8 @@ void SDLInputManager::push_motion_sample(Device& d, const ns::MotionReport& samp
             d.has_motion_samples = true;
             return;
         }
-        d.motion_samples[0] = sample;
-        d.motion_samples[1] = sample;
+        d.motion_samples[0] = d.motion_samples[1];
+        d.motion_samples[1] = d.motion_samples[2];
         d.motion_samples[2] = sample;
     }
 

@@ -49,6 +49,31 @@
         }
     };
 
+    const faceButtonSlots = [
+        {selector: '#abxy .up', standardLabel: 'X', standardBit: 8, joyconRLabel: 'A', joyconRBit: 4},
+        {selector: '#abxy .left', standardLabel: 'Y', standardBit: 1, joyconRLabel: 'X', joyconRBit: 8},
+        {selector: '#abxy .right', standardLabel: 'A', standardBit: 4, joyconRLabel: 'B', joyconRBit: 2},
+        {selector: '#abxy .down', standardLabel: 'B', standardBit: 2, joyconRLabel: 'Y', joyconRBit: 1}
+    ];
+
+    // Joy-Con R uses the rotated on-screen order requested by the user:
+    // A on top, B on the right, Y on the bottom and X on the left.
+    // The emitted bits follow the same rotated mapping:
+    // physical X->A, physical A->B, physical B->Y, physical Y->X.
+    function applyFaceButtonMapping(root, type) {
+        if (!root) return;
+        const joyconR = type === JOYCON_R;
+        for (const slot of faceButtonSlots) {
+            const button = root.querySelector(slot.selector);
+            if (!button) continue;
+            const label = button.querySelector('.label');
+            if (label) label.textContent = joyconR ? slot.joyconRLabel : slot.standardLabel;
+            if (button.hasAttribute('data-btn')) {
+                button.dataset.btn = String(joyconR ? slot.joyconRBit : slot.standardBit);
+            }
+        }
+    }
+
     const allIds = Object.keys(layouts[PRO]);
     const clone = value => JSON.parse(JSON.stringify(value));
     const storageKey = type => `nswc_layout_${type}`;
@@ -110,4 +135,5 @@
     window.nsControllerLayoutStorageKey = storageKey;
     window.nsLoadControllerLayout = load;
     window.nsApplyControllerSkin = applySkin;
+    window.nsApplyControllerFaceButtons = applyFaceButtonMapping;
 })();

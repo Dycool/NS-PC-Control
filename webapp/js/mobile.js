@@ -15,7 +15,9 @@ function allowedForController(id) {
     return controllerType === CONTROLLER_JOYCON_L ? joyconLeftOnly.has(id) : joyconRightOnly.has(id);
 }
 function applyLayout() {
-    nsApplyControllerSkin(document.getElementById('gamepad'), controllerType);
+    const gamepad = document.getElementById('gamepad');
+    nsApplyControllerSkin(gamepad, controllerType);
+    nsApplyControllerFaceButtons(gamepad, controllerType);
     for(let id of NSControllerControlIds) {
         let el = document.getElementById(id);
         if(!el) continue;
@@ -299,10 +301,11 @@ function setupJoystick(baseId, knobId, axisX, axisY) {
         knob.style.transform = `translate(${dx}px, ${dy}px)`;
         
         let physX = dx, physY = dy;
-        if (controllerType === 1) { // JOYCON_L
-            physX = -dy; physY = dx;
-        } else if (controllerType === 2) { // JOYCON_R
-            physX = dy; physY = -dx;
+        if (controllerType === CONTROLLER_JOYCON_L || controllerType === CONTROLLER_JOYCON_R) {
+            // Landscape Joy-Con axes: left -> up, down -> left,
+            // right -> down, and up -> right.
+            physX = -dy;
+            physY = dx;
         }
         
         state[axisX] = Math.round(((physX / maxDist) + 1) * 127.5);
