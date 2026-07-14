@@ -1,10 +1,8 @@
 (function () {
     const PRO = 3, JOYCON_L = 1, JOYCON_R = 2;
 
-    // Previous Joy-Con defaults from the earlier vertical-screen pass. If a
-    // saved layout still matches these exactly, silently migrate it to the new
-    // phone-top-aligned defaults below; genuinely customized layouts remain
-    // untouched.
+    // Last shipped Joy-Con defaults. If a saved layout still matches these
+    // exactly, silently migrate it to the new shared-template defaults below.
     const legacyDefaults = {
         [JOYCON_L]: {
             'btn-zl': {l:31, t:2, w:38, h:8}, 'btn-l': {l:34, t:11, w:32, h:7},
@@ -34,24 +32,20 @@
             'abxy': {l:78, t:35, w:16},
             'rstick': {l:62, t:60, w:16}, 'btn-rs': {l:85, t:80, w:5}
         },
-        // Joy-Con (L), aligned so the Joy-Con top (L/ZL side) points toward
-        // the phone's top edge in the fixed landscape pose.
+        // Shared Joy-Con layout template: L and R look almost the same.
         [JOYCON_L]: {
-            'btn-zl': {l:3, t:28, w:9, h:18}, 'btn-l': {l:12, t:31, w:8, h:12},
-            'btn-sl': {l:34, t:18, w:12, h:6}, 'btn-sr': {l:52, t:18, w:12, h:6},
-            'btn-minus': {l:22, t:28, w:6}, 'btn-capture': {l:71, t:29, w:6},
-            'lstick': {l:28, t:34, w:18}, 'btn-ls': {l:41, t:57, w:6},
-            'dpad': {l:54, t:35, w:18}
+            'btn-zl': {l:2, t:28, w:10, h:22}, 'btn-l': {l:14, t:31, w:8, h:15},
+            'btn-sl': {l:34, t:9, w:14, h:8}, 'btn-sr': {l:53, t:9, w:14, h:8},
+            'btn-minus': {l:25, t:22, w:8}, 'btn-capture': {l:76, t:24, w:8},
+            'lstick': {l:29, t:33, w:24}, 'btn-ls': {l:50, t:58, w:8},
+            'dpad': {l:62, t:34, w:24}
         },
-        // Joy-Con (R), same phone-top alignment as Joy-Con (L): ZR/R point
-        // toward the phone top, ABXY sits in the Joy-Con's upper half, and the
-        // stick remains in the lower half.
         [JOYCON_R]: {
-            'btn-zr': {l:3, t:28, w:9, h:18}, 'btn-r': {l:12, t:31, w:8, h:12},
-            'btn-sl': {l:34, t:76, w:12, h:6}, 'btn-sr': {l:52, t:76, w:12, h:6},
-            'btn-plus': {l:23, t:64, w:6}, 'btn-home': {l:71, t:65, w:6},
-            'abxy': {l:28, t:35, w:18},
-            'rstick': {l:54, t:35, w:18}, 'btn-rs': {l:67, t:58, w:6}
+            'btn-zr': {l:2, t:28, w:10, h:22}, 'btn-r': {l:14, t:31, w:8, h:15},
+            'btn-sl': {l:34, t:9, w:14, h:8}, 'btn-sr': {l:53, t:9, w:14, h:8},
+            'btn-plus': {l:25, t:22, w:8}, 'btn-home': {l:76, t:24, w:8},
+            'rstick': {l:29, t:33, w:24}, 'btn-rs': {l:50, t:58, w:8},
+            'abxy': {l:62, t:34, w:24}
         }
     };
 
