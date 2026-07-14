@@ -3,6 +3,7 @@ const CONTROLLER_JOYCON_L = 1, CONTROLLER_JOYCON_R = 2, CONTROLLER_PRO = 3;
 // Pro source and lets the server choose S1 Pro, S2 Pro, or HORI.
 const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
 let controllerType = parseInt(localStorage.getItem('nswc_controller_type') || String(CONTROLLER_PRO));
+const isMobileClient = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || ('ontouchstart' in window && navigator.maxTouchPoints > 0);
 if (![CONTROLLER_JOYCON_L, CONTROLLER_JOYCON_R, CONTROLLER_PRO].includes(controllerType)) controllerType = CONTROLLER_PRO;
 if (!nativeMobileHost && !isMobileClient) controllerType = CONTROLLER_PRO;
 const defLayout = NSControllerLayouts[controllerType];

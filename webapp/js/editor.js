@@ -1,5 +1,5 @@
 const nativeMobileHost = !!(window.NSBridge && typeof NSBridge.onTouchState === 'function');
-const isMobileClient = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || (\'ontouchstart\' in window && navigator.maxTouchPoints > 0);
+const isMobileClient = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || ('ontouchstart' in window && navigator.maxTouchPoints > 0);
 let controllerType = 3;
 if (nativeMobileHost || isMobileClient) {
     controllerType = parseInt(localStorage.getItem('nswc_controller_type') || '3');
