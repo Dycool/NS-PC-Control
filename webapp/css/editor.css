@@ -5,39 +5,28 @@ html, body { background: #111; color: #fff; margin:0; padding:0; width: 100%; he
 
 .edit-item { position: absolute; box-sizing: border-box; z-index: 1; }
 #gamepad.controller-joycon-l::before, #gamepad.controller-joycon-r::before {
-    content: ""; position: absolute; top: 1.5%; bottom: 1.5%; left: 31%; width: 38%;
+    content: ""; position: absolute; left: 2%; right: 2%; top: 24%; bottom: 24%;
     box-sizing: border-box; border: 2px solid rgba(255,255,255,0.16);
-    border-radius: 22% / 10%; box-shadow: inset 0 0 35px rgba(0,0,0,0.34), 0 12px 32px rgba(0,0,0,0.4);
+    border-radius: 7% / 28%; box-shadow: inset 0 0 35px rgba(0,0,0,0.34), 0 12px 32px rgba(0,0,0,0.4);
     pointer-events: none;
 }
 #gamepad.controller-joycon-l::before { background: rgba(0,190,220,0.18); }
 #gamepad.controller-joycon-r::before { background: rgba(255,75,90,0.18); }
 #gamepad.controller-joycon-l::after, #gamepad.controller-joycon-r::after {
-    content: ""; position: absolute; top: 22%; bottom: 16%; width: 2.5%;
+    content: ""; position: absolute; left: 18%; right: 18%; height: 2.8%;
     background: rgba(15,15,15,0.85); border: 1px solid rgba(255,255,255,0.13);
     border-radius: 8px; pointer-events: none;
 }
-#gamepad.controller-joycon-l::after { right: 30%; }
-#gamepad.controller-joycon-r::after { left: 30%; }
+#gamepad.controller-joycon-l::after { top: 22%; }
+#gamepad.controller-joycon-r::after { bottom: 22%; }
 
-/* Rotate the Joy-Con face controls so the editor/touch UI reads like a real
-   vertically held Joy-Con while still being shown on a landscape screen. */
-#gamepad.controller-joycon-l { --joycon-face-rotation: 90deg; }
+/* On touch/editor pages, the Joy-Con top must match the phone top in the
+   fixed landscape pose. That means the Joy-Con is visually rotated so its
+   shoulder side points toward the phone's top edge (screen-left in this pose). */
+#gamepad.controller-joycon-l { --joycon-face-rotation: -90deg; }
 #gamepad.controller-joycon-r { --joycon-face-rotation: -90deg; }
-#gamepad.controller-joycon-l #btn-minus,
-#gamepad.controller-joycon-l #btn-capture,
-#gamepad.controller-joycon-l #lstick,
-#gamepad.controller-joycon-l #btn-ls,
-#gamepad.controller-joycon-l #dpad,
-#gamepad.controller-joycon-l #btn-sl,
-#gamepad.controller-joycon-l #btn-sr,
-#gamepad.controller-joycon-r #btn-plus,
-#gamepad.controller-joycon-r #btn-home,
-#gamepad.controller-joycon-r #rstick,
-#gamepad.controller-joycon-r #btn-rs,
-#gamepad.controller-joycon-r #abxy,
-#gamepad.controller-joycon-r #btn-sl,
-#gamepad.controller-joycon-r #btn-sr {
+#gamepad.controller-joycon-l .edit-item,
+#gamepad.controller-joycon-r .edit-item {
     transform: rotate(var(--joycon-face-rotation));
     transform-origin: center center;
 }

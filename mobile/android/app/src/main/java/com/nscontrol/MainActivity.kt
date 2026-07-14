@@ -781,7 +781,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         } else {
-            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             if (Build.VERSION.SDK_INT >= 30) {
                 window.insetsController?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
             } else {
@@ -1354,6 +1354,7 @@ class MainActivity : AppCompatActivity() {
     private fun disconnect() {
         deactivateControlClient()
         connected = false
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         try { webView.loadUrl("about:blank") } catch (_: Throwable) {}
         setContentView(connectView)
     }
