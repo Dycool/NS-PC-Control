@@ -53,6 +53,7 @@ private:
 class SettingsDialog : public QDialog {
 public:
     explicit SettingsDialog(QWidget* parent = nullptr, const QString& serverHost = QString());
+    ~SettingsDialog() override;
 
 private:
     QString serverHost;
@@ -101,6 +102,7 @@ std::string macro_safe_file_stem(const std::string& raw_name);
 class MacroDialog : public QDialog {
 public:
     explicit MacroDialog(QWidget* parent = nullptr);
+    ~MacroDialog() override;
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;

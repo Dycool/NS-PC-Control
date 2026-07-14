@@ -15,7 +15,6 @@
 enum { KB_OFF = 0, KB_SINGLE = 1, KB_OVERRIDE = 2 };
 
 extern std::atomic<int> g_keyboardMode;
-extern std::atomic<bool> g_keyboardInputSuspended;
 extern std::atomic<bool> g_gyroEnabled;
 extern std::atomic<bool> g_rumbleEnabled;
 extern std::atomic<bool> g_switch2AudioEnabled;
@@ -76,4 +75,7 @@ bool mouse_mode_active();
 bool joycon_mouse_mode_supported();
 bool joycon_mouse_mode_active();
 bool mouse_capture_active();
+void suspend_keyboard_mouse_input();
+void resume_keyboard_mouse_input();
+bool keyboard_mouse_input_suspended();
 void clear_mouse_button_inputs();

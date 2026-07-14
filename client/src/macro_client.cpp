@@ -195,6 +195,7 @@ std::expected<void, std::string> upsert_macro_entry(ns::macro::Entry e, bool for
 
 void poll_macro_entry_hotkeys() {
     std::vector<std::string> to_run;
+    const bool input_suspended = keyboard_mouse_input_suspended();
     {
         std::lock_guard<std::mutex> lk(g_macro_mtx);
         for (const auto& e : g_macro_entries) {
@@ -204,7 +205,7 @@ void poll_macro_entry_hotkeys() {
             bool down = key_is_down(hk);
             bool was_down = g_macro_hotkey_down[hk];
             g_macro_hotkey_down[hk] = down;
-            if (down && !was_down) to_run.push_back(e.json);
+            if (!input_suspended && down && !was_down) to_run.push_back(e.json);
         }
     }
     for (const auto& json : to_run) (void)start_macro_text(json);

@@ -624,7 +624,28 @@ static void publish_amiibo_request_for_port(int port, bool requested) {
 
 void set_controller_type_for_port(int ctrl, uint8_t protocol_type, bool schedule_reenumeration) {
     if (ctrl < 0 || ctrl >= HID_PORT_COUNT) return;
-    if (g_port_protocol_type[ctrl] == protocol_type) return;
+    if (g_port_protocol_type[ctrl] == protocol_type) {
+        // Disconnecting a client intentionally returns unused ports to an idle
+        // Pro state without disturbing the console. If the next client also
+        // requests Pro, the live value is already Pro even though the console
+        // may still have a Joy-Con identity latched from the last USB session.
+        // Schedule from the enumerated-vs-live mismatch, but only once: this
+        // function is also reached by the 250 Hz writer and must not keep
+        // pushing the quiet-period deadline forward forever.
+        if (schedule_reenumeration
+                && g_ctx.usb_controller_family != UsbControllerFamily::Hori
+                && g_enumerated_ns_type[ctrl] != g_port_controller_type[ctrl]) {
+            uint64_t expected = 0;
+            if (g_s1_identity_change_us.compare_exchange_strong(
+                    expected, now_us(), std::memory_order_relaxed)
+                    && g_ctx.verbose) {
+                std::println("Controller identity mismatch on port {}: console={} requested={}; "
+                             "scheduling USB re-enumeration",
+                             ctrl, g_enumerated_ns_type[ctrl], g_port_controller_type[ctrl]);
+            }
+        }
+        return;
+    }
 
     bool is_s2 = false;
     uint8_t ns_type = NS_TYPE_PRO;

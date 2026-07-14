@@ -19,6 +19,7 @@
 #include <QSignalBlocker>
 #include <QWidget>
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <mutex>
 #include <unordered_set>
@@ -130,7 +131,7 @@ static void open_s2_bindings_dialog(QWidget* parent,
 
 BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
     // Do not let keys used to edit bindings reach the connected controller.
-    g_keyboardInputSuspended.store(true, std::memory_order_relaxed);
+    suspend_keyboard_mouse_input();
     {
         std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
         editBindings = g_keyBindings;
@@ -184,7 +185,7 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
 }
 
 BindingsDialog::~BindingsDialog() {
-    g_keyboardInputSuspended.store(false, std::memory_order_relaxed);
+    resume_keyboard_mouse_input();
 }
 
 void BindingsDialog::keyPressEvent(QKeyEvent* event) {
@@ -271,6 +272,7 @@ void BindingsDialog::refresh() {
 }
 
 SettingsDialog::SettingsDialog(QWidget* parent, const QString& host) : QDialog(parent), serverHost(host) {
+    suspend_keyboard_mouse_input();
     setWindowTitle("Settings");
     setModal(true);
     setMinimumWidth(420);
@@ -352,20 +354,23 @@ SettingsDialog::SettingsDialog(QWidget* parent, const QString& host) : QDialog(p
     mouseSensitivityLabel = new QLabel("Mouse sensitivity", this);
     mouseSensRow->addWidget(mouseSensitivityLabel, 0, 0);
     mouseSensitivitySlider = new QSlider(Qt::Horizontal, this);
-    mouseSensitivitySlider->setRange(1, 100);
+    mouseSensitivitySlider->setRange(0, 500);
     mouseSensitivitySlider->setSingleStep(1);
-    mouseSensitivitySlider->setPageStep(5);
-    mouseSensitivitySlider->setValue(std::clamp(static_cast<int>(g_mouseSensitivity.load() * 10.0 + 0.5), 1, 100));
+    mouseSensitivitySlider->setPageStep(10);
+    mouseSensitivitySlider->setValue(std::clamp(
+        static_cast<int>(std::lround(g_mouseSensitivity.load() * 100.0)), 0, 500));
+    mouseSensitivitySlider->setToolTip(
+        QStringLiteral("0.00 disables mouse movement; 1.00 is the default."));
     mouseSensRow->addWidget(mouseSensitivitySlider, 0, 1);
     mouseSensitivityValue = new QLabel(this);
-    mouseSensitivityValue->setMinimumWidth(36);
+    mouseSensitivityValue->setMinimumWidth(44);
     mouseSensitivityValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     mouseSensRow->addWidget(mouseSensitivityValue, 0, 2);
     outer->addLayout(mouseSensRow);
     connect(mouseSensitivitySlider, &QSlider::valueChanged, this, [this](int v) {
-        mouseSensitivityValue->setText(QString::number(v / 10.0, 'f', 1));
+        mouseSensitivityValue->setText(QString::number(v / 100.0, 'f', 2));
     });
-    mouseSensitivityValue->setText(QString::number(mouseSensitivitySlider->value() / 10.0, 'f', 1));
+    mouseSensitivityValue->setText(QString::number(mouseSensitivitySlider->value() / 100.0, 'f', 2));
     connect(mouseModeBox, &QCheckBox::toggled, this, [this](bool checked) {
         if (checked && joyconMouseModeBox && joyconMouseModeBox->isChecked()) {
             const QSignalBlocker blocker(joyconMouseModeBox);
@@ -447,6 +452,10 @@ SettingsDialog::SettingsDialog(QWidget* parent, const QString& host) : QDialog(p
 
     updateMouseModeControls();
     updateJoyconHorizontalControl();
+}
+
+SettingsDialog::~SettingsDialog() {
+    resume_keyboard_mouse_input();
 }
 
 void SettingsDialog::updateMouseModeControls() {
@@ -536,7 +545,7 @@ void SettingsDialog::saveSettings() {
     if (joyconMouseMode && nativeAvailable) mouseMode = false;
     g_mouseModeEnabled.store(mouseMode);
     g_joyconMouseModeEnabled.store(joyconMouseMode);
-    g_mouseSensitivity.store(mouseSensitivitySlider->value() / 10.0);
+    g_mouseSensitivity.store(mouseSensitivitySlider->value() / 100.0);
     const int controllerType = controllerTypeBox->currentData().toInt();
     const bool joycon = controllerType == ns::CONTROLLER_TYPE_JOYCON_L || controllerType == ns::CONTROLLER_TYPE_JOYCON_R;
     if (!g_connected.load() && !g_connecting.load(std::memory_order_relaxed)) {
@@ -676,6 +685,7 @@ std::string macro_safe_file_stem(const std::string& raw_name) {
 }
 
 MacroDialog::MacroDialog(QWidget* parent) : QDialog(parent) {
+    suspend_keyboard_mouse_input();
     setWindowTitle("Macros");
     setModal(false);
     setMinimumWidth(620);
@@ -706,6 +716,10 @@ MacroDialog::MacroDialog(QWidget* parent) : QDialog(parent) {
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
     connect(recordBtn, &QPushButton::clicked, this, [this] { toggleRecord(); });
     rebuild();
+}
+
+MacroDialog::~MacroDialog() {
+    resume_keyboard_mouse_input();
 }
 
 void MacroDialog::keyPressEvent(QKeyEvent* event) {

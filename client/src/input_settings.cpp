@@ -4,6 +4,7 @@
 #include "stream_runtime.hpp"
 #include "shared/macros.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <QSettings>
@@ -13,7 +14,7 @@
 #include <QCoreApplication>
 
 std::atomic<int> g_keyboardMode{KB_OFF};
-std::atomic<bool> g_keyboardInputSuspended{false};
+static std::atomic<unsigned int> g_keyboardMouseInputSuspendDepth{0};
 std::atomic<bool> g_gyroEnabled{true};
 std::atomic<bool> g_rumbleEnabled{true};
 std::atomic<bool> g_switch2AudioEnabled{false};
@@ -113,7 +114,7 @@ bool mouse_mode_active() {
     return g_mouseModeEnabled.load(std::memory_order_relaxed)
         && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && !joycon_mouse_mode_active()
-        && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
+        && !keyboard_mouse_input_suspended();
 }
 
 bool joycon_mouse_mode_supported() {
@@ -128,11 +129,31 @@ bool joycon_mouse_mode_supported() {
 bool joycon_mouse_mode_active() {
     return g_joyconMouseModeEnabled.load(std::memory_order_relaxed)
         && joycon_mouse_mode_supported()
-        && !g_keyboardInputSuspended.load(std::memory_order_relaxed);
+        && !keyboard_mouse_input_suspended();
 }
 
 bool mouse_capture_active() {
     return mouse_mode_active() || joycon_mouse_mode_active();
+}
+
+void suspend_keyboard_mouse_input() {
+    if (g_keyboardMouseInputSuspendDepth.fetch_add(1, std::memory_order_acq_rel) == 0)
+        mouse_input_reset();
+}
+
+void resume_keyboard_mouse_input() {
+    unsigned int depth = g_keyboardMouseInputSuspendDepth.load(std::memory_order_acquire);
+    while (depth != 0) {
+        if (g_keyboardMouseInputSuspendDepth.compare_exchange_weak(
+                depth, depth - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            if (depth == 1) mouse_input_reset();
+            return;
+        }
+    }
+}
+
+bool keyboard_mouse_input_suspended() {
+    return g_keyboardMouseInputSuspendDepth.load(std::memory_order_acquire) != 0;
 }
 
 bool is_valid_key_code(const std::string& s) {
@@ -225,7 +246,8 @@ void load_saved_feature_toggles() {
     g_switch2AudioSupported.store(false, std::memory_order_relaxed);
     g_horiModeEnabled.store(false, std::memory_order_relaxed);
     double sens = settings.value("MouseSensitivity", 1.0).toDouble();
-    g_mouseSensitivity.store((sens >= 0.05 && sens <= 20.0) ? sens : 1.0);
+    if (!std::isfinite(sens)) sens = 1.0;
+    g_mouseSensitivity.store(std::clamp(sens, 0.0, 5.0));
     int controllerType = settings.value("ControllerType", ns::CONTROLLER_TYPE_PRO).toInt();
     if (controllerType != ns::CONTROLLER_TYPE_PRO &&
         controllerType != ns::CONTROLLER_TYPE_JOYCON_L &&
@@ -387,7 +409,7 @@ bool key_is_down(const std::string& name_raw) {
 }
 
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
-    if (g_keyboardInputSuspended.load(std::memory_order_relaxed)) return;
+    if (keyboard_mouse_input_suspended()) return;
     std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     auto get = [](const std::string& btn) -> std::string {
         auto it = g_keyBindings.find(btn);

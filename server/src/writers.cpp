@@ -157,6 +157,16 @@ void writer_thread(std::stop_token stoken, int hz) {
         memset(rt[i].cmd_response_buf, 0, sizeof(rt[i].cmd_response_buf));
     };
     bool s2_live[HID_PORT_COUNT] = {};
+    uint64_t s2_enumeration_started_us = 0;
+    constexpr uint64_t S2_ENUMERATION_WATCHDOG_US = 12'000'000ULL;
+
+    auto any_active_client = [&]() {
+        for (int c = 0; c < MAX_CLIENTS; ++c) {
+            std::lock_guard<std::mutex> lk(g_ctx.mtx[c]);
+            if (g_ctx.clients[c].active) return true;
+        }
+        return false;
+    };
 
     auto perform_requested_s2_reenumeration = [&]() -> bool {
         if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2
@@ -169,14 +179,18 @@ void writer_thread(std::stop_token stoken, int hz) {
         clear_switch2_usb_activity();
         close_all_fds();
         s2_live[0] = false;
-        if (!run_gadget_setup_if_needed(true,
-                "S2 client connected or console woke; forcing USB re-enumeration")) {
+        const bool started = run_gadget_setup_if_needed(true,
+            "S2 client connected or console woke; forcing USB re-enumeration");
+        if (!started) {
+            s2_enumeration_started_us = 0;
             // A transient teardown/setup failure must remain retryable, but do
             // not spin at full speed if the UDC is temporarily unavailable.
             g_ctx.switch2_usb_reenumeration_requested.store(
                 true, std::memory_order_release);
             for (int i = 0; i < 50 && !stoken.stop_requested(); ++i)
                 std::this_thread::sleep_for(ms(10));
+        } else {
+            s2_enumeration_started_us = now_us();
         }
         return true;
     };
@@ -198,6 +212,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                     all_open = false;
                 } else if (!s2_live[i]) {
                     s2_live[i] = true;
+                    s2_enumeration_started_us = 0;
                     reset_port_runtime(i);
                     // The port going live means the console enumerated and
                     // configured the gadget. Re-assert the authoritative host
@@ -231,6 +246,23 @@ void writer_thread(std::stop_token stoken, int hz) {
             if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2)
                 clear_switch2_usb_activity();
             close_all_fds();
+            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
+                    && s2_enumeration_started_us != 0
+                    && elapsed_us_saturated(now_us(), s2_enumeration_started_us)
+                        >= S2_ENUMERATION_WATCHDOG_US) {
+                if (any_active_client()) {
+                    if (g_ctx.verbose) {
+                        std::println("[s2-rg] enumeration did not reach HID-ready within {} ms; "
+                                     "recycling Raw Gadget",
+                                     S2_ENUMERATION_WATCHDOG_US / 1000ULL);
+                    }
+                    s2_enumeration_started_us = 0;
+                    g_ctx.switch2_usb_reenumeration_requested.store(
+                        true, std::memory_order_release);
+                    continue;
+                }
+                s2_enumeration_started_us = 0;
+            }
             run_gadget_setup_if_needed(false, "requested USB gadget endpoints could not all be opened");
             for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
