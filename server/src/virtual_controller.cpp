@@ -622,7 +622,7 @@ static void publish_amiibo_request_for_port(int port, bool requested) {
     }
 }
 
-void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
+void set_controller_type_for_port(int ctrl, uint8_t protocol_type, bool schedule_reenumeration) {
     if (ctrl < 0 || ctrl >= HID_PORT_COUNT) return;
     if (g_port_protocol_type[ctrl] == protocol_type) return;
 
@@ -686,7 +686,8 @@ void set_controller_type_for_port(int ctrl, uint8_t protocol_type) {
     // type change stays invisible until the gadget re-enumerates. Note the
     // change; the writer forces one debounced re-enumeration once the layout
     // settles. Hori is the only fixed-identity family.
-    if (ns_type != prev_ns_type && g_ctx.usb_controller_family != UsbControllerFamily::Hori) {
+    if (ns_type != prev_ns_type && g_ctx.usb_controller_family != UsbControllerFamily::Hori
+            && schedule_reenumeration) {
         g_s1_identity_change_us.store(now_us(), std::memory_order_relaxed);
     }
 }

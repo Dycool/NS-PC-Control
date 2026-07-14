@@ -159,12 +159,8 @@ void publish_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ss
 void publish_s2_rumble_event(int client_idx, int sub_idx, const uint8_t* packet, ssize_t len, bool publish_neutral);
 
 uint8_t controller_type_for_port(int ctrl);
-void set_controller_type_for_port(int ctrl, uint8_t protocol_type);
-// The console reads each port's identity (device info subcmd 0x02, SPI 0x6012)
-// only during the USB handshake, so an S1 type change after enumeration is
-// invisible until the gadget re-enumerates. The writer polls this and forces
-// one debounced re-enumeration when the live types differ from the ones the
-// console last read.
+void set_controller_type_for_port(int ctrl, uint8_t protocol_type, bool schedule_reenumeration = true);
+
 bool s1_identity_reenumeration_due(uint64_t now);
 void mark_s1_identity_enumerated();
 constexpr uint64_t S1_TYPE_REENUM_QUIET_US = 1'000'000ULL;

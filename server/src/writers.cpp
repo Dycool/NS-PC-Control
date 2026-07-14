@@ -436,7 +436,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                         : (g_ctx.usb_controller_family == UsbControllerFamily::Hori
                             ? ns::CONTROLLER_TYPE_HORI
                             : ns::CONTROLLER_TYPE_PRO);
-                    set_controller_type_for_port(h, idle_profile);
+                    set_controller_type_for_port(h, idle_profile, false);
                 }
             }
         };

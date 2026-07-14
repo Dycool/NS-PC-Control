@@ -1337,7 +1337,7 @@ bool s2_rawgadget_setup(bool force, const char* reason) {
         s2_rawgadget_teardown();
         // Keep the device detached long enough for the host controller to
         // observe a real disconnect before USB_RAW_IOCTL_RUN reconnects it.
-        if (force) std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        if (force) std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
     if (!s2_rawgadget_module_available()) {
