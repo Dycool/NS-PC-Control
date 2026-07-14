@@ -528,12 +528,13 @@ void apply_joycon_horizontal_motion_transform(ns::MotionReport& m, int controlle
     // Motion is in the Pro-normalised frame (X = forward, Y = left, Z = up).
     // Rotate Y/Z the same way the stick is rotated above so a physical
     // gesture lands on the same in-game axis in both orientations.
-    const auto rotate = [left](int16_t& y, int16_t& z) {
-        const int16_t old_y = y;
-        const int16_t old_z = z;
-        if (left) { y = static_cast<int16_t>(-old_z); z = old_y; }
-        else      { y = old_z;                        z = static_cast<int16_t>(-old_y); }
-    };
-    rotate(m.ay, m.az);
-    rotate(m.gy, m.gz);
+    const int16_t old_ay = m.ay, old_az = m.az;
+    const int16_t old_gy = m.gy, old_gz = m.gz;
+    if (left) {
+        m.ay = static_cast<int16_t>(-old_az); m.az = old_ay;
+        m.gy = static_cast<int16_t>(-old_gz); m.gz = old_gy;
+    } else {
+        m.ay = old_az;                        m.az = static_cast<int16_t>(-old_ay);
+        m.gy = old_gz;                        m.gz = static_cast<int16_t>(-old_gy);
+    }
 }
