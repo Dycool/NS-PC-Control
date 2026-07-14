@@ -518,6 +518,10 @@ bool switch2_native_handle_vendor_command(int port,
             dl = 0;
             break;
         case 0x0C: { // feature select
+            // Feature-select replies use the 10 78 status observed on real
+            // Joy-Con 2 hardware, rather than the generic 00 F8 command ACK.
+            r[4] = 0x10;
+            r[5] = 0x78;
             if (sub == 0x01) {
                 const uint8_t f = c.size() > 8 ? c[8] : 0;
                 const bool joycon = state_is_joycon(s);
@@ -542,6 +546,12 @@ bool switch2_native_handle_vendor_command(int port,
                                  mouse_is_enabled ? "enabled" : "disabled", port);
                 }
                 dl = 4;
+            }
+            if (g_ctx.verbose) {
+                std::println("[s2][feature][tx] port={} sub=0x{:02x} "
+                             "mask=0x{:08x} enabled=0x{:08x} response={}",
+                             port, sub, read_le32_at(c, 8), s.enabled_features,
+                             s2_hex(std::span<const uint8_t>(r.data(), 8 + dl)));
             }
             break;
         }
