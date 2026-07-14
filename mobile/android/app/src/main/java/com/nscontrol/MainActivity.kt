@@ -51,7 +51,13 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
-    companion object { private const val TAG = "NSMobile" }
+    companion object {
+        private const val TAG = "NSMobile"
+        // Switch controller IMU samples are effectively a high-rate stream.
+        // Request 200 Hz so short acceleration gestures are not lost between
+        // Android's default 50 Hz GAME callbacks.
+        private const val MOTION_SENSOR_PERIOD_US = 5_000
+    }
     private lateinit var connectView: View
     private lateinit var webView: WebView
     private lateinit var hostInput: EditText
@@ -564,9 +570,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pushMotionSampleLocked() {
-        if (!hasLatestPhoneGyro || (!hasLatestPhoneGravity && !hasLatestPhoneAccel)) return
+        if (!hasLatestPhoneGyro || (!hasLatestPhoneAccel && !hasLatestPhoneGravity)) return
 
-        val accel = if (hasLatestPhoneGravity) latestPhoneGravity else latestPhoneAccel
+        // A Switch IMU report needs total acceleration: gravity plus the user's
+        // translational movement. TYPE_GRAVITY is orientation-only and removes
+        // gestures such as the upward tennis serve toss. Prefer the hardware
+        // accelerometer, which already includes gravity; retain gravity only as
+        // a last-resort fallback for unusual devices without accelerometer data.
+        val accel = if (hasLatestPhoneAccel) latestPhoneAccel else latestPhoneGravity
 
         // Pro Controller touch motion follows the forced landscape display.
         // A single Joy-Con L or R is physically held vertically, with the phone's
@@ -643,14 +654,18 @@ class MainActivity : AppCompatActivity() {
             latestMotionSampleCount = 0
             for (i in 0 until Protocol.MOTION_SAMPLE_COUNT) latestMotionSamples[i].fill(0)
         }
-        val gravityOpened = gravitySensor?.let {
-            sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME)
+        val accelOpened = accelSensor?.let {
+            sensorManager.registerListener(phoneSensorListener, it, MOTION_SENSOR_PERIOD_US)
         } ?: false
-        var opened = gravityOpened
-        if (!gravityOpened) {
-            accelSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
+        var opened = accelOpened
+        if (!accelOpened) {
+            gravitySensor?.let {
+                opened = sensorManager.registerListener(phoneSensorListener, it, MOTION_SENSOR_PERIOD_US) || opened
+            }
         }
-        gyroSensor?.let { opened = sensorManager.registerListener(phoneSensorListener, it, SensorManager.SENSOR_DELAY_GAME) || opened }
+        gyroSensor?.let {
+            opened = sensorManager.registerListener(phoneSensorListener, it, MOTION_SENSOR_PERIOD_US) || opened
+        }
         phoneSensorsActive = opened
     }
 
@@ -1238,9 +1253,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
             }
-            gravity?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME) }
-            if (gravity == null) accel?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME) }
-            sm.registerListener(listener, gyro, SensorManager.SENSOR_DELAY_GAME)
+            val accelOpened = accel?.let {
+                sm.registerListener(listener, it, MOTION_SENSOR_PERIOD_US)
+            } ?: false
+            if (!accelOpened) {
+                gravity?.let { sm.registerListener(listener, it, MOTION_SENSOR_PERIOD_US) }
+            }
+            sm.registerListener(listener, gyro, MOTION_SENSOR_PERIOD_US)
             physicalSensorManagers[slot] = sm
             physicalSensorListeners[slot] = listener
             physicalPads[slot].hasGyro = true
@@ -1250,9 +1269,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pushPhysicalMotionSampleLocked(slot: Int) {
-        if (!physicalHasGyro[slot] || (!physicalHasGravity[slot] && !physicalHasAccel[slot])) return
+        if (!physicalHasGyro[slot] || (!physicalHasAccel[slot] && !physicalHasGravity[slot])) return
 
-        val a = if (physicalHasGravity[slot]) physicalGravity[slot] else physicalAccel[slot]
+        // Match the phone path: preserve real translational acceleration for
+        // gesture-heavy games, with gravity only as a compatibility fallback.
+        val a = if (physicalHasAccel[slot]) physicalAccel[slot] else physicalGravity[slot]
         val g = physicalGyro[slot]
 
         val sample = NativeProtocol.nativePhoneMotion(a[0], a[1], a[2], g[0], g[1], g[2])

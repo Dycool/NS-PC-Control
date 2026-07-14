@@ -1205,16 +1205,20 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func pushPhoneMotionSample(_ motion: CMDeviceMotion) {
-        let g0 = motion.gravity
+        let gravity = motion.gravity
+        let user = motion.userAcceleration
+        let a0 = (x: Float(gravity.x + user.x),
+                  y: Float(gravity.y + user.y),
+                  z: Float(gravity.z + user.z))
         let r0 = motion.rotationRate
 
         // Pro Controller touch motion follows the locked landscape UI. A single
         // Joy-Con L or R is physically held vertically on top of the phone, with
         // both tops aligned, so Joy-Con motion stays in the phone's natural axes.
-        let g = remapPhoneMotionForController(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
+        let a = remapPhoneMotionForController(x: a0.x, y: a0.y, z: a0.z)
         let r = remapPhoneMotionForController(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
 
-        let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
+        let sample = ProtocolWire.motionFromApple(accelX: a.0, accelY: a.1, accelZ: a.2,
                                                   rotationX: r.0, rotationY: r.1, rotationZ: r.2)
         phoneMotion.withLock { state in
             state.samples[0] = state.samples[1]
