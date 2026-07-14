@@ -148,6 +148,45 @@ private enum ProtocolWire {
         return out
     }
 
+    private static func readMotionI16(_ sample: [UInt8], _ offset: Int) -> Int {
+        let raw = UInt16(sample[offset]) | (UInt16(sample[offset + 1]) << 8)
+        return Int(Int16(bitPattern: raw))
+    }
+
+    private static func writeMotionI16(_ sample: inout [UInt8], _ offset: Int, _ value: Int) {
+        let clamped = min(max(value, Int(Int16.min)), Int(Int16.max))
+        let raw = UInt16(bitPattern: Int16(clamped))
+        sample[offset] = UInt8(raw & 0x00ff)
+        sample[offset + 1] = UInt8((raw >> 8) & 0x00ff)
+    }
+
+    static func applyJoyConHorizontalMotion(_ sample: [UInt8], controllerType: Int) -> [UInt8] {
+        guard sample.count >= motionSampleSize,
+              controllerType == controllerTypeJoyConL || controllerType == controllerTypeJoyConR else {
+            return sample
+        }
+
+        // Same final-space transform as the desktop client's horizontal mode:
+        // the Pro-normalised packet is rotated +/-90 degrees around its X axis.
+        var out = sample
+        let oldAy = readMotionI16(out, 2)
+        let oldAz = readMotionI16(out, 4)
+        let oldGy = readMotionI16(out, 8)
+        let oldGz = readMotionI16(out, 10)
+        if controllerType == controllerTypeJoyConL {
+            writeMotionI16(&out, 2, -oldAz)
+            writeMotionI16(&out, 4, oldAy)
+            writeMotionI16(&out, 8, -oldGz)
+            writeMotionI16(&out, 10, oldGy)
+        } else {
+            writeMotionI16(&out, 2, oldAz)
+            writeMotionI16(&out, 4, -oldAy)
+            writeMotionI16(&out, 8, oldGz)
+            writeMotionI16(&out, 10, -oldGy)
+        }
+        return out
+    }
+
     static func initFrame(flags: Int, seq: UInt32, timestampUs: UInt64) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: frameSize)
         out.withUnsafeMutableBufferPointer { b in
@@ -771,7 +810,16 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             }
         case "onTouchControllerType":
             if let first = args.first {
-                touchControllerType = ViewController.normalizedControllerType(intArg(first))
+                let normalized = ViewController.normalizedControllerType(intArg(first))
+                if touchControllerType != normalized {
+                    touchControllerType = normalized
+                    phoneMotion.withLock { state in
+                        state.count = 0
+                        state.revision &+= 1
+                        state.sentRevision = .max
+                        state.samples = Array(repeating: ProtocolWire.neutralMotion(), count: ProtocolWire.motionSampleCount)
+                    }
+                }
             }
         case "onPhysicalControllerType":
             if !(controlClientActive && activeClientMode == .physical), let first = args.first {
@@ -1205,8 +1253,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         let g = remapForLandscapeTopOnLeft(x: Float(g0.x), y: Float(g0.y), z: Float(g0.z))
         let r = remapForLandscapeTopOnLeft(x: Float(r0.x), y: Float(r0.y), z: Float(r0.z))
 
-        let sample = ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
-                                                  rotationX: r.0, rotationY: r.1, rotationZ: r.2)
+        let sample = ProtocolWire.applyJoyConHorizontalMotion(
+            ProtocolWire.motionFromApple(accelX: g.0, accelY: g.1, accelZ: g.2,
+                                         rotationX: r.0, rotationY: r.1, rotationZ: r.2),
+            controllerType: touchControllerType
+        )
         phoneMotion.withLock { state in
             state.samples[0] = state.samples[1]
             state.samples[1] = state.samples[2]
@@ -1388,12 +1439,15 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 }
 
                 let r = motion.rotationRate
-                let sample = ProtocolWire.motionFromControllerApple(accelX: Float(accel.x),
-                                                                            accelY: Float(accel.y),
-                                                                            accelZ: Float(accel.z),
-                                                                            rotationX: Float(r.x),
-                                                                            rotationY: Float(r.y),
-                                                                            rotationZ: Float(r.z))
+                let sample = ProtocolWire.applyJoyConHorizontalMotion(
+                    ProtocolWire.motionFromControllerApple(accelX: Float(accel.x),
+                                                           accelY: Float(accel.y),
+                                                           accelZ: Float(accel.z),
+                                                           rotationX: Float(r.x),
+                                                           rotationY: Float(r.y),
+                                                           rotationZ: Float(r.z)),
+                    controllerType: physicalControllerType
+                )
                 pad.motionSamples[0] = pad.motionSamples[1]
                 pad.motionSamples[1] = pad.motionSamples[2]
                 pad.motionSamples[2] = sample

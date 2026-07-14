@@ -573,9 +573,12 @@ class MainActivity : AppCompatActivity() {
         val a = remapSensorForDisplay(accel)
         val g = remapSensorForDisplay(latestPhoneGyro)
 
-        val sample = NativeProtocol.nativePhoneMotion(
+        val sample = applyJoyConHorizontalMotion(
+            NativeProtocol.nativePhoneMotion(
             a[0], a[1], a[2],
             g[0], g[1], g[2]
+            ),
+            touchControllerType
         )
 
         latestMotionSamples[0] = latestMotionSamples[1]
@@ -598,6 +601,42 @@ class MainActivity : AppCompatActivity() {
 
     private fun clampMotionShort(v: Float): Short = v.roundToInt().coerceIn(-32768, 32767).toShort()
     private fun gyroDeadzoneShort(v: Short): Short = if (kotlin.math.abs(v.toInt()) <= 32) 0 else v
+
+    private fun readMotionI16(sample: ByteArray, offset: Int): Int =
+        ((sample[offset].toInt() and 0xFF) or (sample[offset + 1].toInt() shl 8)).toShort().toInt()
+
+    private fun writeMotionI16(sample: ByteArray, offset: Int, value: Int) {
+        val v = value.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+        sample[offset] = (v and 0xFF).toByte()
+        sample[offset + 1] = ((v ushr 8) and 0xFF).toByte()
+    }
+
+    private fun applyJoyConHorizontalMotion(sample: ByteArray, controllerType: Int): ByteArray {
+        if (sample.size < Protocol.MOTION_SAMPLE_SIZE ||
+            (controllerType != Protocol.CONTROLLER_TYPE_JOYCON_L &&
+                controllerType != Protocol.CONTROLLER_TYPE_JOYCON_R)) return sample
+
+        // Match desktop's Joy-Con horizontal-mode transform. The shared/native
+        // conversion first produces the Pro-normalised frame (X forward, Y left,
+        // Z up); a sideways Joy-Con is then rotated +/-90 degrees around X.
+        val out = sample.copyOf()
+        val oldAy = readMotionI16(out, 2)
+        val oldAz = readMotionI16(out, 4)
+        val oldGy = readMotionI16(out, 8)
+        val oldGz = readMotionI16(out, 10)
+        if (controllerType == Protocol.CONTROLLER_TYPE_JOYCON_L) {
+            writeMotionI16(out, 2, -oldAz)
+            writeMotionI16(out, 4, oldAy)
+            writeMotionI16(out, 8, -oldGz)
+            writeMotionI16(out, 10, oldGy)
+        } else {
+            writeMotionI16(out, 2, oldAz)
+            writeMotionI16(out, 4, -oldAy)
+            writeMotionI16(out, 8, oldGz)
+            writeMotionI16(out, 10, -oldGy)
+        }
+        return out
+    }
 
     private fun remapSensorForDisplay(v: FloatArray): FloatArray {
         val rotation = try {
@@ -854,7 +893,15 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onTouchControllerType(controllerType: Int) {
             // 0/unknown means "default": treat as Pro Controller, never Joy-Con.
-            touchControllerType = if (controllerType in 1..3) controllerType else 3
+            val normalized = if (controllerType in 1..3) controllerType else 3
+            if (touchControllerType == normalized) return
+            touchControllerType = normalized
+            synchronized(phoneSensorLock) {
+                latestMotionSampleCount = 0
+                phoneMotionRevision++
+                sentPhoneMotionRevision = -1
+                for (i in 0 until Protocol.MOTION_SAMPLE_COUNT) latestMotionSamples[i].fill(0)
+            }
         }
 
         @JavascriptInterface
@@ -1238,7 +1285,10 @@ class MainActivity : AppCompatActivity() {
         val a = if (physicalHasGravity[slot]) physicalGravity[slot] else physicalAccel[slot]
         val g = physicalGyro[slot]
 
-        val sample = NativeProtocol.nativePhoneMotion(a[0], a[1], a[2], g[0], g[1], g[2])
+        val sample = applyJoyConHorizontalMotion(
+            NativeProtocol.nativePhoneMotion(a[0], a[1], a[2], g[0], g[1], g[2]),
+            physicalControllerType
+        )
 
         val pad = physicalPads[slot]
         pad.motionSamples[0] = pad.motionSamples[1]
