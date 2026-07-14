@@ -182,18 +182,8 @@ void MotionPipeline::push_gyro(uint64_t timestamp_us, float x, float y, float z)
     if (!gyro_.available || timestamp_us == 0) return;
     if (gyro_.last_input_us != 0 && timestamp_us <= gyro_.last_input_us) return;
 
-    const float raw[3] = {x, y, z};
-    update_gyro_bias(timestamp_us, raw);
 
-    float corrected[3] = {x, y, z};
-    if (gyro_bias_ready_) {
-        for (int axis = 0; axis < 3; ++axis) corrected[axis] -= gyro_bias_[axis];
-    } else if (gyro_stationary_since_us_ != 0) {
-        // During a confirmed stationary startup calibration, do not expose the
-        // offset we are currently measuring as real angular velocity.
-        std::fill_n(corrected, 3, 0.0f);
-    }
-    push(gyro_, timestamp_us, corrected[0], corrected[1], corrected[2], GYRO_CUTOFF_HZ);
+    push(gyro_, timestamp_us, x, y, z, GYRO_CUTOFF_HZ);
 }
 
 uint64_t MotionPipeline::stale_timeout_us(const Stream& stream) {
