@@ -12,7 +12,7 @@
 
 🖱️ **Mouse Mode & Joy-Con Mouse Mode** - Use your controller input as a mouse, including Joy-Con-style mouse behavior.
 
-🔊 **Audio Support** - USB audio support is available in S2 mode for headset and microphone use.
+🔊 **Audio Support** - Audio and microfone are supported in S2 mode.
 
 🧿 **Amiibo Support** - Compatible amiibo/NFC functionality is supported in the S2 workflow.
 
