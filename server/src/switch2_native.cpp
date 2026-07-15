@@ -483,6 +483,11 @@ bool switch2_native_handle_vendor_command(int port,
             else if (sub == 0x03) { d[0] = 0x01; dl = 4; }
             else if (sub == 0x0A) {
                 if (c.size() > 8 && (c[8] == 0x05 || c[8] == 0x07 || c[8] == 0x08 || c[8] == 0x09)) s.selected_report = c[8];
+                if (g_ctx.verbose) {
+                    std::println("[s2][stream] port={} console selected report=0x{:02x} "
+                                 "(requested=0x{:02x})",
+                                 port, s.selected_report, c.size() > 8 ? c[8] : 0xFFu);
+                }
                 s.streaming = true;
                 rt.full_report_enabled = true;
                 rt.input_report_mode = s.selected_report;

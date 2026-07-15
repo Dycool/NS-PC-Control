@@ -120,6 +120,7 @@ bool mouse_mode_active() {
 bool joycon_mouse_mode_supported() {
     const int type = g_controllerType.load(std::memory_order_relaxed);
     return mouse_input_native_joycon_supported()
+        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && g_connected.load(std::memory_order_relaxed)
         && g_switch2ModeEnabled.load(std::memory_order_relaxed)
         && (type == ns::CONTROLLER_TYPE_JOYCON_L

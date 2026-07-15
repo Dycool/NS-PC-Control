@@ -472,7 +472,9 @@ void SettingsDialog::updateMouseModeControls() {
     if (joyconMouseModeBox) {
         joyconMouseModeBox->setVisible(joyconNativeAvailable);
         joyconMouseModeBox->setEnabled(joyconNativeAvailable && !normalChecked);
-        joyconMouseModeBox->setToolTip(QString());
+        joyconMouseModeBox->setToolTip(joyconNativeAvailable || keyboardModeEnabled
+            ? QString()
+            : QStringLiteral("Enable keyboard mode to use Joycon Mouse Mode."));
     }
     if (mouseModeBox) {
         mouseModeBox->setEnabled(keyboardModeEnabled && !nativeChecked);
@@ -493,6 +495,7 @@ bool SettingsDialog::joyconMouseModeAvailable() const {
     if (!controllerTypeBox) return false;
     const int type = controllerTypeBox->currentData().toInt();
     return mouse_input_native_joycon_supported()
+        && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && g_connected.load(std::memory_order_relaxed)
         && g_switch2ModeEnabled.load(std::memory_order_relaxed)
         && (type == ns::CONTROLLER_TYPE_JOYCON_L

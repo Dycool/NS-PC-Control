@@ -229,8 +229,14 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
         // to P1 and every additional controller is ignored.
         if (keyboard_mode == KB_SINGLE) {
             apply_keyboard_to_report(frame.reports[0], false);
-            if (mouse_mode_active())
-                mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
+            if (mouse_mode_active()) {
+                // A lone Joy-Con (L) exposes its one physical stick in the
+                // left-stick field; the server neutralizes rx/ry for that type.
+                if (g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_L)
+                    mouse_apply_right_stick(frame.reports[0].lx, frame.reports[0].ly);
+                else
+                    mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
+            }
             frame.present[0] = true;
             frame.active_count = 1;
             return;
@@ -269,7 +275,12 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
                 frame.present[0] = true;
                 frame.active_count = 1;
             }
-            mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
+            // A lone Joy-Con (L) exposes its one physical stick in the
+            // left-stick field; the server neutralizes rx/ry for that type.
+            if (g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_L)
+                mouse_apply_right_stick(frame.reports[0].lx, frame.reports[0].ly);
+            else
+                mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
         }
         if (g_joyconHorizontalMode.load(std::memory_order_relaxed) && frame.present[0]) {
             apply_joycon_horizontal_transform(frame.reports[0], g_controllerType.load(std::memory_order_relaxed));
@@ -346,7 +357,13 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
             frame.present[0] = true;
             frame.active_count = std::max(frame.active_count, 1);
         }
-        mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
+        // A lone Joy-Con (L) exposes its one physical stick in the left-stick
+        // field; the server neutralizes rx/ry for that type.
+        if (!g_horiModeEnabled.load(std::memory_order_relaxed)
+                && g_controllerType.load(std::memory_order_relaxed) == ns::CONTROLLER_TYPE_JOYCON_L)
+            mouse_apply_right_stick(frame.reports[0].lx, frame.reports[0].ly);
+        else
+            mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
     }
 
     if (g_joyconHorizontalMode.load(std::memory_order_relaxed)) {

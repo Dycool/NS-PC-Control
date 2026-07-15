@@ -1316,9 +1316,24 @@ void build_s2_pro_report(const HIDReport& src,
                          const S2JoyconMouseInput* mouse) {
     const uint8_t ns_type = controller_type_for_port(port);
     if (ns_type == NS_TYPE_JOYCON_L || ns_type == NS_TYPE_JOYCON_R) {
+
+        const uint8_t selected_report = switch2_native_selected_report(port);
+        const bool right = selected_report == 0x08 ? true
+                          : selected_report == 0x07 ? false
+                          : (ns_type == NS_TYPE_JOYCON_R);
+        if (g_ctx.verbose && selected_report != 0x07 && selected_report != 0x08) {
+            std::println("[s2][stream] port={} console has not selected a Joy-Con report yet "
+                         "(selected=0x{:02x}); defaulting to type-derived side",
+                         port, selected_report);
+        } else if (g_ctx.verbose
+                       && right != (ns_type == NS_TYPE_JOYCON_R)) {
+            std::println("[s2][stream] port={} console selected report=0x{:02x} but "
+                         "controller_type={} says otherwise; following console selection",
+                         port, selected_report, ns_type);
+        }
         build_s2_joycon_report(src, motion_samples, has_motion, imu_enabled,
                                 timer, motion_time_us, port, out,
-                                ns_type == NS_TYPE_JOYCON_R, mouse);
+                                right, mouse);
         return;
     }
 
