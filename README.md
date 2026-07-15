@@ -8,6 +8,14 @@
 
 🎮 **Switch Cloud Streaming** - Play your favorite games with your friends just like GameShare! Click [here](docs/cloud.md) for more details.
 
+🎮 **Switch 2 Controller Support** - Native S2 controller support with audio, mouse mode, amiibo support, and Joy-Con mouse mode.
+
+🖱️ **Mouse Mode & Joy-Con Mouse Mode** - Use your controller input as a mouse, including Joy-Con-style mouse behavior.
+
+🔊 **Audio Support** - USB audio support is available in S2 mode for headset and microphone use.
+
+🧿 **Amiibo Support** - Compatible amiibo/NFC functionality is supported in the S2 workflow.
+
 👥 **Up to 4 players simultaneously** - Works with a single Raspberry Pi and a single PC.
 
 ⌨️ **Keyboard Support** - Desktop clients support keyboard controls, either by overriding P1 or by using the keyboard as one player.
