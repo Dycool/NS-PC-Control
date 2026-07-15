@@ -853,16 +853,17 @@ static void switch2_wake_adv_worker(int burst_ms) {
     }
 }
 
-void maybe_send_switch2_wake_advert(const char* reason) {
+void maybe_send_switch2_wake_advert(const char* reason, bool force) {
     if (!g_ctx.switch2_wake_adv_enabled || !g_ctx.switch2_wake_config_loaded) return;
 
     uint64_t now = now_us();
-    // Only wake when the Switch hasn't recently sent HID OUT traffic.
-    if (switch2_usb_host_recently_active(now)) return;
+    // Only wake when the Switch hasn't recently sent HID OUT traffic, unless
+    // the caller wants an unconditional wake (e.g. a fresh client connecting).
+    if (!force && switch2_usb_host_recently_active(now)) return;
     if (g_ctx.switch2_wake_adv_running.exchange(true)) return;
 
     uint64_t last = g_ctx.switch2_last_wake_adv_us.load(std::memory_order_relaxed);
-    if (last && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US) {
+    if (!force && last && elapsed_us_saturated(now, last) < SWITCH2_WAKE_ADV_COOLDOWN_US) {
         g_ctx.switch2_wake_adv_running.store(false);
         return;
     }

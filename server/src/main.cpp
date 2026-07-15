@@ -965,7 +965,7 @@ int main(int argc, char** argv) {
             if (!accepted) continue;
             ++g_ctx.pkts_rx;
             if (wake_on_new_client) {
-                maybe_send_switch2_wake_advert("UDP client connected");
+                maybe_send_switch2_wake_advert("UDP client connected", true);
             }
             flush_feedback_to_udp(sock, cidx);
         }

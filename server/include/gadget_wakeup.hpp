@@ -9,7 +9,7 @@
 bool load_switch2_wakeup_config(bool quiet_if_missing);
 void enter_switch2_wake_runtime_mode();
 void enter_bluetooth_runtime_mode();
-void maybe_send_switch2_wake_advert(const char* reason);
+void maybe_send_switch2_wake_advert(const char* reason, bool force = false);
 int run_switch2_wakeup_setup();
 bool wake_bt_state_was_modified();
 void teardown_gadget();
