@@ -498,8 +498,7 @@ bool SettingsDialog::joyconMouseModeAvailable() const {
         && g_keyboardMode.load(std::memory_order_relaxed) != KB_OFF
         && g_connected.load(std::memory_order_relaxed)
         && g_switch2ModeEnabled.load(std::memory_order_relaxed)
-        && (type == ns::CONTROLLER_TYPE_JOYCON_L
-            || type == ns::CONTROLLER_TYPE_JOYCON_R);
+        && type == ns::CONTROLLER_TYPE_JOYCON_R;
 }
 
 void SettingsDialog::updateJoyconHorizontalControl() {
