@@ -173,10 +173,12 @@ static uint8_t requested_controller_profile_for_frame() {
 
     int mode = g_controllerType.load(std::memory_order_relaxed);
     const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
+    const bool single_joycon_selected =
+        mode == ns::CONTROLLER_TYPE_JOYCON_L || mode == ns::CONTROLLER_TYPE_JOYCON_R;
     // S2 single-keyboard mode is always one full Pro Controller 2 input on P1;
     // physical SDL controllers and any selected Joy-Con-pair profile are ignored.
     if (s2 && g_keyboardMode.load(std::memory_order_relaxed) == KB_SINGLE
-            && !joycon_mouse_mode_active())
+            && !joycon_mouse_mode_active() && !single_joycon_selected)
         return ns::CONTROLLER_TYPE_PRO_S2;
     if (s2) {
         switch (mode) {
