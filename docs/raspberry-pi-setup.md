@@ -19,10 +19,12 @@ sudo reboot
 
 ## Connecting to the Console
 
-Connect the Raspberry Pi to the console dock via USB:
+Connect the Raspberry Pi to the console dock and provide it with a separate power source to prevent it from shutting down if the console enters sleep mode:
 
-* **Raspberry Pi 4:** Use the USB-C port.
-* **Raspberry Pi Zero / Zero 2 W:** Use the inner Micro-USB data port.
+* **Raspberry Pi 4:** Connect the USB-C port to the console dock using a supported powered USB-C hub.
+* **Raspberry Pi Zero / Zero 2 W:** Connect the Micro-USB data port to the console dock and the Micro-USB power port to a separate power source.
+
+Once both the USB data connection and power source are connected, the Raspberry Pi is ready to communicate with the console.
 
 ---
 
