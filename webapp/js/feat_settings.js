@@ -205,7 +205,6 @@
             typeSel.addEventListener('change', () => {
                 horizontal.input.disabled = !isJoycon(S.get('controllerType'));
             });
-            ctrl.note('Applied to every live pad. In Switch 2 mode the server maps it to the S2 family (Joy-Con Pair is not supported there).');
         }
     }
 
@@ -236,8 +235,8 @@
         sec.note('Choose the USB controller identity the server should emulate. The server only accepts this while no other client is connected and will briefly restart its USB gadget after accepting the change.');
         sec.select('Controller type', null, [
             [String(C.GADGET_FAMILY_HORI), 'HORI'],
-            [String(C.GADGET_FAMILY_SWITCH1), 'Switch 1 (Pro Controller)'],
-            [String(C.GADGET_FAMILY_SWITCH2), 'Switch 2 (Pro Controller 2)']
+            [String(C.GADGET_FAMILY_SWITCH1), 'Switch 1'],
+            [String(C.GADGET_FAMILY_SWITCH2), 'Switch 2']
         ], {
             value: serverTypeChoice,
             onChange: (v) => { serverTypeChoice = parseInt(v, 10); }

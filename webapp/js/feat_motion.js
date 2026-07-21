@@ -31,10 +31,10 @@
         settingsUI(ui) {
             if (caps.isNative) return; // native app has its own sensor pipeline
             const sec = ui.section('Motion');
-            const supported = NSCore.motion.supported;
+            const hasSensors = caps.hasDeviceMotion;
             const secure = caps.isSecureContext;
             sec.toggle('Gyro / motion', 'gyro', {
-                disabled: !supported || !secure,
+                disabled: !NSCore.motion.supported,
                 async beforeChange(enabling) {
                     if (!enabling) { NSCore.motion.disable(); return true; }
                     const ok = await NSCore.motion.enable();
@@ -42,7 +42,7 @@
                     return true;
                 }
             });
-            if (!supported)
+            if (!hasSensors)
                 sec.note('This device/browser does not expose motion sensors.');
             else if (!secure)
                 sec.note('Browsers only expose motion sensors on secure origins. At home: use the native mobile app (native gyro, no restrictions), or in Chrome add this address under chrome://flags/#unsafely-treat-insecure-origin-as-secure. HTTPS (e.g. Tailscale/Caddy) also works.', true);

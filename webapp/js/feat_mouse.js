@@ -146,7 +146,6 @@
             if (!eligible)
                 sec.note('Joycon Mouse Mode needs a Switch 2 backend, an active connection and the Joy-Con (R) controller type.');
             sec.range('Mouse sensitivity', 'mouseSensitivity', 0, 5, 0.05);
-            sec.note('0.00 disables mouse movement; 1.00 is the default.');
             sec.note('Click the page to capture the mouse; press Esc to release.');
         }
     });

@@ -423,7 +423,10 @@ window.NSCore = (function () {
         revision: 0,
         _sentRevision: -1,
         _listener: null,
-        get supported() { return caps.hasDeviceMotion && !caps.isNative; },
+        // Secure-context gate lives here so every caller (settings toggle,
+        // mobile.js connect-time enable, roster gyro flag) auto-disables on
+        // plain HTTP instead of each site re-checking.
+        get supported() { return caps.hasDeviceMotion && !caps.isNative && caps.isSecureContext; },
         // iOS requires a user-gesture-initiated permission request.
         async enable() {
             if (motion.enabled || !motion.supported) return motion.enabled;
