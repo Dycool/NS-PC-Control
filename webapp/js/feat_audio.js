@@ -1,8 +1,10 @@
 // feat_audio.js — Phase 6 (client): Switch 2 console audio + microphone over WS.
 //
 // Playback: WS S2AudioPcmPacket frames (S16LE stereo 48 kHz, 5 ms batches)
-// feed an AudioWorklet ring buffer (ScriptProcessor fallback on plain HTTP,
-// where AudioWorklet is unavailable). Microphone: getUserMedia (HTTPS only)
+// feed an AudioWorklet ring buffer; on plain HTTP (no AudioWorklet) each batch
+// is scheduled as a chained AudioBufferSource — native-thread rendering, so
+// playback quality on HTTP stays close to the worklet path.
+// Microphone: getUserMedia (secure origins only — a hard browser rule)
 // -> AudioWorklet capture -> 48 kHz S16LE 5 ms chunks -> WS. A capabilities
 // frame is sent on toggle and refreshed every 2 s (server timeout is 5 s).
 // Everything sits behind settings flags and S2 Pro eligibility.
@@ -13,10 +15,11 @@
     const FRAMES_PER_PACKET = 240; // 5 ms @ 48 kHz (960 bytes stereo S16LE)
     let page = 'index';
     let ctx = null;                 // AudioContext (48 kHz)
-    let playerNode = null;          // worklet or ScriptProcessor
+    let playerNode = null;          // AudioWorkletNode (secure contexts)
     let workletReady = false;
-    let usingFallback = false;
-    let fallbackRing = null, fbWrite = 0, fbRead = 0, fbAvail = 0, fbStarted = false;
+    let usingFallback = false;      // plain HTTP: scheduled AudioBufferSources
+    let playbackOn = false;
+    let fbSchedTime = 0;            // next scheduled buffer start (ctx.currentTime base)
     let micStream = null, micSource = null, micNode = null;
     let micSeq = 0, capsSeq = 0;
     let capsTimer = null;
@@ -126,7 +129,8 @@ registerProcessor('ns-mic-capture', NsMicCapture);
     }
     async function startPlayback() {
         await ensureContext();
-        if (playerNode) return;
+        if (playbackOn) return;
+        playbackOn = true;
         if (workletReady) {
             playerNode = new AudioWorkletNode(ctx, 'ns-pcm-player', {
                 outputChannelCount: [2]
@@ -134,51 +138,44 @@ registerProcessor('ns-mic-capture', NsMicCapture);
             playerNode.connect(ctx.destination);
             usingFallback = false;
         } else {
-            // Plain-HTTP fallback: main-thread ring + ScriptProcessor.
-            fallbackRing = new Float32Array(48000 * 2);
-            fbWrite = 0; fbRead = 0; fbAvail = 0; fbStarted = false;
-            playerNode = ctx.createScriptProcessor(1024, 0, 2);
-            playerNode.onaudioprocess = (e) => {
-                const L = e.outputBuffer.getChannelData(0);
-                const R = e.outputBuffer.getChannelData(1);
-                const n = L.length;
-                if (!fbStarted && fbAvail >= 2400) fbStarted = true;
-                if (!fbStarted || fbAvail < n) {
-                    if (fbAvail < n) fbStarted = false;
-                    L.fill(0); R.fill(0);
-                    return;
-                }
-                for (let i = 0; i < n; i++) {
-                    const r = fbRead * 2;
-                    L[i] = fallbackRing[r]; R[i] = fallbackRing[r + 1];
-                    fbRead = (fbRead + 1) % 48000;
-                    fbAvail--;
-                }
-            };
-            playerNode.connect(ctx.destination);
+            // Plain-HTTP fallback: schedule each 5 ms PCM batch as an
+            // AudioBufferSource chained on the context clock. Unlike the
+            // deprecated ScriptProcessor, rendering happens on the native
+            // audio thread, so main-thread jank cannot glitch the stream.
             usingFallback = true;
+            fbSchedTime = 0;
         }
         if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     }
     function stopPlayback() {
+        playbackOn = false;
         if (playerNode) { try { playerNode.disconnect(); } catch (_) {} playerNode = null; }
-        fallbackRing = null;
+        fbSchedTime = 0;
     }
     function feedPlayback(int16) {
-        if (!playerNode) return;
+        if (!playbackOn || !ctx) return;
         if (!usingFallback) {
-            playerNode.port.postMessage(int16);
+            if (playerNode) playerNode.port.postMessage(int16);
             return;
         }
         const frames = int16.length >> 1;
+        const now = ctx.currentTime;
+        // Backlog beyond ~200 ms means the tab fell behind: drop this batch
+        // (latency wins over completeness; the stream re-primes below).
+        if (fbSchedTime > now + 0.2) return;
+        // (Re)prime with a 50 ms jitter buffer after start or an underrun.
+        if (fbSchedTime < now + 0.02) fbSchedTime = now + 0.05;
+        const buf = ctx.createBuffer(2, frames, C.S2_AUDIO_SAMPLE_RATE);
+        const L = buf.getChannelData(0), R = buf.getChannelData(1);
         for (let i = 0; i < frames; i++) {
-            if (fbAvail >= 48000) { fbRead = (fbRead + 1) % 48000; fbAvail--; }
-            const w = fbWrite * 2;
-            fallbackRing[w] = int16[i * 2] / 32768;
-            fallbackRing[w + 1] = int16[i * 2 + 1] / 32768;
-            fbWrite = (fbWrite + 1) % 48000;
-            fbAvail++;
+            L[i] = int16[i * 2] / 32768;
+            R[i] = int16[i * 2 + 1] / 32768;
         }
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(fbSchedTime);
+        fbSchedTime += frames / C.S2_AUDIO_SAMPLE_RATE;
     }
 
     // ── Microphone ───────────────────────────────────────────────────────────
@@ -277,7 +274,7 @@ registerProcessor('ns-mic-capture', NsMicCapture);
         onWsMessage(magic, view) {
             if (magic === C.S2_AUDIO_PCM_MAGIC && view.byteLength === C.S2_AUDIO_PCM_SIZE) {
                 if (view.getUint8(5) === C.S2_AUDIO_DIR_CONSOLE_TO_CLIENT
-                        && wantPlayback() && playerNode) {
+                        && wantPlayback() && playbackOn) {
                     // PCM starts at byte 20 (even offset, so Int16Array is valid).
                     feedPlayback(new Int16Array(view.buffer, 20, FRAMES_PER_PACKET * 2));
                 }
