@@ -486,12 +486,17 @@ function buildAndSendPacket() {
     const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now() * 1000), true);
+    // Sideways single Joy-Con: rotate sticks/hat/ABXY and map rail buttons to
+    // SL/SR, exactly like the desktop client (applied after mouse/motion).
+    const horizontal = NSCore.settings.get('joyconHorizontal')
+        && (controllerType === NC.TYPE_JOYCON_L || controllerType === NC.TYPE_JOYCON_R);
     for (let p = 0; p < 4; p++) {
         const s = { ...slotStates[p], buttons: normalizeSystemShortcuts(slotStates[p].buttons) };
         // The desktop ns-client stamps every live pad with the selected profile;
         // mirror that so multi-gamepad setups enumerate consistently.
         const ex = p === 0 ? frame.ext
             : { present: slotPresent[p], controllerType: slotPresent[p] ? controllerType : 0 };
+        if (horizontal && ex.present) NSCore.applyJoyconHorizontal(s, ex, controllerType);
         NSCore.buildExtPad(view, 20 + p * EXT_REPORT_SIZE, s, ex);
     }
     ws.send(buffer);

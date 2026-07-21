@@ -177,13 +177,13 @@ int main(int argc, char** argv) {
         if      (s == "-wake")                  s = "--wake";
         else if (s == "-hori")                  s = "--hori";
         else if (s == "-s2")                    s = "--s2";
-        else if (s == "-bt" || s == "--bt") {
-            std::println(stderr, "error: -bt was removed; Bluetooth controller input is enabled "
-                                 "by default. Use -no-bt to disable it.");
+        else if (s == "-bt")                    s = "--bt";
+        else if (s == "-no-bt" || s == "--no-bt") {
+            std::println(stderr, "error: -no-bt was removed; Bluetooth controller input is now "
+                                 "disabled by default. Use --bt to enable it.");
             return 1;
         }
         else if (s == "-pair")                  s = "--pair";
-        else if (s == "-no-bt")                 s = "--no-bt";
         cli_args.push_back(s);
     }
 
@@ -196,22 +196,24 @@ int main(int argc, char** argv) {
     bool        serve_http_webapp = false;
     bool        bluetooth_enabled = false;
     bool        pair_explicit     = false;
-    bool        no_bt             = false;
+    bool        bt_requested      = false;
     bool        legacy_p          = false;
     bool        use_hori          = false;
     bool        use_s2            = false;
     int         web_port          = 8080;
 
     CLI::App app{"ns-backend - Switch Input Server\n\n"
-                 "  By default, UDP, WebSocket, Bluetooth controller input, "
-                 "and Switch 2 wake are enabled when available/configured."};
+                 "  By default only the authenticated UDP input path is enabled. "
+                 "Use --bt for local Bluetooth controller input and -w for the "
+                 "browser webapp + WebSocket input; Switch 2 wake arms itself "
+                 "when configured."};
     std::string bind_arg;
     app.add_option("-b",       bind_arg,                   "Bind UDP to ADDR[:PORT] or PORT");
     app.add_flag  ("-v",       g_ctx.verbose,              "Enable verbose output");
     app.add_flag  ("--wake",   g_ctx.switch2_wakeup_setup_requested,
                                                            "Run interactive Joy-Con 2 wake setup and exit");
     app.add_flag  ("--pair",   pair_explicit,              "Enable Bluetooth gamepad pairing window for 2 minutes on startup");
-    app.add_flag  ("--no-bt",  no_bt,                      "Disable local SDL3 Bluetooth controller input; Switch 2 wake still works if configured");
+    app.add_flag  ("--bt",     bt_requested,               "Enable local SDL3 Bluetooth controller input (disabled by default); Switch 2 wake works either way if configured");
     app.add_flag  ("--hori",   use_hori,                   "Use legacy HORI USB controller identity");
     app.add_flag  ("--s2",     use_s2,                     "Use Switch 2 USB controller identity");
     app.add_flag  ("--upnp",   do_upnp,                    "Forward UDP port via UPnP");
@@ -227,13 +229,9 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     // Post-parse validation
     // -----------------------------------------------------------------------
-    g_ctx.bluetooth_input_disabled = no_bt;
-
-    if (no_bt && pair_explicit) {
-        std::println(stderr, "error: cannot request Bluetooth pairing (-pair) while local "
-                             "Bluetooth controller input is disabled (-no-bt)");
-        return 1;
-    }
+    // Bluetooth controller input is opt-in: without --bt the backend never
+    // touches the local adapter for input (Switch 2 wake stays independent).
+    g_ctx.bluetooth_input_disabled = !bt_requested;
     if (legacy_p) {
         std::println(stderr, "error: -p was removed; use -b PORT or -b ADDR:PORT instead");
         return 1;
@@ -274,7 +272,7 @@ int main(int argc, char** argv) {
     // Runtime initialisation
     // -----------------------------------------------------------------------
     g_ctx.switch2_wake_adv_enabled = load_switch2_wakeup_config(true);
-    bluetooth_enabled = !no_bt && bluetooth_input_available();
+    bluetooth_enabled = bt_requested && bluetooth_input_available();
     if (bluetooth_enabled) {
         bluetooth_manager_runtime_setup(g_ctx.verbose || pair_explicit);
     }
@@ -290,8 +288,10 @@ int main(int argc, char** argv) {
         // Wake remains armed without local BT controller input.
         enter_switch2_wake_runtime_mode();
         if (g_ctx.verbose) std::println("[wake] Switch 2 wake armed without local Bluetooth controller input");
-    } else if (g_ctx.verbose && no_bt) {
-        std::println("[bt] Local Bluetooth controller input disabled by -no-bt");
+    } else if (g_ctx.verbose && !bt_requested) {
+        std::println("[bt] Local Bluetooth controller input off (default); use --bt to enable");
+    } else if (g_ctx.verbose && bt_requested && !bluetooth_enabled) {
+        std::println("[bt] --bt requested but Bluetooth controller input is unavailable on this build/host");
     }
 
     randomize_controller_identity();
@@ -413,7 +413,7 @@ int main(int argc, char** argv) {
 
     std::vector<std::string> extras;
     if (pair_explicit)                    extras.push_back("pairing enabled");
-    if (no_bt)                            extras.push_back("Bluetooth disabled");
+    if (bluetooth_enabled)                extras.push_back("Bluetooth controller input");
     if (use_hori)                         extras.push_back("HORI USB mode");
     if (use_s2)                           extras.push_back("Switch 2 USB mode (single native controller)");
     if (do_upnp)                          extras.push_back("UPnP mapping");
@@ -1007,6 +1007,17 @@ int main(int argc, char** argv) {
     teardown_gadget();
     if (upnp_cleanup.joinable()) upnp_cleanup.join();
     std::cout << ".\n";
+
+    // A WS client (webapp Settings) may have requested the family change; it
+    // funnels into the same re-exec path as the HMAC-verified UDP request.
+    if (!pending_restart && g_ctx.family_change_requested.load(std::memory_order_relaxed)) {
+        pending_restart = true;
+        switch (g_ctx.family_change_target.load(std::memory_order_relaxed)) {
+            case ns::GADGET_FAMILY_SWITCH2: pending_restart_family = UsbControllerFamily::Switch2; break;
+            case ns::GADGET_FAMILY_HORI:    pending_restart_family = UsbControllerFamily::Hori;    break;
+            default:                        pending_restart_family = UsbControllerFamily::Switch1; break;
+        }
+    }
 
     if (pending_restart) {
         // Re-exec rather than reconfigure in place: same cold-start path that

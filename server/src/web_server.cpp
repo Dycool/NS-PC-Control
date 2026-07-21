@@ -50,6 +50,9 @@ struct SessionData {
     bool has_pending_amiibo_request[4] = {};
     uint8_t pending_amiibo_data[4][sizeof(AmiiboDataPacket)];
     bool has_pending_amiibo_data[4] = {};
+    // Change Server Type reply (webapp Settings -> gadget mode request).
+    uint8_t pending_gadget_reply[sizeof(GadgetModeReplyPacket)];
+    bool has_pending_gadget_reply = false;
     bool close_after_write = false;
     bool close_profile_unsupported = false;
     uint64_t assigned_sleep_seq = 0;
@@ -172,6 +175,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->last_roster_seq = 0;
             std::fill(sd->has_pending_amiibo_request, sd->has_pending_amiibo_request + 4, false);
             std::fill(sd->has_pending_amiibo_data, sd->has_pending_amiibo_data + 4, false);
+            sd->has_pending_gadget_reply = false;
             sd->close_after_write = false;
             sd->close_profile_unsupported = false;
             lws_set_timer_usecs(wsi, 10 * 1000);
@@ -386,6 +390,64 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 }
             }
 
+            // --- Change Server Type over WS (magic NSMD) ---
+            // Mirror of the HMAC-verified UDP handler in main.cpp minus the
+            // HMAC: the WS session is the trusted webapp. Same rule: only
+            // honored while no OTHER client is active (the requester itself
+            // is exempt), because the USB identity is device-wide.
+            if (len == sizeof(ns::GadgetModeRequestPacket)) {
+                uint32_t gm_magic = 0; memcpy(&gm_magic, payload, 4);
+                if (gm_magic == ns::GADGET_MODE_MAGIC) {
+                    ns::GadgetModeRequestPacket req{};
+                    memcpy(&req, payload, sizeof(req));
+                    if (req.version == ns::GADGET_MODE_VERSION) {
+                        UsbControllerFamily requested = g_ctx.usb_controller_family;
+                        bool valid_family = true;
+                        switch (req.requested_family) {
+                            case ns::GADGET_FAMILY_SWITCH1: requested = UsbControllerFamily::Switch1; break;
+                            case ns::GADGET_FAMILY_SWITCH2: requested = UsbControllerFamily::Switch2; break;
+                            case ns::GADGET_FAMILY_HORI:    requested = UsbControllerFamily::Hori;    break;
+                            default: valid_family = false; break;
+                        }
+                        if (valid_family) {
+                            const uint64_t gm_now = now_us();
+                            int other_clients = 0;
+                            for (int i = 0; i < MAX_CLIENTS; ++i) {
+                                if (i == sd->ws_slot) continue;
+                                std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                                const ClientSession& cl = g_ctx.clients[i];
+                                if (!cl.active) continue;
+                                if (elapsed_us_over(gm_now, cl.last_rx_us, CLIENT_TIMEOUT_US)) continue;
+                                ++other_clients;
+                            }
+                            ns::GadgetModeReplyPacket reply{};
+                            if (other_clients > 0) {
+                                reply.result = ns::GADGET_MODE_RESULT_SERVER_FULL;
+                                reply.active_family = static_cast<uint8_t>(g_ctx.usb_controller_family);
+                                reply.active_clients = static_cast<uint8_t>(std::clamp(other_clients, 0, MAX_CLIENTS));
+                            } else if (requested == g_ctx.usb_controller_family) {
+                                reply.result = ns::GADGET_MODE_RESULT_UNCHANGED;
+                                reply.active_family = static_cast<uint8_t>(g_ctx.usb_controller_family);
+                            } else {
+                                reply.result = ns::GADGET_MODE_RESULT_RESTARTING;
+                                reply.active_family = static_cast<uint8_t>(requested);
+                            }
+                            memcpy(sd->pending_gadget_reply, &reply, sizeof(reply));
+                            sd->has_pending_gadget_reply = true;
+                            lws_callback_on_writable(wsi);
+                            if (reply.result == ns::GADGET_MODE_RESULT_RESTARTING) {
+                                std::println("Controller type change requested by WS client -> {}; restarting",
+                                             usb_controller_family_name(requested));
+                                g_ctx.family_change_target.store(req.requested_family, std::memory_order_relaxed);
+                                g_ctx.family_change_requested.store(true, std::memory_order_relaxed);
+                                g_ctx.running.store(false, std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
             uint8_t flags = 0; uint32_t seq = 0;
             MultiReport report{};
             bool pad_present[4] = {};
@@ -483,6 +545,14 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
         }
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
+            if (sd->has_pending_gadget_reply) {
+                uint8_t buffer[LWS_PRE + sizeof(GadgetModeReplyPacket)];
+                memcpy(buffer + LWS_PRE, sd->pending_gadget_reply, sizeof(GadgetModeReplyPacket));
+                if (lws_write(wsi, buffer + LWS_PRE, sizeof(GadgetModeReplyPacket), LWS_WRITE_BINARY) != (int)sizeof(GadgetModeReplyPacket)) return -1;
+                sd->has_pending_gadget_reply = false;
+                lws_callback_on_writable(wsi); // flush any other pending feedback
+                break;
+            }
             if (sd->ws_slot < 0 && !sd->has_pending_roster &&
                     !std::ranges::any_of(sd->has_pending_assignment, [](bool h) { return h; })) break;
             bool wrote = false;

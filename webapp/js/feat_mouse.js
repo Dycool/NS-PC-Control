@@ -127,16 +127,15 @@
                 sec.note('This browser does not support Pointer Lock.', true);
                 return;
             }
-            sec.toggle('Mouse mode (mouse → stick)', 'mouseMode', {
+            sec.toggle('Mouse Mode', 'mouseMode', {
                 async beforeChange(enabling) {
                     if (enabling) { S.set('joyconMouse', false); requestLock(); }
                     else if (locked()) document.exitPointerLock();
                     return true;
                 }
             });
-            sec.range('Sensitivity', 'mouseSensitivity', 0.2, 3, 0.1);
             const eligible = joyconMouseEligible();
-            sec.toggle('Native Joy-Con mouse (Switch 2)', 'joyconMouse', {
+            sec.toggle('Joycon Mouse Mode', 'joyconMouse', {
                 disabled: !eligible,
                 async beforeChange(enabling) {
                     if (enabling) { S.set('mouseMode', false); requestLock(); }
@@ -145,7 +144,9 @@
                 }
             });
             if (!eligible)
-                sec.note('Needs a Switch 2 backend, an active connection and the Joy-Con (R) controller type.');
+                sec.note('Joycon Mouse Mode needs a Switch 2 backend, an active connection and the Joy-Con (R) controller type.');
+            sec.range('Mouse sensitivity', 'mouseSensitivity', 0, 5, 0.05);
+            sec.note('0.00 disables mouse movement; 1.00 is the default.');
             sec.note('Click the page to capture the mouse; press Esc to release.');
         }
     });

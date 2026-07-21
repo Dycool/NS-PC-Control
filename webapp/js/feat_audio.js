@@ -282,51 +282,80 @@ registerProcessor('ns-mic-capture', NsMicCapture);
             }
             return false;
         },
+        // Mirrors the desktop SettingsDialog's "Switch 2 headset" group: two
+        // device combos with "Disabled" / "System default" entries; the mic is
+        // only selectable while headphones are attached. Hidden unless the
+        // session is eligible, like the Qt dialog.
         settingsUI(ui) {
-            if (caps.isNative) return;
-            const sec = ui.section('Switch 2 audio');
-            const ok = eligible();
-            sec.toggle('Console audio playback', 'audioPlayback', { disabled: !ok });
-            sec.toggle('Microphone to console', 'audioMicrophone', {
-                disabled: !ok || !caps.isSecureContext || !caps.hasGetUserMedia,
-                async beforeChange(enabling) {
-                    if (enabling && !S.get('audioPlayback')) S.set('audioPlayback', true);
-                    return true;
-                }
-            });
-            if (!ok)
-                sec.note('Needs a Switch 2 backend, an active connection and the Pro Controller type.');
+            if (caps.isNative || !eligible()) return;
+            const sec = ui.section('Switch 2 headset');
+            const DISABLED = '@disabled';
+            const micAllowed = caps.isSecureContext && caps.hasGetUserMedia;
+
+            const outSel = sec.select('Audio output', null,
+                [[DISABLED, 'Disabled'], ['', 'System default']], {
+                    numeric: false,
+                    value: S.get('audioPlayback') ? (S.get('audioOutputDevice') || '') : DISABLED,
+                    onChange: () => {} // replaced below (needs both selects)
+                }).select;
+            const inSel = sec.select('Microphone', null,
+                [[DISABLED, 'Disabled'], ['', 'System default']], {
+                    numeric: false,
+                    value: (micAllowed && S.get('audioMicrophone') && S.get('audioPlayback'))
+                        ? (S.get('audioInputDevice') || '') : DISABLED,
+                    onChange: () => {}
+                }).select;
+
+            sec.note('Disabled reports that no headphones (or no microphone) are attached to the emulated Pro Controller 2.');
             if (!caps.isSecureContext)
-                sec.note('Microphone capture requires HTTPS (reverse proxy). Playback works on plain HTTP.', true);
-            // Device pickers (populated once permissions expose the labels).
+                sec.note('Playback works on plain HTTP. The microphone needs a secure origin: in Chrome add this address under chrome://flags/#unsafely-treat-insecure-origin-as-secure, or use HTTPS (e.g. Tailscale/Caddy).', true);
+            sec.note('Audio is S16LE stereo 48 kHz with a ~50 ms jitter buffer. Expect more latency than the desktop client.');
+
+            // Device labels appear once a permission grants access to them.
             if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-                const outSel = sec.select('Output device', 'audioOutputDevice',
-                    [['', 'Default']], { numeric: false }).select;
-                const inSel = sec.select('Microphone', 'audioInputDevice',
-                    [['', 'Default']], { numeric: false }).select;
                 navigator.mediaDevices.enumerateDevices().then(devs => {
+                    const canSetSink = typeof AudioContext !== 'undefined'
+                        && typeof AudioContext.prototype.setSinkId === 'function';
                     for (const d of devs) {
                         const label = d.label || (d.kind + ' ' + d.deviceId.slice(0, 6));
-                        const canSetSink = typeof AudioContext !== 'undefined'
-                            && typeof AudioContext.prototype.setSinkId === 'function';
                         if (d.kind === 'audiooutput' && canSetSink)
                             outSel.appendChild(el('option', { value: d.deviceId, text: label }));
-                        else if (d.kind === 'audioinput')
+                        else if (d.kind === 'audioinput' && micAllowed)
                             inSel.appendChild(el('option', { value: d.deviceId, text: label }));
                     }
-                    outSel.value = S.get('audioOutputDevice') || '';
-                    inSel.value = S.get('audioInputDevice') || '';
+                    outSel.value = S.get('audioPlayback') ? (S.get('audioOutputDevice') || '') : DISABLED;
+                    inSel.value = (micAllowed && S.get('audioMicrophone') && S.get('audioPlayback'))
+                        ? (S.get('audioInputDevice') || '') : DISABLED;
+                    updateMicAvailability();
                 }).catch(() => {});
-                outSel.onchange = async () => {
-                    S.set('audioOutputDevice', outSel.value);
-                    if (ctx && typeof ctx.setSinkId === 'function') { try { await ctx.setSinkId(outSel.value || ''); } catch (_) {} }
-                };
-                inSel.onchange = () => {
-                    S.set('audioInputDevice', inSel.value);
-                    if (micNode) { stopMic(); startMic(); }
-                };
             }
-            sec.note('Audio is S16LE stereo 48 kHz with a ~50 ms jitter buffer. Expect noticeably more latency than the desktop client.');
+
+            const updateMicAvailability = () => {
+                const headphones = outSel.value !== DISABLED;
+                inSel.disabled = !headphones || !micAllowed;
+                if (!headphones) inSel.value = DISABLED;
+            };
+            outSel.onchange = async () => {
+                if (outSel.value === DISABLED) {
+                    S.set('audioPlayback', false);
+                    S.set('audioMicrophone', false);
+                } else {
+                    S.set('audioOutputDevice', outSel.value);
+                    S.set('audioPlayback', true);
+                    if (ctx && typeof ctx.setSinkId === 'function') { try { await ctx.setSinkId(outSel.value || ''); } catch (_) {} }
+                }
+                updateMicAvailability();
+            };
+            inSel.onchange = () => {
+                if (inSel.value === DISABLED) {
+                    S.set('audioMicrophone', false);
+                } else {
+                    S.set('audioInputDevice', inSel.value);
+                    S.set('audioMicrophone', true);
+                    if (micNode) { stopMic(); startMic(); }
+                }
+            };
+            updateMicAvailability();
         }
     });
 })();

@@ -33,7 +33,7 @@
             const sec = ui.section('Motion');
             const supported = NSCore.motion.supported;
             const secure = caps.isSecureContext;
-            sec.toggle('Gyro (device motion)', 'gyro', {
+            sec.toggle('Gyro / motion', 'gyro', {
                 disabled: !supported || !secure,
                 async beforeChange(enabling) {
                     if (!enabling) { NSCore.motion.disable(); return true; }
@@ -45,7 +45,7 @@
             if (!supported)
                 sec.note('This device/browser does not expose motion sensors.');
             else if (!secure)
-                sec.note('Motion sensors require HTTPS. Serve the webapp through a reverse proxy (e.g. Caddy) to enable gyro.', true);
+                sec.note('Browsers only expose motion sensors on secure origins. At home: use the native mobile app (native gyro, no restrictions), or in Chrome add this address under chrome://flags/#unsafely-treat-insecure-origin-as-secure. HTTPS (e.g. Tailscale/Caddy) also works.', true);
             else if (caps.needsMotionPermission)
                 sec.note('iOS asks for permission when you enable this.');
         }

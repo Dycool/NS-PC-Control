@@ -55,7 +55,7 @@ The wizard captures the Joy-Con 2 HOME wake advertisement and saves it. It does 
 
 > Note: Re-run `-wake` if the Joy-Con 2 is paired differently or wake stops working. The wizard listens continuously for ~3 minutes, so if the first HOME press isn't picked up you can briefly wake the Switch 2 and press HOME again within the same window — no need to restart the wizard.
 
-Use `-no-bt` only if you want to disable local SDL Bluetooth controller input. Switch 2 wake can still run if configured.
+Local SDL Bluetooth controller input is disabled by default; pass `--bt` to enable it. Switch 2 wake runs either way if configured.
 
 ### Important Notes
 

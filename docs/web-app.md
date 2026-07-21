@@ -15,10 +15,28 @@ the phone motor is never used), browser gyro via DeviceMotion, mouse mode
 (Pointer Lock → stick), and — on a Switch 2 backend — Amiibo upload/writeback,
 the native Joy-Con 2 optical mouse, and console audio + microphone.
 
-Browser sensor and microphone APIs (gyro, mic) require a **secure context**:
-serve the webapp through an HTTPS reverse proxy (e.g. Caddy) to enable them.
+Browser sensor and microphone APIs (gyro, mic) require a **secure context**.
 On plain HTTP those toggles appear disabled with an explanatory note; audio
-playback still works. The native mobile app is unaffected (native sensors).
+playback still works (native-thread scheduled fallback). Everything else —
+keyboard, gamepad, rumble, mouse mode, macros, Amiibo — is fully functional
+on HTTP.
+
+### Using gyro/mic on a home network (no TLS required)
+
+- **Best option on phones: the native mobile app.** It uses native sensors
+  (no browser restrictions) and the low-latency UDP path.
+- **Chrome / Edge / Android Chrome:** open
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add
+  `http://<pi-address>:8080`, relaunch. That origin is then treated as secure
+  and gyro/mic/AudioWorklet all unlock. One-time setup per device.
+  (Safari/iOS has no equivalent — use the native app there.)
+- **PC only:** `ssh -L 8080:<pi>:8080` and open `http://localhost:8080` —
+  localhost is always a secure context.
+- **Real HTTPS without exposing anything:** [Tailscale](https://tailscale.com)
+  (`tailscale serve` gives a trusted certificate automatically) or Caddy with
+  a DNS-challenge certificate on a domain pointing at the Pi's LAN address.
+  Avoid self-signed certificates: without device trust they do not create a
+  secure context, so gyro/mic stay blocked (especially on iOS).
 
 ## Enabling the Web Server
 

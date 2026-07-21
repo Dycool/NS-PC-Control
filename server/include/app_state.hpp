@@ -242,6 +242,11 @@ struct ServerContext {
     std::mutex server_macro_upload_mtx;
     ServerMacroUploadRuntime server_macro_uploads[MAX_CLIENTS]{};
     struct lws_context* lws_context = nullptr;
+    // USB family change requested over the trusted WS path (webapp Settings).
+    // The UDP path keeps its HMAC-verified request handling in main.cpp; both
+    // funnel into the same clean-shutdown + re-exec restart at the end of main.
+    std::atomic<bool> family_change_requested{false};
+    std::atomic<uint8_t> family_change_target{0}; // ns::GadgetFamily wire value
 };
 extern ServerContext g_ctx;
 uint64_t elapsed_us_saturated(uint64_t now, uint64_t then);

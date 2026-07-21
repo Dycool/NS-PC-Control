@@ -110,7 +110,7 @@ WantedBy=multi-user.target
 
 Bluetooth controller input is enabled by default. If a Switch 2 wake config exists, the service also arms wake automatically; UDP, WebSocket, Bluetooth controllers, and wake can coexist in normal runtime.
 
-If you want to disable local Bluetooth controller input for a service install, add `-no-bt` to `ExecStart`. Switch 2 wake can still use the Bluetooth adapter if configured.
+Local Bluetooth controller input is **disabled by default**. To use controllers paired directly to the Raspberry Pi, add `--bt` to `ExecStart`. Switch 2 wake can use the Bluetooth adapter either way if configured.
 
 3. Enable and start the service:
 

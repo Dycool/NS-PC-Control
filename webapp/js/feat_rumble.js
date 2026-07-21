@@ -72,7 +72,7 @@
         settingsUI(ui, page) {
             if (caps.isNative) return;
             const sec = ui.section('Feedback');
-            sec.toggle('Gamepad rumble', 'rumble');
+            sec.toggle('Rumble', 'rumble');
             if (page === 'mobile')
                 sec.note('Rumble drives connected gamepads only — the phone motor is never used.');
             else if (!('getGamepads' in navigator))

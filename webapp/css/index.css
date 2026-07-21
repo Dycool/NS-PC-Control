@@ -9,7 +9,14 @@ body {
     margin: 0;
     padding: 20px;
     min-height: 100vh;
+    /* App-like feel: no text caret / selection highlight when tapping labels,
+       status lines or the player list. Form fields opt back in below. */
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
 }
+input[type="text"], textarea { user-select: text; -webkit-user-select: text; }
+.player-row, .status, .player-text { cursor: default; }
 
 .app-header {
     display: flex; align-items: center; gap: 12px;

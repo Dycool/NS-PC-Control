@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>NS PC Control</title>
+    <title>NS Web Control</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231E1E1E'/%3E%3Ccircle cx='22' cy='40' r='9' fill='%23CC0000'/%3E%3Ccircle cx='42' cy='24' r='9' fill='%23E0E0E0'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="css/ns_ui.css">
     <link rel="stylesheet" href="css/index.css">
@@ -13,9 +13,9 @@
 <body>
     <header class="app-header">
         <svg class="app-logo" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#1E1E1E"/><circle cx="22" cy="40" r="9" fill="#CC0000"/><circle cx="42" cy="24" r="9" fill="#E0E0E0"/></svg>
-        <h1 id="appTitle">NS PC Control</h1>
+        <h1 id="appTitle">NS Web Control</h1>
     </header>
-    <script>if (location.protocol === 'file:') document.getElementById('appTitle').textContent = 'NS Mobile';</script>
+    <script>if (location.protocol === 'file:') { document.getElementById('appTitle').textContent = 'NS Mobile'; document.title = 'NS Mobile'; }</script>
 
     <main class="shell">
         <section class="card">

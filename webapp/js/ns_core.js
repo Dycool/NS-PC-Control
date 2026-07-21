@@ -59,6 +59,18 @@ window.NSCore = (function () {
         S2_AUDIO_DIR_CONSOLE_TO_CLIENT: 0,
         S2_AUDIO_DIR_CLIENT_TO_CONSOLE: 1,
 
+        // Gadget mode (server USB family) change — 'NSMD'
+        GADGET_MODE_MAGIC: 0x4E534D44,
+        GADGET_MODE_VERSION: 1,
+        GADGET_MODE_REQUEST_SIZE: 28,
+        GADGET_MODE_REPLY_SIZE: 12,
+        GADGET_FAMILY_SWITCH1: 0,
+        GADGET_FAMILY_SWITCH2: 1,
+        GADGET_FAMILY_HORI: 2,
+        GADGET_MODE_RESULT_RESTARTING: 0,
+        GADGET_MODE_RESULT_UNCHANGED: 1,
+        GADGET_MODE_RESULT_SERVER_FULL: 2,
+
         PAD_PRESENT: 1,
         FLAG_RESET: 0x01,
         FLAG_SINGLE_PAD: 0x04,
@@ -135,6 +147,7 @@ window.NSCore = (function () {
         captureShortcut: true,          // MINUS+PLUS -> CAPTURE combo
         audioPlayback: false,           // S2 console audio -> browser
         audioMicrophone: false,         // browser mic -> console
+        joyconHorizontal: false,        // sideways single Joy-Con (PC page)
         audioOutputDevice: '',          // sinkId ('' = default)
         audioInputDevice: ''            // getUserMedia deviceId ('' = default)
     };
@@ -349,6 +362,59 @@ window.NSCore = (function () {
         return proto + '//' + window.location.host + '/';
     }
 
+    // ── Horizontal (sideways) single Joy-Con ─────────────────────────────────
+    // Faithful port of the desktop client's apply_joycon_horizontal_transform
+    // (input_settings.cpp): rail buttons become SL/SR, sticks/hat/ABXY rotate
+    // 90° (opposite directions for the two halves).
+    function applyJoyconHorizontal(s, ex, type) {
+        const left = type === C.TYPE_JOYCON_L;
+        const right = type === C.TYPE_JOYCON_R;
+        if (!left && !right) return;
+        const shoulders = s.buttons & (C.BTN_L | C.BTN_ZL | C.BTN_R | C.BTN_ZR);
+        ex.extraBits = ex.extraBits || 0;
+        if (shoulders & (C.BTN_L | C.BTN_ZL)) ex.extraBits |= C.EXT_BUTTON_SL;
+        if (shoulders & (C.BTN_R | C.BTN_ZR)) ex.extraBits |= C.EXT_BUTTON_SR;
+        s.buttons &= ~(C.BTN_L | C.BTN_ZL | C.BTN_R | C.BTN_ZR);
+
+        const rot = (x, y) => left ? [255 - y, x] : [y, 255 - x];
+        [s.lx, s.ly] = rot(s.lx === undefined ? 128 : s.lx, s.ly === undefined ? 128 : s.ly);
+        [s.rx, s.ry] = rot(s.rx === undefined ? 128 : s.rx, s.ry === undefined ? 128 : s.ry);
+
+        if (s.hat !== undefined && s.hat <= C.HAT_NW) {
+            const cw = [C.HAT_E, C.HAT_SE, C.HAT_S, C.HAT_SW, C.HAT_W, C.HAT_NW, C.HAT_N, C.HAT_NE];
+            const ccw = [C.HAT_W, C.HAT_NW, C.HAT_N, C.HAT_NE, C.HAT_E, C.HAT_SE, C.HAT_S, C.HAT_SW];
+            s.hat = left ? cw[s.hat] : ccw[s.hat];
+        }
+
+        const face = s.buttons & (C.BTN_A | C.BTN_B | C.BTN_X | C.BTN_Y);
+        s.buttons &= ~(C.BTN_A | C.BTN_B | C.BTN_X | C.BTN_Y);
+        if (left) {
+            if (face & C.BTN_X) s.buttons |= C.BTN_A;
+            if (face & C.BTN_A) s.buttons |= C.BTN_B;
+            if (face & C.BTN_B) s.buttons |= C.BTN_Y;
+            if (face & C.BTN_Y) s.buttons |= C.BTN_X;
+        } else {
+            if (face & C.BTN_B) s.buttons |= C.BTN_A;
+            if (face & C.BTN_Y) s.buttons |= C.BTN_B;
+            if (face & C.BTN_X) s.buttons |= C.BTN_Y;
+            if (face & C.BTN_A) s.buttons |= C.BTN_X;
+        }
+
+        // Motion samples ([ax,ay,az,gx,gy,gz]) rotate like the sticks
+        // (apply_joycon_horizontal_motion_transform). Copy before mutating:
+        // the arrays are shared with NSCore.motion and get re-sent while no
+        // new sensor sample arrives — transforming in place would compound.
+        if (ex.motionSamples) {
+            ex.motionSamples = ex.motionSamples.map(src => {
+                const m = src.slice();
+                const ay = m[1], az = m[2], gy = m[4], gz = m[5];
+                if (left) { m[1] = -az; m[2] = ay; m[4] = -gz; m[5] = gy; }
+                else      { m[1] = az;  m[2] = -ay; m[4] = gz; m[5] = -gy; }
+                return m;
+            });
+        }
+    }
+
     // ── Motion (browser DeviceMotion -> Switch motion samples) ───────────────
     // Same math as the historical mobile.js path; shared by both pages now.
     const motion = {
@@ -433,6 +499,7 @@ window.NSCore = (function () {
     //   mountUI(page)              -> called on DOM ready ('index' | 'mobile')
     const features = [];
     function registerFeature(f) { features.push(f); }
+    function getFeature(id) { return features.find(f => f.id === id) || null; }
     let activeWs = null;
     const dispatch = {
         wsMessage(magic, view) {
@@ -465,10 +532,13 @@ window.NSCore = (function () {
                 catch (err) { console.error('[ns-core] feature ' + f.id + ' mountUI failed', err); }
             }
         },
-        // Lets every feature contribute rows to the Settings drawer
-        // (feat_settings owns the drawer shell and calls this when building).
-        settingsUI(ui, page) {
+        // Lets every feature contribute rows to the Settings drawer.
+        // feat_settings owns the drawer shell, calls specific features by id
+        // (to mirror the desktop dialog's ordering) and then this with the
+        // already-rendered ids excluded, so future features still show up.
+        settingsUI(ui, page, excludeIds) {
             for (const f of features) {
+                if (excludeIds && excludeIds.includes(f.id)) continue;
                 try { if (f.settingsUI) f.settingsUI(ui, page); }
                 catch (err) { console.error('[ns-core] feature ' + f.id + ' settingsUI failed', err); }
             }
@@ -500,8 +570,8 @@ window.NSCore = (function () {
         s2Active, s2NfcAssigned, s2AudioEligible,
         parseAssignment, parseControllerStatus, parseRoster,
         parseRumble, parsePrecisionRumble, parseAmiiboRequest,
-        buildExtPad, normalizeSystemShortcuts, makeWsUrl,
+        buildExtPad, normalizeSystemShortcuts, makeWsUrl, applyJoyconHorizontal,
         clampI16, clampU8, screenRemap,
-        registerFeature, dispatch, ws, wsSend, el
+        registerFeature, getFeature, dispatch, ws, wsSend, el
     };
 })();
