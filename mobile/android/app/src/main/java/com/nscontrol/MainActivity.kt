@@ -37,15 +37,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okio.ByteString
-import okio.ByteString.Companion.toByteString
 import org.json.JSONArray
-import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -68,10 +60,8 @@ class MainActivity : AppCompatActivity() {
     private var connected = false
     @Volatile private var controlClientActive = false
     @Volatile private var sending = false
-    private var ws: WebSocket? = null
-    private val client = OkHttpClient.Builder()
-        .pingInterval(10, java.util.concurrent.TimeUnit.SECONDS)
-        .build()
+    // Authenticated UDP transport (same path as the desktop ns-client).
+    @Volatile private var udp: NsUdp? = null
     private val seq = AtomicInteger(0)
     private val senderToken = AtomicInteger(0)
     private val sendLock = Any()
@@ -96,6 +86,9 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var touchHid: ByteArray? = null
     @Volatile private var touchFrame: ByteArray? = null
     @Volatile private var lastTouchFrameMs: Long = 0
+    // 0 forces the 4 ms sender loop to (re)send the client names on its next
+    // tick; the loop then refreshes them every 2 s (UDP is lossy, this heals).
+    @Volatile private var lastNamesSentMs: Long = 0
     @Volatile private var touchControllerType: Int = 3
     @Volatile private var physicalControllerType: Int = Protocol.CONTROLLER_TYPE_PRO
     @Volatile private var touchExtraButtons: Int = 0
@@ -254,17 +247,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseHostPort(raw: String): Pair<String, Int> {
-        val text = raw.trim()
+        // Strip any legacy scheme (old builds accepted ws:// URLs).
+        val text = raw.trim().substringAfter("://").substringBefore('/')
         val colon = text.lastIndexOf(':')
-        return if (colon > 0) {
+        return if (colon > 0 && !text.startsWith("[")) {
             val port = text.substring(colon + 1).toIntOrNull()
             if (port != null && port in 1..65535) {
                 Pair(text.substring(0, colon), port)
             } else {
-                Pair(text, 8080)
+                Pair(text, NsUdp.DEFAULT_PORT)
             }
         } else {
-            Pair(text, 8080)
+            Pair(text, NsUdp.DEFAULT_PORT)
         }
     }
 
@@ -276,14 +270,9 @@ class MainActivity : AppCompatActivity() {
         connectBtn.isEnabled = false
         Thread {
             val (probeHost, probePort) = parseHostPort(host)
-            val reachable = try {
-                val socket = java.net.Socket()
-                socket.connect(java.net.InetSocketAddress(probeHost, probePort), 2000)
-                socket.close()
-                true
-            } catch (_: Exception) {
-                false
-            }
+            // UDP ServerInfo probe (the backend answers it even with no client
+            // slot free); replaces the old TCP probe against the web port.
+            val reachable = NsUdp.probe(probeHost, probePort)
             runOnUiThread {
                 connectBtn.isEnabled = true
                 if (!reachable) {
@@ -301,73 +290,86 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    // WebSocket to the Raspberry Pi backend. Either physical controllers or Touch Controls owns the only live session.
-    private fun connectWs(): Boolean {
-        return try {
-            val wsUrl = normalizeWsUrl(host)
-            val req = Request.Builder()
-                .url(wsUrl)
-                .addHeader("Sec-WebSocket-Protocol", "nspc-protocol")
-                .build()
-            ws = client.newWebSocket(req, object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    runOnUiThread {
-                        if (!controlClientActive || ws !== webSocket) return@runOnUiThread
-                        statusText.text = "Connected"
-                        if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
-                        sendNamesFrame()
-                        startSending()
-                    }
-                }
-
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    val message = when {
-                        reason.contains("S2 does not support L+R", ignoreCase = true) ->
-                            "Switch 2 mode does not support Joy-Con L + R"
-                        reason.contains("server full", ignoreCase = true) -> "Server full"
-                        else -> "Disconnected"
-                    }
-                    runOnUiThread { handleWsClosed(webSocket, message) }
-                }
-
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    runOnUiThread { handleWsClosed(webSocket, "Connection failed") }
-                }
-
-                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    // Server -> mobile rumble normally uses classic 8-byte ns::RumblePacket:
-                    // magic 'NSVR', subpad, low_freq, high_freq, duration_10ms.
-                    // Keep a tiny NSVH fallback too, because older backend/client builds may
-                    // still send PrecisionRumblePacket; its low/high/duration bytes are the same.
-                    val size = bytes.size
-                    if (size != Protocol.RUMBLE_PACKET_SIZE && size != Protocol.PRECISION_RUMBLE_PACKET_SIZE) {
-                        Log.d(TAG, "ignored ws binary size=$size")
-                        return
-                    }
-                    val magic = readU32LE(bytes, 0)
-                    if (magic != Protocol.RUMBLE_MAGIC && magic != Protocol.PRECISION_RUMBLE_MAGIC) {
-                        Log.d(TAG, "ignored ws binary magic=0x${magic.toString(16)} size=$size")
-                        return
-                    }
-                    val subpad = bytes[4].toInt() and 0xFF
-                    val low = bytes[5].toInt() and 0xFF
-                    val high = bytes[6].toInt() and 0xFF
-                    val duration10Ms = bytes[7].toInt() and 0xFF
-                    Log.d(TAG, "rumble packet ${if (magic == Protocol.RUMBLE_MAGIC) "NSVR" else "NSVH"} subpad=$subpad low=$low high=$high duration10ms=$duration10Ms")
-                    // OkHttp already calls this on a background thread. Keep rumble/haptics
-                    // off the UI thread; only the View haptic fallback hops to UI if needed.
-                    routeRumble(subpad, low, high, duration10Ms)
-                }
-            })
-            true
-        } catch (_: Throwable) {
-            runOnUiThread { statusText.text = "Invalid server address" }
-            false
+    // Authenticated UDP to the Raspberry Pi backend — the same low-latency path
+    // as the desktop ns-client. Either physical controllers or Touch Controls
+    // owns the only live session. UDP is connectionless: the server accepts on
+    // the first signed input frame, so sending starts immediately.
+    //
+    // Socket creation involves DNS resolution and must stay off the UI thread
+    // (unlike OkHttp, plain sockets throw NetworkOnMainThreadException).
+    private fun connectUdp(): Boolean {
+        val (h, p) = parseHostPort(host)
+        if (h.isEmpty()) {
+            statusText.text = "Invalid server address"
+            return false
         }
+        val attemptToken = senderToken.get()
+        Thread {
+            val transport = try { NsUdp(h, p) } catch (_: Throwable) { null }
+            runOnUiThread {
+                if (!controlClientActive || senderToken.get() != attemptToken || udp != null) {
+                    transport?.close()
+                    return@runOnUiThread
+                }
+                if (transport == null) {
+                    statusText.text = "Invalid server address"
+                    controlClientActive = false
+                    activeClientMode = ClientMode.NONE
+                    stopPhysicalControllerSensors()
+                    updatePhysicalStatusOnPage("Not connected")
+                    return@runOnUiThread
+                }
+                udp = transport
+                lastNamesSentMs = 0 // sender loop pushes names right away, then every 2 s
+                startReceiver(transport)
+                statusText.text = "Connected"
+                if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
+                startSending()
+            }
+        }.apply { name = "ns-udp-connect" }.start()
+        return true
     }
 
-    private fun handleWsClosed(socket: WebSocket, text: String) {
-        if (ws !== socket) return
+    // Server -> mobile feedback arrives on the same UDP socket: rumble (NSVR,
+    // with an NSVH precision fallback whose low/high/duration bytes match) and
+    // ClientAssignmentPacket (server full / S2 profile refusals, which the WS
+    // path used to deliver through the close reason).
+    private fun startReceiver(transport: NsUdp) {
+        Thread {
+            val buf = ByteArray(1024)
+            while (udp === transport && !transport.closed) {
+                val n = transport.receive(buf)
+                if (n < 0) break
+                if (n < 8) continue
+                val magic = NsUdp.readU32LE(buf, 0)
+                when {
+                    (n == Protocol.RUMBLE_PACKET_SIZE && magic == Protocol.RUMBLE_MAGIC) ||
+                    (n == Protocol.PRECISION_RUMBLE_PACKET_SIZE && magic == Protocol.PRECISION_RUMBLE_MAGIC) -> {
+                        val subpad = buf[4].toInt() and 0xFF
+                        val low = buf[5].toInt() and 0xFF
+                        val high = buf[6].toInt() and 0xFF
+                        val duration10Ms = buf[7].toInt() and 0xFF
+                        // Keep rumble/haptics off the UI thread.
+                        routeRumble(subpad, low, high, duration10Ms)
+                    }
+                    n == NsUdp.CLIENT_ASSIGNMENT_SIZE && magic == NsUdp.CLIENT_ASSIGNMENT_MAGIC -> {
+                        val flags = buf[5].toInt() and 0xFF
+                        val message = when {
+                            flags and NsUdp.ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED != 0 ->
+                                "Switch 2 mode does not support Joy-Con L + R"
+                            flags and NsUdp.ASSIGNMENT_FLAG_SERVER_FULL != 0 -> "Server full"
+                            else -> null
+                        }
+                        if (message != null) runOnUiThread { handleTransportClosed(transport, message) }
+                    }
+                    else -> Log.d(TAG, "ignored udp feedback magic=0x${magic.toString(16)} size=$n")
+                }
+            }
+        }.apply { name = "ns-udp-recv"; isDaemon = true }.start()
+    }
+
+    private fun handleTransportClosed(transport: NsUdp, text: String) {
+        if (udp !== transport) return
         statusText.text = text
         senderToken.incrementAndGet()
         sending = false
@@ -376,7 +378,8 @@ class MainActivity : AppCompatActivity() {
         touchFrame = null
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
-        ws = null
+        udp = null
+        transport.close()
         stopPhoneSensors()
         stopPhysicalControllerSensors()
         stopAllPhysicalRumble()
@@ -397,57 +400,23 @@ class MainActivity : AppCompatActivity() {
         })()""", null) } catch (_: Throwable) {}
     }
 
-    private fun normalizeWsUrl(raw: String): String {
-        var text = raw.trim()
-        if (text.isEmpty()) throw IllegalArgumentException("Empty host")
-
-        val hadScheme = text.contains("://")
-        if (!hadScheme) text = "ws://$text"
-
-        val uri = URI(text)
-        val inputScheme = (uri.scheme ?: "ws").lowercase()
-        val wsScheme = when (inputScheme) {
-            "https", "wss" -> "wss"
-            "http", "ws" -> "ws"
-            else -> "ws"
-        }
-
-        val authority = uri.rawAuthority ?: throw IllegalArgumentException("Missing host")
-        val hostPart = uri.host ?: authority
-            .substringAfter('@')
-            .let { a -> if (a.startsWith("[")) a.substringBefore(']') + "]" else a.substringBeforeLast(':', a) }
-            .trim()
-        if (hostPart.isEmpty()) throw IllegalArgumentException("Missing host")
-
-        val safeHost = if (hostPart.contains(':') && !hostPart.startsWith("[")) "[$hostPart]" else hostPart
-        val explicitPort = uri.port
-        val needsBackendDefaultPort = explicitPort < 0 && (!hadScheme || wsScheme == "ws")
-        val portText = when {
-            explicitPort >= 0 -> ":$explicitPort"
-            needsBackendDefaultPort -> ":8080"
-            else -> ""
-        }
-        val path = uri.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
-        val query = uri.rawQuery?.let { "?$it" } ?: ""
-        return "$wsScheme://$safeHost$portText$path$query"
-    }
-
-    private fun readU32LE(bytes: ByteString, off: Int): Int {
-        return (bytes[off].toInt() and 0xFF) or
-            ((bytes[off + 1].toInt() and 0xFF) shl 8) or
-            ((bytes[off + 2].toInt() and 0xFF) shl 16) or
-            ((bytes[off + 3].toInt() and 0xFF) shl 24)
-    }
-
     private fun startSending() {
         if (sending) return
         val token = senderToken.incrementAndGet()
         sending = true
         Thread {
             try {
+                // Input frames are the latency-critical path: bump the sender
+                // above default background priority so 4 ms ticks stay on time.
+                try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Throwable) {}
                 if (activeClientMode == ClientMode.TOUCH) startPhoneSensors()
                 while (sending && controlClientActive && senderToken.get() == token) {
                     sendFrame()
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastNamesSentMs >= 2000L) {
+                        lastNamesSentMs = now
+                        sendNamesFrame()
+                    }
                     Thread.sleep(4)
                 }
             } catch (_: Throwable) {
@@ -481,12 +450,14 @@ class MainActivity : AppCompatActivity() {
         sendFrameInternal()
     }
 
-    private fun sendResetFrameTo(socket: WebSocket) {
-        try { sendFrameInternal(socketOverride = socket, flagsOverride = Protocol.FLAG_RESET, forceNeutral = true) } catch (_: Throwable) {}
+    // FLAG_DISCONNECT frees the server slot immediately (the UDP equivalent of
+    // the old WebSocket close); sent a few times since UDP is lossy.
+    private fun sendDisconnectFrameTo(transport: NsUdp) {
+        try { sendFrameInternal(socketOverride = transport, flagsOverride = Protocol.FLAG_DISCONNECT, forceNeutral = true) } catch (_: Throwable) {}
     }
 
     private fun sendNamesFrame() {
-        val socket = ws ?: return
+        val transport = udp ?: return
         val data = ByteArray(224)
         data[0] = 0x4E.toByte()
         data[1] = 0x43.toByte()
@@ -520,12 +491,12 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        try { socket.send(data.toByteString()) } catch (_: Throwable) {}
+        try { transport.sendSigned(data, NsUdp.NAMES_AUTH_SIZE) } catch (_: Throwable) {}
     }
 
-    private fun sendFrameInternal(socketOverride: WebSocket? = null, flagsOverride: Int? = null, forceNeutral: Boolean = false) {
+    private fun sendFrameInternal(socketOverride: NsUdp? = null, flagsOverride: Int? = null, forceNeutral: Boolean = false) {
         synchronized(sendLock) {
-            val socket = socketOverride ?: ws ?: return
+            val socket = socketOverride ?: udp ?: return
             val touchActive = !forceNeutral && touchClientActive()
             val flags = flagsOverride ?: if (touchActive) Protocol.FLAG_SINGLE_PAD else 0
             val timestampUs = System.currentTimeMillis() * 1000L
@@ -565,7 +536,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            if (!socket.send(frame.toByteString())) throw IllegalStateException("WebSocket send queue rejected frame")
+            socket.sendSigned(frame, NsUdp.FRAME_AUTH_SIZE)
         }
     }
 
@@ -952,7 +923,7 @@ class MainActivity : AppCompatActivity() {
         scanPhysicalControllers()
         updatePhysicalStatusOnPage("Connecting...")
 
-        if (!connectWs()) {
+        if (!connectUdp()) {
             controlClientActive = false
             activeClientMode = ClientMode.NONE
             stopPhysicalControllerSensors()
@@ -990,7 +961,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updatePhysicalStatusOnPage()
-        sendNamesFrame()
+        lastNamesSentMs = 0 // roster changed: sender loop re-announces names next tick
     }
 
     private fun isControllerDevice(device: InputDevice): Boolean {
@@ -1354,15 +1325,15 @@ class MainActivity : AppCompatActivity() {
         lastBridgeFrameParseMs = 0
         controlClientActive = true
 
-        if (!connectWs()) {
+        if (!connectUdp()) {
             controlClientActive = false
             activeClientMode = ClientMode.NONE
         }
     }
 
     private fun deactivateControlClient() {
-        if (!controlClientActive && ws == null && !sending) return
-        val closingWs = ws
+        if (!controlClientActive && udp == null && !sending) return
+        val closing = udp
         senderToken.incrementAndGet()
         sending = false
         controlClientActive = false
@@ -1370,21 +1341,21 @@ class MainActivity : AppCompatActivity() {
         touchFrame = null
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
-        ws = null
+        udp = null
         stopPhoneSensors()
         stopPhysicalControllerSensors()
         stopAllPhysicalRumble()
         activeClientMode = ClientMode.NONE
 
-        if (closingWs != null) {
+        if (closing != null) {
             Thread {
                 try {
                     repeat(3) {
-                        sendResetFrameTo(closingWs)
+                        sendDisconnectFrameTo(closing)
                         try { Thread.sleep(4) } catch (_: InterruptedException) { return@Thread }
                     }
-                    try { closingWs.close(1000, "Leaving touch controls") } catch (_: Throwable) {}
                 } catch (_: Throwable) {}
+                closing.close()
             }.start()
         }
     }

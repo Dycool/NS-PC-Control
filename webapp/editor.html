@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Layout Editor</title>
+    <title>NS Layout Editor</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231E1E1E'/%3E%3Ccircle cx='22' cy='40' r='9' fill='%23CC0000'/%3E%3Ccircle cx='42' cy='24' r='9' fill='%23E0E0E0'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="css/editor.css">
     <script src="js/bridge.js"></script>
 </head>
@@ -24,11 +25,11 @@
                     <option value="1">Joy-Con (L)</option>
                     <option value="2">Joy-Con (R)</option>
                 </select>
-                <button onclick="saveLayout()" style="background:#0a0; color:#fff;">Save</button>
+                <button onclick="saveLayout()" style="background:#CC0000; color:#fff;">Save</button>
                 <select id="addSel" onchange="addBtn()"><option value="">+ Add Button</option></select>
                 <button id="toggleDel" onclick="toggleDel()">🗑️ Delete Mode: OFF</button>
-                <button onclick="window.location.href='mobile.html'" style="background:#a00; color:#fff;">Cancel</button>
-                <button onclick="resetLayout()" style="background:#e91e63; color:#fff;">Reset to Defaults</button>
+                <button onclick="window.location.href='mobile.html'" style="background:#262626; color:#E0E0E0; border:1px solid #3A3A3A;">Cancel</button>
+                <button onclick="resetLayout()" style="background:#262626; color:#E0E0E0; border:1px solid #CC0000;">Reset to Defaults</button>
             </div>
         </div>
         <div id="btn-zl" class="edit-item btn-shoulder btn"><span class="label">ZL</span></div>

@@ -601,11 +601,14 @@ void writer_thread(std::stop_token stoken, int hz) {
                                                          : ns::CONTROLLER_TYPE_PRO;
                 }
             }
+            const bool family_supports_nfc =
+                g_ctx.usb_controller_family == UsbControllerFamily::Switch2;
             for (int c = 0; c < MAX_CLIENTS; ++c) {
                 if (!snap[c].active) continue;
                 for (int s = 0; s < 4; ++s) {
                     publish_client_assignment_event(c, s, assignment_masks[c][s], assignment_primary[c][s],
                                                     assignment_requested[c][s], assignment_virtual[c][s]);
+                    if (!family_supports_nfc) continue;
                     bool has_native_nfc = false;
                     for (int h = 0; h < nports; ++h) {
                         if ((assignment_masks[c][s] & (1u << h)) && controller_port_supports_amiibo(h)) {
@@ -690,14 +693,10 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 const MotionReport* motion_for_port = nullptr;
                                 bool has_motion_for_port = false;
                                 MotionReport prepared_motion[3]{};
-                                bool dbg_src_has_motion = false;
-                                bool dbg_src_fresh = false;
                                 if (port_needed) {
                                     int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                     const HIDReport& source_report = get_hid_report(snap[cidx], sidx);
                                     has_motion_for_port = source_report.has_motion != 0;
-                                    dbg_src_has_motion = has_motion_for_port;
-                                    dbg_src_fresh = (source_report.reserved[1] & EXT_STATUS_MOTION_FRESH) != 0;
                                     if (has_motion_for_port) {
                                         for (int idx = 0; idx < 3; ++idx)
                                             prepared_motion[idx] = source_report.motion[idx];
@@ -760,37 +759,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                                                         h, write_buf, native_mouse_ptr);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
-                                    // Joy-Con L gyro diagnostics. Prints on any state
-                                    // change and at most once/second otherwise, so a
-                                    // moving controller stays readable. If nothing prints
-                                    // while L is selected, the console never put the port
-                                    // into standard-report streaming (a different failure).
-                                    if (g_ctx.verbose
-                                            && hw_slots[h].virtual_type == NS_TYPE_JOYCON_L) {
-                                        static uint64_t jcl_last_log_us[HID_PORT_COUNT] = {};
-                                        static uint8_t  jcl_last_state[HID_PORT_COUNT] =
-                                            {0xFF, 0xFF, 0xFF, 0xFF};
-                                        const uint8_t state =
-                                            (has_motion_for_port ? 0x1 : 0)
-                                            | (rt[h].imu_enabled ? 0x2 : 0)
-                                            | (dbg_src_has_motion ? 0x4 : 0)
-                                            | (dbg_src_fresh ? 0x8 : 0);
-                                        if (state != jcl_last_state[h]
-                                                || now_stamp - jcl_last_log_us[h] >= 1000000ull) {
-                                            const MotionReport* m = motion_for_port;
-                                            std::println(
-                                                "[jcl][motion] port={} imu_enabled={} "
-                                                "client_has_motion={} fresh={} sent_has_motion={} "
-                                                "gyro_newest=({},{},{}) accel_newest=({},{},{})",
-                                                h, rt[h].imu_enabled ? 1 : 0,
-                                                dbg_src_has_motion ? 1 : 0, dbg_src_fresh ? 1 : 0,
-                                                has_motion_for_port ? 1 : 0,
-                                                m ? m[2].gx : 0, m ? m[2].gy : 0, m ? m[2].gz : 0,
-                                                m ? m[2].ax : 0, m ? m[2].ay : 0, m ? m[2].az : 0);
-                                            jcl_last_log_us[h] = now_stamp;
-                                            jcl_last_state[h] = state;
-                                        }
-                                    }
                                     build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);
                                     memcpy(write_buf, &std_in, sizeof(ProInputReport30));
                                     write_len = sizeof(ProInputReport30);

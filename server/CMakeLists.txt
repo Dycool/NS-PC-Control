@@ -159,11 +159,19 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/index.css  >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/mobile.css >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/editor.css >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i css/ns_ui.css >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/bridge.js  >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/ns_core.js >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/controller_layouts.js >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/index.js   >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/mobile.js  >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/editor.js  >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_settings.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_rumble.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_motion.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_mouse.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_amiibo.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_audio.js >> ${WEBAPP_EMBED}
     DEPENDS
         ${WEBAPP_DIR}/index.html
         ${WEBAPP_DIR}/mobile.html
@@ -171,11 +179,19 @@ add_custom_command(
         ${WEBAPP_DIR}/css/index.css
         ${WEBAPP_DIR}/css/mobile.css
         ${WEBAPP_DIR}/css/editor.css
+        ${WEBAPP_DIR}/css/ns_ui.css
         ${WEBAPP_DIR}/js/bridge.js
+        ${WEBAPP_DIR}/js/ns_core.js
         ${WEBAPP_DIR}/js/controller_layouts.js
         ${WEBAPP_DIR}/js/index.js
         ${WEBAPP_DIR}/js/mobile.js
         ${WEBAPP_DIR}/js/editor.js
+        ${WEBAPP_DIR}/js/feat_settings.js
+        ${WEBAPP_DIR}/js/feat_rumble.js
+        ${WEBAPP_DIR}/js/feat_motion.js
+        ${WEBAPP_DIR}/js/feat_mouse.js
+        ${WEBAPP_DIR}/js/feat_amiibo.js
+        ${WEBAPP_DIR}/js/feat_audio.js
     COMMENT "Embedding webapp files via xxd..."
     VERBATIM
 )

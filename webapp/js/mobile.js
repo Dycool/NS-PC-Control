@@ -33,21 +33,19 @@ function applyLayout() {
     }
 }
 applyLayout();
-const PROTO_MAGIC = 0x4E535743, PROTO_VERSION = 6;
-const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341, CLIENT_ASSIGNMENT_SIZE = 16;
-const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02, CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
-const CLIENT_NAMES_MAGIC = 0x4E53434E, SERVER_INFO_VERSION = 1;
-const ROSTER_NAME_CAP = 48, ROSTER_ENTRY_SIZE = 50, CLIENT_NAMES_SIZE = 224;
-const PAD_PRESENT = 1;
-const FLAG_SINGLE_PAD = 0x04;
-const EXT_STATUS_BATTERY_VALID = 0x01;
-const EXT_STATUS_BATTERY_CHARGING = 0x02;
-const EXT_STATUS_MOTION_FRESH = 0x04;
-const EXT_STATUS_MOTION_FRESH_VALID = 0x08;
-const EXT_BUTTON_SL = 0x10, EXT_BUTTON_SR = 0x20;
-const EXT_REPORT_SIZE = 48, PACKET_SIZE = 212;
-const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
-const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
+// Protocol constants live in ns_core.js; keep the historical local names.
+const NC = NSCore.C;
+const PROTO_MAGIC = NC.PROTO_MAGIC, PROTO_VERSION = NC.PROTO_VERSION_3;
+const CLIENT_ASSIGNMENT_MAGIC = NC.CLIENT_ASSIGNMENT_MAGIC, CLIENT_ASSIGNMENT_SIZE = NC.CLIENT_ASSIGNMENT_SIZE;
+const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = NC.CLIENT_ASSIGNMENT_FLAG_ACCEPTED, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = NC.CLIENT_ASSIGNMENT_FLAG_SERVER_FULL, CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = NC.CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED;
+const CLIENT_NAMES_MAGIC = NC.CLIENT_NAMES_MAGIC, SERVER_INFO_VERSION = NC.SERVER_INFO_VERSION;
+const ROSTER_NAME_CAP = NC.ROSTER_NAME_CAP, ROSTER_ENTRY_SIZE = NC.ROSTER_ENTRY_SIZE, CLIENT_NAMES_SIZE = NC.CLIENT_NAMES_SIZE;
+const PAD_PRESENT = NC.PAD_PRESENT;
+const FLAG_SINGLE_PAD = NC.FLAG_SINGLE_PAD;
+const EXT_BUTTON_SL = NC.EXT_BUTTON_SL, EXT_BUTTON_SR = NC.EXT_BUTTON_SR;
+const EXT_REPORT_SIZE = NC.EXT_REPORT_SIZE, PACKET_SIZE = NC.PACKET_SIZE;
+const BTN_MINUS = NC.BTN_MINUS, BTN_PLUS = NC.BTN_PLUS, BTN_LSTICK = NC.BTN_LSTICK, BTN_RSTICK = NC.BTN_RSTICK;
+const BTN_HOME = NC.BTN_HOME, BTN_CAPTURE = NC.BTN_CAPTURE;
 let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
 let serverSlot = 255, serverFull = false, lastNamesSentMs = 0;
 function sendTouchName() {
@@ -57,7 +55,7 @@ function sendTouchName() {
     v.setUint32(0, CLIENT_NAMES_MAGIC, true);
     v.setUint8(4, SERVER_INFO_VERSION);
     v.setUint8(8, 1); // pad 0 present
-    v.setUint8(9, 0); // no gyro flag
+    v.setUint8(9, NSCore.motion.enabled ? 1 : 0); // gyro flag for the roster
     let touchName = 'Mobile';
     if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
         touchName = 'iOS Controller';
@@ -71,7 +69,14 @@ function sendTouchName() {
 function handleTouchWsBinaryMessage(ev) {
     if (!(ev.data instanceof ArrayBuffer)) return;
     const view = new DataView(ev.data);
-    if (view.byteLength !== CLIENT_ASSIGNMENT_SIZE || view.getUint32(0, true) !== CLIENT_ASSIGNMENT_MAGIC) return;
+    if (view.byteLength < 4) return;
+    const magic = view.getUint32(0, true);
+    if (magic === NC.ROSTER_MAGIC && view.byteLength === NC.ROSTER_SIZE) { NSCore.parseRoster(view); return; }
+    if (view.byteLength !== CLIENT_ASSIGNMENT_SIZE || magic !== CLIENT_ASSIGNMENT_MAGIC) {
+        NSCore.dispatch.wsMessage(magic, view); // rumble/status/amiibo/audio features
+        return;
+    }
+    NSCore.parseAssignment(view);
     const flags = view.getUint8(5);
     if (flags & CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED) {
         resetTouchConnectionUi('Switch 2 mode does not support Joy-Con L + R');
@@ -99,56 +104,15 @@ function handleTouchWsBinaryMessage(ev) {
     }
 }
 
-let touchBatteryPercent = null;
-let touchBatteryCharging = false;
-let motionSamples = [];
-let motionEnabled = false;
-let motionRevision = 0, sentMotionRevision = -1;
-const clampI16 = v => Math.max(-32768, Math.min(32767, Math.round(v || 0)));
-function screenRemap(x, y, z) {
-    const angle = ((screen.orientation && screen.orientation.angle) || window.orientation || 0) % 360;
-    if (angle === 90 || angle === -270) return [-y, x, z];
-    if (angle === 180 || angle === -180) return [-x, -y, z];
-    if (angle === 270 || angle === -90) return [y, -x, z];
-    return [x, y, z];
-}
-function onDeviceMotion(e) {
-    const a0 = e.accelerationIncludingGravity || e.acceleration;
-    const r0 = e.rotationRate;
-    if (!a0 || !r0) return;
-    const a = screenRemap(a0.x || 0, a0.y || 0, a0.z || 0);
-    // DeviceMotion rotationRate is degrees/sec; native mobile gyro APIs use radians/sec.
-    const g = screenRemap(r0.beta || 0, r0.gamma || 0, r0.alpha || 0);
-    const accelScale = 4096 / 9.80665, gyroScale = 16.384;
-    const sample = [
-        clampI16(-a[2] * accelScale), clampI16(-a[0] * accelScale), clampI16(a[1] * accelScale),
-        clampI16(-g[2] * gyroScale), clampI16(-g[0] * gyroScale), clampI16(g[1] * gyroScale)
-    ];
-    for (let i=3; i<6; i++) if (Math.abs(sample[i]) <= 32) sample[i] = 0;
-    motionSamples = [sample, sample, sample];
-    motionRevision++;
-}
+// Motion (DeviceMotion) and battery are provided by ns_core.js now; the math
+// and behavior are unchanged (ported verbatim from this file).
 async function enableMotion() {
-    if (motionEnabled || typeof DeviceMotionEvent === 'undefined') return;
-    try {
-        if (typeof DeviceMotionEvent.requestPermission === 'function' && await DeviceMotionEvent.requestPermission() !== 'granted') return;
-        window.addEventListener('devicemotion', onDeviceMotion);
-        motionEnabled = true;
-    } catch (_) {}
-}
-if (navigator.getBattery) {
-    navigator.getBattery().then(b => {
-        const update = () => {
-            touchBatteryPercent = Number.isFinite(b.level) ? Math.max(0, Math.min(100, Math.round(b.level * 100))) : null;
-            touchBatteryCharging = !!b.charging;
-        };
-        update();
-        b.addEventListener('levelchange', update);
-        b.addEventListener('chargingchange', update);
-    }).catch(() => { touchBatteryPercent = null; });
+    if (!NSCore.settings.get('gyro')) return;
+    await NSCore.motion.enable();
 }
 function resetTouchConnectionUi(text) {
     isConnected = false;
+    NSCore.dispatch.disconnect();
     if (loopId) { clearInterval(loopId); loopId = null; }
     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
     const btn = document.getElementById('btnConnect');
@@ -315,19 +279,8 @@ function setupJoystick(baseId, knobId, axisX, axisY) {
 }
 setupJoystick('lstick', 'lknob', 'lx', 'ly');
 setupJoystick('rstick', 'rknob', 'rx', 'ry');
-function normalizeSystemShortcuts(buttons) {
-    const captureCombo = (buttons & BTN_MINUS) && (buttons & BTN_PLUS);
-    const homeCombo = (buttons & BTN_LSTICK) && (buttons & BTN_RSTICK);
-    if (captureCombo) {
-        buttons |= BTN_CAPTURE;
-        buttons &= ~(BTN_MINUS | BTN_PLUS | BTN_HOME);
-        if (homeCombo) buttons &= ~(BTN_LSTICK | BTN_RSTICK);
-    } else if (homeCombo) {
-        buttons |= BTN_HOME;
-        buttons &= ~(BTN_LSTICK | BTN_RSTICK | BTN_CAPTURE);
-    }
-    return buttons;
-}
+// Shared implementation honors the Home/Capture shortcut toggles in Settings.
+function normalizeSystemShortcuts(buttons) { return NSCore.normalizeSystemShortcuts(buttons); }
 let publishedControllerType = null;
 let publishedExtraButtons = null;
 function publishControllerType() {
@@ -365,35 +318,29 @@ function publishTouchState() {
 function sendPacket() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (publishTouchState()) return;
+    const m = NSCore.motion.consume();
+    const frame = {
+        state: {
+            buttons: normalizeSystemShortcuts(state.buttons), hat: state.hat,
+            lx: state.lx, ly: state.ly, rx: state.rx, ry: state.ry
+        },
+        ext: {
+            present: true,
+            extraBits: state.extraButtons,
+            controllerType,
+            motionSamples: m ? m.samples : null,
+            motionFresh: m ? m.fresh : false,
+            batteryPercent: NSCore.state.battery.percent,
+            batteryCharging: NSCore.state.battery.charging
+        }
+    };
+    NSCore.dispatch.buildFrame(frame); // features (e.g. audio caps refresh) may hook here
     const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, FLAG_SINGLE_PAD);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now()*1000), true);
-    let off = 20;
-    const sendButtons = normalizeSystemShortcuts(state.buttons);
-    view.setUint16(off, sendButtons, true); view.setUint8(off+2, state.hat);
-    view.setUint8(off+3, state.lx); view.setUint8(off+4, state.ly); view.setUint8(off+5, state.rx); view.setUint8(off+6, state.ry); view.setUint8(off+7, PAD_PRESENT);
-    for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(off + k, 0);
-    if (motionSamples.length === 3) {
-        for (let s=0; s<3; s++) for (let v=0; v<6; v++) view.setInt16(off + 8 + s*12 + v*2, motionSamples[s][v], true);
-        view.setUint8(off + 44, 1);
-        let motionFlags = view.getUint8(off + 46) | EXT_STATUS_MOTION_FRESH_VALID;
-        if (motionRevision !== sentMotionRevision) motionFlags |= EXT_STATUS_MOTION_FRESH;
-        view.setUint8(off + 46, motionFlags);
-        sentMotionRevision = motionRevision;
-    }
-    if (touchBatteryPercent !== null) {
-        view.setUint8(off + 45, touchBatteryPercent);
-        let batteryFlags = view.getUint8(off + 46) | EXT_STATUS_BATTERY_VALID;
-        if (touchBatteryCharging) batteryFlags |= EXT_STATUS_BATTERY_CHARGING;
-        view.setUint8(off + 46, batteryFlags);
-    }
-    view.setUint8(off + 7, PAD_PRESENT | state.extraButtons);
-    view.setUint8(off + 47, controllerType);
-    for(let p=1; p<4; p++) {
-        off = 20 + (p*EXT_REPORT_SIZE); view.setUint16(off, 0, true); view.setUint8(off+2, 8);
-        view.setUint8(off+3, 128); view.setUint8(off+4, 128); view.setUint8(off+5, 128); view.setUint8(off+6, 128); view.setUint8(off+7, 0);
-        for(let k=8; k<EXT_REPORT_SIZE; k++) view.setUint8(off+k, 0);
-    }
+    NSCore.buildExtPad(view, 20, frame.state, frame.ext);
+    for (let p = 1; p < 4; p++)
+        NSCore.buildExtPad(view, 20 + p * EXT_REPORT_SIZE, {}, { present: false });
     ws.send(buffer);
     if (Date.now() - lastNamesSentMs > 2000) sendTouchName();
 }
@@ -409,7 +356,9 @@ document.getElementById('btnConnect').onclick = async () => {
     ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
     ws.onmessage = handleTouchWsBinaryMessage;
     ws.onopen = () => {
-        isConnected = true; serverFull = false; serverSlot = 255; lastNamesSentMs = 0; const btn = document.getElementById('btnConnect');
+        isConnected = true; serverFull = false; serverSlot = 255; lastNamesSentMs = 0;
+        NSCore.dispatch.connect(ws);
+        const btn = document.getElementById('btnConnect');
         btn.innerText = "Connected"; btn.classList.add('connected');
         connectTimeout = setTimeout(() => {
             if (window._connectionFailed) { window._connectionFailed = false; return; }
@@ -422,3 +371,4 @@ document.getElementById('btnConnect').onclick = async () => {
     ws.onclose = () => { resetTouchConnectionUi(serverFull ? 'Server full' : 'Disconnected'); };
 };
 document.getElementById('statusDot').onclick = () => { if(ws) ws.close(); };
+NSCore.dispatch.mountUI('mobile');

@@ -16,3 +16,8 @@ struct WebClient;
 constexpr size_t UDP_RX_MAX_PACKET_SIZE = ns::PACKET_SIZE;
 
 void web_server_thread(std::stop_token stoken, int web_port, uint16_t udp_port, bool serve_http_webapp);
+
+// Switch 2 audio -> WebSocket sink. Called from the audio playback thread
+// (udp_audio.cpp); enqueues console PCM for the registered WS audio client.
+// The packet is sent unsigned: the WS path is a trusted-network transport.
+void web_server_push_s2_audio_pcm(const ns::S2AudioPcmPacket& packet);

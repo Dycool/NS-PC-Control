@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import CoreMotion
+import CryptoKit
 import Network
 import GameController
 import CoreHaptics
@@ -32,8 +33,45 @@ private enum ProtocolWire {
     static let precisionRumblePacketSize = 20
     static let rumbleMagic: UInt32 = 0x4E535652
     static let precisionRumbleMagic: UInt32 = 0x4E535648
+    static let serverInfoMagic: UInt32 = 0x4E535349
+    static let clientAssignmentMagic: UInt32 = 0x4E534341
+    static let clientAssignmentSize = 16
+    static let assignmentFlagServerFull = 0x02
+    static let assignmentFlagProfileUnsupported = 0x10
+
+    // Authenticated UDP wire format (same as the desktop ns-client): payload
+    // (auth region) + first 16 bytes of HMAC-SHA256 keyed with SHA-256(secret).
+    static let defaultUdpPort: UInt16 = 7331
+    static let hmacTagSize = 16
+    static let frameAuthSize = 212   // input frame: 212 + 16 = 228 on the wire
+    static let namesAuthSize = 208   // ClientNamesPacket: hmac lives at 208..223
+    private static let hmacKey = SymmetricKey(
+        data: Data(SHA256.hash(data: Data("nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY".utf8))))
+
+    static func signed(_ payload: [UInt8], authLen: Int) -> Data {
+        var data = Data(payload.prefix(authLen))
+        let tag = HMAC<SHA256>.authenticationCode(for: data, using: hmacKey)
+        data.append(contentsOf: Array(tag).prefix(hmacTagSize))
+        return data
+    }
+
+    static func signed(_ payload: Data, authLen: Int) -> Data {
+        var data = payload.prefix(authLen)
+        let tag = HMAC<SHA256>.authenticationCode(for: data, using: hmacKey)
+        data.append(contentsOf: Array(tag).prefix(hmacTagSize))
+        return data
+    }
+
+    static func readU32LE(_ data: Data, _ off: Int) -> UInt32 {
+        guard data.count >= off + 4 else { return 0 }
+        let b = data
+        let i = data.startIndex
+        return UInt32(b[i + off]) | (UInt32(b[i + off + 1]) << 8)
+            | (UInt32(b[i + off + 2]) << 16) | (UInt32(b[i + off + 3]) << 24)
+    }
 
     static let flagReset = 0x01
+    static let flagDisconnect = 0x08
     static let flagSinglePad = 0x04
     static let extStatusBatteryValid = 0x01
     static let extStatusBatteryCharging = 0x02
@@ -308,7 +346,7 @@ private final class PhysicalPad {
     }
 }
 
-final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, URLSessionWebSocketDelegate, UIGestureRecognizerDelegate {
+final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
     var orientationMask: UIInterfaceOrientationMask = .allButUpsideDown
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientationMask }
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
@@ -325,13 +363,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     private var connected = false
     private var controlClientActive = false
     private var sending = false
-    private var webSocket: URLSessionWebSocketTask?
-    private var pingTimer: Timer?
-    private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+    // Authenticated UDP transport (same path as the desktop ns-client).
+    private var udp: NWConnection?
     private var seq: UInt32 = 0
-    private let sendQueue = DispatchQueue(label: "ns.mobile.ios.sender")
+    // Input frames are the latency-critical path: user-interactive QoS keeps
+    // the 4 ms sender ticks on time under load.
+    private let sendQueue = DispatchQueue(label: "ns.mobile.ios.sender", qos: .userInteractive)
     private let stateQueue = DispatchQueue(label: "ns.mobile.ios.state")
+    private let udpQueue = DispatchQueue(label: "ns.mobile.ios.udp", qos: .userInteractive)
     private var senderToken = 0
+    // 0 forces the 4 ms sender loop to (re)send the client names on its next
+    // tick; the loop then refreshes them every 2 s (UDP is lossy, this heals).
+    private var lastNamesSentMs: UInt64 = 0
 
     private var currentOrientation: UIInterfaceOrientation = .landscapeRight
     private var currentPage: Page = .mainMenu
@@ -551,52 +594,60 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
     }
 
+    // UDP ServerInfo probe: 8-byte unauthenticated ServerInfoProbe, answered by
+    // a 16-byte ServerInfoReply even when every slot is busy. Replaces the old
+    // TCP probe against the web port (which no longer exists without -w).
     private func probeServer(_ raw: String, completion: @escaping (Bool) -> Void) {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { completion(false); return }
-        let hadScheme = text.contains("://")
-        if !hadScheme { text = "ws://\(text)" }
-        guard let comps = URLComponents(string: text) else { completion(false); return }
-        guard let rawHost = comps.host, !rawHost.isEmpty else { completion(false); return }
-        let probePort = comps.port ?? 8080
-        let host = NWEndpoint.Host(rawHost)
-        let port = NWEndpoint.Port(integerLiteral: UInt16(probePort))
-        let connection = NWConnection(host: host, port: port, using: .tcp)
+        guard let (endpointHost, endpointPort) = try? parseHostPort(raw) else { completion(false); return }
+        let params = NWParameters.udp
+        params.serviceClass = .responsiveData
+        let connection = NWConnection(host: endpointHost, port: endpointPort, using: params)
         let probeLock = NSLock()
         var probeDone = false
-        let timeoutWork = DispatchWorkItem {
+        func finish(_ ok: Bool) {
             probeLock.lock()
             guard !probeDone else { probeLock.unlock(); return }
             probeDone = true
             probeLock.unlock()
             connection.cancel()
-            completion(false)
+            completion(ok)
+        }
+        var probe = Data(count: 8)
+        probe[0] = 0x49; probe[1] = 0x53; probe[2] = 0x53; probe[3] = 0x4E // 'NSSI' LE
+        probe[4] = 1 // SERVER_INFO_VERSION
+        func awaitReply() {
+            connection.receiveMessage { data, _, _, error in
+                if let data, data.count >= 16,
+                   ProtocolWire.readU32LE(data, 0) == ProtocolWire.serverInfoMagic {
+                    finish(true)
+                } else if error != nil {
+                    finish(false)
+                } else {
+                    awaitReply()
+                }
+            }
         }
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                probeLock.lock()
-                guard !probeDone else { probeLock.unlock(); return }
-                probeDone = true
-                probeLock.unlock()
-                timeoutWork.cancel()
-                connection.cancel()
-                completion(true)
+                awaitReply()
+                // A couple of retries: single UDP datagrams can be lost.
+                for delay in [0.0, 0.6, 1.2] {
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                        probeLock.lock()
+                        let done = probeDone
+                        probeLock.unlock()
+                        if !done { connection.send(content: probe, completion: .contentProcessed { _ in }) }
+                    }
+                }
             case .failed:
-                probeLock.lock()
-                guard !probeDone else { probeLock.unlock(); return }
-                probeDone = true
-                probeLock.unlock()
-                timeoutWork.cancel()
-                completion(false)
-            case .cancelled:
-                break
+                finish(false)
             default:
                 break
             }
         }
         connection.start(queue: DispatchQueue.global(qos: .utility))
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0, execute: timeoutWork)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { finish(false) }
     }
 
     @objc private func edgeBack(_ recognizer: UIScreenEdgePanGestureRecognizer) {
@@ -874,7 +925,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         lastBridgeFrameParseMs = 0
         scanPhysicalControllers()
         updatePhysicalStatusOnPage(prefix: "Connecting...")
-        if !connectWs() {
+        if !connectUdp() {
             controlClientActive = false
             activeClientMode = .none
             clearPhysicalControllers()
@@ -892,15 +943,15 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
         controlClientActive = true
-        if !connectWs() {
+        if !connectUdp() {
             controlClientActive = false
             activeClientMode = .none
         }
     }
 
     private func deactivateControlClient() {
-        if !controlClientActive && webSocket == nil && !sending { return }
-        let closing = webSocket
+        if !controlClientActive && udp == nil && !sending { return }
+        let closing = udp
         senderToken += 1
         sending = false
         controlClientActive = false
@@ -908,9 +959,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         touchFrame = nil
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
-        pingTimer?.invalidate()
-        pingTimer = nil
-        webSocket = nil
+        udp = nil
         stopPhoneSensors()
         stopAllPhysicalRumble()
         if activeClientMode != .physical {
@@ -921,11 +970,13 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         if let closing {
             sendQueue.async { [weak self] in
                 guard let self else { return }
+                // FLAG_DISCONNECT frees the server slot immediately (the UDP
+                // equivalent of the old WS close); repeated since UDP is lossy.
                 for _ in 0..<3 {
-                    self.sendResetFrame(to: closing)
+                    self.sendDisconnectFrame(to: closing)
                     Thread.sleep(forTimeInterval: 0.004)
                 }
-                closing.cancel(with: .normalClosure, reason: "Leaving controls".data(using: .utf8))
+                closing.cancel()
             }
         }
     }
@@ -940,13 +991,58 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         view.addSubview(connectView)
     }
 
-    private func connectWs() -> Bool {
+    // Host[:port] -> UDP endpoint; strips any legacy ws:// scheme old builds
+    // accepted. Default is the backend's controller port (7331), not the web
+    // port: native clients no longer touch the WebSocket path.
+    private func parseHostPort(_ raw: String) throws -> (NWEndpoint.Host, NWEndpoint.Port) {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw URLError(.badURL) }
+        if let range = text.range(of: "://") { text = String(text[range.upperBound...]) }
+        if let slash = text.firstIndex(of: "/") { text = String(text[..<slash]) }
+        var hostPart = text
+        var port = ProtocolWire.defaultUdpPort
+        if !text.hasPrefix("["), text.filter({ $0 == ":" }).count == 1,
+           let colon = text.lastIndex(of: ":") {
+            let candidate = String(text[text.index(after: colon)...])
+            if let value = UInt16(candidate), value > 0 {
+                hostPart = String(text[..<colon])
+                port = value
+            }
+        }
+        guard !hostPart.isEmpty, let nwPort = NWEndpoint.Port(rawValue: port) else { throw URLError(.badURL) }
+        return (NWEndpoint.Host(hostPart), nwPort)
+    }
+
+    // Authenticated UDP to the Raspberry Pi backend — the same low-latency
+    // path as the desktop ns-client. UDP is connectionless: the server accepts
+    // on the first signed input frame, so sending starts as soon as the local
+    // socket is ready.
+    private func connectUdp() -> Bool {
         do {
-            let url = try normalizeWsUrl(host)
-            let task = session.webSocketTask(with: url, protocols: ["nspc-protocol"])
-            webSocket = task
-            task.resume()
-            receiveLoop(task)
+            let (endpointHost, endpointPort) = try parseHostPort(host)
+            let params = NWParameters.udp
+            params.serviceClass = .responsiveData // low-latency DSCP marking
+            let connection = NWConnection(host: endpointHost, port: endpointPort, using: params)
+            udp = connection
+            connection.stateUpdateHandler = { [weak self, weak connection] state in
+                DispatchQueue.main.async {
+                    guard let self, let connection, self.udp === connection else { return }
+                    switch state {
+                    case .ready:
+                        guard self.controlClientActive else { return }
+                        self.statusLabel.text = "Connected"
+                        if self.activeClientMode == .physical { self.updatePhysicalStatusOnPage(prefix: "Connected") }
+                        self.lastNamesSentMs = 0 // sender loop announces names immediately
+                        self.startSending()
+                    case .failed, .waiting:
+                        self.handleTransportClosed(text: "Connection failed")
+                    default:
+                        break
+                    }
+                }
+            }
+            receiveLoop(connection)
+            connection.start(queue: udpQueue)
             return true
         } catch {
             statusLabel.text = "Invalid server address"
@@ -954,53 +1050,51 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
     }
 
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        DispatchQueue.main.async { [weak self, weak webSocketTask] in
-            guard let self, let task = webSocketTask, self.webSocket === task, self.controlClientActive else { return }
-            self.statusLabel.text = "Connected"
-            if self.activeClientMode == .physical { self.updatePhysicalStatusOnPage(prefix: "Connected") }
-            self.sendNamesFrame()
-            self.startSending()
-            self.pingTimer?.invalidate()
-            self.pingTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-                self?.webSocket?.sendPing { _ in }
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        let closeReason = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        let message: String
-        if closeReason.localizedCaseInsensitiveContains("S2 does not support L+R") {
-            message = "Switch 2 mode does not support Joy-Con L + R"
-        } else if closeReason.localizedCaseInsensitiveContains("server full") {
-            message = "Server full"
-        } else {
-            message = "Disconnected"
-        }
-        DispatchQueue.main.async { [weak self, weak webSocketTask] in
-            guard let self, let task = webSocketTask, self.webSocket === task else { return }
-            self.handleWsClosed(text: message)
-        }
-    }
-
-    private func receiveLoop(_ task: URLSessionWebSocketTask) {
-        task.receive { [weak self, weak task] result in
-            guard let self, let task else { return }
-            switch result {
-            case .success(let message):
-                if case .data(let data) = message { self.handleRumblePacket(data) }
-                if self.webSocket === task { self.receiveLoop(task) }
-            case .failure:
-                DispatchQueue.main.async { [weak self, weak task] in
-                    guard let self, let task, self.webSocket === task else { return }
-                    self.handleWsClosed(text: "Connection failed")
+    // Server -> mobile feedback arrives on the same UDP socket: rumble (NSVR,
+    // with the NSVH precision fallback whose low/high/duration bytes match)
+    // and ClientAssignmentPacket refusals, which the WS close reason used to
+    // deliver (server full / S2 profile unsupported).
+    private func receiveLoop(_ connection: NWConnection) {
+        connection.receiveMessage { [weak self, weak connection] data, _, _, error in
+            guard let self, let connection else { return }
+            guard self.udp === connection else { return }
+            if let data, !data.isEmpty { self.handleFeedbackPacket(data) }
+            if error == nil {
+                self.receiveLoop(connection)
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.udp === connection else { return }
+                    self.handleTransportClosed(text: "Connection failed")
                 }
             }
         }
     }
 
-    private func handleWsClosed(text: String) {
+    private func handleFeedbackPacket(_ data: Data) {
+        guard data.count >= 8 else { return }
+        let magic = ProtocolWire.readU32LE(data, 0)
+        if (data.count == ProtocolWire.rumblePacketSize && magic == ProtocolWire.rumbleMagic)
+            || (data.count == ProtocolWire.precisionRumblePacketSize && magic == ProtocolWire.precisionRumbleMagic) {
+            handleRumblePacket(data)
+            return
+        }
+        if data.count == ProtocolWire.clientAssignmentSize && magic == ProtocolWire.clientAssignmentMagic {
+            let flags = Int(data[data.startIndex + 5])
+            let message: String?
+            if flags & ProtocolWire.assignmentFlagProfileUnsupported != 0 {
+                message = "Switch 2 mode does not support Joy-Con L + R"
+            } else if flags & ProtocolWire.assignmentFlagServerFull != 0 {
+                message = "Server full"
+            } else {
+                message = nil
+            }
+            if let message {
+                DispatchQueue.main.async { [weak self] in self?.handleTransportClosed(text: message) }
+            }
+        }
+    }
+
+    private func handleTransportClosed(text: String) {
         statusLabel.text = text
         senderToken += 1
         sending = false
@@ -1009,9 +1103,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         touchFrame = nil
         lastTouchFrameMs = 0
         lastBridgeFrameParseMs = 0
-        pingTimer?.invalidate()
-        pingTimer = nil
-        webSocket = nil
+        udp?.cancel()
+        udp = nil
         stopPhoneSensors()
         stopAllPhysicalRumble()
         clearPhysicalControllers()
@@ -1037,20 +1130,6 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    private func normalizeWsUrl(_ raw: String) throws -> URL {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw URLError(.badURL) }
-        let hadScheme = text.contains("://")
-        if !hadScheme { text = "ws://\(text)" }
-        guard var comps = URLComponents(string: text) else { throw URLError(.badURL) }
-        let inputScheme = (comps.scheme ?? "ws").lowercased()
-        comps.scheme = (inputScheme == "https" || inputScheme == "wss") ? "wss" : "ws"
-        if comps.port == nil && (!hadScheme || comps.scheme == "ws") { comps.port = 8080 }
-        if comps.path.isEmpty { comps.path = "/" }
-        guard let url = comps.url else { throw URLError(.badURL) }
-        return url
-    }
-
     private func startSending() {
         if sending { return }
         senderToken += 1
@@ -1062,6 +1141,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             while self.sending && self.controlClientActive && self.senderToken == token {
                 self.collectPhysicalMotionSamplesIfNeeded()
                 self.sendFrame()
+                let now = self.uptimeMs()
+                if now - self.lastNamesSentMs >= 2000 {
+                    self.lastNamesSentMs = now
+                    self.sendNamesFrame()
+                }
                 Thread.sleep(forTimeInterval: 0.004)
             }
             DispatchQueue.main.async { [weak self] in
@@ -1083,7 +1167,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func sendFrame() {
-        guard let socket = webSocket else { return }
+        guard let socket = udp else { return }
         let touchActive = controlClientActive && activeClientMode == .touch && currentPage == .touchControls
         let physicalActive = controlClientActive && activeClientMode == .physical && currentPage == .mainMenu
         let flags = touchActive ? ProtocolWire.flagSinglePad : 0
@@ -1124,22 +1208,20 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             }
         }
 
-        socket.send(.data(Data(frame))) { [weak self] error in
-            guard let self, error != nil else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.statusLabel.text = "Input sender failed"
-                self?.deactivateControlClient()
-            }
-        }
+        // Hot path (250 Hz): sign and fire-and-forget. Transport failures
+        // surface through the NWConnection state handler / receive loop.
+        socket.send(content: ProtocolWire.signed(frame, authLen: ProtocolWire.frameAuthSize),
+                    completion: .idempotent)
     }
 
-    private func sendResetFrame(to socket: URLSessionWebSocketTask) {
-        let frame = ProtocolWire.initFrame(flags: ProtocolWire.flagReset, seq: nextSeq(), timestampUs: UInt64(Date().timeIntervalSince1970 * 1_000_000.0))
-        socket.send(.data(Data(frame)), completionHandler: { _ in })
+    private func sendDisconnectFrame(to socket: NWConnection) {
+        let frame = ProtocolWire.initFrame(flags: ProtocolWire.flagDisconnect, seq: nextSeq(), timestampUs: UInt64(Date().timeIntervalSince1970 * 1_000_000.0))
+        socket.send(content: ProtocolWire.signed(frame, authLen: ProtocolWire.frameAuthSize),
+                    completion: .contentProcessed { _ in })
     }
 
     private func sendNamesFrame() {
-        guard let socket = webSocket else { return }
+        guard let socket = udp else { return }
         var data = Data(count: 224)
         data[0] = 0x4E
         data[1] = 0x43
@@ -1173,7 +1255,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 }
             }
         }
-        socket.send(.data(data)) { _ in }
+        socket.send(content: ProtocolWire.signed(data, authLen: ProtocolWire.namesAuthSize),
+                    completion: .contentProcessed { _ in })
     }
 
     private func nextSeq() -> UInt32 {

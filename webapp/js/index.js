@@ -8,30 +8,35 @@
 // a shared-secret constant in JS source served over HTTP is misleading.
 // FIX #11 (security model): This webapp sends input over an unauthenticated
 // WebSocket. Ensure the server port is not reachable from untrusted networks.
-const PROTO_MAGIC = 0x4E535743;
-const CLIENT_ASSIGNMENT_MAGIC = 0x4E534341;
-const CLIENT_ASSIGNMENT_SIZE = 16;
-const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = 0x01;
-const CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = 0x02;
-const CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
-const CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
-const CLIENT_NAMES_MAGIC = 0x4E53434E;
-const ROSTER_MAGIC = 0x4E53524F;
-const SERVER_INFO_VERSION = 1;
-const ROSTER_NAME_CAP = 48;
-const ROSTER_ENTRY_SIZE = 50;
-const ROSTER_SIZE = 208;
-const CLIENT_NAMES_SIZE = 224;
-const PROTO_VERSION = 5;
-const PAD_PRESENT = 1;
-const EXT_REPORT_SIZE = 48;
-const PACKET_SIZE = 212;
-const PACKET_AUTH_SIZE = 196;
-const BTN_Y = 1<<0, BTN_B = 1<<1, BTN_A = 1<<2, BTN_X = 1<<3;
-const BTN_L = 1<<4, BTN_R = 1<<5, BTN_ZL = 1<<6, BTN_ZR = 1<<7;
-const BTN_MINUS = 1<<8, BTN_PLUS = 1<<9, BTN_LSTICK = 1<<10, BTN_RSTICK = 1<<11;
-const BTN_HOME = 1<<12, BTN_CAPTURE = 1<<13;
-const HAT_N=0, HAT_NE=1, HAT_E=2, HAT_SE=3, HAT_S=4, HAT_SW=5, HAT_W=6, HAT_NW=7, HAT_NEUTRAL=8;
+// Protocol constants live in ns_core.js (single source of truth shared with
+// mobile.js and the feat_* modules); keep the historical local names.
+const NC = NSCore.C;
+const PROTO_MAGIC = NC.PROTO_MAGIC;
+const CLIENT_ASSIGNMENT_MAGIC = NC.CLIENT_ASSIGNMENT_MAGIC;
+const CLIENT_ASSIGNMENT_SIZE = NC.CLIENT_ASSIGNMENT_SIZE;
+const CLIENT_ASSIGNMENT_FLAG_ACCEPTED = NC.CLIENT_ASSIGNMENT_FLAG_ACCEPTED;
+const CLIENT_ASSIGNMENT_FLAG_SERVER_FULL = NC.CLIENT_ASSIGNMENT_FLAG_SERVER_FULL;
+const CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = NC.CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID;
+const CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = NC.CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED;
+const CLIENT_NAMES_MAGIC = NC.CLIENT_NAMES_MAGIC;
+const ROSTER_MAGIC = NC.ROSTER_MAGIC;
+const SERVER_INFO_VERSION = NC.SERVER_INFO_VERSION;
+const ROSTER_NAME_CAP = NC.ROSTER_NAME_CAP;
+const ROSTER_ENTRY_SIZE = NC.ROSTER_ENTRY_SIZE;
+const ROSTER_SIZE = NC.ROSTER_SIZE;
+const CLIENT_NAMES_SIZE = NC.CLIENT_NAMES_SIZE;
+// Version 6 (WEB_PROTO_VERSION_3): same 212-byte layout, but declares that the
+// motion area carries 3 samples per pad (used when browser gyro is enabled).
+const PROTO_VERSION = NC.PROTO_VERSION_3;
+const PAD_PRESENT = NC.PAD_PRESENT;
+const EXT_REPORT_SIZE = NC.EXT_REPORT_SIZE;
+const PACKET_SIZE = NC.PACKET_SIZE;
+const BTN_Y = NC.BTN_Y, BTN_B = NC.BTN_B, BTN_A = NC.BTN_A, BTN_X = NC.BTN_X;
+const BTN_L = NC.BTN_L, BTN_R = NC.BTN_R, BTN_ZL = NC.BTN_ZL, BTN_ZR = NC.BTN_ZR;
+const BTN_MINUS = NC.BTN_MINUS, BTN_PLUS = NC.BTN_PLUS, BTN_LSTICK = NC.BTN_LSTICK, BTN_RSTICK = NC.BTN_RSTICK;
+const BTN_HOME = NC.BTN_HOME, BTN_CAPTURE = NC.BTN_CAPTURE;
+const HAT_N = NC.HAT_N, HAT_NE = NC.HAT_NE, HAT_E = NC.HAT_E, HAT_SE = NC.HAT_SE,
+      HAT_S = NC.HAT_S, HAT_SW = NC.HAT_SW, HAT_W = NC.HAT_W, HAT_NW = NC.HAT_NW, HAT_NEUTRAL = NC.HAT_NEUTRAL;
 let ws = null;
 let isConnected = false;
 let loopId = null;
@@ -60,6 +65,7 @@ function parseRosterPacket(view) {
     roster = { valid:true, ports };
 }
 function handleAssignmentPacket(view) {
+    NSCore.parseAssignment(view); // keeps NSCore.state (S2 gating, settings UI) in sync
     const flags = view.getUint8(5);
     const subpad = view.getUint8(7);
     serverAssignment.serverFull = !!(flags & CLIENT_ASSIGNMENT_FLAG_SERVER_FULL);
@@ -90,11 +96,13 @@ function handleWsBinaryMessage(ev) {
     if (view.byteLength < 4) return;
     const magic = view.getUint32(0, true);
     if (magic === CLIENT_ASSIGNMENT_MAGIC && view.byteLength === CLIENT_ASSIGNMENT_SIZE) handleAssignmentPacket(view);
-    else if (magic === ROSTER_MAGIC && view.byteLength === ROSTER_SIZE) parseRosterPacket(view);
+    else if (magic === ROSTER_MAGIC && view.byteLength === ROSTER_SIZE) { parseRosterPacket(view); NSCore.parseRoster(view); }
+    else NSCore.dispatch.wsMessage(magic, view); // rumble/status/amiibo/audio features
 }
 
 function resetMainConnectionUi(text) {
     isConnected = false;
+    NSCore.dispatch.disconnect();
     resetServerAssignment();
     resetRoster();
     lastNamesSent = '';
@@ -135,6 +143,7 @@ window.onload = () => {
     const savedBindings = localStorage.getItem('nswc_bindings');
     if (savedBindings) currentBindings = JSON.parse(savedBindings);
     wireMacroMenu();
+    NSCore.dispatch.mountUI('index');
 };
 document.getElementById('kbMode').onchange = (e) => localStorage.setItem('nswc_mode', e.target.value);
 window.addEventListener('keydown', (e) => {
@@ -218,24 +227,10 @@ function mergeStates(s1, s2) {
         lx: s1.lx !== 128 ? s1.lx : s2.lx, ly: s1.ly !== 128 ? s1.ly : s2.ly,
         rx: s1.rx !== 128 ? s1.rx : s2.rx, ry: s1.ry !== 128 ? s1.ry : s2.ry };
 }
-function normalizeSystemShortcuts(buttons) {
-    const captureCombo = (buttons & BTN_MINUS) && (buttons & BTN_PLUS);
-    const homeCombo = (buttons & BTN_LSTICK) && (buttons & BTN_RSTICK);
-    if (captureCombo) {
-        buttons |= BTN_CAPTURE;
-        buttons &= ~(BTN_MINUS | BTN_PLUS | BTN_HOME);
-        if (homeCombo) buttons &= ~(BTN_LSTICK | BTN_RSTICK);
-    } else if (homeCombo) {
-        buttons |= BTN_HOME;
-        buttons &= ~(BTN_LSTICK | BTN_RSTICK | BTN_CAPTURE);
-    }
-    return buttons;
-}
-function clamp16(v) { v = Math.round(v || 0); return Math.max(-32768, Math.min(32767, v)); }
-function makeWsUrl() {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${window.location.host}/`;
-}
+// Shared implementation honors the Home/Capture shortcut toggles in Settings.
+function normalizeSystemShortcuts(buttons) { return NSCore.normalizeSystemShortcuts(buttons); }
+function clamp16(v) { return NSCore.clampI16(v); }
+function makeWsUrl() { return NSCore.makeWsUrl(); }
 let savedMacros = JSON.parse(localStorage.getItem('nswc_macros') || '[]');
 if (savedMacros && Array.isArray(savedMacros.macros)) savedMacros = savedMacros.macros; if (!Array.isArray(savedMacros)) savedMacros = [];
 let macroRunning = false, macroSteps = [], macroStepIndex = 0, macroStepUntil = 0, macroState = null;
@@ -471,18 +466,33 @@ function buildAndSendPacket() {
     const macroOverride = updateMacroState();
     if (macroOverride) slotStates[0] = macroOverride;
     updateRosterUi();
+    // Give features (gyro, mouse mode, ...) a chance to mutate pad 0 and its
+    // extended fields before the packet is serialized.
+    const controllerType = NSCore.settings.get('controllerType');
+    const frame = {
+        state: slotStates[0],
+        ext: {
+            present: slotPresent[0],
+            controllerType,
+            motionSamples: null,
+            motionFresh: false,
+            batteryPercent: null,
+            batteryCharging: false
+        }
+    };
+    NSCore.dispatch.buildFrame(frame);
+    slotStates[0] = frame.state;
+    slotPresent[0] = frame.ext.present;
     const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now() * 1000), true);
-    for(let p = 0; p < 4; p++) {
-        const finalButtons = normalizeSystemShortcuts(slotStates[p].buttons);
-        const offset = 20 + (p * EXT_REPORT_SIZE);
-        view.setUint16(offset, finalButtons, true);
-        view.setUint8(offset + 2, slotStates[p].hat);
-        view.setUint8(offset + 3, slotStates[p].lx); view.setUint8(offset + 4, slotStates[p].ly);
-        view.setUint8(offset + 5, slotStates[p].rx); view.setUint8(offset + 6, slotStates[p].ry);
-        view.setUint8(offset + 7, slotPresent[p] ? PAD_PRESENT : 0);
-        for (let k = 8; k < EXT_REPORT_SIZE; k++) view.setUint8(offset + k, 0);
+    for (let p = 0; p < 4; p++) {
+        const s = { ...slotStates[p], buttons: normalizeSystemShortcuts(slotStates[p].buttons) };
+        // The desktop ns-client stamps every live pad with the selected profile;
+        // mirror that so multi-gamepad setups enumerate consistently.
+        const ex = p === 0 ? frame.ext
+            : { present: slotPresent[p], controllerType: slotPresent[p] ? controllerType : 0 };
+        NSCore.buildExtPad(view, 20 + p * EXT_REPORT_SIZE, s, ex);
     }
     ws.send(buffer);
     sendNamesIfChanged(slotPresent, slotName);
@@ -498,6 +508,7 @@ document.getElementById('btnConnect').onclick = async () => {
     ws.onmessage = handleWsBinaryMessage;
     ws.onopen = () => {
         isConnected = true;
+        NSCore.dispatch.connect(ws);
         document.getElementById('btnConnect').innerText = "Disconnect";
         document.getElementById('kbMode').disabled = true;
         document.getElementById('statusText').innerText = `Connected.`;

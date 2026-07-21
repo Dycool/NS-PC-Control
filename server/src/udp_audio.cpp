@@ -2,6 +2,7 @@
 
 #include "app_state.hpp"
 #include "s2_uac1_audio.hpp"
+#include "web_server.hpp"
 #include "shared/protocol.hpp"
 #include "shared/sha256.h"
 
@@ -41,6 +42,21 @@ std::jthread g_audio_capture_thread;
 std::atomic<int> g_audio_socket{-1};
 std::atomic<uint8_t> g_active_capabilities{0};
 std::atomic<uint64_t> g_active_last_seen_us{0};
+
+// WebSocket audio sink (registered by web_server.cpp). Kept as plain atomics:
+// the lws service thread writes, the playback thread and the USB writer read.
+std::atomic<uint8_t> g_ws_capabilities{0};
+std::atomic<uint64_t> g_ws_last_seen_us{0};
+std::atomic<uint32_t> g_ws_output_sequence{0};
+
+uint8_t ws_active_capabilities() {
+    const uint64_t last_seen = g_ws_last_seen_us.load(std::memory_order_relaxed);
+    if (last_seen == 0
+            || elapsed_us_over(ns::now_us(), last_seen, AUDIO_CAPABILITY_TIMEOUT_US)) {
+        return 0;
+    }
+    return g_ws_capabilities.load(std::memory_order_relaxed);
+}
 
 bool same_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
     return a.sin_family == b.sin_family
@@ -170,25 +186,37 @@ void audio_playback_loop(std::stop_token stop_token) {
         if (++frames_in_batch < ns::S2_AUDIO_UDP_FRAMES) continue;
         frames_in_batch = 0;
 
+        // The console-audio consumer is transport-agnostic: the same batched
+        // PCM packet can go to the authenticated UDP endpoint (desktop client)
+        // and/or the registered WebSocket sink (web client, unsigned).
+        const bool ws_playback =
+            (ws_active_capabilities() & ns::S2_AUDIO_CAP_PLAYBACK) != 0;
+
         sockaddr_in endpoint{};
         uint8_t capabilities = 0;
         uint32_t sequence = 0;
-        if (!endpoint_snapshot(endpoint, capabilities, sequence)
-                || (capabilities & ns::S2_AUDIO_CAP_PLAYBACK) == 0) {
-            continue;
-        }
+        const bool udp_playback = endpoint_snapshot(endpoint, capabilities, sequence)
+            && (capabilities & ns::S2_AUDIO_CAP_PLAYBACK) != 0;
+        if (!ws_playback && !udp_playback) continue;
 
         ns::S2AudioPcmPacket packet{};
         packet.direction = ns::S2_AUDIO_DIR_CONSOLE_TO_CLIENT;
         packet.payload_bytes = ns::S2_AUDIO_PCM_BYTES;
-        packet.seq = sequence;
         packet.ts_us = ns::now_us();
         std::memcpy(packet.pcm, payload.data(), payload.size());
-        sign_pcm_packet(packet);
-        const int sock = g_audio_socket.load(std::memory_order_relaxed);
-        if (sock >= 0) {
-            (void)sendto(sock, &packet, sizeof(packet), 0,
-                         reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
+
+        if (ws_playback) {
+            packet.seq = g_ws_output_sequence.fetch_add(1, std::memory_order_relaxed);
+            web_server_push_s2_audio_pcm(packet); // no HMAC on the WS path
+        }
+        if (udp_playback) {
+            packet.seq = sequence;
+            sign_pcm_packet(packet);
+            const int sock = g_audio_socket.load(std::memory_order_relaxed);
+            if (sock >= 0) {
+                (void)sendto(sock, &packet, sizeof(packet), 0,
+                             reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
+            }
         }
     }
 }
@@ -242,6 +270,7 @@ void s2_udp_audio_stop() {
     if (g_audio_capture_thread.joinable()) g_audio_capture_thread.request_stop();
     if (g_audio_playback_thread.joinable()) g_audio_playback_thread.join();
     if (g_audio_capture_thread.joinable()) g_audio_capture_thread.join();
+    s2_ws_audio_set_capabilities(0);
     std::lock_guard<std::mutex> lk(g_audio_endpoint.mutex);
     clear_endpoint_locked();
 }
@@ -339,13 +368,16 @@ void s2_udp_audio_forget_endpoint(const sockaddr_in& sender) {
 }
 
 uint8_t s2_udp_audio_headset_state(uint8_t report_timer) {
+    uint8_t caps = 0;
     const uint64_t last_seen = g_active_last_seen_us.load(std::memory_order_relaxed);
     if (last_seen == 0
             || elapsed_us_over(ns::now_us(), last_seen, AUDIO_CAPABILITY_TIMEOUT_US)) {
         g_active_capabilities.store(0, std::memory_order_relaxed);
-        return 0;
+    } else {
+        caps = g_active_capabilities.load(std::memory_order_relaxed);
     }
-    const uint8_t caps = g_active_capabilities.load(std::memory_order_relaxed);
+    // A WebSocket audio client counts as an attached headset too.
+    caps |= ws_active_capabilities();
     if ((caps & ns::S2_AUDIO_CAP_MICROPHONE) != 0) {
         return static_cast<uint8_t>(0x07u | ((report_timer & 0x08u) ? 0x08u : 0x00u));
     }
@@ -353,4 +385,21 @@ uint8_t s2_udp_audio_headset_state(uint8_t report_timer) {
         return static_cast<uint8_t>(0x05u | ((report_timer & 0x08u) ? 0x08u : 0x00u));
     }
     return 0;
+}
+
+void s2_ws_audio_set_capabilities(uint8_t caps) {
+    caps &= static_cast<uint8_t>(ns::S2_AUDIO_CAP_PLAYBACK | ns::S2_AUDIO_CAP_MICROPHONE);
+    // A microphone is only valid as part of a headset (same physical invariant
+    // as the UDP path and the desktop UI): mic-only behaves as nothing attached.
+    if ((caps & ns::S2_AUDIO_CAP_PLAYBACK) == 0) {
+        caps &= static_cast<uint8_t>(~ns::S2_AUDIO_CAP_MICROPHONE);
+    }
+    g_ws_capabilities.store(caps, std::memory_order_relaxed);
+    g_ws_last_seen_us.store(caps != 0 ? ns::now_us() : 0, std::memory_order_relaxed);
+    if (caps == 0) g_ws_output_sequence.store(0, std::memory_order_relaxed);
+}
+
+void s2_ws_audio_touch() {
+    if (g_ws_capabilities.load(std::memory_order_relaxed) != 0)
+        g_ws_last_seen_us.store(ns::now_us(), std::memory_order_relaxed);
 }

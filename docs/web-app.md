@@ -1,11 +1,24 @@
 # Web App & Mobile Clients
 
 The Raspberry Pi backend includes an **embedded web server** that serves a full control interface accessible from any browser — no native client installation needed.
-The websocket connection is enabled by default to accept native mobile app connections.
+
+The WebSocket input path exists only for browsers and is **tied to the webapp**:
+both are enabled together by the `-w` flag. Without `-w` the backend is
+**UDP-only** — the desktop ns-client and the native mobile apps all use the
+authenticated low-latency UDP path and need no web server at all.
 
 The webapp automatically detects if its running on a PC or on a phone and adjusts itself to support touch controls when needed.
-Gyro with touch controls is only available on the Mobile client app.
-The webapp does not support rumble and gyro.
+
+Supported web features (Settings panel, gear button): controller type selection
+(Pro / Joy-Con L / Joy-Con R / Pair), gamepad rumble (browser gamepads only —
+the phone motor is never used), browser gyro via DeviceMotion, mouse mode
+(Pointer Lock → stick), and — on a Switch 2 backend — Amiibo upload/writeback,
+the native Joy-Con 2 optical mouse, and console audio + microphone.
+
+Browser sensor and microphone APIs (gyro, mic) require a **secure context**:
+serve the webapp through an HTTPS reverse proxy (e.g. Caddy) to enable them.
+On plain HTTP those toggles appear disabled with an explanatory note; audio
+playback still works. The native mobile app is unaffected (native sensors).
 
 ## Enabling the Web Server
 
