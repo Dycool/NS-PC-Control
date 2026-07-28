@@ -438,18 +438,10 @@ SettingsDialog::SettingsDialog(QWidget* parent, const QString& host) : QDialog(p
 
     const bool connected = g_connected.load();
     const bool connecting = g_connecting.load(std::memory_order_relaxed);
-    const bool switch2Connected = connected
-        && g_switch2ModeEnabled.load(std::memory_order_relaxed);
     controllerTypeBox->setEnabled(!connected && !connecting);
     controllerTypeBox->setToolTip(connected || connecting
         ? QStringLiteral("Disconnect or cancel the connection attempt to change the emulated controller type.")
         : QString());
-    gyroBox->setEnabled(!switch2Connected);
-    gyroBox->setToolTip(switch2Connected
-        ? QStringLiteral("Motion input is temporarily disabled for Switch 2 mode.")
-        : QString());
-
-
     updateMouseModeControls();
     updateJoyconHorizontalControl();
 }

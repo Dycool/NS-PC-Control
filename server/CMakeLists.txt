@@ -210,6 +210,7 @@ add_executable(ns-backend
     ${RAW_GADGET_EMBED_CPP}
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
+    src/s2_motion_carrier.cpp
     src/switch2_native.cpp
     src/s2_nfc_codec.cpp
     src/writers.cpp
@@ -260,4 +261,17 @@ endif()
 if(MINIUPNPC_FOUND)
     target_include_directories(ns-backend PRIVATE ${MINIUPNPC_INCLUDE_DIRS})
     target_link_libraries(ns-backend PRIVATE ${MINIUPNPC_LIBRARIES})
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(s2-motion-carrier-test
+        tests/s2_motion_carrier_test.cpp
+        src/s2_motion_carrier.cpp
+    )
+    target_include_directories(s2-motion-carrier-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
+    )
+    add_test(NAME s2-motion-carrier COMMAND s2-motion-carrier-test)
 endif()

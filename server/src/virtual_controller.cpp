@@ -4,18 +4,17 @@
 #include "gadget_wakeup.hpp"
 #include "switch2_native.hpp"
 #include "s2_nfc_codec.hpp"
+#include "s2_motion_carrier.hpp"
 #include "udp_audio.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <chrono>
 #include <print>
 #include <format>
 #include <span>
 #include <cstring>
-#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string_view>
@@ -24,202 +23,21 @@ using namespace ns;
 
 uint8_t pro_timer_from_us(uint64_t t_us) { return (uint8_t)((t_us / 5000ULL) & 0xFF); }
 
-static void write_u16le(uint8_t* dst, uint16_t v) {
-    dst[0] = static_cast<uint8_t>(v & 0xFF);
-    dst[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-}
-
-static void write_i16le(uint8_t* dst, int16_t v) {
-    write_u16le(dst, static_cast<uint16_t>(v));
-}
-
-static void write_u32le(uint8_t* dst, uint32_t v) {
-    dst[0] = static_cast<uint8_t>(v & 0xFFu);
-    dst[1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
-    dst[2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
-    dst[3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
-}
-
-static void write_i32le(uint8_t* dst, int32_t v) {
-    write_u32le(dst, static_cast<uint32_t>(v));
-}
-
 namespace {
 
-struct S2MotionState {
-    uint16_t tick = 0;
-    uint8_t controller_type = 0;
-    bool active = false;
-    uint64_t last_fresh_motion_us = 0;
-    double tick_fraction = 0.0;
-    uint16_t last_timing = 0;
-    bool have_cached_samples = false;
-    std::array<MotionReport, 3> cached_samples{};
-    std::array<uint32_t, 3> angular_phase{0x00000000u, 0x00000000u, 0x80000000u};
-};
-
-struct S2AveragedMotion {
-    double accel[3]{0.0, 0.0, 4096.0};
-    double gyro[3]{0.0, 0.0, 0.0};
-};
-
-std::array<S2MotionState, HID_PORT_COUNT> g_s2_motion_state{};
+std::array<ns::s2::MotionCarrierState, HID_PORT_COUNT> g_s2_motion_state{};
 std::mutex g_s2_motion_mtx;
-
-constexpr int16_t S2_DEFAULT_TEMPERATURE = 0x0C00;
-// MotionReport retains the Switch 1 raw IMU unit used by every client:
-// 16.384 counts per degree/second. Convert that unit accurately when updating
-// the native S2 phase accumulator instead of treating it as 48000/turn.
-constexpr double S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC = 360.0 * 16.384;
-constexpr double S2_INTERNAL_IMU_HZ = 800.0;
-constexpr long double S2_PHASE_UNITS_PER_TURN = 4294967296.0L;
-
-// Majority-bit template from a real, stationary, face-up Right Joy-Con 2
-// 40-byte native motion capture. Confirmed sensor fields are overwritten below;
-// unknown codec state is intentionally preserved instead of being zero-filled.
-constexpr std::array<uint8_t, 36> JOYCON2_STATIONARY_PAYLOAD = {
-    0x83, 0x90, 0xF8, 0xA9, 0x84, 0x3C, 0x00, 0xD0, 0xE7,
-    0x02, 0x48, 0xEE, 0x88, 0x4F, 0xFE, 0xEF, 0xFF, 0xFF,
-    0xDF, 0x02, 0x2C, 0x77, 0xE3, 0x03, 0xFF, 0xEB, 0xFF,
-    0xFE, 0xBF, 0x0B, 0x20, 0xB9, 0x33, 0x3E, 0xC0, 0x03
-};
 
 int s2_motion_port(int port) {
     return (port >= 0 && port < HID_PORT_COUNT) ? port : 0;
-}
-
-void reset_s2_state_locked(S2MotionState& state, uint8_t controller_type) {
-    state = S2MotionState{};
-    state.controller_type = controller_type;
-}
-
-uint16_t advance_s2_motion_clock(S2MotionState& state,
-                                  uint64_t now_us,
-                                  bool fresh_motion,
-                                  uint8_t& elapsed_ticks) {
-    // Switch2Connect identified the key integration failure: a host may poll a
-    // held report several times and integrate the held gyro on every poll. A
-    // held frame must therefore retain the previous motion timestamp. Only a
-    // newly received physical sensor frame advances the native IMU clock.
-    if (!fresh_motion && state.last_timing != 0) {
-        elapsed_ticks = 0;
-        return state.last_timing;
-    }
-
-    uint32_t ticks = 3;
-    uint32_t tick_advance = 3;
-    if (state.last_fresh_motion_us != 0 && now_us > state.last_fresh_motion_us) {
-        const double exact_ticks =
-            (static_cast<double>(now_us - state.last_fresh_motion_us) * S2_INTERNAL_IMU_HZ
-             / 1'000'000.0) + state.tick_fraction;
-        tick_advance = static_cast<uint32_t>(std::floor(exact_ticks));
-        state.tick_fraction = exact_ticks - static_cast<double>(tick_advance);
-        // The four-bit sample-count field saturates, but the 12-bit tick
-        // counter must advance by the FULL elapsed time: the reference
-        // captures show catch-up jumps (e.g. dticks 1792 after a 2.2s stall)
-        // while the sample nibble stays small. Freezing the counter during
-        // stalls desynchronised the console's motion clock.
-        ticks = std::clamp<uint32_t>(tick_advance, 1u, 15u);
-        if (tick_advance < 1) tick_advance = 1;
-    } else {
-        state.tick_fraction = 0.2; // continue the natural 3,3,3,3,4 cadence
-    }
-
-    state.last_fresh_motion_us = now_us;
-    elapsed_ticks = static_cast<uint8_t>(ticks);
-    state.tick = static_cast<uint16_t>((state.tick + tick_advance) & 0x0FFFu);
-    state.last_timing = static_cast<uint16_t>((static_cast<uint16_t>(elapsed_ticks) << 12) | state.tick);
-    return state.last_timing;
-}
-
-void prepare_s2_motion_samples(S2MotionState& state,
-                               const MotionReport motion_samples[3],
-                               bool fresh_motion,
-                               MotionReport out[3]) {
-    if (fresh_motion && motion_samples) {
-        for (size_t i = 0; i < 3; ++i) state.cached_samples[i] = motion_samples[i];
-        state.have_cached_samples = true;
-    }
-
-    if (state.have_cached_samples) {
-        for (size_t i = 0; i < 3; ++i) out[i] = state.cached_samples[i];
-    } else {
-        for (size_t i = 0; i < 3; ++i) {
-            out[i] = MotionReport{};
-            out[i].az = 4096;
-        }
-    }
-
-    if (!fresh_motion) {
-        // Keep the latest acceleration and controls in held reports, but never
-        // expose the same angular velocity twice.
-        for (size_t i = 0; i < 3; ++i) out[i].gx = out[i].gy = out[i].gz = 0;
-    }
-}
-
-S2AveragedMotion average_s2_motion(const MotionReport motion_samples[3], bool has_motion) {
-    S2AveragedMotion result{};
-    if (!has_motion || !motion_samples) return result;
-
-    const int32_t accel_sum[3] = {
-        static_cast<int32_t>(motion_samples[0].ax) + motion_samples[1].ax + motion_samples[2].ax,
-        static_cast<int32_t>(motion_samples[0].ay) + motion_samples[1].ay + motion_samples[2].ay,
-        static_cast<int32_t>(motion_samples[0].az) + motion_samples[1].az + motion_samples[2].az,
-    };
-    const int32_t gyro_sum[3] = {
-        static_cast<int32_t>(motion_samples[0].gx) + motion_samples[1].gx + motion_samples[2].gx,
-        static_cast<int32_t>(motion_samples[0].gy) + motion_samples[1].gy + motion_samples[2].gy,
-        static_cast<int32_t>(motion_samples[0].gz) + motion_samples[1].gz + motion_samples[2].gz,
-    };
-    for (size_t axis = 0; axis < 3; ++axis) {
-        result.accel[axis] = static_cast<double>(accel_sum[axis]) / 3.0;
-        result.gyro[axis] = static_cast<double>(gyro_sum[axis]) / 3.0;
-    }
-    return result;
-}
-
-bool put_bits_lsb(uint8_t* dst, size_t dst_len, unsigned start_bit, unsigned width, uint32_t value) {
-    if (!dst || width == 0 || width > 31 || start_bit + width > dst_len * 8u) return false;
-    for (unsigned bit = 0; bit < width; ++bit) {
-        const unsigned absolute = start_bit + bit;
-        const size_t byte_index = absolute / 8u;
-        const uint8_t mask = static_cast<uint8_t>(1u << (absolute % 8u));
-        if ((value >> bit) & 1u) dst[byte_index] |= mask;
-        else dst[byte_index] &= static_cast<uint8_t>(~mask);
-    }
-    return true;
-}
-
-uint32_t pack_signed_field(int64_t value, unsigned width) {
-    const int64_t min_value = -(int64_t{1} << (width - 1u));
-    const int64_t max_value =  (int64_t{1} << (width - 1u)) - 1;
-    const int64_t clipped = std::clamp(value, min_value, max_value);
-    return static_cast<uint32_t>(clipped) & ((uint32_t{1} << width) - 1u);
-}
-
-int32_t accel_q16(double raw_counts) {
-    constexpr int64_t min_q16 = std::numeric_limits<int32_t>::min();
-    constexpr int64_t max_q16 = std::numeric_limits<int32_t>::max();
-    const long double scaled = static_cast<long double>(raw_counts) * 65536.0L;
-    const int64_t rounded = static_cast<int64_t>(std::llround(scaled));
-    return static_cast<int32_t>(std::clamp(rounded, min_q16, max_q16));
-}
-
-// Native Joy-Con 2 gyro shares the raw sensor unit with MotionReport
-// (16.384 counts per degree/second measured as ~16.4 by gravity-integration),
-// so gyro values pass through 1:1. The transmitted fields clamp at +/-500 dps.
-constexpr int64_t JOYCON2_GYRO_CLAMP_COUNTS = 8191;  // int14 full scale
-
-void mark_s2_motion_inactive(int port) {
-    std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
-    g_s2_motion_state[s2_motion_port(port)].active = false;
 }
 
 } // namespace
 
 void reset_s2_motion_state(int port) {
     std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
-    reset_s2_state_locked(g_s2_motion_state[s2_motion_port(port)], 0);
+    const int motion_port = s2_motion_port(port);
+    ns::s2::reset_motion_carrier(g_s2_motion_state[motion_port]);
 }
 
 // Plain modern descriptor: reports 0x30/0x21/0x81 and the 0x01/0x10/0x80 outputs,
@@ -1022,171 +840,46 @@ static uint8_t s2_power_info_from_hid(const HIDReport& src) {
     return pwr;
 }
 
-// Native Switch 2 motion is controller-specific. Pro Controller 2 uses a
-// byte-aligned 30-byte block. Joy-Con 2 uses a 40-byte packed codec. The two
-// formats share only the timing/temperature prefix and must not be conflated.
-static void write_s2_pro_motion_block(uint8_t* out,
-                                      size_t motion_len_index,
-                                      size_t motion_data_index,
-                                      const MotionReport motion_samples[3],
-                                      bool has_motion,
-                                      bool imu_enabled,
-                                      uint64_t motion_time_us,
-                                      int port) {
-    if (!out || motion_data_index + 30u > PRO_REPORT_SIZE) return;
-    if (!imu_enabled) {
-        mark_s2_motion_inactive(port);
-        return;
-    }
+// Pro Controller 2 and Joy-Con 2 reports both carry the same length-0x1E
+// quaternion motion carrier; only the enclosing report ID/offset differs.
+static bool write_s2_motion_carrier(uint8_t* out,
+                                    size_t motion_len_index,
+                                    size_t motion_data_index,
+                                    const MotionReport motion_samples[3],
+                                    bool fresh_motion,
+                                    bool imu_enabled,
+                                    uint64_t motion_time_us,
+                                    int port) {
+    if (!out || motion_data_index + ns::s2::MOTION_CARRIER_SIZE > PRO_REPORT_SIZE)
+        return false;
 
     const int motion_port = s2_motion_port(port);
-
     std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
-    S2MotionState& state = g_s2_motion_state[motion_port];
-    if (!state.active || state.controller_type != NS_TYPE_PRO) {
-        reset_s2_state_locked(state, NS_TYPE_PRO);
-        state.active = true;
+    ns::s2::MotionCarrierState& state = g_s2_motion_state[motion_port];
+
+    // A null sample pointer means the source disappeared, not merely that this
+    // USB poll is reusing the most recent physical IMU sample.
+    if (!imu_enabled || !motion_samples) {
+        if (state.initialized || state.carrier_valid)
+            ns::s2::reset_motion_carrier(state);
+        return false;
     }
 
-    // A real Pro Controller 2 sends held reports (no new IMU sample) with
-    // motion length 0 and an all-zero motion block (11% of the reports in the
-    // reference captures), never a re-stamped copy of the previous block. The
-    // console skips the block; the phase accumulators resume on the next
-    // fresh sample.
-    if (!has_motion && state.last_timing != 0) {
-        out[motion_len_index] = 0;
-        return;
-    }
-
-    MotionReport effective_samples[3]{};
-    prepare_s2_motion_samples(state, motion_samples, has_motion, effective_samples);
-    const S2AveragedMotion motion = average_s2_motion(effective_samples, true);
-
-    uint8_t elapsed_ticks = 0;
-    const uint16_t timing = advance_s2_motion_clock(
-        state, motion_time_us, has_motion, elapsed_ticks);
-
-    // The captured Pro Controller 2 block stores three wrapping 32-bit angular
-    // phase accumulators. The observed scale is one full turn per 2^32 units.
-    // MotionReport gyro values use the common S1 scale: 16.384 counts per
-    // degree/second (5898.24 counts per full turn/second).
-    const long double phase_scale =
-        S2_PHASE_UNITS_PER_TURN /
-        (S2_GYRO_COUNTS_PER_FULL_TURN_PER_SEC * S2_INTERNAL_IMU_HZ);
-    for (size_t axis = 0; axis < 3; ++axis) {
-        const int64_t increment = std::llround(
-            static_cast<long double>(motion.gyro[axis]) * elapsed_ticks * phase_scale);
-        state.angular_phase[axis] += static_cast<uint32_t>(increment);
-    }
-
-    out[motion_len_index] = 30;
-    uint8_t* dst = out + motion_data_index;
-    write_u16le(dst + 0x00, timing);
-    write_i16le(dst + 0x02, S2_DEFAULT_TEMPERATURE);
-    write_u32le(dst + 0x04, state.angular_phase[0]);
-    write_u32le(dst + 0x08, state.angular_phase[1]);
-    write_u32le(dst + 0x0C, state.angular_phase[2]);
-    write_i32le(dst + 0x10, accel_q16(motion.accel[0]));
-    write_i32le(dst + 0x14, accel_q16(motion.accel[1]));
-    write_i32le(dst + 0x18, accel_q16(motion.accel[2]));
-    // This field is real but unresolved. Zero is the dominant value in the
-    // default capture and is safer than inventing a correction algorithm.
-    write_i16le(dst + 0x1C, 0);
-}
-
-static void write_s2_joycon_motion_block(uint8_t* out,
-                                         size_t motion_len_index,
-                                         size_t motion_data_index,
-                                         const MotionReport motion_samples[3],
-                                         bool has_motion,
-                                         bool imu_enabled,
-                                         uint64_t motion_time_us,
-                                         int port,
-                                         bool right) {
-    if (!out || motion_data_index + 40u > PRO_REPORT_SIZE) return;
-    if (!imu_enabled) {
-        mark_s2_motion_inactive(port);
-        return;
-    }
-
-    const int motion_port = s2_motion_port(port);
-    const uint8_t type = right ? NS_TYPE_JOYCON_R : NS_TYPE_JOYCON_L;
-
-    std::lock_guard<std::mutex> lock(g_s2_motion_mtx);
-    S2MotionState& state = g_s2_motion_state[motion_port];
-    if (!state.active || state.controller_type != type) {
-        reset_s2_state_locked(state, type);
-        state.active = true;
-    }
-
-    // Mirror the real held-report behaviour observed on the Pro Controller 2
-    // captures: no new IMU sample -> zero motion length, all-zero block.
-    if (!has_motion && state.last_timing != 0) {
-        out[motion_len_index] = 0;
-        return;
-    }
-
-    MotionReport effective_samples[3]{};
-    prepare_s2_motion_samples(state, motion_samples, has_motion, effective_samples);
-
-    uint8_t elapsed_ticks = 0;
-    const uint16_t timing = advance_s2_motion_clock(
-        state, motion_time_us, has_motion, elapsed_ticks);
-
-    out[motion_len_index] = 40;
-    uint8_t* dst = out + motion_data_index;
-    write_u16le(dst + 0x00, timing);
-    write_i16le(dst + 0x02, S2_DEFAULT_TEMPERATURE);
-    std::memcpy(dst + 0x04, JOYCON2_STATIONARY_PAYLOAD.data(), JOYCON2_STATIONARY_PAYLOAD.size());
-    uint8_t* payload = dst + 0x04;
-
-    // Decoded native Joy-Con 2 layout (validated against synchronized
-    // dual-controller grip captures and guided single-axis captures at
-    // cross-sensor correlation 0.996-0.999; see
-    // docs/switch2_native_motion_map_v2.md in the RE workspace):
-    //
-    //   bit   1        1 = normal rate, 0 = gyro at/near the +/-500 dps clamp
-    //   bits 68..110   accel sample A (oldest)  3 x int14, 4096 counts/g
-    //   bits 110..149  gyro  sample M (middle)  3 x int13, value = counts/2
-    //   bits 149..188  accel sample B (middle)  3 x int13, value = counts/2
-    //   bits 188..230  gyro  sample G (newest)  3 x int14, 16.4 counts/dps
-    //   bits 230..272  accel sample C (newest)  3 x int14
-    //
-    // The three client MotionReport samples map naturally onto the three
-    // sample slots (oldest / middle / newest). MotionReport already uses the
-    // raw sensor units (4096 counts/g, 16.384 counts/dps), so values pass
-    // through 1:1 apart from the half-resolution middle fields.
-    MotionReport* smp = effective_samples;
-
-    const int16_t acc_a[3] = {smp[0].ax, smp[0].ay, smp[0].az};
-    const int16_t acc_b[3] = {smp[1].ax, smp[1].ay, smp[1].az};
-    const int16_t acc_c[3] = {smp[2].ax, smp[2].ay, smp[2].az};
-    const int16_t gyr_m[3] = {smp[1].gx, smp[1].gy, smp[1].gz};
-    const int16_t gyr_g[3] = {smp[2].gx, smp[2].gy, smp[2].gz};
-
-    bool clipped = false;
-    for (size_t axis = 0; axis < 3; ++axis) {
-        // accel A (int14 @68), gyro M (int13 @110, counts/2),
-        // accel B (int13 @149, counts/2), gyro G (int14 @188), accel C (int14 @230)
-        put_bits_lsb(payload, 36, 68u + 14u * axis, 14,
-                     pack_signed_field(acc_a[axis], 14));
-        put_bits_lsb(payload, 36, 110u + 13u * axis, 13,
-                     pack_signed_field(std::llround(gyr_m[axis] / 2.0), 13));
-        put_bits_lsb(payload, 36, 149u + 13u * axis, 13,
-                     pack_signed_field(std::llround(acc_b[axis] / 2.0), 13));
-        put_bits_lsb(payload, 36, 188u + 14u * axis, 14,
-                     pack_signed_field(gyr_g[axis], 14));
-        put_bits_lsb(payload, 36, 230u + 14u * axis, 14,
-                     pack_signed_field(acc_c[axis], 14));
-        if (std::abs(static_cast<int64_t>(gyr_g[axis])) >= JOYCON2_GYRO_CLAMP_COUNTS ||
-            std::abs(static_cast<int64_t>(gyr_m[axis])) >= JOYCON2_GYRO_CLAMP_COUNTS) {
-            clipped = true;
+    if (fresh_motion) {
+        ns::s2::MotionCarrierSample carrier_samples[3]{};
+        for (size_t i = 0; i < 3; ++i) {
+            carrier_samples[i] = {
+                motion_samples[i].ax, motion_samples[i].ay, motion_samples[i].az,
+                motion_samples[i].gx, motion_samples[i].gy, motion_samples[i].gz,
+            };
         }
+        ns::s2::update_motion_carrier(state, carrier_samples, motion_time_us);
     }
+    if (!state.carrier_valid) return false;
 
-    // bit 0 is always 1 in captures; bit 1 flags proximity to the gyro clamp.
-    put_bits_lsb(payload, 36, 0, 1, 1u);
-    put_bits_lsb(payload, 36, 1, 1, clipped ? 0u : 1u);
+    out[motion_len_index] = static_cast<uint8_t>(ns::s2::MOTION_CARRIER_SIZE);
+    std::memcpy(out + motion_data_index, state.carrier.data(), state.carrier.size());
+    return true;
 }
 
 static void build_s2_joycon_report(const HIDReport& src,
@@ -1251,12 +944,15 @@ static void build_s2_joycon_report(const HIDReport& src,
 
     if (mouse) {
         MotionReport stationary[3]{};
-        for (auto& sample : stationary) sample.ax = 4096;
-        write_s2_pro_motion_block(out, 16, 17, stationary, true, true,
-                                  motion_time_us, port);
+        // The carrier translator remounts the project's S1 frame as
+        // {-Y,+X,+Z}; -Y here preserves the established +X gravity posture
+        // used by native Joy-Con 2 optical mouse mode.
+        for (auto& sample : stationary) sample.ay = -4096;
+        write_s2_motion_carrier(out, 16, 17, stationary, true, true,
+                                motion_time_us, port);
     } else {
-        write_s2_joycon_motion_block(out, 16, 17, motion_samples, has_motion,
-                                      imu_enabled, motion_time_us, port, right);
+        write_s2_motion_carrier(out, 16, 17, motion_samples, has_motion,
+                                imu_enabled, motion_time_us, port);
     }
 
     if (mouse) {
@@ -1363,16 +1059,14 @@ void build_s2_pro_report(const HIDReport& src,
     pack_stick_12(out + 6, src.input.lx, src.input.ly);
     pack_stick_12(out + 9, src.input.rx, src.input.ry);
 
-    // Real Pro Controller 2 captures (PC2_Gyro_*.pcapng): byte 12 carries a
-    // motion-block-valid flag in bit 0x08. 0x38 accompanies every report that
-    // has a 30-byte motion block; 0x30 accompanies held reports whose motion
-    // length is zero. Always sending 0x30 marked our motion data as invalid.
-    out[12] = (imu_enabled && has_motion) ? 0x38 : 0x30;
+    // The hardware-validated PicoSwitch2 path retains 0x30 here while the
+    // motion length byte at offset 15 selects the cached 0x1E carrier.
+    out[12] = 0x30;
     out[13] = controller_port_supports_amiibo(port)
         ? amiibo_nfc_report_state(port) : 0x00;
     out[14] = s2_udp_audio_headset_state(timer);
-    write_s2_pro_motion_block(out, 15, 16, motion_samples, has_motion,
-                              imu_enabled, motion_time_us, port);
+    write_s2_motion_carrier(out, 15, 16, motion_samples, has_motion,
+                            imu_enabled, motion_time_us, port);
 }
 
 

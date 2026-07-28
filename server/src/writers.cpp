@@ -116,6 +116,9 @@ void writer_thread(std::stop_token stoken, int hz) {
     // report. The legacy 5 ms wall-clock timer repeats values at S2's 4 ms
     // report interval, which can make relative input reports look stale.
     uint8_t s2_report_counter[HID_PORT_COUNT]{};
+    uint64_t s2_motion_generation[HID_PORT_COUNT]{};
+    int s2_motion_owner_client[HID_PORT_COUNT] = {-1, -1, -1, -1};
+    int s2_motion_owner_subpad[HID_PORT_COUNT] = {-1, -1, -1, -1};
     for (int i = 0; i < nports; ++i) init_spi_flash(i);
 
     const auto tick = us(1'000'000 / hz);
@@ -692,11 +695,25 @@ void writer_thread(std::stop_token stoken, int hz) {
                                 if (port_needed) report_for_port = out_reports[h];
                                 const MotionReport* motion_for_port = nullptr;
                                 bool has_motion_for_port = false;
+                                bool fresh_motion_for_port = false;
+                                int motion_client_idx = -1;
+                                int motion_subpad_idx = -1;
+                                uint64_t motion_generation = 0;
                                 MotionReport prepared_motion[3]{};
                                 if (port_needed) {
                                     int cidx = hw_slots[h].client_idx, sidx = hw_slots[h].sub_idx;
                                     const HIDReport& source_report = get_hid_report(snap[cidx], sidx);
+                                    motion_client_idx = cidx;
+                                    motion_subpad_idx = sidx;
+                                    motion_generation = snap[cidx].report_generation;
                                     has_motion_for_port = source_report.has_motion != 0;
+                                    fresh_motion_for_port = has_motion_for_port;
+                                    if (source_report.reserved[1]
+                                            & EXT_STATUS_MOTION_FRESH_VALID) {
+                                        fresh_motion_for_port =
+                                            (source_report.reserved[1]
+                                             & EXT_STATUS_MOTION_FRESH) != 0;
+                                    }
                                     if (has_motion_for_port) {
                                         for (int idx = 0; idx < 3; ++idx)
                                             prepared_motion[idx] = source_report.motion[idx];
@@ -705,6 +722,7 @@ void writer_thread(std::stop_token stoken, int hz) {
                                     if (hw_slots[h].pair_member && !hw_slots[h].pair_right && !g_port_switch2[h]) {
                                         motion_for_port = nullptr;
                                         has_motion_for_port = false;
+                                        fresh_motion_for_port = false;
                                     }
                                     if (motion_for_port && hw_slots[h].virtual_type == NS_TYPE_JOYCON_R
                                             && !g_port_switch2[h]) {
@@ -731,8 +749,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                                         have_report_to_write = false;
                                         continue;
                                     }
-                                    // Keep the native S2 motion implementation available, but
-                                    // ignore client motion until S2 motion is ready to be enabled.
                                     S2JoyconMouseInput native_mouse{};
                                     const S2JoyconMouseInput* native_mouse_ptr = nullptr;
                                     if (port_needed
@@ -753,10 +769,43 @@ void writer_thread(std::stop_token stoken, int hz) {
                                             native_mouse_ptr = &native_mouse;
                                         }
                                     }
-                                    build_s2_pro_report(report_for_port, nullptr,
-                                                        false, false,
-                                                        s2_report_counter[h]++, now_stamp,
-                                                        h, write_buf, native_mouse_ptr);
+                                    // All native S2 controller shapes use the
+                                    // same length-0x1E quaternion carrier.
+                                    const bool s2_motion =
+                                        hw_slots[h].virtual_type == NS_TYPE_PRO
+                                        || hw_slots[h].virtual_type == NS_TYPE_JOYCON_L
+                                        || hw_slots[h].virtual_type == NS_TYPE_JOYCON_R;
+                                    if (s2_motion && motion_for_port) {
+                                        const bool owner_changed =
+                                            s2_motion_owner_client[h] != motion_client_idx
+                                            || s2_motion_owner_subpad[h] != motion_subpad_idx;
+                                        if (owner_changed) {
+                                            reset_s2_motion_state(h);
+                                            s2_motion_owner_client[h] = motion_client_idx;
+                                            s2_motion_owner_subpad[h] = motion_subpad_idx;
+                                            s2_motion_generation[h] = 0;
+                                        }
+                                        if (fresh_motion_for_port) {
+                                            if (motion_generation
+                                                    == s2_motion_generation[h]) {
+                                                fresh_motion_for_port = false;
+                                            } else {
+                                                s2_motion_generation[h] =
+                                                    motion_generation;
+                                            }
+                                        }
+                                    } else {
+                                        s2_motion_owner_client[h] = -1;
+                                        s2_motion_owner_subpad[h] = -1;
+                                        s2_motion_generation[h] = 0;
+                                    }
+                                    build_s2_pro_report(
+                                        report_for_port,
+                                        s2_motion ? motion_for_port : nullptr,
+                                        s2_motion && fresh_motion_for_port,
+                                        s2_motion && rt[h].imu_enabled,
+                                        s2_report_counter[h]++, now_stamp,
+                                        h, write_buf, native_mouse_ptr);
                                     write_len = PRO_REPORT_SIZE;
                                 } else {
                                     build_standard_report(report_for_port, motion_for_port, has_motion_for_port, rt[h].imu_enabled, pro_timer_from_us(now_stamp), std_in, is_s2);
