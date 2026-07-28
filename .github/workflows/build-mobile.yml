@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'mobile/**'
+      - 'shared/**'
+      - 'webapp/**'
       - '.github/workflows/build-mobile.yml'
   workflow_dispatch:
   workflow_call:
@@ -35,9 +37,9 @@ jobs:
         with:
           gradle-version: '8.5'
 
-      - name: Build debug APK
+      - name: Build debug APK and verify release/minified variant
         working-directory: mobile/android
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: gradle :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
 
       - name: Stage Android APK
         run: |

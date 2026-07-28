@@ -11,15 +11,23 @@ The webapp automatically detects if its running on a PC or on a phone and adjust
 
 Supported web features (Settings panel, gear button): controller type selection
 (Pro / Joy-Con L / Joy-Con R / Pair), gamepad rumble (browser gamepads only —
-the phone motor is never used), browser gyro via DeviceMotion, mouse mode
-(Pointer Lock → stick), and — on a Switch 2 backend — Amiibo upload/writeback,
-the native Joy-Con 2 optical mouse, and console audio + microphone.
+the phone motor is never used), browser gyro via DeviceMotion, physical-gamepad
+motion when the browser exposes the optional GamepadPose API, mouse mode
+(Pointer Lock → stick), macros, and — on a Switch 2 backend — C/GL/GR
+keyboard and macro inputs, Amiibo upload/writeback, the native Joy-Con 2
+optical mouse, and console audio + microphone.
 
 Browser sensor and microphone APIs (gyro, mic) require a **secure context**.
 On plain HTTP those toggles appear disabled with an explanatory note; audio
 playback still works (native-thread scheduled fallback). Everything else —
 keyboard, gamepad, rumble, mouse mode, macros, Amiibo — is fully functional
 on HTTP.
+
+Physical controller motion is best-effort in a browser: the standard Gamepad
+API exposes buttons and axes but not an IMU. NS Web Control consumes gyro and
+acceleration when a browser/controller stack supplies the experimental
+`Gamepad.pose` extension; otherwise use the desktop client or a native mobile
+app for controller gyro.
 
 ## Enabling the Web Server
 

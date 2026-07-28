@@ -27,8 +27,11 @@ class NsUdp(host: String, port: Int) {
         const val SERVER_INFO_MAGIC = 0x4E535349
         const val CLIENT_ASSIGNMENT_MAGIC = 0x4E534341
         const val CLIENT_ASSIGNMENT_SIZE = 16
+        const val ASSIGNMENT_FLAG_ACCEPTED = 0x01
         const val ASSIGNMENT_FLAG_SERVER_FULL = 0x02
         const val ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10
+        const val ROSTER_MAGIC = 0x4E53524F
+        const val ROSTER_SIZE = 208
 
         private const val SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY"
         private val KEY: ByteArray =

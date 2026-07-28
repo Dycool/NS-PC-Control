@@ -60,6 +60,8 @@ class MainActivity : AppCompatActivity() {
     private var connected = false
     @Volatile private var controlClientActive = false
     @Volatile private var sending = false
+    @Volatile private var assignmentConfirmed = false
+    @Volatile private var lastServerFeedbackMs = 0L
     // Authenticated UDP transport (same path as the desktop ns-client).
     @Volatile private var udp: NsUdp? = null
     private val seq = AtomicInteger(0)
@@ -161,9 +163,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var currentPage = Page.MAIN_MENU
+    @Volatile private var currentPage = Page.MAIN_MENU
     private val pageStack = mutableListOf<Page>()
     @Volatile private var activeClientMode = ClientMode.NONE
+    @Volatile private var cachedBatteryStatus: Pair<Int, Boolean>? = null
+    @Volatile private var lastBatteryStatusReadMs = 0L
 
     private lateinit var inputManager: InputManager
     private val physicalLock = Any()
@@ -320,11 +324,21 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
                 udp = transport
+                assignmentConfirmed = false
+                lastServerFeedbackMs = SystemClock.uptimeMillis()
                 lastNamesSentMs = 0 // sender loop pushes names right away, then every 2 s
                 startReceiver(transport)
-                statusText.text = "Connected"
-                if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connected")
+                statusText.text = "Connecting..."
+                if (activeClientMode == ClientMode.PHYSICAL) updatePhysicalStatusOnPage("Connecting...")
                 startSending()
+                Thread {
+                    try { Thread.sleep(3_000) } catch (_: InterruptedException) { return@Thread }
+                    runOnUiThread {
+                        if (udp === transport && controlClientActive && !assignmentConfirmed) {
+                            handleTransportClosed(transport, "Server did not accept the controller")
+                        }
+                    }
+                }.apply { name = "ns-udp-assignment-timeout"; isDaemon = true }.start()
             }
         }.apply { name = "ns-udp-connect" }.start()
         return true
@@ -340,9 +354,25 @@ class MainActivity : AppCompatActivity() {
             while (udp === transport && !transport.closed) {
                 val n = transport.receive(buf)
                 if (n < 0) break
+                if (udp !== transport) break
                 if (n < 8) continue
                 val magic = NsUdp.readU32LE(buf, 0)
                 when {
+                    n == NsUdp.ROSTER_SIZE && magic == NsUdp.ROSTER_MAGIC -> {
+                        // The roster is repeated every two seconds, so it also
+                        // confirms a live server if the first UDP assignment
+                        // datagram was lost.
+                        runOnUiThread {
+                            if (udp === transport && controlClientActive) {
+                                assignmentConfirmed = true
+                                lastServerFeedbackMs = SystemClock.uptimeMillis()
+                                statusText.text = "Connected"
+                                if (activeClientMode == ClientMode.PHYSICAL) {
+                                    updatePhysicalStatusOnPage("Connected")
+                                }
+                            }
+                        }
+                    }
                     (n == Protocol.RUMBLE_PACKET_SIZE && magic == Protocol.RUMBLE_MAGIC) ||
                     (n == Protocol.PRECISION_RUMBLE_PACKET_SIZE && magic == Protocol.PRECISION_RUMBLE_MAGIC) -> {
                         val subpad = buf[4].toInt() and 0xFF
@@ -354,13 +384,27 @@ class MainActivity : AppCompatActivity() {
                     }
                     n == NsUdp.CLIENT_ASSIGNMENT_SIZE && magic == NsUdp.CLIENT_ASSIGNMENT_MAGIC -> {
                         val flags = buf[5].toInt() and 0xFF
+                        if (flags and NsUdp.ASSIGNMENT_FLAG_ACCEPTED != 0) {
+                            runOnUiThread {
+                                if (udp === transport && controlClientActive) {
+                                    assignmentConfirmed = true
+                                    lastServerFeedbackMs = SystemClock.uptimeMillis()
+                                    statusText.text = "Connected"
+                                    if (activeClientMode == ClientMode.PHYSICAL) {
+                                        updatePhysicalStatusOnPage("Connected")
+                                    }
+                                }
+                            }
+                        }
                         val message = when {
                             flags and NsUdp.ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED != 0 ->
                                 "Switch 2 mode does not support Joy-Con L + R"
                             flags and NsUdp.ASSIGNMENT_FLAG_SERVER_FULL != 0 -> "Server full"
                             else -> null
                         }
-                        if (message != null) runOnUiThread { handleTransportClosed(transport, message) }
+                        if (message != null) {
+                            runOnUiThread { handleTransportClosed(transport, message) }
+                        }
                     }
                     else -> Log.d(TAG, "ignored udp feedback magic=0x${magic.toString(16)} size=$n")
                 }
@@ -374,6 +418,8 @@ class MainActivity : AppCompatActivity() {
         senderToken.incrementAndGet()
         sending = false
         controlClientActive = false
+        assignmentConfirmed = false
+        lastServerFeedbackMs = 0
         touchHid = null
         touchFrame = null
         lastTouchFrameMs = 0
@@ -413,6 +459,16 @@ class MainActivity : AppCompatActivity() {
                 while (sending && controlClientActive && senderToken.get() == token) {
                     sendFrame()
                     val now = SystemClock.uptimeMillis()
+                    if (assignmentConfirmed && lastServerFeedbackMs != 0L
+                        && now - lastServerFeedbackMs >= 7_000L) {
+                        val stalled = udp
+                        if (stalled != null) {
+                            runOnUiThread {
+                                if (udp === stalled) handleTransportClosed(stalled, "Server stopped responding")
+                            }
+                        }
+                        break
+                    }
                     if (now - lastNamesSentMs >= 2000L) {
                         lastNamesSentMs = now
                         sendNamesFrame()
@@ -436,14 +492,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun phoneBatteryStatus(): Pair<Int, Boolean>? {
+        // ACTION_BATTERY_CHANGED is a sticky broadcast backed by a Binder call.
+        // This function runs from the 250 Hz input loop, while battery state
+        // changes on a seconds/minutes timescale, so keep it out of the motion
+        // hot path after the first read.
+        val now = SystemClock.uptimeMillis()
+        if (lastBatteryStatusReadMs != 0L && now - lastBatteryStatusReadMs < 1_000L) {
+            return cachedBatteryStatus
+        }
+        lastBatteryStatusReadMs = now
         val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null
         val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-        if (level < 0 || scale <= 0) return null
+        if (level < 0 || scale <= 0) {
+            cachedBatteryStatus = null
+            return null
+        }
         val percent = ((level * 100f) / scale).roundToInt().coerceIn(0, 100)
         val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-        return percent to charging
+        return (percent to charging).also { cachedBatteryStatus = it }
     }
 
     private fun sendFrame() {
@@ -1337,6 +1405,8 @@ class MainActivity : AppCompatActivity() {
         senderToken.incrementAndGet()
         sending = false
         controlClientActive = false
+        assignmentConfirmed = false
+        lastServerFeedbackMs = 0
         touchHid = null
         touchFrame = null
         lastTouchFrameMs = 0

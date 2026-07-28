@@ -39,6 +39,8 @@ const HAT_N = NC.HAT_N, HAT_NE = NC.HAT_NE, HAT_E = NC.HAT_E, HAT_SE = NC.HAT_SE
       HAT_S = NC.HAT_S, HAT_SW = NC.HAT_SW, HAT_W = NC.HAT_W, HAT_NW = NC.HAT_NW, HAT_NEUTRAL = NC.HAT_NEUTRAL;
 let ws = null;
 let isConnected = false;
+let isConnecting = false;
+let connectionGeneration = 0;
 let loopId = null;
 let seqCounter = 0;
 let lastNamesSent = '';
@@ -101,7 +103,9 @@ function handleWsBinaryMessage(ev) {
 }
 
 function resetMainConnectionUi(text) {
+    connectionGeneration++;
     isConnected = false;
+    isConnecting = false;
     NSCore.dispatch.disconnect();
     NSCore.gamepadMotion.reset();
     resetServerAssignment();
@@ -240,7 +244,9 @@ function mergeStates(s1, s2) {
 function normalizeSystemShortcuts(buttons) { return NSCore.normalizeSystemShortcuts(buttons); }
 function clamp16(v) { return NSCore.clampI16(v); }
 function makeWsUrl() { return NSCore.makeWsUrl(); }
-let savedMacros = JSON.parse(localStorage.getItem('nswc_macros') || '[]');
+let savedMacros = [];
+try { savedMacros = JSON.parse(localStorage.getItem('nswc_macros') || '[]'); }
+catch (_) { savedMacros = []; }
 if (savedMacros && Array.isArray(savedMacros.macros)) savedMacros = savedMacros.macros; if (!Array.isArray(savedMacros)) savedMacros = [];
 let macroRunning = false, macroSteps = [], macroStepIndex = 0, macroStepUntil = 0, macroState = null;
 let macroRecording = false, macroRecordLast = null, macroRecordSince = 0, macroRecorded = [];
@@ -394,9 +400,10 @@ function wireMacroMenu() {
         else { macroRecording=false; if (macroRecordLast !== null) macroRecorded.push(`${macroFrameToText(macroRecordLast)} ${Math.max(1, Math.round(performance.now()-macroRecordSince))}`); if(macroRecorded.some(x=>!x.startsWith('WAIT '))) savedMacros.push(macroPrettyEntry({name:uniqueMacroName('Recorded Macro'), commands:macroRecorded})); persistMacros(); refreshMacroList(); document.getElementById('btnMacroRecord').innerText='Record P1'; }
     };
 }
-function sendNamesIfChanged(slotPresent, slotName) {
+function sendNamesIfChanged(slotPresent, slotName, slotGyro) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const key = slotName.map((n, i) => slotPresent[i] ? n : '').join('');
+    const key = slotName.map((n, i) =>
+        slotPresent[i] ? n + '\u0002' + (slotGyro[i] ? '1' : '0') : '').join('\u0001');
     const now = Date.now();
     if (key === lastNamesSent && (now - lastNamesSentMs) < 2000) return;
     lastNamesSent = key;
@@ -407,7 +414,7 @@ function sendNamesIfChanged(slotPresent, slotName) {
     for (let p = 0; p < 4; p++) {
         const off = 8 + p * ROSTER_ENTRY_SIZE;
         v.setUint8(off, slotPresent[p] ? 1 : 0);
-        v.setUint8(off + 1, 0);
+        v.setUint8(off + 1, slotPresent[p] && slotGyro[p] ? 1 : 0);
         const name = (slotPresent[p] ? (slotName[p] || 'Controller') : '').slice(0, ROSTER_NAME_CAP - 1);
         for (let k = 0; k < name.length; k++) v.setUint8(off + 2 + k, name.charCodeAt(k) & 0xff);
     }
@@ -539,30 +546,48 @@ function buildAndSendPacket() {
         NSCore.buildExtPad(view, 20 + p * EXT_REPORT_SIZE, s, ex);
     }
     ws.send(buffer);
-    sendNamesIfChanged(slotPresent, slotName);
+    const gyroEnabled = NSCore.settings.get('gyro');
+    const slotGyro = slotGamepads.map((pad, p) => !!(slotPresent[p] && gyroEnabled
+        && ((p === 0 && NSCore.motion.enabled)
+            || (pad && NSCore.gamepadMotion.supported(pad)))));
+    sendNamesIfChanged(slotPresent, slotName, slotGyro);
 }
 document.getElementById('btnConnect').onclick = async () => {
-    if (isConnected) {
+    if (isConnected || isConnecting) {
         if (ws) ws.close();
         resetMainConnectionUi('Disconnected');
         return;
     }
+    isConnecting = true;
+    const attempt = ++connectionGeneration;
+    document.getElementById('btnConnect').innerText = "Cancel";
+    document.getElementById('statusText').innerText = "Connecting...";
+    if (NSCore.settings.get('gyro') && NSCore.motion.supported)
+        await NSCore.motion.enable();
+    if (!isConnecting || attempt !== connectionGeneration) return;
     const wsUrl = makeWsUrl();
-    ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
-    ws.onmessage = handleWsBinaryMessage;
-    ws.onopen = () => {
+    const socket = new WebSocket(wsUrl, "nspc-protocol");
+    ws = socket;
+    socket.binaryType = "arraybuffer";
+    socket.onmessage = ev => { if (ws === socket) handleWsBinaryMessage(ev); };
+    socket.onopen = () => {
+        if (ws !== socket) { try { socket.close(); } catch (_) {} return; }
+        isConnecting = false;
         isConnected = true;
-        NSCore.dispatch.connect(ws);
+        NSCore.dispatch.connect(socket);
         document.getElementById('btnConnect').innerText = "Disconnect";
         document.getElementById('kbMode').disabled = true;
         document.getElementById('statusText').innerText = `Connected.`;
         try { window.focus(); document.body.focus(); } catch(e) {}
         loopId = setInterval(buildAndSendPacket, 4);
     };
-    ws.onerror = () => {
+    socket.onerror = () => {
+        if (ws !== socket) return;
         document.getElementById('statusText').innerText = "Connection failed";
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+        if (ws !== socket) return;
+        ws = null;
         const current = document.getElementById('statusText').innerText;
         resetMainConnectionUi((current === 'Connection failed' || current === 'Server full') ? current : 'Disconnected');
     }

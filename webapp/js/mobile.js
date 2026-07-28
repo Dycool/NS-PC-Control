@@ -46,7 +46,7 @@ const EXT_BUTTON_SL = NC.EXT_BUTTON_SL, EXT_BUTTON_SR = NC.EXT_BUTTON_SR;
 const EXT_REPORT_SIZE = NC.EXT_REPORT_SIZE, PACKET_SIZE = NC.PACKET_SIZE;
 const BTN_MINUS = NC.BTN_MINUS, BTN_PLUS = NC.BTN_PLUS, BTN_LSTICK = NC.BTN_LSTICK, BTN_RSTICK = NC.BTN_RSTICK;
 const BTN_HOME = NC.BTN_HOME, BTN_CAPTURE = NC.BTN_CAPTURE;
-let ws = null, loopId = null, seqCounter = 0, isConnected = false, connectTimeout = null;
+let ws = null, loopId = null, seqCounter = 0, isConnected = false, isConnecting = false, connectionGeneration = 0, connectTimeout = null;
 let serverSlot = 255, serverFull = false, lastNamesSentMs = 0;
 function sendTouchName() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -111,7 +111,9 @@ async function enableMotion() {
     await NSCore.motion.enable();
 }
 function resetTouchConnectionUi(text) {
+    connectionGeneration++;
     isConnected = false;
+    isConnecting = false;
     NSCore.dispatch.disconnect();
     if (loopId) { clearInterval(loopId); loopId = null; }
     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
@@ -345,19 +347,28 @@ function sendPacket() {
     if (Date.now() - lastNamesSentMs > 2000) sendTouchName();
 }
 document.getElementById('btnConnect').onclick = async () => {
-    if (isConnected) {
+    if (isConnected || isConnecting) {
         if (ws) ws.close();
         resetTouchConnectionUi('Disconnected');
         return;
     }
+    isConnecting = true;
+    const attempt = ++connectionGeneration;
+    const connectingBtn = document.getElementById('btnConnect');
+    if (connectingBtn) connectingBtn.innerText = "Cancel";
     await enableMotion();
+    if (!isConnecting || attempt !== connectionGeneration) return;
     if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen().catch(()=>{}); }
     const wsUrl = makeWsUrl();
-    ws = new WebSocket(wsUrl, "nspc-protocol"); ws.binaryType = "arraybuffer";
-    ws.onmessage = handleTouchWsBinaryMessage;
-    ws.onopen = () => {
+    const socket = new WebSocket(wsUrl, "nspc-protocol");
+    ws = socket;
+    socket.binaryType = "arraybuffer";
+    socket.onmessage = ev => { if (ws === socket) handleTouchWsBinaryMessage(ev); };
+    socket.onopen = () => {
+        if (ws !== socket) { try { socket.close(); } catch (_) {} return; }
+        isConnecting = false;
         isConnected = true; serverFull = false; serverSlot = 255; lastNamesSentMs = 0;
-        NSCore.dispatch.connect(ws);
+        NSCore.dispatch.connect(socket);
         const btn = document.getElementById('btnConnect');
         btn.innerText = "Connected"; btn.classList.add('connected');
         connectTimeout = setTimeout(() => {
@@ -367,8 +378,16 @@ document.getElementById('btnConnect').onclick = async () => {
         publishTouchState();
         loopId = setInterval(sendPacket, 16);
     };
-    ws.onerror = () => { resetTouchConnectionUi('Connection failed'); alert("Connection failed"); };
-    ws.onclose = () => { resetTouchConnectionUi(serverFull ? 'Server full' : 'Disconnected'); };
+    socket.onerror = () => {
+        if (ws !== socket) return;
+        resetTouchConnectionUi('Connection failed');
+        alert("Connection failed");
+    };
+    socket.onclose = () => {
+        if (ws !== socket) return;
+        ws = null;
+        resetTouchConnectionUi(serverFull ? 'Server full' : 'Disconnected');
+    };
 };
 document.getElementById('statusDot').onclick = () => { if(ws) ws.close(); };
 NSCore.dispatch.mountUI('mobile');

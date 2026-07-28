@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'client/**'
+      - 'shared/**'
       - 'server/include/**'
       - 'server/src/shared/**'
       - '.github/workflows/build-clients.yml'

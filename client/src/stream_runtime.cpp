@@ -24,7 +24,7 @@ std::atomic<uint16_t> g_amiiboRequestSequence[4]{};
 std::atomic<uint64_t> g_amiiboScanDeadlineUs[4]{};
 SOCKET g_sendSock = INVALID_SOCKET;
 sockaddr_in g_sendDest{};
-uint8_t g_sendHmac[32]{};
+static std::mutex g_sendTransportMutex;
 static std::mutex g_amiiboPathMutex;
 static QString g_amiiboPaths[4];
 std::thread g_senderThread;
@@ -385,6 +385,7 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
 }
 
 void sendAmiiboData(uint8_t subpad, const QByteArray& data) {
+    std::lock_guard<std::mutex> transport_lk(g_sendTransportMutex);
     if (g_sendSock == INVALID_SOCKET) return;
     ns::AmiiboDataPacket pkt{};
     pkt.magic = ns::AMIIBO_DATA_MAGIC;
@@ -606,12 +607,22 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     }
     set_socket_nonblocking(sock);
 
-    g_sendSock = sock;
-    g_sendDest = dest;
-    if (cfg.hmac_key) std::memcpy(g_sendHmac, cfg.hmac_key, 32);
+    {
+        std::lock_guard<std::mutex> transport_lk(g_sendTransportMutex);
+        g_sendSock = sock;
+        g_sendDest = dest;
+    }
 
     detect_server_is_legacy(sock, dest);
-    if (g_serverLastReplyUs.load() == 0) return (err_out ? *err_out = "Server not reachable." : ""), closesocket(sock), 1;
+    if (g_serverLastReplyUs.load() == 0) {
+        {
+            std::lock_guard<std::mutex> transport_lk(g_sendTransportMutex);
+            if (g_sendSock == sock) g_sendSock = INVALID_SOCKET;
+        }
+        if (err_out) *err_out = "Server not reachable.";
+        closesocket(sock);
+        return 1;
+    }
     uint32_t seq = 0;
     uint32_t joycon_mouse_seq = 0;
     uint64_t joycon_mouse_last_send_us = 0;
@@ -747,6 +758,10 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
                                  joycon_mouse_last_flags, true);
     }
     send_udp_disconnect_packet(sock, dest, cfg.hmac_key, seq++);
+    {
+        std::lock_guard<std::mutex> transport_lk(g_sendTransportMutex);
+        if (g_sendSock == sock) g_sendSock = INVALID_SOCKET;
+    }
     closesocket(sock);
     return g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed) ? 1 : 0;
 }

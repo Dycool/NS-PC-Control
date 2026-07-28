@@ -38,6 +38,8 @@ private enum ProtocolWire {
     static let clientAssignmentSize = 16
     static let assignmentFlagServerFull = 0x02
     static let assignmentFlagProfileUnsupported = 0x10
+    static let rosterMagic: UInt32 = 0x4E53524F
+    static let rosterSize = 208
 
     // Authenticated UDP wire format (same as the desktop ns-client): payload
     // (auth region) + first 16 bytes of HMAC-SHA256 keyed with SHA-256(secret).
@@ -268,6 +270,29 @@ private final class Locked<T> {
     }
 }
 
+// Small property-wrapper for session fields shared by the main, UDP and
+// 250 Hz sender queues.
+@propertyWrapper
+private final class LockedValue<T> {
+    private let lock = NSLock()
+    private var value: T
+
+    init(wrappedValue: T) { value = wrappedValue }
+
+    var wrappedValue: T {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+        set {
+            lock.lock()
+            value = newValue
+            lock.unlock()
+        }
+    }
+}
+
 private final class PhysicalPad {
     var controller: GCController?
     var name = "Empty"
@@ -361,29 +386,30 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
 
     private var host = ""
     private var connected = false
-    private var controlClientActive = false
-    private var sending = false
+    @LockedValue private var controlClientActive = false
+    @LockedValue private var sending = false
+    @LockedValue private var assignmentConfirmed = false
+    @LockedValue private var lastServerFeedbackMs: UInt64 = 0
     // Authenticated UDP transport (same path as the desktop ns-client).
-    private var udp: NWConnection?
-    private var seq: UInt32 = 0
+    @LockedValue private var udp: NWConnection? = nil
+    @LockedValue private var seq: UInt32 = 0
     // Input frames are the latency-critical path: user-interactive QoS keeps
     // the 4 ms sender ticks on time under load.
     private let sendQueue = DispatchQueue(label: "ns.mobile.ios.sender", qos: .userInteractive)
-    private let stateQueue = DispatchQueue(label: "ns.mobile.ios.state")
     private let udpQueue = DispatchQueue(label: "ns.mobile.ios.udp", qos: .userInteractive)
-    private var senderToken = 0
+    @LockedValue private var senderToken = 0
     // 0 forces the 4 ms sender loop to (re)send the client names on its next
     // tick; the loop then refreshes them every 2 s (UDP is lossy, this heals).
-    private var lastNamesSentMs: UInt64 = 0
+    @LockedValue private var lastNamesSentMs: UInt64 = 0
 
     private var currentOrientation: UIInterfaceOrientation = .landscapeRight
-    private var currentPage: Page = .mainMenu
+    @LockedValue private var currentPage: Page = .mainMenu
     private var pageStack: [Page] = []
-    private var activeClientMode: ClientMode = .none
+    @LockedValue private var activeClientMode: ClientMode = .none
 
     private let motionManager = CMMotionManager()
     private let motionQueue = OperationQueue()
-    private var phoneSensorsActive = false
+    @LockedValue private var phoneSensorsActive = false
     private let phoneMotion = Locked(PhoneMotionState())
 
     private struct PhoneMotionState {
@@ -393,13 +419,13 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         var sentRevision: UInt64 = .max
     }
 
-    private var touchHid: [UInt8]?
-    private var touchFrame: [UInt8]?
-    private var lastTouchFrameMs: UInt64 = 0
-    private var touchControllerType = 3
-    private var physicalControllerType = ProtocolWire.controllerTypePro
-    private var touchExtraButtons = 0
-    private var lastBridgeFrameParseMs: UInt64 = 0
+    @LockedValue private var touchHid: [UInt8]? = nil
+    @LockedValue private var touchFrame: [UInt8]? = nil
+    @LockedValue private var lastTouchFrameMs: UInt64 = 0
+    @LockedValue private var touchControllerType = 3
+    @LockedValue private var physicalControllerType = ProtocolWire.controllerTypePro
+    @LockedValue private var touchExtraButtons = 0
+    @LockedValue private var lastBridgeFrameParseMs: UInt64 = 0
 
     private let physicalPads = Locked((0..<ProtocolWire.padCount).map { _ in PhysicalPad() })
     private var controllerSlots: [ObjectIdentifier: Int] = [:]
@@ -955,6 +981,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         senderToken += 1
         sending = false
         controlClientActive = false
+        assignmentConfirmed = false
+        lastServerFeedbackMs = 0
         touchHid = nil
         touchFrame = nil
         lastTouchFrameMs = 0
@@ -1023,6 +1051,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             let params = NWParameters.udp
             params.serviceClass = .responsiveData // low-latency DSCP marking
             let connection = NWConnection(host: endpointHost, port: endpointPort, using: params)
+            assignmentConfirmed = false
             udp = connection
             connection.stateUpdateHandler = { [weak self, weak connection] state in
                 DispatchQueue.main.async {
@@ -1030,11 +1059,19 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                     switch state {
                     case .ready:
                         guard self.controlClientActive else { return }
-                        self.statusLabel.text = "Connected"
-                        if self.activeClientMode == .physical { self.updatePhysicalStatusOnPage(prefix: "Connected") }
+                        self.lastServerFeedbackMs = self.uptimeMs()
+                        self.statusLabel.text = "Connecting..."
+                        if self.activeClientMode == .physical { self.updatePhysicalStatusOnPage(prefix: "Connecting...") }
                         self.lastNamesSentMs = 0 // sender loop announces names immediately
                         self.startSending()
-                    case .failed, .waiting:
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self, weak connection] in
+                            guard let self, let connection, self.udp === connection,
+                                  self.controlClientActive, !self.assignmentConfirmed else { return }
+                            self.handleTransportClosed(text: "Server did not accept the controller")
+                        }
+                    case .waiting:
+                        self.statusLabel.text = "Waiting for network..."
+                    case .failed:
                         self.handleTransportClosed(text: "Connection failed")
                     default:
                         break
@@ -1043,6 +1080,11 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             }
             receiveLoop(connection)
             connection.start(queue: udpQueue)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self, weak connection] in
+                guard let self, let connection, self.udp === connection,
+                      self.controlClientActive, !self.sending else { return }
+                self.handleTransportClosed(text: "Connection failed")
+            }
             return true
         } catch {
             statusLabel.text = "Invalid server address"
@@ -1058,7 +1100,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         connection.receiveMessage { [weak self, weak connection] data, _, _, error in
             guard let self, let connection else { return }
             guard self.udp === connection else { return }
-            if let data, !data.isEmpty { self.handleFeedbackPacket(data) }
+            if let data, !data.isEmpty { self.handleFeedbackPacket(data, connection: connection) }
             if error == nil {
                 self.receiveLoop(connection)
             } else {
@@ -1070,9 +1112,25 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
     }
 
-    private func handleFeedbackPacket(_ data: Data) {
+    private func handleFeedbackPacket(_ data: Data, connection: NWConnection) {
+        guard udp === connection else { return }
         guard data.count >= 8 else { return }
         let magic = ProtocolWire.readU32LE(data, 0)
+        if data.count == ProtocolWire.rosterSize && magic == ProtocolWire.rosterMagic {
+            // Roster packets repeat every two seconds and therefore provide a
+            // reliable liveness confirmation if the first UDP assignment was lost.
+            DispatchQueue.main.async { [weak self, weak connection] in
+                guard let self, let connection, self.udp === connection,
+                      self.controlClientActive else { return }
+                self.assignmentConfirmed = true
+                self.lastServerFeedbackMs = self.uptimeMs()
+                self.statusLabel.text = "Connected"
+                if self.activeClientMode == .physical {
+                    self.updatePhysicalStatusOnPage(prefix: "Connected")
+                }
+            }
+            return
+        }
         if (data.count == ProtocolWire.rumblePacketSize && magic == ProtocolWire.rumbleMagic)
             || (data.count == ProtocolWire.precisionRumblePacketSize && magic == ProtocolWire.precisionRumbleMagic) {
             handleRumblePacket(data)
@@ -1080,6 +1138,18 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
         if data.count == ProtocolWire.clientAssignmentSize && magic == ProtocolWire.clientAssignmentMagic {
             let flags = Int(data[data.startIndex + 5])
+            if flags & 0x01 != 0 {
+                DispatchQueue.main.async { [weak self, weak connection] in
+                    guard let self, let connection, self.udp === connection,
+                          self.controlClientActive else { return }
+                    self.assignmentConfirmed = true
+                    self.lastServerFeedbackMs = self.uptimeMs()
+                    self.statusLabel.text = "Connected"
+                    if self.activeClientMode == .physical {
+                        self.updatePhysicalStatusOnPage(prefix: "Connected")
+                    }
+                }
+            }
             let message: String?
             if flags & ProtocolWire.assignmentFlagProfileUnsupported != 0 {
                 message = "Switch 2 mode does not support Joy-Con L + R"
@@ -1089,7 +1159,10 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 message = nil
             }
             if let message {
-                DispatchQueue.main.async { [weak self] in self?.handleTransportClosed(text: message) }
+                DispatchQueue.main.async { [weak self, weak connection] in
+                    guard let self, let connection, self.udp === connection else { return }
+                    self.handleTransportClosed(text: message)
+                }
             }
         }
     }
@@ -1099,6 +1172,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         senderToken += 1
         sending = false
         controlClientActive = false
+        assignmentConfirmed = false
+        lastServerFeedbackMs = 0
         touchHid = nil
         touchFrame = nil
         lastTouchFrameMs = 0
@@ -1142,6 +1217,17 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                 self.collectPhysicalMotionSamplesIfNeeded()
                 self.sendFrame()
                 let now = self.uptimeMs()
+                if self.assignmentConfirmed && self.lastServerFeedbackMs != 0
+                    && now - self.lastServerFeedbackMs >= 7_000 {
+                    let stalled = self.udp
+                    if let stalled {
+                        DispatchQueue.main.async { [weak self, weak stalled] in
+                            guard let self, let stalled, self.udp === stalled else { return }
+                            self.handleTransportClosed(text: "Server stopped responding")
+                        }
+                    }
+                    break
+                }
                 if now - self.lastNamesSentMs >= 2000 {
                     self.lastNamesSentMs = now
                     self.sendNamesFrame()
@@ -1386,8 +1472,10 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
     }
 
     private func clearPhysicalControllers() {
-        controllerSlots.removeAll()
         physicalPads.withLock { pads in
+            // GameController valueChanged handlers can arrive off the main
+            // queue, so keep the slot dictionary under the same lock as pads.
+            controllerSlots.removeAll()
             for pad in pads {
                 if let motion = pad.controller?.motion, motion.sensorsRequireManualActivation {
                     motion.sensorsActive = false

@@ -3,11 +3,22 @@
 #include <string.h>
 
 static uint8_t* jni_get_bytes(JNIEnv* env, jbyteArray arr, jboolean* is_copy) {
+    if (!arr) return NULL;
     return (uint8_t*)(*env)->GetByteArrayElements(env, arr, is_copy);
 }
 
 static void jni_release_bytes(JNIEnv* env, jbyteArray arr, uint8_t* data, int mode) {
+    if (!arr || !data) return;
     (*env)->ReleaseByteArrayElements(env, arr, (jbyte*)data, mode);
+}
+
+static int jni_array_has(JNIEnv* env, jbyteArray arr, jsize minimum) {
+    return arr && (*env)->GetArrayLength(env, arr) >= minimum;
+}
+
+static int jni_valid_frame_pad(JNIEnv* env, jbyteArray frame, jint pad_index) {
+    return pad_index >= 0 && pad_index < NS_PROTOCOL_PAD_COUNT
+        && jni_array_has(env, frame, NS_PROTOCOL_WEB_FRAME_SIZE);
 }
 
 static jbyteArray jni_new_byte_array(JNIEnv* env, int size, const uint8_t* data) {
@@ -54,6 +65,8 @@ void JNICALL
 Java_com_nscontrol_NativeProtocol_nativeSetFrameHid(JNIEnv* env, jclass clazz,
                                                     jbyteArray frame, jint padIndex,
                                                     jbyteArray hid) {
+    if (!jni_valid_frame_pad(env, frame, padIndex)
+            || !jni_array_has(env, hid, NS_PROTOCOL_HID_SIZE)) return;
     uint8_t* f = jni_get_bytes(env, frame, NULL);
     uint8_t* h = jni_get_bytes(env, hid, NULL);
     if (f && h) {
@@ -68,6 +81,10 @@ Java_com_nscontrol_NativeProtocol_nativeSetFrameMotionSamples(JNIEnv* env, jclas
                                                               jbyteArray frame, jint padIndex,
                                                               jbyteArray m0, jbyteArray m1,
                                                               jbyteArray m2) {
+    if (!jni_valid_frame_pad(env, frame, padIndex)
+            || !jni_array_has(env, m0, NS_PROTOCOL_MOTION_SIZE)
+            || !jni_array_has(env, m1, NS_PROTOCOL_MOTION_SIZE)
+            || !jni_array_has(env, m2, NS_PROTOCOL_MOTION_SIZE)) return;
     uint8_t* f = jni_get_bytes(env, frame, NULL);
     uint8_t* b0 = jni_get_bytes(env, m0, NULL);
     uint8_t* b1 = jni_get_bytes(env, m1, NULL);
@@ -85,6 +102,8 @@ void JNICALL
 Java_com_nscontrol_NativeProtocol_nativeSetFrameMotion(JNIEnv* env, jclass clazz,
                                                        jbyteArray frame, jint padIndex,
                                                        jbyteArray motion) {
+    if (!jni_valid_frame_pad(env, frame, padIndex)
+            || !jni_array_has(env, motion, NS_PROTOCOL_MOTION_SIZE)) return;
     uint8_t* f = jni_get_bytes(env, frame, NULL);
     uint8_t* m = jni_get_bytes(env, motion, NULL);
     if (f && m) {
@@ -157,6 +176,7 @@ Java_com_nscontrol_NativeProtocol_nativeMotionFromAndroid(JNIEnv* env, jclass cl
 jbyteArray JNICALL
 Java_com_nscontrol_NativeProtocol_nativeExtractPadHid(JNIEnv* env, jclass clazz,
                                                       jbyteArray frame) {
+    if (!frame) return NULL;
     jsize len = (*env)->GetArrayLength(env, frame);
     if (len < 20 + NS_PROTOCOL_HID_SIZE) return NULL;
 

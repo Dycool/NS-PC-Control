@@ -22,7 +22,7 @@
 
 🌐 **Web App & Mobile Touch Controls** - The server includes an embedded [web interface](https://github.com/Dycool/NS-PC-Control/blob/main/docs/web-app.md) with a desktop control panel and touch-optimized mobile gamepad, no client install needed.
 
-🔄 **Gyroscope and Rumble** - PC clients with gyro-capable controllers (DS4, DualSense, compatible USB motion pads), Android and iOS can send motion data! Rumble is only supported on PC clients or controllers connected through the mobile apps.
+🔄 **Gyroscope and Rumble** - Motion works through both the Switch 1 and Switch 2 paths from gyro-capable PC controllers (DS4, DualSense, compatible USB motion pads), Android, iOS, and supported browser sensor APIs. Rumble is supported on PC clients or physical controllers connected through the web/mobile clients.
 
 ⚙️ **Macros** - Create, record and share your own [macros](https://github.com/Dycool/NS-PC-Control/blob/main/docs/macros.md) from any PC client!
 
