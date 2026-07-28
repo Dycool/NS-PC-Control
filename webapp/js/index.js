@@ -103,6 +103,7 @@ function handleWsBinaryMessage(ev) {
 function resetMainConnectionUi(text) {
     isConnected = false;
     NSCore.dispatch.disconnect();
+    NSCore.gamepadMotion.reset();
     resetServerAssignment();
     resetRoster();
     lastNamesSent = '';
@@ -123,6 +124,7 @@ const defaultBindings = {
     'BTN_MINUS': 'Digit3', 'BTN_PLUS': 'Digit4',
     'BTN_LSTICK': 'ShiftLeft', 'BTN_RSTICK': 'ShiftRight',
     'BTN_HOME': 'Home', 'BTN_CAPTURE': 'PrintScreen',
+    'BTN_C': 'F1', 'BTN_GL': 'F2', 'BTN_GR': 'F3',
     'DPAD_UP': 'ArrowUp', 'DPAD_DOWN': 'ArrowDown', 'DPAD_LEFT': 'ArrowLeft', 'DPAD_RIGHT': 'ArrowRight',
     'LSTICK_UP': 'KeyW', 'LSTICK_DOWN': 'KeyS', 'LSTICK_LEFT': 'KeyA', 'LSTICK_RIGHT': 'KeyD',
     'RSTICK_UP': 'KeyI', 'RSTICK_DOWN': 'KeyK', 'RSTICK_LEFT': 'KeyJ', 'RSTICK_RIGHT': 'KeyL'
@@ -141,7 +143,10 @@ window.onload = () => {
     const savedMode = localStorage.getItem('nswc_mode');
     if (savedMode) document.getElementById('kbMode').value = savedMode;
     const savedBindings = localStorage.getItem('nswc_bindings');
-    if (savedBindings) currentBindings = JSON.parse(savedBindings);
+    if (savedBindings) {
+        try { currentBindings = { ...defaultBindings, ...JSON.parse(savedBindings) }; }
+        catch (_) { currentBindings = { ...defaultBindings }; }
+    }
     wireMacroMenu();
     NSCore.dispatch.mountUI('index');
 };
@@ -154,9 +159,9 @@ window.addEventListener('keydown', (e) => {
     keysDown.add(e.code);
 });
 window.addEventListener('keyup', (e) => { e.preventDefault(); keysDown.delete(e.code); });
-function getNeutralState() { return { buttons: 0, hat: HAT_NEUTRAL, lx: 128, ly: 128, rx: 128, ry: 128 }; }
+function getNeutralState() { return { buttons: 0, extraBits: 0, hat: HAT_NEUTRAL, lx: 128, ly: 128, rx: 128, ry: 128 }; }
 function getKeyboardState() {
-    let buttons = 0, hat = HAT_NEUTRAL, lx = 128, ly = 128, rx = 128, ry = 128;
+    let buttons = 0, extraBits = 0, hat = HAT_NEUTRAL, lx = 128, ly = 128, rx = 128, ry = 128;
     if (keysDown.has(currentBindings['BTN_Y'])) buttons |= BTN_Y;
     if (keysDown.has(currentBindings['BTN_B'])) buttons |= BTN_B;
     if (keysDown.has(currentBindings['BTN_A'])) buttons |= BTN_A;
@@ -171,6 +176,9 @@ function getKeyboardState() {
     if (keysDown.has(currentBindings['BTN_RSTICK'])) buttons |= BTN_RSTICK;
     if (keysDown.has(currentBindings['BTN_HOME'])) buttons |= BTN_HOME;
     if (keysDown.has(currentBindings['BTN_CAPTURE'])) buttons |= BTN_CAPTURE;
+    if (keysDown.has(currentBindings['BTN_C'])) extraBits |= NC.EXT_BUTTON_C;
+    if (keysDown.has(currentBindings['BTN_GL'])) extraBits |= NC.EXT_BUTTON_GL;
+    if (keysDown.has(currentBindings['BTN_GR'])) extraBits |= NC.EXT_BUTTON_GR;
     const up = keysDown.has(currentBindings['DPAD_UP']), down = keysDown.has(currentBindings['DPAD_DOWN']);
     const left = keysDown.has(currentBindings['DPAD_LEFT']), right = keysDown.has(currentBindings['DPAD_RIGHT']);
     if (up && right) hat = HAT_NE; else if (up && left) hat = HAT_NW;
@@ -185,7 +193,7 @@ function getKeyboardState() {
     else if (keysDown.has(currentBindings['RSTICK_RIGHT']) && !keysDown.has(currentBindings['RSTICK_LEFT'])) rx = 255;
     if (keysDown.has(currentBindings['RSTICK_UP']) && !keysDown.has(currentBindings['RSTICK_DOWN'])) ry = 0;
     else if (keysDown.has(currentBindings['RSTICK_DOWN']) && !keysDown.has(currentBindings['RSTICK_UP'])) ry = 255;
-    return { buttons, hat, lx, ly, rx, ry };
+    return { buttons, extraBits, hat, lx, ly, rx, ry };
 }
 function getGamepadState(pad) {
     if (!pad) return null;
@@ -219,11 +227,12 @@ function getGamepadState(pad) {
     if (pad.axes.length >= 4) {
         rx = applyDeadzone(pad.axes[2]); ry = applyDeadzone(pad.axes[3]);
     }
-    return { buttons, hat, lx, ly, rx, ry };
+    return { buttons, extraBits: 0, hat, lx, ly, rx, ry };
 }
 function mergeStates(s1, s2) {
     if (!s1) return s2; if (!s2) return s1;
-    return { buttons: s1.buttons | s2.buttons, hat: s1.hat !== HAT_NEUTRAL ? s1.hat : s2.hat,
+    return { buttons: s1.buttons | s2.buttons, extraBits: (s1.extraBits || 0) | (s2.extraBits || 0),
+        hat: s1.hat !== HAT_NEUTRAL ? s1.hat : s2.hat,
         lx: s1.lx !== 128 ? s1.lx : s2.lx, ly: s1.ly !== 128 ? s1.ly : s2.ly,
         rx: s1.rx !== 128 ? s1.rx : s2.rx, ry: s1.ry !== 128 ? s1.ry : s2.ry };
 }
@@ -240,14 +249,22 @@ function macroBtnBit(name) {
     const map = {Y:BTN_Y,B:BTN_B,A:BTN_A,X:BTN_X,L:BTN_L,R:BTN_R,ZL:BTN_ZL,ZR:BTN_ZR,MINUS:BTN_MINUS,'-':BTN_MINUS,PLUS:BTN_PLUS,'+':BTN_PLUS,LSTICK:BTN_LSTICK,LS:BTN_LSTICK,RSTICK:BTN_RSTICK,RS:BTN_RSTICK,HOME:BTN_HOME,CAPTURE:BTN_CAPTURE};
     return map[name] || 0;
 }
+function macroExtraBit(name) {
+    name = String(name || '').trim().toUpperCase();
+    const map = {C:NC.EXT_BUTTON_C,BTN_C:NC.EXT_BUTTON_C,
+        GL:NC.EXT_BUTTON_GL,BTN_GL:NC.EXT_BUTTON_GL,
+        GR:NC.EXT_BUTTON_GR,BTN_GR:NC.EXT_BUTTON_GR};
+    return map[name] || 0;
+}
 function macroButtonsFromText(txt) { return String(txt || '').split(/[+|, ]+/).reduce((b, x) => b | macroBtnBit(x), 0); }
 function macroButtonsToText(buttons) {
     const names = [['Y',BTN_Y],['B',BTN_B],['A',BTN_A],['X',BTN_X],['L',BTN_L],['R',BTN_R],['ZL',BTN_ZL],['ZR',BTN_ZR],['MINUS',BTN_MINUS],['PLUS',BTN_PLUS],['LSTICK',BTN_LSTICK],['RSTICK',BTN_RSTICK],['HOME',BTN_HOME],['CAPTURE',BTN_CAPTURE]];
     return names.filter(x => buttons & x[1]).map(x => x[0]).join('+') || 'WAIT';
 }
-function macroFrameFromState(s) { const axis=v=>v<80?-1:(v>176?1:0); s=s||getNeutralState(); return {buttons:s.buttons||0, hat:s.hat, lx:axis(s.lx), ly:axis(s.ly), rx:axis(s.rx), ry:axis(s.ry)}; }
-function macroFrameEqual(a,b) { return !!a && !!b && a.buttons===b.buttons && a.hat===b.hat && a.lx===b.lx && a.ly===b.ly && a.rx===b.rx && a.ry===b.ry; }
-function macroFrameToText(f) { const parts=[]; const btn=macroButtonsToText(f.buttons); if(btn!=='WAIT') parts.push(btn); if(f.hat===HAT_N) parts.push('DPAD_UP'); else if(f.hat===HAT_NE) parts.push('DPAD_UP','DPAD_RIGHT'); else if(f.hat===HAT_E) parts.push('DPAD_RIGHT'); else if(f.hat===HAT_SE) parts.push('DPAD_DOWN','DPAD_RIGHT'); else if(f.hat===HAT_S) parts.push('DPAD_DOWN'); else if(f.hat===HAT_SW) parts.push('DPAD_DOWN','DPAD_LEFT'); else if(f.hat===HAT_W) parts.push('DPAD_LEFT'); else if(f.hat===HAT_NW) parts.push('DPAD_UP','DPAD_LEFT'); if(f.lx<0) parts.push('LSTICK_LEFT'); else if(f.lx>0) parts.push('LSTICK_RIGHT'); if(f.ly<0) parts.push('LSTICK_UP'); else if(f.ly>0) parts.push('LSTICK_DOWN'); if(f.rx<0) parts.push('RSTICK_LEFT'); else if(f.rx>0) parts.push('RSTICK_RIGHT'); if(f.ry<0) parts.push('RSTICK_UP'); else if(f.ry>0) parts.push('RSTICK_DOWN'); return parts.join('+') || 'WAIT'; }
+function macroExtraToText(extraBits) { return [['C',NC.EXT_BUTTON_C],['GL',NC.EXT_BUTTON_GL],['GR',NC.EXT_BUTTON_GR]].filter(x => extraBits & x[1]).map(x => x[0]); }
+function macroFrameFromState(s) { const axis=v=>v<80?-1:(v>176?1:0); s=s||getNeutralState(); return {buttons:s.buttons||0, extraBits:s.extraBits||0, hat:s.hat, lx:axis(s.lx), ly:axis(s.ly), rx:axis(s.rx), ry:axis(s.ry)}; }
+function macroFrameEqual(a,b) { return !!a && !!b && a.buttons===b.buttons && a.extraBits===b.extraBits && a.hat===b.hat && a.lx===b.lx && a.ly===b.ly && a.rx===b.rx && a.ry===b.ry; }
+function macroFrameToText(f) { const parts=[]; const btn=macroButtonsToText(f.buttons); if(btn!=='WAIT') parts.push(btn); parts.push(...macroExtraToText(f.extraBits||0)); if(f.hat===HAT_N) parts.push('DPAD_UP'); else if(f.hat===HAT_NE) parts.push('DPAD_UP','DPAD_RIGHT'); else if(f.hat===HAT_E) parts.push('DPAD_RIGHT'); else if(f.hat===HAT_SE) parts.push('DPAD_DOWN','DPAD_RIGHT'); else if(f.hat===HAT_S) parts.push('DPAD_DOWN'); else if(f.hat===HAT_SW) parts.push('DPAD_DOWN','DPAD_LEFT'); else if(f.hat===HAT_W) parts.push('DPAD_LEFT'); else if(f.hat===HAT_NW) parts.push('DPAD_UP','DPAD_LEFT'); if(f.lx<0) parts.push('LSTICK_LEFT'); else if(f.lx>0) parts.push('LSTICK_RIGHT'); if(f.ly<0) parts.push('LSTICK_UP'); else if(f.ly>0) parts.push('LSTICK_DOWN'); if(f.rx<0) parts.push('RSTICK_LEFT'); else if(f.rx>0) parts.push('RSTICK_RIGHT'); if(f.ry<0) parts.push('RSTICK_UP'); else if(f.ry>0) parts.push('RSTICK_DOWN'); return parts.join('+') || 'WAIT'; }
 function macroCommandString(objOrText) {
     if (!objOrText) return '';
     if (typeof objOrText === 'string') { try { return macroCommandString(JSON.parse(objOrText)); } catch(e) { return objOrText; } }
@@ -255,7 +272,7 @@ function macroCommandString(objOrText) {
     return objOrText.commands || objOrText.macro || '';
 }
 const MACRO_JSON_MAX_BYTES = 50 * 1024 * 1024;
-const MACRO_VALID_INPUTS = new Set(['A','B','X','Y','L','R','ZL','ZR','MINUS','-','PLUS','+','LSTICK','LS','RSTICK','RS','HOME','CAPTURE','DPAD_UP','DPAD_DOWN','DPAD_LEFT','DPAD_RIGHT','UP','DOWN','LEFT','RIGHT','LSTICK_UP','LSTICK_DOWN','LSTICK_LEFT','LSTICK_RIGHT','LS_UP','LS_DOWN','LS_LEFT','LS_RIGHT','RSTICK_UP','RSTICK_DOWN','RSTICK_LEFT','RSTICK_RIGHT','RS_UP','RS_DOWN','RS_LEFT','RS_RIGHT']);
+const MACRO_VALID_INPUTS = new Set(['A','B','X','Y','L','R','ZL','ZR','MINUS','-','PLUS','+','LSTICK','LS','RSTICK','RS','HOME','CAPTURE','C','BTN_C','GL','BTN_GL','GR','BTN_GR','DPAD_UP','DPAD_DOWN','DPAD_LEFT','DPAD_RIGHT','UP','DOWN','LEFT','RIGHT','LSTICK_UP','LSTICK_DOWN','LSTICK_LEFT','LSTICK_RIGHT','LS_UP','LS_DOWN','LS_LEFT','LS_RIGHT','RSTICK_UP','RSTICK_DOWN','RSTICK_LEFT','RSTICK_RIGHT','RS_UP','RS_DOWN','RS_LEFT','RS_RIGHT']);
 function macroCommandsArray(objOrText) { const obj = (typeof objOrText === 'string') ? (()=>{ try { return JSON.parse(objOrText); } catch(_) { return {commands:objOrText}; } })() : objOrText; const c = obj && obj.commands !== undefined ? obj.commands : objOrText; if (Array.isArray(c)) return c.map(String); if (typeof c === 'string') return c.split(/[;\n\r]+/).map(x=>x.trim()).filter(Boolean); throw new Error('commands must be a string or array of strings'); }
 const defLayout = {}; // Placeholder if referenced globally. In index it's not but we handle variables.
 function validateMacro(objOrText) { const lines = macroCommandsArray(objOrText); if (!lines.length) throw new Error('no macro commands found'); for (const line of lines) { const m = line.trim().match(/^(.*?)\s+(\d+)$/); if (!m) throw new Error('missing duration: '+line); const cmd=m[1].trim(), ms=Number(m[2]); if (!Number.isSafeInteger(ms) || ms <= 0 || ms > 4294967295) throw new Error('invalid duration: '+line); if (cmd.toUpperCase()==='WAIT' || cmd.toUpperCase()==='LOOP') continue; const toks=cmd.split(/[+,|\s]+/).filter(Boolean); if (!toks.length) throw new Error('missing input: '+line); const seen=new Set(); for (const t0 of toks) { const t=t0.toUpperCase(); if (!MACRO_VALID_INPUTS.has(t)) throw new Error('unknown input '+t0+' in '+line); seen.add(t); } const has=(...xs)=>xs.some(x=>seen.has(x)); if (has('DPAD_UP','UP')&&has('DPAD_DOWN','DOWN')) throw new Error('DPAD up/down conflict: '+line); if (has('DPAD_LEFT','LEFT')&&has('DPAD_RIGHT','RIGHT')) throw new Error('DPAD left/right conflict: '+line); if (has('LSTICK_UP','LS_UP')&&has('LSTICK_DOWN','LS_DOWN')) throw new Error('left stick up/down conflict: '+line); if (has('LSTICK_LEFT','LS_LEFT')&&has('LSTICK_RIGHT','LS_RIGHT')) throw new Error('left stick left/right conflict: '+line); if (has('RSTICK_UP','RS_UP')&&has('RSTICK_DOWN','RS_DOWN')) throw new Error('right stick up/down conflict: '+line); if (has('RSTICK_LEFT','RS_LEFT')&&has('RSTICK_RIGHT','RS_RIGHT')) throw new Error('right stick left/right conflict: '+line); } return lines; }
@@ -287,7 +304,7 @@ function parseMacro(objOrText) {
             return;
         }
         const st = {...getNeutralState(), ms};
-        if (cmd !== 'WAIT') for (const t0 of cmd.split(/[+,|\s]+/).filter(Boolean)) { const t=t0.toUpperCase(); st.buttons |= macroBtnBit(t); if (t==='DPAD_UP'||t==='UP') st.hat=HAT_N; else if (t==='DPAD_DOWN'||t==='DOWN') st.hat=HAT_S; else if (t==='DPAD_LEFT'||t==='LEFT') st.hat=HAT_W; else if (t==='DPAD_RIGHT'||t==='RIGHT') st.hat=HAT_E; else if (t==='LSTICK_UP'||t==='LS_UP') st.ly=0; else if (t==='LSTICK_DOWN'||t==='LS_DOWN') st.ly=255; else if (t==='LSTICK_LEFT'||t==='LS_LEFT') st.lx=0; else if (t==='LSTICK_RIGHT'||t==='LS_RIGHT') st.lx=255; else if (t==='RSTICK_UP'||t==='RS_UP') st.ry=0; else if (t==='RSTICK_DOWN'||t==='RS_DOWN') st.ry=255; else if (t==='RSTICK_LEFT'||t==='RS_LEFT') st.rx=0; else if (t==='RSTICK_RIGHT'||t==='RS_RIGHT') st.rx=255; }
+        if (cmd !== 'WAIT') for (const t0 of cmd.split(/[+,|\s]+/).filter(Boolean)) { const t=t0.toUpperCase(); st.buttons |= macroBtnBit(t); st.extraBits |= macroExtraBit(t); if (t==='DPAD_UP'||t==='UP') st.hat=HAT_N; else if (t==='DPAD_DOWN'||t==='DOWN') st.hat=HAT_S; else if (t==='DPAD_LEFT'||t==='LEFT') st.hat=HAT_W; else if (t==='DPAD_RIGHT'||t==='RIGHT') st.hat=HAT_E; else if (t==='LSTICK_UP'||t==='LS_UP') st.ly=0; else if (t==='LSTICK_DOWN'||t==='LS_DOWN') st.ly=255; else if (t==='LSTICK_LEFT'||t==='LS_LEFT') st.lx=0; else if (t==='LSTICK_RIGHT'||t==='LS_RIGHT') st.lx=255; else if (t==='RSTICK_UP'||t==='RS_UP') st.ry=0; else if (t==='RSTICK_DOWN'||t==='RS_DOWN') st.ry=255; else if (t==='RSTICK_LEFT'||t==='RS_LEFT') st.rx=0; else if (t==='RSTICK_RIGHT'||t==='RS_RIGHT') st.rx=255; }
         steps.push(st);
     };
     for (const raw of text.split(';')) { const p = raw.trim(); if (p) addStep(p); }
@@ -428,6 +445,7 @@ function buildAndSendPacket() {
     const mode = parseInt(document.getElementById('kbMode').value);
     const kbState = getKeyboardState();
     let slotStates = [null, null, null, null];
+    let slotGamepads = [null, null, null, null];
     let slotName = ["", "", "", ""];
     let slotPresent = [false, false, false, false];
     const padName = (pad) => (pad && pad.id) ? pad.id : "Controller";
@@ -436,6 +454,7 @@ function buildAndSendPacket() {
             let pad = activePads[i];
             let gp = getGamepadState(pad);
             slotStates[i] = gp || getNeutralState();
+            slotGamepads[i] = pad || null;
             slotPresent[i] = !!gp;
             slotName[i] = gp ? padName(pad) : "";
         }
@@ -445,6 +464,7 @@ function buildAndSendPacket() {
             let pad = activePads[i - 1];
             let gp = getGamepadState(pad);
             slotStates[i] = gp || getNeutralState();
+            slotGamepads[i] = pad || null;
             slotPresent[i] = !!gp;
             slotName[i] = gp ? padName(pad) : "";
         }
@@ -452,12 +472,14 @@ function buildAndSendPacket() {
         let pad0 = activePads[0];
         let gp0 = getGamepadState(pad0);
         slotStates[0] = mergeStates(kbState, gp0 || getNeutralState());
+        slotGamepads[0] = pad0 || null;
         slotPresent[0] = true;
         slotName[0] = gp0 ? (padName(pad0) + " + Keyboard") : "Keyboard";
         for (let i = 1; i < 4; i++) {
             let pad = activePads[i];
             let gp = getGamepadState(pad);
             slotStates[i] = gp || getNeutralState();
+            slotGamepads[i] = pad || null;
             slotPresent[i] = !!gp;
             slotName[i] = gp ? padName(pad) : "";
         }
@@ -473,6 +495,7 @@ function buildAndSendPacket() {
         state: slotStates[0],
         ext: {
             present: slotPresent[0],
+            extraBits: slotStates[0].extraBits || 0,
             controllerType,
             motionSamples: null,
             motionFresh: false,
@@ -483,6 +506,14 @@ function buildAndSendPacket() {
     NSCore.dispatch.buildFrame(frame);
     slotStates[0] = frame.state;
     slotPresent[0] = frame.ext.present;
+    frame.ext.extraBits = slotStates[0].extraBits || 0;
+    if (NSCore.settings.get('gyro') && slotGamepads[0]) {
+        const physicalMotion = NSCore.gamepadMotion.consume(slotGamepads[0]);
+        if (physicalMotion) {
+            frame.ext.motionSamples = physicalMotion.samples;
+            frame.ext.motionFresh = physicalMotion.fresh;
+        }
+    }
     const buffer = new ArrayBuffer(PACKET_SIZE), view = new DataView(buffer);
     view.setUint32(0, PROTO_MAGIC, true); view.setUint8(4, PROTO_VERSION); view.setUint8(5, 0);
     view.setUint16(6, 0, true); view.setUint32(8, seqCounter++, true); view.setBigUint64(12, BigInt(Date.now() * 1000), true);
@@ -495,7 +526,15 @@ function buildAndSendPacket() {
         // The desktop ns-client stamps every live pad with the selected profile;
         // mirror that so multi-gamepad setups enumerate consistently.
         const ex = p === 0 ? frame.ext
-            : { present: slotPresent[p], controllerType: slotPresent[p] ? controllerType : 0 };
+            : { present: slotPresent[p], extraBits: s.extraBits || 0,
+                controllerType: slotPresent[p] ? controllerType : 0 };
+        if (p > 0 && NSCore.settings.get('gyro') && slotGamepads[p]) {
+            const physicalMotion = NSCore.gamepadMotion.consume(slotGamepads[p]);
+            if (physicalMotion) {
+                ex.motionSamples = physicalMotion.samples;
+                ex.motionFresh = physicalMotion.fresh;
+            }
+        }
         if (horizontal && ex.present) NSCore.applyJoyconHorizontal(s, ex, controllerType);
         NSCore.buildExtPad(view, 20 + p * EXT_REPORT_SIZE, s, ex);
     }

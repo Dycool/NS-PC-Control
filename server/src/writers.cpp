@@ -936,7 +936,11 @@ void writer_thread(std::stop_token stoken, int hz) {
                         for (int vendor_reads = 0; vendor_reads < 16 && s2_gadget_poll_vendor_report(h, vendor_cmd); ++vendor_reads) {
                             ++g_ctx.host_out_reports;
                             mark_switch2_usb_activity(now_stamp);
-                            if (g_ctx.verbose && vendor_cmd.size() >= 4)
+                            const bool routine_mouse_poll =
+                                vendor_cmd.size() >= 4
+                                && vendor_cmd[0] == 0x0A
+                                && vendor_cmd[3] == 0x02;
+                            if (g_ctx.verbose && vendor_cmd.size() >= 4 && !routine_mouse_poll)
                                 std::println("[s2] vendor cmd port {}: id={:#04x} sub={:#04x} len={}",
                                              h, vendor_cmd[0], vendor_cmd[3], vendor_cmd.size());
                             std::vector<uint8_t> vendor_resp;

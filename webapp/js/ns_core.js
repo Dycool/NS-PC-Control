@@ -84,6 +84,9 @@ window.NSCore = (function () {
         HAT_S: 4, HAT_SW: 5, HAT_W: 6, HAT_NW: 7, HAT_NEUTRAL: 8,
 
         EXT_PAD_PRESENT: 0x01,
+        EXT_BUTTON_C: 0x02,
+        EXT_BUTTON_GL: 0x04,
+        EXT_BUTTON_GR: 0x08,
         EXT_BUTTON_SL: 0x10,
         EXT_BUTTON_SR: 0x20,
         EXT_STATUS_BATTERY_VALID: 0x01,
@@ -479,6 +482,82 @@ window.NSCore = (function () {
         motion.revision++;
     }
 
+    // Optional Gamepad Extensions pose data. The base Gamepad API exposes only
+    // buttons/axes; browsers that implement GamepadPose can additionally expose
+    // controller angular velocity and acceleration through `pad.pose`.
+    const gamepadMotion = {
+        _pads: new Map(),
+        supported(pad) {
+            const angular = pad && pad.pose && pad.pose.angularVelocity;
+            return !!(angular && angular.length >= 3
+                && Number.isFinite(Number(angular[0]))
+                && Number.isFinite(Number(angular[1]))
+                && Number.isFinite(Number(angular[2])));
+        },
+        anySupported() {
+            if (!navigator.getGamepads) return false;
+            try { return Array.from(navigator.getGamepads() || []).some(p => gamepadMotion.supported(p)); }
+            catch (_) { return false; }
+        },
+        consume(pad) {
+            if (!gamepadMotion.supported(pad)) return null;
+            const pose = pad.pose;
+            const angular = pose.angularVelocity;
+            const linear = pose.linearAcceleration;
+            const accelScale = 4096 / 9.80665;
+            // GamepadPose follows the WebXR frame (+X right, +Y up, +Z back).
+            // The protocol frame is +X forward, +Y left, +Z up.
+            const ax = linear && linear.length >= 3 && Number.isFinite(Number(linear[0]))
+                ? Number(linear[0]) : 0;
+            const ay = linear && linear.length >= 3 && Number.isFinite(Number(linear[1]))
+                ? Number(linear[1]) : 9.80665;
+            const az = linear && linear.length >= 3 && Number.isFinite(Number(linear[2]))
+                ? Number(linear[2]) : 0;
+            // Implementations source angular velocity from VR runtimes in
+            // radians/sec. Switch motion uses 16.384 counts per degree/sec.
+            const gyroScale = (180 / Math.PI) * 16.384;
+            const sample = [
+                clampI16(-az * accelScale), clampI16(-ax * accelScale), clampI16(ay * accelScale),
+                clampI16(-Number(angular[2]) * gyroScale),
+                clampI16(-Number(angular[0]) * gyroScale),
+                clampI16(Number(angular[1]) * gyroScale)
+            ];
+            for (let i = 3; i < 6; i++) if (Math.abs(sample[i]) <= 32) sample[i] = 0;
+
+            const key = Number.isInteger(pad.index) ? pad.index : String(pad.id || 'gamepad');
+            let state = gamepadMotion._pads.get(key);
+            if (!state) {
+                state = { samples: [], revision: 0, sentRevision: -1,
+                    timestamp: null, signature: '', lastNoTimestampMs: 0 };
+                gamepadMotion._pads.set(key, state);
+            }
+            const timestamp = Number(pad.timestamp) || 0;
+            const signature = sample.join(',');
+            const now = performance.now();
+            // Most implementations advance Gamepad.timestamp for pose samples.
+            // If they do not, the value/signature check plus a 60 Hz fallback
+            // still avoids treating every 4 ms packet as a new sensor sample.
+            const changed = timestamp > 0
+                ? timestamp !== state.timestamp || signature !== state.signature
+                : signature !== state.signature || now - state.lastNoTimestampMs >= 12;
+            if (changed) {
+                state.samples.push(sample);
+                if (state.samples.length > 3) state.samples.shift();
+                state.revision++;
+                state.timestamp = timestamp;
+                state.signature = signature;
+                state.lastNoTimestampMs = now;
+            }
+            if (!state.samples.length) return null;
+            const samples = state.samples.slice();
+            while (samples.length < 3) samples.unshift(samples[0]);
+            const fresh = state.revision !== state.sentRevision;
+            state.sentRevision = state.revision;
+            return { samples: samples.map(s => s.slice()), fresh };
+        },
+        reset() { gamepadMotion._pads.clear(); }
+    };
+
     // ── Battery (shared; previously mobile-only) ─────────────────────────────
     if (navigator.getBattery) {
         navigator.getBattery().then(b => {
@@ -568,7 +647,7 @@ window.NSCore = (function () {
     }
 
     return {
-        C, caps, settings, state, motion,
+        C, caps, settings, state, motion, gamepadMotion,
         onStateChanged, emitStateChanged, resetState,
         s2Active, s2NfcAssigned, s2AudioEligible,
         parseAssignment, parseControllerStatus, parseRoster,

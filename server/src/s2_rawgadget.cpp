@@ -186,6 +186,8 @@ void append_iad(std::vector<uint8_t>& out, uint8_t first_if, uint8_t count,
 }
 
 void append_hid_and_vendor(std::vector<uint8_t>& out) {
+    size_t report_desc_size = 0;
+    switch2_report_descriptor_for_port(0, report_desc_size);
     append_iad(out, 0, 1, 0x03, 0x00, 0x00);
     usb_interface_descriptor hid_if{};
     hid_if.bLength = USB_DT_INTERFACE_SIZE; hid_if.bDescriptorType = USB_DT_INTERFACE;
@@ -194,7 +196,7 @@ void append_hid_and_vendor(std::vector<uint8_t>& out) {
     HidDescriptor hid{};
     hid.bLength = sizeof(HidDescriptor); hid.bDescriptorType = 0x21; hid.bcdHID = htole16(0x0111);
     hid.bCountryCode = 0; hid.bNumDescriptors = 1; hid.bReportDescriptorType = 0x22;
-    hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_PRO_REPORT_DESC_SIZE));
+    hid.wDescriptorLength = htole16(static_cast<uint16_t>(report_desc_size));
     append_obj(out, hid);
     PlainEndpointDesc ep_in{};
     ep_in.bEndpointAddress = USB_DIR_IN | EP_HID; ep_in.bmAttributes = USB_ENDPOINT_XFER_INT;
@@ -722,7 +724,10 @@ void handle_control(const usb_ctrlrequest& ctrl) {
                 raw_ep0_stall();
                 return;
             }
-            raw_ep0_write(S2_PRO_REPORT_DESC, std::min<size_t>(S2_PRO_REPORT_DESC_SIZE, length));
+            size_t report_desc_size = 0;
+            const uint8_t* report_desc =
+                switch2_report_descriptor_for_port(0, report_desc_size);
+            raw_ep0_write(report_desc, std::min<size_t>(report_desc_size, length));
             return;
         }
         if (desc_type == 0x21) {
@@ -733,7 +738,9 @@ void handle_control(const usb_ctrlrequest& ctrl) {
             HidDescriptor hid{};
             hid.bLength = sizeof(HidDescriptor); hid.bDescriptorType = 0x21; hid.bcdHID = htole16(0x0111);
             hid.bNumDescriptors = 1; hid.bReportDescriptorType = 0x22;
-            hid.wDescriptorLength = htole16(static_cast<uint16_t>(S2_PRO_REPORT_DESC_SIZE));
+            size_t report_desc_size = 0;
+            switch2_report_descriptor_for_port(0, report_desc_size);
+            hid.wDescriptorLength = htole16(static_cast<uint16_t>(report_desc_size));
             raw_ep0_write(reinterpret_cast<const uint8_t*>(&hid), std::min<size_t>(sizeof(hid), length));
             return;
         }
@@ -1230,9 +1237,12 @@ void vendor_in_loop() {
         if (g_ctx.verbose) {
             const uint8_t id = report.empty() ? 0 : report[0];
             const uint8_t sub = report.size() > 3 ? report[3] : 0;
+            const bool routine_mouse_poll = id == 0x0A && sub == 0x02;
             if (written >= 0) {
-                std::println("[s2][vendor][ep-tx] id=0x{:02x} sub=0x{:02x} "
-                             "len={} result={}", id, sub, report.size(), written);
+                if (!routine_mouse_poll) {
+                    std::println("[s2][vendor][ep-tx] id=0x{:02x} sub=0x{:02x} "
+                                 "len={} result={}", id, sub, report.size(), written);
+                }
             } else {
                 std::println(stderr,
                              "[s2][vendor][ep-tx] id=0x{:02x} sub=0x{:02x} "

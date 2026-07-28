@@ -33,21 +33,25 @@
             const sec = ui.section('Motion');
             const hasSensors = caps.hasDeviceMotion;
             const secure = caps.isSecureContext;
+            const hasGamepadMotion = NSCore.gamepadMotion.anySupported();
             sec.toggle('Gyro / motion', 'gyro', {
-                disabled: !NSCore.motion.supported,
+                disabled: !NSCore.motion.supported && !hasGamepadMotion,
                 async beforeChange(enabling) {
                     if (!enabling) { NSCore.motion.disable(); return true; }
-                    const ok = await NSCore.motion.enable();
-                    if (!ok) return false; // permission denied / unavailable
-                    return true;
+                    if (NSCore.motion.supported && await NSCore.motion.enable()) return true;
+                    return NSCore.gamepadMotion.anySupported();
                 }
             });
-            if (!hasSensors)
-                sec.note('This device/browser does not expose motion sensors.');
+            if (hasGamepadMotion)
+                sec.note('Physical gamepad motion detected through the optional GamepadPose API.');
+            else if (!hasSensors)
+                sec.note('This browser does not currently expose phone or physical gamepad motion sensors.');
             else if (!secure)
                 sec.note('Browsers only expose motion sensors on secure origins. At home: use the native mobile app (native gyro, no restrictions), or in Chrome add this address under chrome://flags/#unsafely-treat-insecure-origin-as-secure. HTTPS (e.g. Tailscale/Caddy) also works.', true);
             else if (caps.needsMotionPermission)
                 sec.note('iOS asks for permission when you enable this.');
+            if (!hasGamepadMotion)
+                sec.note('Physical controller gyro requires browser support for the experimental GamepadPose extension.');
         }
     });
 })();

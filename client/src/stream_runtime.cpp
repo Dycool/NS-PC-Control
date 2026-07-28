@@ -283,7 +283,12 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
                 mouse_apply_right_stick(frame.reports[0].rx, frame.reports[0].ry);
         }
         if (g_joyconHorizontalMode.load(std::memory_order_relaxed) && frame.present[0]) {
-            apply_joycon_horizontal_transform(frame.reports[0], g_controllerType.load(std::memory_order_relaxed));
+            const int controller_type = g_controllerType.load(std::memory_order_relaxed);
+            apply_joycon_horizontal_transform(frame.reports[0], controller_type);
+            if (frame.has_motion[0]) {
+                for (auto& sample : frame.motion[0])
+                    apply_joycon_horizontal_motion_transform(sample, controller_type);
+            }
         }
         if (native_mouse) {
             // Native mouse movement is useful without a physical SDL pad too.
