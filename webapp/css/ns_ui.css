@@ -83,20 +83,10 @@
 .ns-toggle input:checked + .slider::before { transform: translateX(18px); background: #fff; }
 .ns-toggle input:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
 
-/* ── Player badges (LEDs, battery, body RGB) ─────────────────────────────── */
+/* ── Player badges (battery) ──────────────────────────────────────────────── */
 .ns-badges { display: inline-flex; align-items: center; gap: 8px; }
-.ns-leds { display: inline-flex; gap: 3px; }
-.ns-led {
-    width: 7px; height: 7px; border-radius: 2px;
-    background: var(--ns-surface-2); border: 1px solid var(--ns-border);
-}
-.ns-led.on { background: var(--ns-accent); border-color: var(--ns-accent); box-shadow: 0 0 5px rgba(204,0,0,0.7); }
 .ns-batt { font-size: 11px; color: var(--ns-text-dim); }
 .ns-batt.charging { color: var(--ns-ok); }
-.ns-rgb {
-    width: 10px; height: 10px; border-radius: 50%;
-    border: 1px solid var(--ns-border); display: inline-block;
-}
 .ns-tag {
     font-size: 10px; padding: 1px 6px; border-radius: 8px;
     border: 1px solid var(--ns-border); color: var(--ns-text-dim);

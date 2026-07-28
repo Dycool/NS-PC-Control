@@ -259,7 +259,7 @@
               + (NSCore.s2Active() ? ' — Switch 2 mode' : '')
             : 'Not connected.');
         if (!caps.isSecureContext && !caps.isNative)
-            about.note('Served over plain HTTP: gyro and microphone are disabled by the browser (everything else works). See the Motion and Switch 2 headset sections for home-network workarounds.', true);
+            about.note('Served over plain HTTP: gyro and microphone are disabled by the browser (everything else works).', true);
     }
 
     // Rebuild the open drawer only when a gating fact changes.
@@ -289,19 +289,9 @@
         for (let p = 0; p < 4; p++) {
             const holder = document.getElementById('p' + (p + 1) + 'Badges');
             if (!holder) { badgeEls = []; return badgeEls; }
-            const leds = [];
-            const ledBox = el('span', { class: 'ns-leds' });
-            for (let i = 0; i < 4; i++) {
-                const led = el('span', { class: 'ns-led' });
-                leds.push(led);
-                ledBox.appendChild(led);
-            }
-            const rgb = el('span', { class: 'ns-rgb', style: 'display:none' });
             const batt = el('span', { class: 'ns-batt' });
-            holder.appendChild(rgb);
-            holder.appendChild(ledBox);
             holder.appendChild(batt);
-            badgeEls.push({ holder, leds, rgb, batt, row: holder.closest('.player-row') });
+            badgeEls.push({ holder, batt, row: holder.closest('.player-row') });
         }
         return badgeEls;
     }
@@ -317,6 +307,7 @@
         const els = ensureBadges();
         if (!els.length) return;
         const roster = NSCore.state.roster;
+        const singleS2 = NSCore.state.connected && NSCore.s2Active();
         for (let p = 0; p < 4; p++) {
             const b = els[p];
             const entry = roster.valid ? roster.ports[p] : null;
@@ -324,17 +315,8 @@
                 if (b.row) b.row.style.display = 'none';
                 continue;
             }
-            if (b.row) b.row.style.display = '';
+            if (b.row) b.row.style.display = singleS2 && p > 0 ? 'none' : '';
             const sp = subpadForPort(p);
-            const st = sp >= 0 ? NSCore.state.status[sp] : null;
-            for (let i = 0; i < 4; i++)
-                b.leds[i].className = 'ns-led' + (st && (st.playerLeds & (1 << i)) ? ' on' : '');
-            if (st && st.rgb) {
-                b.rgb.style.display = '';
-                b.rgb.style.background = 'rgb(' + st.rgb[0] + ',' + st.rgb[1] + ',' + st.rgb[2] + ')';
-            } else {
-                b.rgb.style.display = 'none';
-            }
             // Battery: we only know our own client battery; show it on our pads.
             if (sp >= 0 && NSCore.state.battery.percent !== null) {
                 b.batt.textContent = NSCore.state.battery.percent + '%';

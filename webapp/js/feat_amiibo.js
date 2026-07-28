@@ -12,7 +12,8 @@
     let page = 'index';
     let scanRequested = [false, false, false, false];
     let lastSeq = [null, null, null, null];
-    let card = null, statusEl = null, scanBtn = null, fileInput = null, mobileBtn = null;
+    let card = null, statusEl = null, scanBtn = null, settingsScanBtn = null;
+    let fileInput = null, mobileBtn = null;
 
     function activeSubpad() {
         for (let s = 0; s < 4; s++) if (scanRequested[s]) return s;
@@ -20,7 +21,10 @@
     }
 
     // ── Upload (.bin -> AmiiboDataPacket over WS) ────────────────────────────
-    function pickFile() { if (fileInput) fileInput.click(); }
+    function pickFile() {
+        if (!NSCore.state.connected || !NSCore.s2NfcAssigned() || !scanRequested.some(Boolean)) return;
+        if (fileInput) fileInput.click();
+    }
     function sendAmiibo(bytes, subpad) {
         const buf = new ArrayBuffer(C.AMIIBO_DATA_SIZE);
         const v = new DataView(buf);
@@ -75,8 +79,8 @@
         if (card) return;
         const shell = document.querySelector('.shell');
         if (!shell) return;
-        statusEl = el('div', { class: 'status', text: 'The console has not requested a scan yet — you can still preload a dump.' });
-        scanBtn = el('button', { class: 'btn-primary', text: 'Scan Amiibo (.bin)…', onclick: pickFile });
+        statusEl = el('div', { class: 'status', text: 'Waiting for the console to request an Amiibo scan.' });
+        scanBtn = el('button', { text: 'Scan Amiibo (.bin)…', onclick: pickFile });
         card = el('section', { class: 'card' }, [
             el('div', { class: 'card-title', text: 'Amiibo (Switch 2)' }),
             el('div', { class: 'btn-group' }, [scanBtn]),
@@ -103,8 +107,15 @@
             if (eligible)
                 setStatus(waiting
                     ? 'Console is waiting for an Amiibo — load a .bin dump.'
-                    : 'The console has not requested a scan yet — you can still preload a dump.');
-            if (scanBtn) scanBtn.classList.toggle('listening', waiting);
+                    : 'Waiting for the console to request an Amiibo scan.');
+            if (scanBtn) {
+                scanBtn.classList.remove('btn-primary');
+                scanBtn.disabled = !(NSCore.state.connected && waiting);
+            }
+            if (settingsScanBtn) {
+                settingsScanBtn.classList.remove('ns-btn-accent');
+                settingsScanBtn.disabled = !(NSCore.state.connected && waiting);
+            }
         } else if (!caps.isNative) {
             ensureMobileBtn();
             if (mobileBtn) mobileBtn.style.display = (eligible && waiting) ? 'flex' : 'none';
@@ -150,7 +161,9 @@
         settingsUI(ui, p) {
             if (!NSCore.s2NfcAssigned()) return;
             const sec = ui.section('Amiibo (Switch 2)');
-            sec.button('Load Amiibo dump (.bin)…', pickFile, { accent: true });
+            settingsScanBtn = sec.button('Load Amiibo dump (.bin)…', pickFile, {
+                disabled: !(NSCore.state.connected && scanRequested.some(Boolean))
+            });
             sec.note('540-byte raw NTAG215 dumps and 572-byte extended dumps (with signature) are supported.');
         }
     });

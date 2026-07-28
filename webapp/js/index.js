@@ -102,6 +102,13 @@ function handleWsBinaryMessage(ev) {
     else NSCore.dispatch.wsMessage(magic, view); // rumble/status/amiibo/audio features
 }
 
+function cleanControllerName(name) {
+    const cleaned = String(name || '')
+        .replace(/\s*\(STANDARD GAMEPAD[^)]*\)\s*$/i, '')
+        .trim();
+    return cleaned || 'Controller';
+}
+
 function resetMainConnectionUi(text) {
     connectionGeneration++;
     isConnected = false;
@@ -119,6 +126,7 @@ function resetMainConnectionUi(text) {
     if (kb) kb.disabled = false;
     const status = document.getElementById('statusText');
     if (status && text) status.innerText = text;
+    updateRosterUi();
 }
 window.__nsMainDisconnected = resetMainConnectionUi;
 const keysDown = new Set();
@@ -415,24 +423,30 @@ function sendNamesIfChanged(slotPresent, slotName, slotGyro) {
         const off = 8 + p * ROSTER_ENTRY_SIZE;
         v.setUint8(off, slotPresent[p] ? 1 : 0);
         v.setUint8(off + 1, slotPresent[p] && slotGyro[p] ? 1 : 0);
-        const name = (slotPresent[p] ? (slotName[p] || 'Controller') : '').slice(0, ROSTER_NAME_CAP - 1);
+        const name = (slotPresent[p] ? cleanControllerName(slotName[p]) : '').slice(0, ROSTER_NAME_CAP - 1);
         for (let k = 0; k < name.length; k++) v.setUint8(off + 2 + k, name.charCodeAt(k) & 0xff);
     }
     ws.send(buf);
 }
 function updateRosterUi() {
     let playerNum = 1;
+    const singleS2 = isConnected && NSCore.s2Active();
     for (let p = 0; p < 4; p++) {
         const el = document.getElementById(`p${p+1}Text`);
         if (!el) continue;
+        const row = el.closest('.player-row');
         if (roster.valid && roster.ports[p] && roster.ports[p].present === 2) {
-            el.style.display = 'none';
+            if (row) row.style.display = 'none'; else el.style.display = 'none';
             continue;
         }
-        el.style.display = 'block';
+        if (singleS2 && p > 0) {
+            if (row) row.style.display = 'none'; else el.style.display = 'none';
+            continue;
+        }
+        if (row) row.style.display = ''; else el.style.display = 'block';
         let label = 'Not connected';
         if (roster.valid && roster.ports[p] && roster.ports[p].present === 1) {
-            label = roster.ports[p].name || 'Controller';
+            label = cleanControllerName(roster.ports[p].name);
             if (roster.ports[p].gyro) label += ' + gyro';
             el.innerText = `P${playerNum}: ${label}`;
             playerNum++;
