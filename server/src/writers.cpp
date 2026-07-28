@@ -176,8 +176,24 @@ void writer_thread(std::stop_token stoken, int hz) {
                     false, std::memory_order_acq_rel)) {
             return false;
         }
+        // Requests can arrive from the client allocator, wake worker and USB
+        // resume/configuration callbacks. If a forced enumeration is already
+        // in flight, that fresh USB session satisfies all of them. Restarting
+        // it again here cancels the console's vendor handshake and can leave
+        // hid_writes at zero until another reconnect.
+        if (s2_enumeration_started_us != 0) {
+            g_ctx.switch2_usb_reenumeration_after_resume.store(
+                false, std::memory_order_release);
+            if (g_ctx.verbose) {
+                std::println("[s2] coalescing duplicate re-enumeration request "
+                             "while the current enumeration is still in flight");
+            }
+            return false;
+        }
         if (g_ctx.verbose)
             std::println("[s2] client/wake boundary; re-enumerating native USB gadget");
+        g_ctx.switch2_usb_reenumeration_after_resume.store(
+            false, std::memory_order_release);
         clear_switch2_usb_activity();
         close_all_fds();
         s2_live[0] = false;
@@ -563,6 +579,13 @@ void writer_thread(std::stop_token stoken, int hz) {
                 if (run_gadget_setup_if_needed(true,
                         "controller type changed; console must re-read device identity")) {
                     mark_s1_identity_enumerated();
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
+                        // Treat requests raised concurrently by wake/client
+                        // callbacks as part of this same fresh enumeration.
+                        s2_enumeration_started_us = now_us();
+                        g_ctx.switch2_usb_reenumeration_after_resume.store(
+                            false, std::memory_order_release);
+                    }
                 }
                 break;
             }

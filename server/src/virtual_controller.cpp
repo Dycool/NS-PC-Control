@@ -942,15 +942,18 @@ static void build_s2_joycon_report(const HIDReport& src,
     // reconnect, wake, OTA, and mouse-mode captures (0x30 during init only).
     out[9] = 0x38;
 
-    if (mouse) {
+    if (mouse && mouse->active) {
         MotionReport stationary[3]{};
         // The carrier translator remounts the project's S1 frame as
         // {-Y,+X,+Z}; -Y here preserves the established +X gravity posture
-        // used by native Joy-Con 2 optical mouse mode.
+        // used while native Joy-Con 2 optical mouse input is actually active.
         for (auto& sample : stationary) sample.ay = -4096;
         write_s2_motion_carrier(out, 16, 17, stationary, true, true,
                                 motion_time_us, port);
     } else {
+        // The console normally enables the optical-mouse capability together
+        // with IMU (feature mask 0x37). Merely advertising that capability
+        // must not replace live controller motion with the mouse posture.
         write_s2_motion_carrier(out, 16, 17, motion_samples, has_motion,
                                 imu_enabled, motion_time_us, port);
     }
