@@ -69,8 +69,6 @@ extern const uint8_t LEGACY_REPORT_DESC[85] = {
     0x20,0x75,0x08,0x95,0x01,0x81,0x02,0xC0
 };
 
-// Exact Switch 2 Pro Controller HID report descriptor from PicoSwitch2/ns2-testing
-// and ndeadly's controller research: input reports 0x05/0x09 and output 0x02.
 extern const uint8_t S2_PRO_REPORT_DESC[] = {
     0x05, 0x01, 0x09, 0x05, 0xA1, 0x01,
     0x85, 0x05, 0x05, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00,
@@ -90,51 +88,6 @@ extern const uint8_t S2_PRO_REPORT_DESC[] = {
 };
 extern const size_t S2_PRO_REPORT_DESC_SIZE = sizeof(S2_PRO_REPORT_DESC);
 static_assert(sizeof(S2_PRO_REPORT_DESC) == 97, "S2 Pro Controller HID descriptor must be 97 bytes");
-
-// Genuine Joy-Con 2 L/R descriptors are identical except for the extended
-// input report ID at byte 24. Unlike Pro2, their structured report is 0x07/0x08
-// and their output report is 0x01.
-static constexpr uint8_t S2_JOYCON_L_REPORT_DESC[] = {
-    0x05, 0x01, 0x09, 0x05, 0xA1, 0x01,
-    0x85, 0x05, 0x05, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00,
-    0x95, 0x3F, 0x75, 0x08, 0x81, 0x02,
-    0x85, 0x07, 0x09, 0x01, 0x95, 0x02, 0x81, 0x02,
-    0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x25, 0x01,
-    0x95, 0x10, 0x75, 0x01, 0x81, 0x02,
-    0x05, 0xFF, 0x09, 0x01, 0x26, 0xFF, 0x00,
-    0x95, 0x01, 0x75, 0x08, 0x81, 0x02,
-    0x05, 0x01, 0x09, 0x01, 0xA1, 0x00,
-    0x09, 0x30, 0x09, 0x31, 0x26, 0xFF, 0x0F,
-    0x95, 0x02, 0x75, 0x0C, 0x81, 0x02, 0xC0,
-    0x05, 0xFF, 0x09, 0x02, 0x26, 0xFF, 0x00,
-    0x95, 0x37, 0x75, 0x08, 0x81, 0x02,
-    0x85, 0x01, 0x09, 0x01, 0x95, 0x3F, 0x91, 0x02,
-    0xC0
-};
-static_assert(sizeof(S2_JOYCON_L_REPORT_DESC) == 100,
-              "Joy-Con 2 HID descriptor must be 100 bytes");
-
-static const std::array<uint8_t, sizeof(S2_JOYCON_L_REPORT_DESC)> S2_JOYCON_R_REPORT_DESC = [] {
-    std::array<uint8_t, sizeof(S2_JOYCON_L_REPORT_DESC)> desc{};
-    std::copy_n(S2_JOYCON_L_REPORT_DESC, desc.size(), desc.begin());
-    desc[24] = 0x08;
-    return desc;
-}();
-
-const uint8_t* switch2_report_descriptor_for_port(int ctrl, size_t& size) {
-    switch (controller_type_for_port(ctrl)) {
-        case NS_TYPE_JOYCON_L:
-            size = sizeof(S2_JOYCON_L_REPORT_DESC);
-            return S2_JOYCON_L_REPORT_DESC;
-        case NS_TYPE_JOYCON_R:
-            size = S2_JOYCON_R_REPORT_DESC.size();
-            return S2_JOYCON_R_REPORT_DESC.data();
-        case NS_TYPE_PRO:
-        default:
-            size = S2_PRO_REPORT_DESC_SIZE;
-            return S2_PRO_REPORT_DESC;
-    }
-}
 
 uint8_t CTRL_MAC_BE[4][6] = {
     {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA0}, {0x02, 0x4E, 0x53, 0x26, 0x06, 0xA1},
@@ -1037,9 +990,8 @@ static void build_s2_joycon_report(const HIDReport& src,
 }
 
 // S2 report builder. Pro Controller 2 uses report 0x09; Joy-Con 2 L/R use
-// reports 0x07/0x08. The USB session keeps the composite S2 transport while
-// its HID report descriptor, logical device info/SPI and report stream follow
-// the selected pad type.
+// reports 0x07/0x08. The USB device and HID descriptor intentionally remain
+// Pro2; logical device info/SPI and the report stream follow the selected type.
 void build_s2_pro_report(const HIDReport& src,
                          const MotionReport motion_samples[3],
                          bool has_motion,

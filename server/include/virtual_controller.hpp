@@ -49,7 +49,6 @@ extern const uint8_t LEGACY_REPORT_DESC[85];
 
 extern const uint8_t S2_PRO_REPORT_DESC[];
 extern const size_t S2_PRO_REPORT_DESC_SIZE;
-const uint8_t* switch2_report_descriptor_for_port(int ctrl, size_t& size);
 
 #define NS_LOCAL_PACKED __attribute__((packed))
 
