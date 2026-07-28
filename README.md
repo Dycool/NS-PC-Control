@@ -111,6 +111,7 @@ Detailed guides and technical information are in the `docs/` folder:
 | **Protocol** | Custom UDP-based protocol with magic/version/sequence number guards |
 | **Pro controller Emulation** | [switch-auto-core](https://github.com/churunfa/switch-auto-core) by [churunfa](https://github.com/churunfa)
 | **Pro controller 2 Emulation** | [switch2_controller_research](https://github.com/ndeadly/switch2_controller_research) by [ndeadly](https://github.com/ndeadly)
+| **Switch 2 motion controls** | [PicoSwitch2](https://github.com/notsosaelin/PicoSwitch2/tree/ns2-testing) by [notsosaelin](https://github.com/notsosaelin) |
 |**Switch 2 Wake Setup**|[Switch2-RPI-Wake](https://github.com/Bill-git1/Switch2-RPI-Wake) by [Bill-git1](https://github.com/Bill-git1)|
 
 
