@@ -174,9 +174,11 @@ endif()
 
 if(APPLE)
     find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
 
     target_link_libraries(ns-client PRIVATE
         ${COREGRAPHICS_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK}
     )
 
     set_target_properties(ns-client PROPERTIES
@@ -189,6 +191,17 @@ if(APPLE)
 endif()
 
 if(UNIX AND NOT APPLE)
+    find_package(X11 QUIET COMPONENTS Xi)
+    if(X11_FOUND AND X11_Xi_FOUND)
+        target_compile_definitions(ns-client PRIVATE NS_ENABLE_X11_BACKGROUND_INPUT)
+        target_link_libraries(ns-client PRIVATE
+            X11::X11
+            X11::Xi
+        )
+    else()
+        message(STATUS "X11/XInput2 background input unavailable; using focused Qt input fallback")
+    endif()
+
     set_target_properties(ns-client PROPERTIES
         BUILD_RPATH "$ORIGIN"
         INSTALL_RPATH "$ORIGIN"

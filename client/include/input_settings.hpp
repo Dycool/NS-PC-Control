@@ -65,6 +65,7 @@ void load_saved_feature_toggles();
 void save_feature_toggles();
 void set_key_pressed(const std::string& key, bool down);
 bool pressed_key_cache_contains(const std::string& key);
+void clear_pressed_key_cache();
 void update_keyboard_state_cache();
 bool key_is_down(const std::string& name_raw);
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode);

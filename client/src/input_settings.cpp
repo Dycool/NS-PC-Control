@@ -102,7 +102,27 @@ std::unordered_map<std::string, std::string> default_key_bindings() {
 }
 
 std::string normalize_key_name(std::string s) {
-    return ns::macro::upper(ns::macro::trim(std::move(s)));
+    s = ns::macro::upper(ns::macro::trim(std::move(s)));
+    if (s.size() == 4 && s.compare(0, 3, "KEY") == 0
+            && s[3] >= 'A' && s[3] <= 'Z')
+        return s.substr(3);
+    if (s.size() == 6 && s.compare(0, 5, "DIGIT") == 0
+            && s[5] >= '0' && s[5] <= '9')
+        return s.substr(5);
+    static const std::pair<const char*, const char*> aliases[] = {
+        {"ESCAPE", "ESC"},
+        {"ARROWUP", "UP"}, {"ARROWDOWN", "DOWN"},
+        {"ARROWLEFT", "LEFT"}, {"ARROWRIGHT", "RIGHT"},
+        {"SHIFTLEFT", "LSHIFT"}, {"SHIFTRIGHT", "RSHIFT"},
+        {"CONTROLLEFT", "LCTRL"}, {"CONTROLRIGHT", "RCTRL"},
+        {"ALTLEFT", "LALT"}, {"ALTRIGHT", "RALT"},
+        {"METALEFT", "LMETA"}, {"METARIGHT", "RMETA"},
+        {"PRINTSCREEN", "SNAPSHOT"},
+    };
+    for (const auto& [alias, canonical] : aliases) {
+        if (s == alias) return canonical;
+    }
+    return s;
 }
 
 bool is_mouse_button_name(const std::string& name) {
@@ -137,8 +157,10 @@ bool mouse_capture_active() {
 }
 
 void suspend_keyboard_mouse_input() {
-    if (g_keyboardMouseInputSuspendDepth.fetch_add(1, std::memory_order_acq_rel) == 0)
+    if (g_keyboardMouseInputSuspendDepth.fetch_add(1, std::memory_order_acq_rel) == 0) {
+        clear_pressed_key_cache();
         mouse_input_reset();
+    }
 }
 
 void resume_keyboard_mouse_input() {
@@ -146,7 +168,10 @@ void resume_keyboard_mouse_input() {
     while (depth != 0) {
         if (g_keyboardMouseInputSuspendDepth.compare_exchange_weak(
                 depth, depth - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
-            if (depth == 1) mouse_input_reset();
+            if (depth == 1) {
+                clear_pressed_key_cache();
+                mouse_input_reset();
+            }
             return;
         }
     }
@@ -316,56 +341,10 @@ bool pressed_key_cache_contains(const std::string& key) {
     return g_pressedKeys.count(normalize_key_name(key)) != 0;
 }
 
-#ifdef _WIN32
-int windows_vk_for_key(const std::string& name) {
-    if (name.size() == 6 && name.compare(0, 5, "MOUSE") == 0) {
-        switch (name[5]) {
-            case '1': return VK_LBUTTON;
-            case '2': return VK_RBUTTON;
-            case '3': return VK_MBUTTON;
-            case '4': return VK_XBUTTON1;
-            case '5': return VK_XBUTTON2;
-            default: return 0;
-        }
-    }
-    if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z') return name[0];
-    if (name.size() == 1 && name[0] >= '0' && name[0] <= '9') return name[0];
-    if (name.size() >= 2 && name[0] == 'F') {
-        int num = std::stoi(name.substr(1));
-        if (num >= 1 && num <= 12) return VK_F1 + num - 1;
-    }
-    struct Map { const char* n; int vk; };
-    static const Map map[] = {
-        {"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
-        {"LSHIFT", VK_LSHIFT}, {"RSHIFT", VK_RSHIFT}, {"LCTRL", VK_LCONTROL}, {"RCTRL", VK_RCONTROL},
-        {"LALT", VK_LMENU}, {"RALT", VK_RMENU}, {"SPACE", VK_SPACE}, {"ENTER", VK_RETURN},
-        {"TAB", VK_TAB}, {"ESC", VK_ESCAPE}, {"BACKSPACE", VK_BACK}, {"HOME", VK_HOME},
-        {"SNAPSHOT", VK_SNAPSHOT}
-    };
-    for (const auto& m : map) if (name == m.n) return m.vk;
-    return 0;
+void clear_pressed_key_cache() {
+    std::lock_guard<std::mutex> lk(g_pressedKeysMutex);
+    g_pressedKeys.clear();
 }
-#endif
-
-#ifdef __APPLE__
-int mac_keycode_for_key(const std::string& name) {
-    struct Map { const char* n; int kc; };
-    static const Map map[] = {
-        {"A", 0}, {"S", 1}, {"D", 2}, {"F", 3}, {"H", 4}, {"G", 5}, {"Z", 6}, {"X", 7},
-        {"C", 8}, {"V", 9}, {"B", 11}, {"Q", 12}, {"W", 13}, {"E", 14}, {"R", 15},
-        {"Y", 16}, {"T", 17}, {"1", 18}, {"2", 19}, {"3", 20}, {"4", 21}, {"6", 22},
-        {"5", 23}, {"=", 24}, {"9", 25}, {"7", 26}, {"-", 27}, {"8", 28}, {"0", 29},
-        {"O", 31}, {"U", 32}, {"I", 34}, {"P", 35}, {"L", 37}, {"J", 38}, {"K", 40},
-        {"N", 45}, {"M", 46}, {"TAB", 48}, {"SPACE", 49}, {"BACKSPACE", 51}, {"ESC", 53},
-        {"LCTRL", 59}, {"LSHIFT", 56}, {"LALT", 58}, {"RCTRL", 62}, {"RSHIFT", 60}, {"RALT", 61},
-        {"LEFT", 123}, {"RIGHT", 124}, {"DOWN", 125}, {"UP", 126}, {"ENTER", 36}, {"HOME", 115},
-        {"F1", 122}, {"F2", 120}, {"F3", 99}, {"F4", 118}, {"F5", 96}, {"F6", 97},
-        {"F7", 98}, {"F8", 100}, {"F9", 101}, {"F10", 109}, {"F11", 103}, {"F12", 111}
-    };
-    for (const auto& m : map) if (name == m.n) return m.kc;
-    return -1;
-}
-#endif
 
 void update_keyboard_state_cache() {
     std::lock_guard<std::mutex> lk_bind(g_keyBindingsMutex);
@@ -375,15 +354,8 @@ void update_keyboard_state_cache() {
         if (key.empty()) continue;
         if (is_mouse_button_name(key) && !mouse_mode_active()) { g_kbStateCache[key] = false; continue; }
         bool down = false;
-#ifdef _WIN32
-        int vk = windows_vk_for_key(key);
-        if (vk && (GetAsyncKeyState(vk) & 0x8000)) down = true;
-#endif
-#ifdef __APPLE__
-        int kc = mac_keycode_for_key(key);
-        if (kc >= 0 && CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, (CGKeyCode)kc)) down = true;
-#endif
-        if (!down) down = pressed_key_cache_contains(key);
+        if (!mouse_input_query_key_state(key, down))
+            down = pressed_key_cache_contains(key);
         g_kbStateCache[key] = down;
     }
 }
@@ -392,19 +364,16 @@ bool key_is_down(const std::string& name_raw) {
     std::string name = normalize_key_name(name_raw);
     if (name.empty()) return false;
     if (is_mouse_button_name(name) && !mouse_mode_active()) return false;
+    // Native probes are authoritative and are cheap enough to consult at the
+    // 250 Hz report cadence. This avoids both focus lag and stale Qt key-down
+    // entries after the application loses focus.
+    bool native_down = false;
+    if (mouse_input_query_key_state(name, native_down)) return native_down;
     {
         std::lock_guard<std::mutex> lk(g_kbCacheMutex);
         auto it = g_kbStateCache.find(name);
         if (it != g_kbStateCache.end()) return it->second;
     }
-#ifdef _WIN32
-    int vk = windows_vk_for_key(name);
-    if (vk && (GetAsyncKeyState(vk) & 0x8000)) return true;
-#endif
-#ifdef __APPLE__
-    int kc = mac_keycode_for_key(name);
-    if (kc >= 0 && CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, (CGKeyCode)kc)) return true;
-#endif
     return pressed_key_cache_contains(name);
 }
 
@@ -424,6 +393,17 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     };
     for (const auto& m : btn_map) {
         if (auto k = get(m.name); !k.empty() && key_is_down(k)) rep.buttons |= m.flag;
+    }
+    if (mouse_mode_active()) {
+        bool mouse1_custom = false;
+        bool mouse2_custom = false;
+        for (const auto& binding : g_keyBindings) {
+            const std::string key = normalize_key_name(binding.second);
+            mouse1_custom = mouse1_custom || key == "MOUSE1";
+            mouse2_custom = mouse2_custom || key == "MOUSE2";
+        }
+        if (!mouse1_custom && key_is_down("MOUSE1")) rep.buttons |= ns::BTN_ZR;
+        if (!mouse2_custom && key_is_down("MOUSE2")) rep.buttons |= ns::BTN_ZL;
     }
     struct ExtraBtnMap { const char* name; uint8_t flag; };
     static const ExtraBtnMap extra_btn_map[] = {

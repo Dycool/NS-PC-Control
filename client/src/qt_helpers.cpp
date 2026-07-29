@@ -1,5 +1,6 @@
 #include "qt_helpers.hpp"
 #include "input_settings.hpp"
+#include "mouse_input.hpp"
 #include "platform.hpp"
 #ifdef _WIN32
 #include <shobjidl.h>
@@ -11,6 +12,8 @@
 #include <QPointer>
 #include <QTimer>
 #include <QKeyEvent>
+#include <QMouseEvent>
+#include <QWheelEvent>
 #include <QCoreApplication>
 #include <QDir>
 #include <vector>
@@ -125,6 +128,53 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
+            auto* key_event = static_cast<QKeyEvent*>(event);
+            if (!key_event->isAutoRepeat()) {
+                const QString key = key_name_from_qkey(key_event);
+                if (!key.isEmpty())
+                    set_key_pressed(q_to_std(key), event->type() == QEvent::KeyPress);
+            }
+        } else if (event->type() == QEvent::MouseButtonPress
+                   || event->type() == QEvent::MouseButtonRelease) {
+            auto* mouse_event = static_cast<QMouseEvent*>(event);
+            const bool down = event->type() == QEvent::MouseButtonPress;
+            switch (mouse_event->button()) {
+                case Qt::LeftButton:    set_key_pressed("MOUSE1", down); break;
+                case Qt::RightButton:   set_key_pressed("MOUSE2", down); break;
+                case Qt::MiddleButton:  set_key_pressed("MOUSE3", down); break;
+                case Qt::BackButton:    set_key_pressed("MOUSE4", down); break;
+                case Qt::ForwardButton: set_key_pressed("MOUSE5", down); break;
+                default: break;
+            }
+        } else if (event->type() == QEvent::MouseMove) {
+            auto* mouse_event = static_cast<QMouseEvent*>(event);
+            const QPointF current = mouse_event->globalPosition();
+            if (mouse_capture_active() && last_mouse_position_valid) {
+                const QPointF delta = current - last_mouse_position;
+                mouse_input_add_focused_motion(
+                    qRound(delta.x()), qRound(delta.y()));
+            }
+            last_mouse_position = current;
+            last_mouse_position_valid = mouse_capture_active();
+        } else if (event->type() == QEvent::Wheel) {
+            auto* wheel_event = static_cast<QWheelEvent*>(event);
+            const int angle_delta = wheel_event->angleDelta().y();
+            mouse_input_add_focused_scroll(
+                angle_delta != 0 ? angle_delta : wheel_event->pixelDelta().y() * 8);
+        } else if (event->type() == QEvent::ApplicationDeactivate) {
+            // Focused Qt releases can be lost when the active application
+            // changes. Native background probes remain authoritative where
+            // available; this only clears the focused-event fallback.
+            clear_pressed_key_cache();
+            last_mouse_position_valid = false;
+        }
+
+        if (event->type() == QEvent::Show) {
+            if (auto* widget = qobject_cast<QWidget*>(watched))
+                widget->setMouseTracking(true);
+        }
+
         auto* dialog = qobject_cast<QDialog*>(watched);
         if (!dialog || !dialog->isWindow()) return QObject::eventFilter(watched, event);
 
@@ -154,6 +204,10 @@ protected:
         }
         return QObject::eventFilter(watched, event);
     }
+
+private:
+    QPointF last_mouse_position;
+    bool last_mouse_position_valid = false;
 };
 
 } // namespace
