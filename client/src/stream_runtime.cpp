@@ -705,7 +705,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         // Typed uploads are sent after the live input frame so the server has
         // already seen the current controller type.
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
-        pump_udp_replies(sock, rumble, cfg.hmac_key, frame.controller_for_slot);
+        pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
             if (g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed)) {
                 const std::string message = "Switch 2 mode does not support Joy-Con L + R. Use an individual Joy-Con or Pro Controller.";

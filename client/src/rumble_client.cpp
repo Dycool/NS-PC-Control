@@ -89,7 +89,7 @@ void RumbleManager::set_output(int slot, uint8_t low, uint8_t high, uint32_t dur
 }
 
 void pump_udp_replies(SOCKET sock, RumbleManager& rumble,
-                      const uint8_t hmac_key[32], const int controller_for_slot[4]) {
+                      const int controller_for_slot[4]) {
     // Audio has moved to its own socket/thread, so this input-reply pump no
     // longer sees or dispatches audio datagrams.
     uint8_t buf[1024];

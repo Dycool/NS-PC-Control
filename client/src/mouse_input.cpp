@@ -20,11 +20,11 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #elif defined(__linux__) && defined(NS_ENABLE_X11_BACKGROUND_INPUT)
+#include <QGuiApplication>
 #include <X11/XKBlib.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/extensions/XInput2.h>
-#include <QGuiApplication>
 #include <poll.h>
 #endif
 

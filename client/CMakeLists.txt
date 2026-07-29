@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.20)
-set(CMAKE_WARN_DEPRECATED OFF)
 project(ns_clients LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)

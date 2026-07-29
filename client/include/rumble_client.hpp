@@ -26,6 +26,6 @@ private:
 };
 
 void pump_udp_replies(SOCKET sock, RumbleManager& rumble,
-                      const uint8_t hmac_key[32], const int controller_for_slot[4]);
+                      const int controller_for_slot[4]);
 bool detect_server_is_legacy(SOCKET sock, const sockaddr_in& dest);
 bool probe_server_sync(const std::string& host, int port);

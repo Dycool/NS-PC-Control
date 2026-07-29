@@ -18,7 +18,7 @@ permissions:
 env:
   SDL_REF: release-3.4.10
   QT_VERSION: '6.8.3'
-  VCPKG_COMMIT: 8584f4d71b35d9c82a94bd39a0d558302b3604e4ee1ae46d8eb4c38519682bb9
+  VCPKG_COMMIT: 9d7f79f56ae1a9b4704d6a7fb8237e347a974133
   VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/_cache/vcpkg-bincache
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -27,6 +27,8 @@ jobs:
     name: Windows static .exe
     runs-on: windows-latest
     timeout-minutes: 360
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/_deps/vcpkg
     steps:
       - uses: actions/checkout@v6
 
@@ -59,10 +61,10 @@ jobs:
       - name: Bootstrap pinned vcpkg
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           git clone https://github.com/microsoft/vcpkg.git _deps/vcpkg
-          cd _deps/vcpkg
-          git checkout $env:VCPKG_COMMIT
-          cd ../..
+          git -C _deps/vcpkg checkout --detach $env:VCPKG_COMMIT
           .\_deps\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Create release-only vcpkg triplets
@@ -108,7 +110,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$PWD/_deps/vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-release `
             -DVCPKG_HOST_TRIPLET=x64-windows-release `
-            -DVCPKG_OVERLAY_TRIPLETS="$PWD/triplets" `
+            -DQT_NO_QTPATHS_DEPLOYMENT_WARNING=ON `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
           cmake --build client/build --target ns-client --parallel
@@ -230,10 +232,18 @@ jobs:
           version: ${{ env.QT_VERSION }}
           cache: true
 
-      - name: Install dependencies
-        env:
-          HOMEBREW_REQUIRE_TAP_TRUST: 1
-        run: brew install cmake ninja pkg-config qt@6 openssl
+      - name: Verify or install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v cmake >/dev/null 2>&1 || missing+=(cmake)
+          command -v ninja >/dev/null 2>&1 || missing+=(ninja)
+          command -v pkg-config >/dev/null 2>&1 || missing+=(pkg-config)
+          pkg-config --exists openssl || missing+=(openssl@3)
+          if ((${#missing[@]})); then
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install "${missing[@]}"
+          fi
 
       - name: Cache SDL3 static
         id: cache-sdl3
