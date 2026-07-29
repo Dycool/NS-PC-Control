@@ -133,28 +133,54 @@ body.ns-modal-open { overflow: hidden; }
     border-radius: 6px; font: 14px var(--ns-font);
 }
 .ns-amiibo-series { max-width: none; width: 100%; }
+.ns-amiibo-body {
+    display: flex; flex: 1; overflow: hidden;
+}
 .ns-amiibo-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 10px; padding: 14px 18px; overflow-y: auto; flex: 1;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 8px; padding: 14px 18px; overflow-y: auto; flex: 1;
     align-content: start;
 }
 .ns-amiibo-item {
-    min-width: 0; min-height: 132px; display: flex; flex-direction: column;
-    align-items: flex-start; justify-content: center; gap: 9px; padding: 14px;
+    min-width: 0; min-height: 48px; display: flex; flex-direction: column;
+    align-items: flex-start; justify-content: center; padding: 10px 12px;
     color: var(--ns-text); background: var(--ns-surface-2);
     border: 1px solid var(--ns-border); border-radius: 8px;
     font-family: var(--ns-font); cursor: pointer; text-align: left;
+    transition: background 0.15s, border-color 0.15s;
 }
 .ns-amiibo-item:hover, .ns-amiibo-item:focus-visible {
     border-color: var(--ns-accent); background: #303030; outline: none;
 }
-.ns-amiibo-item-type {
-    color: var(--ns-accent); font-size: 10px; font-weight: 700;
-    letter-spacing: 0.08em; text-transform: uppercase;
+.ns-amiibo-item.selected {
+    border-color: var(--ns-accent); background: rgba(230, 0, 18, 0.18);
+    box-shadow: 0 0 0 1px var(--ns-accent);
 }
-.ns-amiibo-item-name { font-size: 14px; font-weight: 600; line-height: 1.2; }
-.ns-amiibo-item-meta {
-    color: var(--ns-text-dim); font-size: 11px; line-height: 1.25;
+.ns-amiibo-item-name { font-size: 13px; font-weight: 600; line-height: 1.2; word-break: break-word; }
+.ns-amiibo-preview {
+    width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 18px;
+    border-left: 1px solid var(--ns-border); background: var(--ns-surface-2);
+    gap: 12px;
+}
+.ns-amiibo-preview-img {
+    max-width: 180px; max-height: 240px; object-fit: contain;
+    filter: drop-shadow(0 6px 12px rgba(0,0,0,0.5));
+}
+.ns-amiibo-preview-placeholder {
+    color: var(--ns-text-dim); font-size: 13px; text-align: center;
+}
+.ns-amiibo-preview-name {
+    font-size: 14px; font-weight: 600; color: var(--ns-text);
+    text-align: center; word-break: break-word;
+}
+.ns-amiibo-select-btn {
+    width: 100%; padding: 10px 14px; background: var(--ns-accent);
+    color: #fff; border: none; border-radius: 6px; font-weight: 600;
+    cursor: pointer; transition: opacity 0.15s;
+}
+.ns-amiibo-select-btn:disabled {
+    opacity: 0.4; cursor: not-allowed;
 }
 .ns-amiibo-modal > .ns-note {
     flex-shrink: 0; margin: 0; padding: 10px 18px;

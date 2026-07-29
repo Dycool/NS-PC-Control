@@ -11,7 +11,7 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 find_package(OpenSSL REQUIRED)
 
 if(APPLE)
@@ -133,6 +133,7 @@ target_include_directories(ns-client PRIVATE
 
 target_link_libraries(ns-client PRIVATE
     Qt6::Widgets
+    Qt6::Network
     SDL3::SDL3
     Threads::Threads
     nlohmann_json::nlohmann_json

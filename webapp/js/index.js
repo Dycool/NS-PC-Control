@@ -187,6 +187,7 @@ window.onload = () => {
 };
 document.getElementById('kbMode').onchange = (e) => localStorage.setItem('nswc_mode', e.target.value);
 window.addEventListener('keydown', (e) => {
+    if (document.body.classList.contains('ns-modal-open')) return;
     if (activeBindKey) { e.preventDefault(); remapKey(e.code); return; }
     const m = savedMacros.find(x => normalizeMacroKey(x.hotkey) && normalizeMacroKey(x.hotkey) === normalizeMacroKey(e.code));
     if (m && !macroHotkeyConflicts(e.code, savedMacros.indexOf(m))) { e.preventDefault(); runMacroServerSide(m); return; }

@@ -1,4 +1,5 @@
 #include "amiibo_library.hpp"
+#include "s2_nfc_codec.hpp"
 
 #include <array>
 #include <cassert>
@@ -47,6 +48,7 @@ int main() {
         0x12345678u, 0x00000003u, test_key, tag);
     assert(generated);
     assert(tag.size() == ns::AMIIBO_V3_DUMP_SIZE);
+    assert(ns::s2nfc::validate_v3_dump(tag, nullptr));
     assert(tag[0x388] == 0x01);
     assert(tag[0x3b0] == 0x41);
 

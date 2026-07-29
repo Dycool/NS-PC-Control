@@ -451,7 +451,7 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
         g_amiibo_signature[port] = signature;
         g_amiibo_signature_from_file[port] = has_real_signature;
         g_amiibo_source_size[port] = len;
-        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         g_amiibo_modified[port] = false;
         reset_amiibo_transaction_locked(port);
         // Physical placement is the first NFC processor event. This transition
@@ -461,7 +461,7 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     if (nfc_debug_enabled()) {
         const auto uid = ns::s2nfc::uid_from_dump(
             std::span<const uint8_t>(data, is_v3 ? len : std::min(len, ns::s2nfc::RAW_DUMP_SIZE)));
-        std::println("[s2][nfc][upload] accepted t_us={} port={} format={} uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} expiry_ms=15000 modified=false signature_source={}",
+        std::println("[s2][nfc][upload] accepted t_us={} port={} format={} uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} expiry_ms=3000 modified=false signature_source={}",
                      now_us(), port,
                      is_v3 ? "v3-2048" :
                          (len == ns::s2nfc::TAGMO_DUMP_SIZE ? "tagmo-532" :

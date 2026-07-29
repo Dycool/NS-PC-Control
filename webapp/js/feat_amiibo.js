@@ -16,6 +16,8 @@
     let card = null, statusEl = null, chooseBtn = null, settingsChooseBtn = null;
     let modalBackdrop = null, modal = null, searchInput = null, seriesSelect = null;
     let results = null, modalStatus = null;
+    let previewImg = null, previewPlaceholder = null, previewName = null, useBtn = null;
+    let selectedAmiiboObj = null;
     let catalogue = [];
     let cataloguePromise = null;
     let selectionPending = false;
@@ -240,6 +242,23 @@
         modalStatus.classList.toggle('ns-warn', !!warning);
     }
 
+    function highlightAmiibo(amiibo, targetEl) {
+        selectedAmiiboObj = amiibo;
+        if (results) {
+            results.querySelectorAll('.ns-amiibo-item').forEach(btn => btn.classList.remove('selected'));
+        }
+        if (targetEl) targetEl.classList.add('selected');
+        if (previewImg && previewPlaceholder && previewName && useBtn) {
+            const imgUrl = 'https://raw.githubusercontent.com/8bitDream/AmiiboAPI/master/images/icon_'
+                + amiibo.head + '-' + amiibo.tail + '.png';
+            previewImg.src = imgUrl;
+            previewImg.style.display = 'block';
+            previewPlaceholder.style.display = 'none';
+            previewName.textContent = amiibo.name;
+            useBtn.disabled = false;
+        }
+    }
+
     function ensurePicker() {
         if (modal) return;
         searchInput = el('input', {
@@ -250,21 +269,51 @@
         searchInput.oninput = renderResults;
         seriesSelect.onchange = renderResults;
         results = el('div', { class: 'ns-amiibo-grid' });
+        
+        previewImg = el('img', {
+            class: 'ns-amiibo-preview-img',
+            alt: 'Amiibo preview',
+            style: 'display:none;'
+        });
+        previewPlaceholder = el('div', {
+            class: 'ns-amiibo-preview-placeholder',
+            text: 'Select an Amiibo'
+        });
+        previewName = el('div', {
+            class: 'ns-amiibo-preview-name',
+            text: ''
+        });
+        useBtn = el('button', {
+            class: 'ns-amiibo-select-btn',
+            text: 'Use Selected Amiibo',
+            disabled: true,
+            onclick: () => {
+                if (selectedAmiiboObj) selectAmiibo(selectedAmiiboObj);
+            }
+        });
+        const previewPanel = el('div', { class: 'ns-amiibo-preview' }, [
+            previewImg,
+            previewPlaceholder,
+            previewName,
+            useBtn
+        ]);
+
+        const bodyContainer = el('div', { class: 'ns-amiibo-body' }, [
+            results,
+            previewPanel
+        ]);
+
         modalStatus = el('div', {
             class: 'ns-note',
             text: 'Loading Amiibo catalogue…'
         });
         modal = el('section', {
             class: 'ns-amiibo-modal', role: 'dialog',
-            'aria-modal': 'true', 'aria-label': 'Choose Amiibo'
+            'aria-modal': 'true', 'aria-label': 'Scan Amiibo'
         }, [
             el('div', { class: 'ns-amiibo-header' }, [
                 el('div', {}, [
-                    el('h2', { text: 'Choose Amiibo' }),
-                    el('div', {
-                        class: 'ns-note',
-                        text: 'Public metadata only. Generated tags and writebacks stay privately on your server.'
-                    })
+                    el('h2', { text: 'Scan Amiibo' })
                 ]),
                 el('button', {
                     class: 'ns-drawer-close', text: '×',
@@ -274,7 +323,7 @@
             el('div', { class: 'ns-amiibo-toolbar' }, [
                 searchInput, seriesSelect
             ]),
-            results,
+            bodyContainer,
             modalStatus
         ]);
         modalBackdrop = el('div', {
@@ -313,24 +362,15 @@
         });
         results.innerHTML = '';
         matching.slice(0, 160).forEach(amiibo => {
-            const isV3 = (parseInt(amiibo.tail, 16) & 0xff) === 0x03;
-            results.appendChild(el('button', {
-                class: 'ns-amiibo-item',
-                title: 'Use ' + amiibo.name,
-                onclick: () => selectAmiibo(amiibo)
+            const itemBtn = el('button', {
+                class: 'ns-amiibo-item' + (selectedAmiiboObj === amiibo ? ' selected' : ''),
+                title: 'Select ' + amiibo.name,
+                onclick: (e) => highlightAmiibo(amiibo, e.currentTarget),
+                ondblclick: () => selectAmiibo(amiibo)
             }, [
-                el('span', {
-                    class: 'ns-amiibo-item-type',
-                    text: amiibo.type || 'Amiibo'
-                }),
-                el('span', { class: 'ns-amiibo-item-name', text: amiibo.name }),
-                el('span', {
-                    class: 'ns-amiibo-item-meta',
-                    text: (amiibo.gameSeries || amiibo.amiiboSeries)
-                        + ' · ' + amiibo.type + ' · '
-                        + (isV3 ? 'v3 / 2 KiB' : 'NTAG215')
-                })
-            ]));
+                el('span', { class: 'ns-amiibo-item-name', text: amiibo.name })
+            ]);
+            results.appendChild(itemBtn);
         });
         if (matching.length > 160) {
             results.appendChild(el('div', {
@@ -369,7 +409,7 @@
             class: 'status',
             text: 'Waiting for the console to request an Amiibo scan.'
         });
-        chooseBtn = el('button', { text: 'Choose Amiibo…', onclick: openPicker });
+        chooseBtn = el('button', { text: 'Scan Amiibo…', onclick: openPicker });
         card = el('section', { class: 'card' }, [
             el('div', { class: 'card-title', text: 'Amiibo (Switch 2)' }),
             el('div', { class: 'btn-group' }, [chooseBtn]),
@@ -434,7 +474,7 @@
             if (page !== 'index' || !NSCore.state.connected
                     || !NSCore.s2Active()) return;
             const section = ui.section('Amiibo library');
-            settingsChooseBtn = section.button('Choose Amiibo…', openPicker, {
+            settingsChooseBtn = section.button('Scan Amiibo…', openPicker, {
                 disabled: !(NSCore.state.connected
                     && NSCore.s2NfcAssigned()
                     && scanRequested.some(Boolean))

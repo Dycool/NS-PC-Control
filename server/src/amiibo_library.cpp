@@ -369,6 +369,10 @@ std::optional<std::vector<uint8_t>> generate_tag(
         std::span<const uint8_t>(tag.data() + 0x3c0, 0x3e));
     tag[0x3fe] = static_cast<uint8_t>(crc >> 8);
     tag[0x3ff] = static_cast<uint8_t>(crc);
+
+    std::copy_n(uid.begin(), 7, tag.begin());
+    tag[7] = 0x00;
+    tag[8] = 0x44;
     return tag;
 }
 

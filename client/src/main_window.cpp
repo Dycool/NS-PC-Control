@@ -59,11 +59,9 @@ MainWindow::MainWindow() {
     grid->addWidget(settingsBtn, 3, 3);
 
     connectBtn = new QPushButton("Connect", this);
-    scanAmiiboBtn = new QPushButton("Choose Amiibo...", this);
+    scanAmiiboBtn = new QPushButton("Scan Amiibo...", this);
     quitBtn = new QPushButton("Quit", this);
 
-    // Restore exact original grid positions from main branch:
-    // connect at (4,1), quit at (4,3). Place Scan Amiibo at (4,2) with natural size (no colspan).
     grid->addWidget(connectBtn, 4, 1);
     grid->addWidget(scanAmiiboBtn, 4, 2);
     grid->addWidget(quitBtn, 4, 3);
@@ -170,7 +168,6 @@ void MainWindow::toggleConnection() {
         }
     }
 }
-
 
 void MainWindow::updateUi() {
     const bool connected = g_connected.load();
@@ -280,7 +277,7 @@ void MainWindow::onScanAmiiboClicked() {
                 ns::AMIIBO_LIBRARY_SELECT,
                 static_cast<uint8_t>(subpad), head, tail)) {
         QMessageBox::warning(
-            this, QStringLiteral("Choose Amiibo"),
+            this, QStringLiteral("Scan Amiibo"),
             QStringLiteral("Could not send the Amiibo selection to the server."));
         return;
     }

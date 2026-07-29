@@ -1,4 +1,5 @@
 #include "amiibo_picker.hpp"
+#include "input_settings.hpp"
 
 #include <QComboBox>
 #include <QAbstractItemView>
@@ -12,8 +13,13 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSet>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -25,20 +31,15 @@ bool AmiiboCatalogItem::isV3() const {
 }
 
 AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
-    setWindowTitle(QStringLiteral("Choose Amiibo"));
+    suspend_keyboard_mouse_input();
+
+    setWindowTitle(QStringLiteral("Scan Amiibo"));
     setModal(true);
     resize(760, 560);
 
+    networkManager = new QNetworkAccessManager(this);
+
     auto* outer = new QVBoxLayout(this);
-    auto* intro = new QLabel(
-        QStringLiteral(
-            "Choose from the public Amiibo catalogue. NS-PC-Control stores "
-            "working copies and console writebacks privately on your server. "
-            "The release includes synthetic templates, so no key or dump "
-            "files are needed."),
-        this);
-    intro->setWordWrap(true);
-    outer->addWidget(intro);
 
     auto* filters = new QHBoxLayout();
     searchEdit = new QLineEdit(this);
@@ -51,11 +52,27 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
     filters->addWidget(seriesBox);
     outer->addLayout(filters);
 
+    auto* bodyLayout = new QHBoxLayout();
+
     list = new QListWidget(this);
     list->setAlternatingRowColors(true);
     list->setSelectionMode(QAbstractItemView::SingleSelection);
     list->setUniformItemSizes(true);
-    outer->addWidget(list, 1);
+    bodyLayout->addWidget(list, 1);
+
+    imagePreview = new QLabel(this);
+    imagePreview->setFixedSize(220, 280);
+    imagePreview->setAlignment(Qt::AlignCenter);
+    imagePreview->setStyleSheet(QStringLiteral(
+        "border: 1px solid #444; border-radius: 8px; background-color: #1e1e1e; color: #888;"));
+    imagePreview->setText(QStringLiteral("Select an Amiibo"));
+
+    auto* previewLayout = new QVBoxLayout();
+    previewLayout->addWidget(imagePreview, 0, Qt::AlignCenter);
+    previewLayout->addStretch();
+    bodyLayout->addLayout(previewLayout);
+
+    outer->addLayout(bodyLayout, 1);
 
     status = new QLabel(QStringLiteral("Loading Amiibo catalogue…"), this);
     status->setWordWrap(true);
@@ -74,6 +91,7 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
             this, [this] { applyFilter(); });
     connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
         chooseButton->setEnabled(row >= 0);
+        updatePreview(selectedAmiibo());
     });
     connect(list, &QListWidget::itemDoubleClicked,
             this, [this](QListWidgetItem*) {
@@ -85,6 +103,15 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
             this, &QDialog::reject);
 
     loadCatalogue();
+}
+
+AmiiboPickerDialog::~AmiiboPickerDialog() {
+    if (currentReply) {
+        currentReply->abort();
+        currentReply->deleteLater();
+        currentReply = nullptr;
+    }
+    resume_keyboard_mouse_input();
 }
 
 const AmiiboCatalogItem* AmiiboPickerDialog::selectedAmiibo() const {
@@ -200,18 +227,50 @@ void AmiiboPickerDialog::applyFilter() {
         if (!series.isEmpty() && item.gameSeries != series) continue;
         if (!query.isEmpty()
                 && !haystack.contains(query, Qt::CaseInsensitive)) continue;
-        const QString generation = item.isV3()
-            ? QStringLiteral("v3 / 2 KiB") : QStringLiteral("NTAG215");
-        auto* row = new QListWidgetItem(
-            QStringLiteral("%1  —  %2  ·  %3  ·  %4")
-                .arg(item.name,
-                     item.gameSeries.isEmpty()
-                         ? item.amiiboSeries : item.gameSeries,
-                     item.type, generation),
-            list);
+        auto* row = new QListWidgetItem(item.name, list);
         row->setData(Qt::UserRole, index);
         row->setToolTip(QStringLiteral("%1\nID: %2\nAmiibo series: %3")
                             .arg(item.character, item.id(), item.amiiboSeries));
     }
     chooseButton->setEnabled(list->currentRow() >= 0);
+    updatePreview(selectedAmiibo());
+}
+
+void AmiiboPickerDialog::updatePreview(const AmiiboCatalogItem* item) {
+    if (currentReply) {
+        currentReply->abort();
+        currentReply->deleteLater();
+        currentReply = nullptr;
+    }
+    if (!item) {
+        imagePreview->clear();
+        imagePreview->setText(QStringLiteral("Select an Amiibo"));
+        return;
+    }
+    imagePreview->setText(QStringLiteral("Loading image…"));
+    const QString urlStr = QStringLiteral(
+        "https://raw.githubusercontent.com/8bitDream/AmiiboAPI/master/images/icon_%1-%2.png")
+        .arg(item->head, item->tail);
+    const QUrl url(urlStr);
+    QNetworkRequest request(url);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    currentReply = networkManager->get(request);
+    connect(currentReply, &QNetworkReply::finished, this, [this, reply = currentReply]() {
+        if (reply != currentReply) return;
+        if (reply->error() == QNetworkReply::NoError) {
+            const QByteArray data = reply->readAll();
+            QPixmap pixmap;
+            if (pixmap.loadFromData(data)) {
+                imagePreview->setPixmap(pixmap.scaled(
+                    imagePreview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            } else {
+                imagePreview->setText(QStringLiteral("Failed to load image"));
+            }
+        } else {
+            imagePreview->setText(QStringLiteral("Image unavailable"));
+        }
+        currentReply->deleteLater();
+        currentReply = nullptr;
+    });
 }

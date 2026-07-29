@@ -10,6 +10,8 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QNetworkAccessManager;
+class QNetworkReply;
 
 struct AmiiboCatalogItem {
     QString head;
@@ -27,6 +29,7 @@ struct AmiiboCatalogItem {
 class AmiiboPickerDialog final : public QDialog {
 public:
     explicit AmiiboPickerDialog(QWidget* parent = nullptr);
+    ~AmiiboPickerDialog() override;
 
     const AmiiboCatalogItem* selectedAmiibo() const;
 
@@ -34,12 +37,16 @@ private:
     QLineEdit* searchEdit = nullptr;
     QComboBox* seriesBox = nullptr;
     QListWidget* list = nullptr;
+    QLabel* imagePreview = nullptr;
     QLabel* status = nullptr;
     QPushButton* chooseButton = nullptr;
     QVector<AmiiboCatalogItem> catalogue;
+    QNetworkAccessManager* networkManager = nullptr;
+    QNetworkReply* currentReply = nullptr;
 
     void loadCatalogue();
     bool parseCatalogue(const QByteArray& json, QString* error = nullptr);
     void rebuildSeries();
     void applyFilter();
+    void updatePreview(const AmiiboCatalogItem* item);
 };
