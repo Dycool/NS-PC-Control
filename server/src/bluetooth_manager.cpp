@@ -49,6 +49,7 @@ constexpr auto        RECONNECT_COOLDOWN       = std::chrono::seconds(5);
 // Small string/process helpers
 // ---------------------------------------------------------------------------
 
+#ifdef NS_ENABLE_BLUEZ_DBUS
 std::string lower_copy(std::string s) {
     std::ranges::transform(s, s.begin(), [](unsigned char c) { return std::tolower(c); });
     return s;
@@ -63,6 +64,7 @@ std::string path_to_mac(const std::string& path) {
     std::ranges::transform(mac, mac.begin(), [](unsigned char c) { return std::toupper(c); });
     return mac;
 }
+#endif
 
 bool command_exists(const char* name) {
     std::string cmd = std::format("command -v {} >/dev/null 2>&1", name);

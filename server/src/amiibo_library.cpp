@@ -372,12 +372,14 @@ std::optional<std::vector<uint8_t>> generate_tag(
     return tag;
 }
 
+#ifdef NS_EMBEDDED_AMIIBO_TEMPLATES
 uint32_t read_le32(const uint8_t* data) {
     return static_cast<uint32_t>(data[0])
         | (static_cast<uint32_t>(data[1]) << 8)
         | (static_cast<uint32_t>(data[2]) << 16)
         | (static_cast<uint32_t>(data[3]) << 24);
 }
+#endif
 
 std::optional<std::vector<uint8_t>> embedded_template(
     uint32_t head, uint32_t tail) {

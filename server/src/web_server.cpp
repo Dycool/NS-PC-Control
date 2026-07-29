@@ -276,6 +276,11 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 if (library_magic == ns::AMIIBO_LIBRARY_MAGIC) {
                     ns::AmiiboLibraryPacket request{};
                     std::memcpy(&request, payload, sizeof(request));
+                    // The request uses a packed wire layout. Keep aligned
+                    // copies of multi-byte fields for normal C++ calls and
+                    // formatting.
+                    const uint32_t amiibo_head = request.head;
+                    const uint32_t amiibo_tail = request.tail;
                     amiibo_library::OperationResult result{
                         ns::AMIIBO_LIBRARY_INVALID_REQUEST, 0, "invalid request"};
                     if (request.version == ns::AMIIBO_LIBRARY_VERSION) {
@@ -308,7 +313,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                             if (port >= 0) {
                                 std::vector<uint8_t> tag;
                                 result = amiibo_library::select(
-                                    request.head, request.tail, port,
+                                    amiibo_head, amiibo_tail, port,
                                     tag);
                                 if (result) {
                                     set_amiibo_data_for_port(
@@ -321,8 +326,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     reply.action = request.action;
                     reply.result = result.code;
                     reply.subpad = request.subpad;
-                    reply.head = request.head;
-                    reply.tail = request.tail;
+                    reply.head = amiibo_head;
+                    reply.tail = amiibo_tail;
                     reply.tag_size = result.tag_size;
                     std::memcpy(sd->pending_amiibo_library_result,
                                 &reply, sizeof(reply));
@@ -331,8 +336,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     if (g_ctx.verbose) {
                         std::println(
                             "[s2][nfc][library] ws action={} subpad={} id={:08x}{:08x} result={} tag_size={} detail={}",
-                            request.action, request.subpad, request.head,
-                            request.tail, result.code, result.tag_size,
+                            request.action, request.subpad, amiibo_head,
+                            amiibo_tail, result.code, result.tag_size,
                             result.detail);
                     }
                     break;

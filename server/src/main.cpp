@@ -813,10 +813,16 @@ int main(int argc, char** argv) {
                     sendto(sock, &reply, sizeof(reply), 0,
                            reinterpret_cast<const sockaddr*>(&sender), slen);
                     if (g_ctx.verbose) {
+                        // AmiiboLibraryPacket is packed for the UDP wire
+                        // format. Copy multi-byte fields before passing them to
+                        // std::println, whose forwarding references cannot bind
+                        // directly to potentially unaligned packed members.
+                        const uint32_t amiibo_head = request.head;
+                        const uint32_t amiibo_tail = request.tail;
                         std::println(
                             "[s2][nfc][library] udp action={} subpad={} id={:08x}{:08x} result={} tag_size={} detail={}",
-                            request.action, request.subpad, request.head,
-                            request.tail, result.code, result.tag_size,
+                            request.action, request.subpad, amiibo_head,
+                            amiibo_tail, result.code, result.tag_size,
                             result.detail);
                     }
                     continue;
