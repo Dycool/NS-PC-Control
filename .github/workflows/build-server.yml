@@ -26,6 +26,7 @@ permissions:
 
 env:
   SDL_REF: release-3.4.10
+  MINIUPNPC_REF: miniupnpc_2_2_6
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -167,13 +168,42 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14 cmake ninja-build git wget curl xxd \
-            libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev \
+            libssl-dev libwebsockets-dev libsystemd-dev \
             linux-libc-dev pkg-config
 
           test -f /usr/include/linux/usb/raw_gadget.h
 
       - name: Refresh the offline Amiibo catalogue
         uses: ./.github/actions/update-amiibo-catalog
+
+      - name: Cache miniupnpc aarch64 static
+        id: cache-miniupnpc-aarch64
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/miniupnpc-aarch64-static
+          key: miniupnpc-aarch64-static-${{ env.MINIUPNPC_REF }}-v1
+
+      - name: Build miniupnpc aarch64 static
+        if: steps.cache-miniupnpc-aarch64.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/miniupnp /tmp/miniupnpc-build
+          git clone --depth 1 --branch "$MINIUPNPC_REF" \
+            https://github.com/miniupnp/miniupnp.git /tmp/miniupnp
+
+          cmake -S /tmp/miniupnp/miniupnpc -B /tmp/miniupnpc-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_INSTALL_PREFIX="$HOME/.local/miniupnpc-aarch64-static" \
+            -DUPNPC_BUILD_STATIC=ON \
+            -DUPNPC_BUILD_SHARED=OFF \
+            -DUPNPC_BUILD_TESTS=OFF \
+            -DUPNPC_BUILD_SAMPLE=OFF
+
+          cmake --build /tmp/miniupnpc-build --parallel
+          cmake --install /tmp/miniupnpc-build
+          find "$HOME/.local/miniupnpc-aarch64-static" \
+            -type f -name libminiupnpc.a -print -quit | grep -q .
 
       - name: Cache SDL3 aarch64 static
         id: cache-sdl3-aarch64
@@ -223,6 +253,15 @@ jobs:
           AMIIBO_RETAIL_KEY_B64: ${{ secrets.AMIIBO_RETAIL_KEY_B64 }}
         run: |
           set -euo pipefail
+
+          MINIUPNPC_PREFIX="$HOME/.local/miniupnpc-aarch64-static"
+          MINIUPNPC_INCLUDE_DIR="$MINIUPNPC_PREFIX/include"
+          MINIUPNPC_STATIC_LIBRARY="$(
+            find "$MINIUPNPC_PREFIX" -type f -name libminiupnpc.a -print -quit
+          )"
+          test -f "$MINIUPNPC_INCLUDE_DIR/miniupnpc/miniupnpc.h"
+          test -f "$MINIUPNPC_STATIC_LIBRARY"
+
           cd server
           mkdir -p build
           cd build
@@ -231,6 +270,9 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
             -DRAW_GADGET_MODULE_DIR="$GITHUB_WORKSPACE/server/prebuilt-raw-gadget" \
+            -DMINIUPNPC_INCLUDE_DIRS="$MINIUPNPC_INCLUDE_DIR" \
+            -DMINIUPNPC_LIBRARIES="$MINIUPNPC_STATIC_LIBRARY" \
+            -DREQUIRE_STATIC_UPNP=ON \
             -DUSE_SDL_BT=ON \
             -DREQUIRE_SDL_BT=ON
 
@@ -264,10 +306,19 @@ jobs:
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
             -DRAW_GADGET_MODULE_DIR="$GITHUB_WORKSPACE/server/prebuilt-raw-gadget" \
             -DAMIIBO_TEMPLATE_BUNDLE="$GITHUB_WORKSPACE/server/generated/amiibo_templates.bin" \
+            -DMINIUPNPC_INCLUDE_DIRS="$MINIUPNPC_INCLUDE_DIR" \
+            -DMINIUPNPC_LIBRARIES="$MINIUPNPC_STATIC_LIBRARY" \
+            -DREQUIRE_STATIC_UPNP=ON \
             -DUSE_SDL_BT=ON \
             -DREQUIRE_SDL_BT=ON
 
           make -j"$(nproc)"
+
+          if readelf -d ns-backend | grep -q 'libminiupnpc\.so'; then
+            echo "::error::ns-backend still has a dynamic miniupnpc dependency"
+            readelf -d ns-backend
+            exit 1
+          fi
 
           mkdir -p artifact/pi-server
           cp ns-backend artifact/pi-server/ns-backend

@@ -31,38 +31,73 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cli11)
 
 option(USE_UPNP           "Enable UPnP port forwarding via miniupnpc"                           ON)
+option(REQUIRE_STATIC_UPNP "Fail if UPnP would link against a shared miniupnpc library"            OFF)
 option(USE_SDL_BT         "Enable local Bluetooth/controller input via SDL3"                    ON)
 option(REQUIRE_SDL_BT     "Fail configure if SDL3 Bluetooth/controller support is unavailable"  OFF)
 option(USE_BLUEZ_DBUS     "Use BlueZ D-Bus manager for Bluetooth pairing/reconnect on Linux"    ON)
 option(REQUIRE_BLUEZ_DBUS "Fail configure if BlueZ D-Bus manager dependencies are unavailable"  ON)
 
-# Allow passing paths directly (e.g. from cross-compiled miniupnpc)
 set(MINIUPNPC_INCLUDE_DIRS "" CACHE STRING "miniupnpc include path")
 set(MINIUPNPC_LIBRARIES    "" CACHE STRING "miniupnpc library path")
+set(MINIUPNPC_LINK_STATIC FALSE)
 
 if(USE_UPNP)
     if(MINIUPNPC_INCLUDE_DIRS AND MINIUPNPC_LIBRARIES)
-        add_definitions(-DUSE_UPNP)
+        list(GET MINIUPNPC_LIBRARIES 0 MINIUPNPC_PRIMARY_LIBRARY)
+        if(IS_ABSOLUTE "${MINIUPNPC_PRIMARY_LIBRARY}" AND NOT EXISTS "${MINIUPNPC_PRIMARY_LIBRARY}")
+            message(FATAL_ERROR "Configured miniupnpc library does not exist: ${MINIUPNPC_PRIMARY_LIBRARY}")
+        endif()
+        if(MINIUPNPC_PRIMARY_LIBRARY MATCHES "\\.a$")
+            set(MINIUPNPC_LINK_STATIC TRUE)
+        elseif(REQUIRE_STATIC_UPNP)
+            message(FATAL_ERROR
+                "REQUIRE_STATIC_UPNP=ON, but MINIUPNPC_LIBRARIES is not a static archive: "
+                "${MINIUPNPC_PRIMARY_LIBRARY}")
+        endif()
         set(MINIUPNPC_FOUND TRUE)
-        message(STATUS "UPnP support enabled (external paths: ${MINIUPNPC_INCLUDE_DIRS})")
     else()
         find_package(PkgConfig QUIET)
         if(PkgConfig_FOUND)
-            pkg_check_modules(MINIUPNPC miniupnpc)
+            pkg_check_modules(MINIUPNPC QUIET miniupnpc)
         endif()
 
         if(MINIUPNPC_FOUND)
-            add_definitions(-DUSE_UPNP)
-            find_library(MINIUPNPC_STATIC_LIBRARY NAMES libminiupnpc.a PATHS ${MINIUPNPC_LIBRARY_DIRS})
+            set(_NS_SAVED_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+            set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+            find_library(MINIUPNPC_STATIC_LIBRARY
+                NAMES miniupnpc
+                PATHS ${MINIUPNPC_LIBRARY_DIRS})
+            set(CMAKE_FIND_LIBRARY_SUFFIXES "${_NS_SAVED_LIBRARY_SUFFIXES}")
+            unset(_NS_SAVED_LIBRARY_SUFFIXES)
+
             if(MINIUPNPC_STATIC_LIBRARY)
-                set(MINIUPNPC_LIBRARIES ${MINIUPNPC_STATIC_LIBRARY})
-                message(STATUS "UPnP support enabled (static: ${MINIUPNPC_STATIC_LIBRARY})")
-            else()
-                message(STATUS "UPnP support enabled (miniupnpc via pkg-config)")
+                set(MINIUPNPC_LIBRARIES "${MINIUPNPC_STATIC_LIBRARY}")
+                set(MINIUPNPC_LINK_STATIC TRUE)
+            elseif(REQUIRE_STATIC_UPNP)
+                message(FATAL_ERROR
+                    "miniupnpc was found, but only as a shared library. "
+                    "Provide MINIUPNPC_INCLUDE_DIRS and a libminiupnpc.a path in "
+                    "MINIUPNPC_LIBRARIES, or configure with USE_UPNP=OFF.")
             endif()
-        else()
-            message(STATUS "UPnP support disabled (miniupnpc not found)")
+        elseif(REQUIRE_STATIC_UPNP)
+            message(FATAL_ERROR
+                "REQUIRE_STATIC_UPNP=ON, but miniupnpc was not found. "
+                "Provide MINIUPNPC_INCLUDE_DIRS and MINIUPNPC_LIBRARIES.")
         endif()
+    endif()
+
+    if(MINIUPNPC_FOUND)
+        add_definitions(-DUSE_UPNP)
+        if(MINIUPNPC_LINK_STATIC)
+            add_definitions(-DMINIUPNP_STATICLIB)
+            message(STATUS "UPnP support enabled (static: ${MINIUPNPC_LIBRARIES})")
+        else()
+            message(WARNING
+                "UPnP support is using shared miniupnpc (${MINIUPNPC_LIBRARIES}). "
+                "Do not distribute this binary unless the matching SONAME is bundled.")
+        endif()
+    else()
+        message(STATUS "UPnP support disabled (miniupnpc not found)")
     endif()
 else()
     message(STATUS "UPnP support disabled by user")
