@@ -55,6 +55,7 @@ if(APPLE)
     # use the legacy OpenGL entry points that required it.
     ns_remove_agl_framework(Qt6::Gui)
     ns_remove_agl_framework(Qt6::Widgets)
+    ns_remove_agl_framework(Qt6::Network)
     ns_remove_agl_framework(OpenGL::GL)
     ns_remove_agl_framework(WrapOpenGL::WrapOpenGL)
 endif()
@@ -131,6 +132,9 @@ target_link_libraries(ns-client PRIVATE
 )
 
 if(TARGET Qt6::Network)
+    if(APPLE)
+        ns_remove_agl_framework(Qt6::Network)
+    endif()
     target_link_libraries(ns-client PRIVATE Qt6::Network)
     target_compile_definitions(ns-client PRIVATE HAS_QT_NETWORK=1)
 endif()
