@@ -21,7 +21,7 @@ if(APPLE)
             return()
         endif()
 
-        foreach(prop IN ITEMS INTERFACE_LINK_LIBRARIES INTERFACE_LINK_OPTIONS)
+        foreach(prop IN ITEMS LINK_LIBRARIES LINK_OPTIONS INTERFACE_LINK_LIBRARIES INTERFACE_LINK_OPTIONS)
             get_target_property(values "${target}" "${prop}")
             if(NOT values OR values STREQUAL "values-NOTFOUND")
                 continue()
@@ -37,6 +37,15 @@ if(APPLE)
                     endif()
 
                     list(APPEND filtered_values "-framework")
+                endif()
+
+                if(value STREQUAL "-framework")
+                    set(pending_framework TRUE)
+                    continue()
+                endif()
+
+                if(value MATCHES "AGL\\.framework" OR value STREQUAL "-framework AGL" OR value STREQUAL "AGL")
+                    continue()
                 endif()
 
                 list(APPEND filtered_values "${value}")
@@ -178,6 +187,11 @@ if(APPLE)
         ${COREGRAPHICS_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
     )
+
+    ns_remove_agl_framework(ns-client)
+    ns_remove_agl_framework(Qt6::Gui)
+    ns_remove_agl_framework(Qt6::Widgets)
+    ns_remove_agl_framework(Qt6::Network)
 
     set_target_properties(ns-client PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "NS PC Control"
