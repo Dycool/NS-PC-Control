@@ -8,7 +8,7 @@ val assetsNsMobile = file("${projectDir}/src/main/assets/ns_mobile")
 
 tasks.register<Copy>("copyWebApp") {
     from(webappDir) {
-        include("**/*.html", "css/**/*.css", "js/**/*.js")
+        include("**/*.html", "css/**/*.css", "js/**/*.js", "data/**/*")
     }
     into(assetsNsMobile)
 }

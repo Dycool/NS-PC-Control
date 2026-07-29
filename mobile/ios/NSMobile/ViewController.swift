@@ -40,6 +40,12 @@ private enum ProtocolWire {
     static let assignmentFlagProfileUnsupported = 0x10
     static let rosterMagic: UInt32 = 0x4E53524F
     static let rosterSize = 208
+    static let amiiboRequestMagic: UInt32 = 0x4E534152
+    static let amiiboRequestSize = 8
+    static let amiiboLibraryMagic: UInt32 = 0x4E53414C
+    static let amiiboLibraryResultMagic: UInt32 = 0x4E534C52
+    static let amiiboLibraryResultSize = 20
+    static let amiiboLibraryAuthSize = 16
 
     // Authenticated UDP wire format (same as the desktop ns-client): payload
     // (auth region) + first 16 bytes of HMAC-SHA256 keyed with SHA-256(secret).
@@ -70,6 +76,14 @@ private enum ProtocolWire {
         let i = data.startIndex
         return UInt32(b[i + off]) | (UInt32(b[i + off + 1]) << 8)
             | (UInt32(b[i + off + 2]) << 16) | (UInt32(b[i + off + 3]) << 24)
+    }
+
+    static func writeU32LE(_ bytes: inout [UInt8], _ off: Int, _ value: UInt32) {
+        guard bytes.count >= off + 4 else { return }
+        bytes[off] = UInt8(truncatingIfNeeded: value)
+        bytes[off + 1] = UInt8(truncatingIfNeeded: value >> 8)
+        bytes[off + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        bytes[off + 3] = UInt8(truncatingIfNeeded: value >> 24)
     }
 
     static let flagReset = 0x01
@@ -552,6 +566,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
           window.NSBridge = {
             onOpen:function(){post('onOpen');},
             onBinary:function(json){post('onBinary',[json]);},
+            onAmiiboLibrary:function(action,subpad,head,tail){post('onAmiiboLibrary',[action,subpad,head,tail]);},
             onTouchState:function(buttons,hat,lx,ly,rx,ry){post('onTouchState',[buttons,hat,lx,ly,rx,ry]);},
             onTouchControllerType:function(controllerType){post('onTouchControllerType',[controllerType]);},
             onTouchExtraButtons:function(extraButtons){post('onTouchExtraButtons',[extraButtons]);},
@@ -874,6 +889,15 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         case "onPhysicalRefresh":
             scanPhysicalControllers()
             updatePhysicalStatusOnPage()
+        case "onAmiiboLibrary":
+            if args.count >= 4 {
+                sendAmiiboLibrary(
+                    action: intArg(args[0]),
+                    subpad: intArg(args[1]),
+                    headHex: String(describing: args[2]),
+                    tailHex: String(describing: args[3])
+                )
+            }
         case "onOpenTouch":
             navTo(.touchControls)
         case "onOpenEditor":
@@ -994,6 +1018,7 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
             clearPhysicalControllers()
         }
         activeClientMode = .none
+        publishAmiiboDisconnected()
 
         if let closing {
             sendQueue.async { [weak self] in
@@ -1138,6 +1163,9 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
         }
         if data.count == ProtocolWire.clientAssignmentSize && magic == ProtocolWire.clientAssignmentMagic {
             let flags = Int(data[data.startIndex + 5])
+            let subpad = Int(data[data.startIndex + 7])
+            let mask = Int(data[data.startIndex + 8])
+            let virtualType = Int(data[data.startIndex + 11])
             if flags & 0x01 != 0 {
                 DispatchQueue.main.async { [weak self, weak connection] in
                     guard let self, let connection, self.udp === connection,
@@ -1148,6 +1176,8 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                     if self.activeClientMode == .physical {
                         self.updatePhysicalStatusOnPage(prefix: "Connected")
                     }
+                    self.publishAmiiboAssignment(
+                        subpad: subpad, mask: mask, virtualType: virtualType)
                 }
             }
             let message: String?
@@ -1164,7 +1194,95 @@ final class ViewController: UIViewController, WKScriptMessageHandler, WKNavigati
                     self.handleTransportClosed(text: message)
                 }
             }
+            return
         }
+        if data.count == ProtocolWire.amiiboRequestSize
+                && magic == ProtocolWire.amiiboRequestMagic {
+            let i = data.startIndex
+            let subpad = Int(data[i + 4])
+            let requested = data[i + 5] != 0
+            let sequence = Int(data[i + 6]) | (Int(data[i + 7]) << 8)
+            DispatchQueue.main.async { [weak self] in
+                self?.publishAmiiboRequest(
+                    subpad: subpad, requested: requested, sequence: sequence)
+            }
+            return
+        }
+        if data.count == ProtocolWire.amiiboLibraryResultSize
+                && magic == ProtocolWire.amiiboLibraryResultMagic {
+            let i = data.startIndex
+            let action = Int(data[i + 5])
+            let result = Int(data[i + 6])
+            let subpad = Int(data[i + 7])
+            let head = ProtocolWire.readU32LE(data, 8)
+            let tail = ProtocolWire.readU32LE(data, 12)
+            let tagSize = Int(data[i + 16]) | (Int(data[i + 17]) << 8)
+            DispatchQueue.main.async { [weak self] in
+                self?.publishAmiiboResult(
+                    action: action, result: result, subpad: subpad,
+                    head: head, tail: tail, tagSize: tagSize)
+            }
+            return
+        }
+    }
+
+    private func sendAmiiboLibrary(
+        action: Int, subpad: Int, headHex: String, tailHex: String
+    ) {
+        guard currentPage == .mainMenu, controlClientActive,
+              let socket = udp,
+              let head = UInt32(headHex, radix: 16),
+              let tail = UInt32(tailHex, radix: 16) else { return }
+        var packet = [UInt8](
+            repeating: 0,
+            count: ProtocolWire.amiiboLibraryAuthSize
+                + ProtocolWire.hmacTagSize)
+        ProtocolWire.writeU32LE(
+            &packet, 0, ProtocolWire.amiiboLibraryMagic)
+        packet[4] = 1
+        packet[5] = UInt8(truncatingIfNeeded: action)
+        packet[6] = UInt8(truncatingIfNeeded: subpad & 3)
+        ProtocolWire.writeU32LE(&packet, 8, head)
+        ProtocolWire.writeU32LE(&packet, 12, tail)
+        socket.send(
+            content: ProtocolWire.signed(
+                packet, authLen: ProtocolWire.amiiboLibraryAuthSize),
+            completion: .idempotent)
+    }
+
+    private func publishAmiiboAssignment(
+        subpad: Int, mask: Int, virtualType: Int
+    ) {
+        guard currentPage == .mainMenu else { return }
+        let js = "if(window.__nsAmiiboNativeAssignment)" +
+            "window.__nsAmiiboNativeAssignment(true,\(subpad),\(mask),\(virtualType));"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    private func publishAmiiboDisconnected() {
+        guard currentPage == .mainMenu else { return }
+        let js = "if(window.__nsAmiiboNativeAssignment)" +
+            "window.__nsAmiiboNativeAssignment(false,0,0,0);"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    private func publishAmiiboRequest(
+        subpad: Int, requested: Bool, sequence: Int
+    ) {
+        guard currentPage == .mainMenu else { return }
+        let js = "if(window.__nsAmiiboNativeRequest)" +
+            "window.__nsAmiiboNativeRequest(\(subpad),\(requested ? "true" : "false"),\(sequence));"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    private func publishAmiiboResult(
+        action: Int, result: Int, subpad: Int,
+        head: UInt32, tail: UInt32, tagSize: Int
+    ) {
+        guard currentPage == .mainMenu else { return }
+        let js = "if(window.__nsAmiiboNativeResult)" +
+            "window.__nsAmiiboNativeResult(\(action),\(result),\(subpad),\(head),\(tail),\(tagSize));"
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func handleTransportClosed(text: String) {

@@ -19,6 +19,7 @@ jobs:
 
   build-server:
     uses: ./.github/workflows/build-server.yml
+    secrets: inherit
 
   build-mobile:
     uses: ./.github/workflows/build-mobile.yml

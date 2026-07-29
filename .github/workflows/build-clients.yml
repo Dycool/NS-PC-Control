@@ -7,6 +7,8 @@ on:
       - 'shared/**'
       - 'server/include/**'
       - 'server/src/shared/**'
+      - 'scripts/**'
+      - '.github/actions/update-amiibo-catalog/**'
       - '.github/workflows/build-clients.yml'
   workflow_dispatch:
   workflow_call:
@@ -36,6 +38,9 @@ jobs:
         uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: x64
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Capture MSVC toolset version for cache key
         id: msvc
@@ -137,7 +142,7 @@ jobs:
           sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
           sudo apt-get update
           sudo apt-get install -y gcc-14 g++-14 \
-            build-essential cmake ninja-build pkg-config git file wget desktop-file-utils patchelf libssl-dev \
+            build-essential cmake ninja-build pkg-config git file wget curl desktop-file-utils patchelf libssl-dev \
             qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins \
             libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev libglu1-mesa-dev \
             libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev \
@@ -145,6 +150,9 @@ jobs:
             libwayland-dev wayland-protocols libwayland-egl-backend-dev libdecor-0-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libusb-1.0-0-dev \
             libdbus-1-dev libibus-1.0-dev libdrm-dev libgbm-dev zsync
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Cache SDL3 static
         id: cache-sdl3
@@ -244,6 +252,9 @@ jobs:
           if ((${#missing[@]})); then
             HOMEBREW_NO_AUTO_UPDATE=1 brew install "${missing[@]}"
           fi
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Cache SDL3 static
         id: cache-sdl3

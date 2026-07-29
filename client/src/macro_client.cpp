@@ -235,6 +235,7 @@ bool poll_macro_record_p1(ns::HoriHIDReport& report) {
     auto sdl = g_sdlInput.snapshot();
     if (sdl[0].connected) {
         report = sdl[0].input;
+        apply_controller_bindings(report);
         return true;
     }
     int km = g_keyboardMode.load();

@@ -5,16 +5,36 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace ns::s2nfc {
 
+inline constexpr std::size_t TAGMO_DUMP_SIZE = 532;
 inline constexpr std::size_t RAW_DUMP_SIZE = 540;
 inline constexpr std::size_t ORIGINALITY_SIGNATURE_SIZE = 32;
 inline constexpr std::size_t EXTENDED_DUMP_SIZE = RAW_DUMP_SIZE + ORIGINALITY_SIGNATURE_SIZE;
+inline constexpr std::size_t V3_DUMP_SIZE = 2048;
+inline constexpr std::size_t V3_COMPAT_SPLIT = 0x80;
+inline constexpr std::size_t V3_COMPAT_SHIFT = 0x40;
+inline constexpr std::size_t V3_SRAM_OFFSET = 0x3C0;
+inline constexpr std::size_t V3_SRAM_SIZE = 64;
+inline constexpr std::size_t V3_NS_REG_OFFSET = 0x3B6;
+inline constexpr std::uint8_t V3_SRAM_RF_READY = 0x08;
+inline constexpr std::size_t V3_WRITE_END = 0x248;
+inline constexpr std::size_t V3_DEVICE_COMMAND_SIZE = 74;
+inline constexpr std::size_t V3_DEVICE_RESULT_SIZE = 19 + V3_SRAM_SIZE;
+inline constexpr std::size_t V3_EXTENDED_CLEAR_SIZE = 355;
+inline constexpr std::size_t V3_EXTENDED_UPDATE_SIZE = 167;
 inline constexpr std::size_t STATUS_PAYLOAD_SIZE = 61;
 inline constexpr std::size_t READ_METADATA_SIZE = 63;
 inline constexpr std::size_t READ_TRAILER_SIZE = 19;
 inline constexpr std::size_t READ_PAYLOAD_SIZE = READ_METADATA_SIZE + RAW_DUMP_SIZE + READ_TRAILER_SIZE;
+inline constexpr std::size_t V3_OPERATION_PREFIX_SIZE = 60;
+inline constexpr std::size_t V3_SECTOR_READ_PREFIX_SIZE = 64;
+inline constexpr std::size_t READ_CHUNK_DATA_SIZE = 70;
+inline constexpr std::size_t READ_CHUNK_HEADER_SIZE = 3;
+inline constexpr std::size_t READ_CHUNK_PAYLOAD_SIZE =
+    READ_CHUNK_HEADER_SIZE + READ_CHUNK_DATA_SIZE;
 inline constexpr std::size_t WRITE_STAGING_SIZE = 454;
 
 using Signature = std::array<std::uint8_t, ORIGINALITY_SIGNATURE_SIZE>;
@@ -37,7 +57,9 @@ struct WriteApplyResult {
 };
 
 std::array<std::uint8_t, 7> uid_from_raw(std::span<const std::uint8_t> raw);
+std::array<std::uint8_t, 7> uid_from_dump(std::span<const std::uint8_t> dump);
 bool validate_raw_dump(std::span<const std::uint8_t> raw, std::string* error = nullptr);
+bool validate_v3_dump(std::span<const std::uint8_t> image, std::string* error = nullptr);
 
 // Builds the exact 622-byte USB payload observed for command 0x01/0x15.
 // In read mode it contains 63 bytes of metadata, the 540-byte dump and a
@@ -59,5 +81,45 @@ bool build_read_buffer_payload(std::span<const std::uint8_t> raw,
 WriteApplyResult apply_write_staging(std::span<const std::uint8_t> staging,
                                      std::span<const std::uint8_t> coverage,
                                      std::span<std::uint8_t> raw);
+
+// Figure-v3 (NTAG I2C Plus 2K) operations. A v3 read starts with the same
+// identity/signature prefix but byte 18 advertises chip type 0x06. The console
+// then retrieves the descriptor-selected pages in offset-addressed 70-byte
+// chunks. The stored dump remains a flat 2048-byte image; SRAM_RF_READY is
+// raised only on the served copy, matching physical-chip session-register
+// behaviour.
+bool build_v3_read_buffer(std::span<const std::uint8_t> image,
+                          std::span<const std::uint8_t> signature,
+                          std::span<const std::uint8_t> request,
+                          std::vector<std::uint8_t>& output,
+                          std::string* error = nullptr);
+bool build_v3_sector_read_buffer(std::span<const std::uint8_t> image,
+                                 std::span<const std::uint8_t> signature,
+                                 std::span<const std::uint8_t> request,
+                                 std::vector<std::uint8_t>& output,
+                                 std::string* error = nullptr);
+bool build_v3_device_result(std::span<const std::uint8_t> image,
+                            std::vector<std::uint8_t>& output,
+                            std::string* error = nullptr);
+bool build_buffer_chunk(std::span<const std::uint8_t> buffer,
+                        std::uint16_t offset,
+                        std::span<std::uint8_t> output,
+                        std::size_t& output_size,
+                        std::string* error = nullptr);
+
+bool is_v3_device_command(std::span<const std::uint8_t> data,
+                          std::span<const std::uint8_t> image);
+bool is_v3_write_start(std::span<const std::uint8_t> data,
+                       std::span<const std::uint8_t> image);
+std::size_t v3_extended_expected_size(std::span<const std::uint8_t> data,
+                                      std::span<const std::uint8_t> image);
+WriteApplyResult apply_v3_write_staging(std::span<const std::uint8_t> staging,
+                                        std::span<const std::uint8_t> coverage,
+                                        std::span<std::uint8_t> image);
+WriteApplyResult apply_v3_extended_staging(std::span<const std::uint8_t> staging,
+                                           std::span<const std::uint8_t> coverage,
+                                           std::size_t expected_size,
+                                           std::span<std::uint8_t> image);
+bool v3_sram_response_valid(std::span<const std::uint8_t> image);
 
 } // namespace ns::s2nfc

@@ -6,6 +6,8 @@ on:
       - 'server/**'
       - 'shared/**'
       - 'webapp/**'
+      - 'scripts/**'
+      - '.github/actions/update-amiibo-catalog/**'
       - '.github/workflows/build-server.yml'
   schedule:
     # Keep the embedded module catalog current as Raspberry Pi OS publishes
@@ -13,6 +15,10 @@ on:
     - cron: '23 4 * * 1'
   workflow_dispatch:
   workflow_call:
+    secrets:
+      AMIIBO_RETAIL_KEY_B64:
+        description: Build-only base64 encoding of the 160-byte amiitool retail key
+        required: true
 
 permissions:
   contents: read
@@ -27,6 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Check embedded web JavaScript syntax
         shell: bash
@@ -157,11 +166,14 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-14 g++-14 cmake ninja-build git wget xxd \
+          sudo apt-get install -y gcc-14 g++-14 cmake ninja-build git wget curl xxd \
             libssl-dev libwebsockets-dev libminiupnpc-dev libsystemd-dev \
             linux-libc-dev pkg-config
 
           test -f /usr/include/linux/usb/raw_gadget.h
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Cache SDL3 aarch64 static
         id: cache-sdl3-aarch64
@@ -207,7 +219,10 @@ jobs:
           cmake --install /tmp/SDL3-build
 
       - name: Build Unified Pi Server
+        env:
+          AMIIBO_RETAIL_KEY_B64: ${{ secrets.AMIIBO_RETAIL_KEY_B64 }}
         run: |
+          set -euo pipefail
           cd server
           mkdir -p build
           cd build
@@ -216,6 +231,39 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
             -DRAW_GADGET_MODULE_DIR="$GITHUB_WORKSPACE/server/prebuilt-raw-gadget" \
+            -DUSE_SDL_BT=ON \
+            -DREQUIRE_SDL_BT=ON
+
+          cmake --build . --target amiibo-bundle-generator --parallel
+
+          if [ -z "${AMIIBO_RETAIL_KEY_B64:-}" ]; then
+            echo "::error::Configure the AMIIBO_RETAIL_KEY_B64 repository secret so every distributed server contains its offline Amiibo templates."
+            exit 1
+          fi
+
+          build_key="$(mktemp)"
+          trap 'rm -f "$build_key"' EXIT
+          printf '%s' "$AMIIBO_RETAIL_KEY_B64" | base64 --decode > "$build_key"
+          if [ "$(stat -c %s "$build_key")" -ne 160 ]; then
+            echo "AMIIBO_RETAIL_KEY_B64 must decode to exactly 160 bytes"
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/server/generated"
+          ./amiibo-bundle-generator \
+            "$GITHUB_WORKSPACE/shared/data/amiibo_catalog.json" \
+            "$build_key" \
+            "$GITHUB_WORKSPACE/server/generated/amiibo_templates.bin"
+          rm -f "$build_key"
+          trap - EXIT
+
+          # The first configure creates the generator. Reconfigure after its
+          # output exists so the release backend embeds the generated bundle.
+          cmake .. \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-aarch64-static" \
+            -DRAW_GADGET_MODULE_DIR="$GITHUB_WORKSPACE/server/prebuilt-raw-gadget" \
+            -DAMIIBO_TEMPLATE_BUNDLE="$GITHUB_WORKSPACE/server/generated/amiibo_templates.bin" \
             -DUSE_SDL_BT=ON \
             -DREQUIRE_SDL_BT=ON
 

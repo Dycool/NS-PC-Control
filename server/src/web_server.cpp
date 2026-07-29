@@ -1,4 +1,5 @@
 #include "web_server.hpp"
+#include "amiibo_library.hpp"
 #include "app_state.hpp"
 #include "gadget_wakeup.hpp"
 #include "s2_uac1_audio.hpp"
@@ -50,6 +51,8 @@ struct SessionData {
     bool has_pending_amiibo_request[4] = {};
     uint8_t pending_amiibo_data[4][sizeof(AmiiboDataPacket)];
     bool has_pending_amiibo_data[4] = {};
+    uint8_t pending_amiibo_library_result[sizeof(AmiiboLibraryResultPacket)];
+    bool has_pending_amiibo_library_result = false;
     // Change Server Type reply (webapp Settings -> gadget mode request).
     uint8_t pending_gadget_reply[sizeof(GadgetModeReplyPacket)];
     bool has_pending_gadget_reply = false;
@@ -118,7 +121,11 @@ static const StaticResource RESOURCES[] = {
     {"/js/feat_motion.js", js_feat_motion_js, js_feat_motion_js_len, "application/javascript; charset=utf-8"},
     {"/js/feat_mouse.js", js_feat_mouse_js, js_feat_mouse_js_len, "application/javascript; charset=utf-8"},
     {"/js/feat_amiibo.js", js_feat_amiibo_js, js_feat_amiibo_js_len, "application/javascript; charset=utf-8"},
-    {"/js/feat_audio.js", js_feat_audio_js, js_feat_audio_js_len, "application/javascript; charset=utf-8"}
+    {"/js/feat_audio.js", js_feat_audio_js, js_feat_audio_js_len, "application/javascript; charset=utf-8"},
+    {"/data/amiibo_catalog.json", data_amiibo_catalog_json,
+     data_amiibo_catalog_json_len, "application/json; charset=utf-8"},
+    {"/data/amiibo_catalog.js", data_amiibo_catalog_js,
+     data_amiibo_catalog_js_len, "application/javascript; charset=utf-8"}
 };
 
 static int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void*, void *in, size_t) {
@@ -262,6 +269,76 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 }
             }
 
+            // --- Persistent Amiibo library (offline catalogue selection) ---
+            if (len == sizeof(ns::AmiiboLibraryPacket) && sd->ws_slot >= 0) {
+                uint32_t library_magic = 0;
+                std::memcpy(&library_magic, payload, sizeof(library_magic));
+                if (library_magic == ns::AMIIBO_LIBRARY_MAGIC) {
+                    ns::AmiiboLibraryPacket request{};
+                    std::memcpy(&request, payload, sizeof(request));
+                    amiibo_library::OperationResult result{
+                        ns::AMIIBO_LIBRARY_INVALID_REQUEST, 0, "invalid request"};
+                    if (request.version == ns::AMIIBO_LIBRARY_VERSION) {
+                        if (request.action == ns::AMIIBO_LIBRARY_CLEAR) {
+                            result = amiibo_library::clear();
+                        } else if (request.action == ns::AMIIBO_LIBRARY_SELECT
+                                   && request.subpad < 4) {
+                            int port = console_port_for_client_subpad(
+                                sd->ws_slot, request.subpad);
+                            if (port < 0 || !controller_port_supports_amiibo(port)) {
+                                uint8_t mask = 0;
+                                {
+                                    std::lock_guard<std::mutex> lk(
+                                        g_ctx.mtx[sd->ws_slot]);
+                                    mask = g_ctx.clients[sd->ws_slot]
+                                        .client_assignment[request.subpad]
+                                        .console_port_mask;
+                                }
+                                port = -1;
+                                for (int candidate = 0;
+                                     candidate < HID_PORT_COUNT; ++candidate) {
+                                    if ((mask & (1u << candidate))
+                                            && controller_port_supports_amiibo(
+                                                candidate)) {
+                                        port = candidate;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (port >= 0) {
+                                std::vector<uint8_t> tag;
+                                result = amiibo_library::select(
+                                    request.head, request.tail, port,
+                                    tag);
+                                if (result) {
+                                    set_amiibo_data_for_port(
+                                        port, tag.data(), tag.size());
+                                }
+                            }
+                        }
+                    }
+                    ns::AmiiboLibraryResultPacket reply{};
+                    reply.action = request.action;
+                    reply.result = result.code;
+                    reply.subpad = request.subpad;
+                    reply.head = request.head;
+                    reply.tail = request.tail;
+                    reply.tag_size = result.tag_size;
+                    std::memcpy(sd->pending_amiibo_library_result,
+                                &reply, sizeof(reply));
+                    sd->has_pending_amiibo_library_result = true;
+                    lws_callback_on_writable(wsi);
+                    if (g_ctx.verbose) {
+                        std::println(
+                            "[s2][nfc][library] ws action={} subpad={} id={:08x}{:08x} result={} tag_size={} detail={}",
+                            request.action, request.subpad, request.head,
+                            request.tail, result.code, result.tag_size,
+                            result.detail);
+                    }
+                    break;
+                }
+            }
+
             // --- Amiibo upload (Switch 2, magic NSAD) ---
             // Mirror of the UDP ingest in main.cpp, minus the sender-address
             // lookup: the WS session already identifies the client. WS is a
@@ -274,8 +351,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         ns::AmiiboDataPacket ad{};
                         memcpy(&ad, payload, std::min(len, sizeof(ad)));
                         const uint16_t amiibo_data_len = ad.data_len;
-                        const bool size_supported = amiibo_data_len == ns::AMIIBO_RAW_DUMP_SIZE
-                            || amiibo_data_len == ns::AMIIBO_EXTENDED_DUMP_SIZE;
+                        const bool size_supported =
+                            ns::is_supported_amiibo_dump_size(amiibo_data_len);
                         const bool packet_complete = len >= amiibo_header + amiibo_data_len;
                         if (size_supported && packet_complete && ad.subpad < 4) {
                             int port = console_port_for_client_subpad(sd->ws_slot, ad.subpad);
@@ -602,12 +679,32 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 }
                 if (sd->has_pending_amiibo_data[s]) {
                     uint8_t buffer[LWS_PRE + sizeof(AmiiboDataPacket)];
-                    memcpy(buffer + LWS_PRE, sd->pending_amiibo_data[s], sizeof(AmiiboDataPacket));
-                    if (lws_write(wsi, buffer + LWS_PRE, sizeof(AmiiboDataPacket), LWS_WRITE_BINARY) != (int)sizeof(AmiiboDataPacket)) return -1;
+                    uint16_t data_len = 0;
+                    memcpy(&data_len,
+                           sd->pending_amiibo_data[s] + offsetof(AmiiboDataPacket, data_len),
+                           sizeof(data_len));
+                    const size_t packet_size = offsetof(AmiiboDataPacket, data) + data_len;
+                    memcpy(buffer + LWS_PRE, sd->pending_amiibo_data[s], packet_size);
+                    if (lws_write(wsi, buffer + LWS_PRE, packet_size, LWS_WRITE_BINARY)
+                            != static_cast<int>(packet_size)) return -1;
                     sd->has_pending_amiibo_data[s] = false;
                     wrote = true;
                     break;
                 }
+            }
+            if (!wrote && sd->has_pending_amiibo_library_result) {
+                uint8_t buffer[LWS_PRE + sizeof(AmiiboLibraryResultPacket)];
+                std::memcpy(buffer + LWS_PRE,
+                            sd->pending_amiibo_library_result,
+                            sizeof(AmiiboLibraryResultPacket));
+                if (lws_write(wsi, buffer + LWS_PRE,
+                              sizeof(AmiiboLibraryResultPacket),
+                              LWS_WRITE_BINARY)
+                        != static_cast<int>(sizeof(AmiiboLibraryResultPacket))) {
+                    return -1;
+                }
+                sd->has_pending_amiibo_library_result = false;
+                wrote = true;
             }
             if (!wrote && sd->has_pending_roster) {
                 uint8_t buffer[LWS_PRE + sizeof(RosterPacket)];
@@ -760,7 +857,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                         wb.subpad = static_cast<uint8_t>(s);
                         wb.data_len = cs.amiibo_writeback_len[s];
                         std::memcpy(wb.data, cs.amiibo_writeback_data[s],
-                                    std::min<size_t>(cs.amiibo_writeback_len[s], ns::AMIIBO_EXTENDED_DUMP_SIZE));
+                                    std::min<size_t>(cs.amiibo_writeback_len[s], ns::AMIIBO_MAX_DUMP_SIZE));
                         memcpy(sd->pending_amiibo_data[s], &wb, sizeof(wb));
                         sd->has_pending_amiibo_data[s] = true;
                         cs.amiibo_writeback_pending[s] = false;

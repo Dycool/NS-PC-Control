@@ -130,6 +130,8 @@ function resetMainConnectionUi(text) {
 }
 window.__nsMainDisconnected = resetMainConnectionUi;
 const keysDown = new Set();
+const owns = (object, key) =>
+    Object.prototype.hasOwnProperty.call(object, key);
 const defaultBindings = {
     'BTN_Y': 'KeyZ', 'BTN_B': 'KeyX', 'BTN_A': 'KeyV', 'BTN_X': 'KeyC',
     'BTN_L': 'KeyQ', 'BTN_R': 'KeyE', 'BTN_ZL': 'Digit1', 'BTN_ZR': 'Digit2',
@@ -141,8 +143,12 @@ const defaultBindings = {
     'LSTICK_UP': 'KeyW', 'LSTICK_DOWN': 'KeyS', 'LSTICK_LEFT': 'KeyA', 'LSTICK_RIGHT': 'KeyD',
     'RSTICK_UP': 'KeyI', 'RSTICK_DOWN': 'KeyK', 'RSTICK_LEFT': 'KeyJ', 'RSTICK_RIGHT': 'KeyL'
 };
+const defaultControllerBindings = Object.fromEntries(
+    Object.keys(defaultBindings).map(action => [action, action]));
 let currentBindings = { ...defaultBindings };
+let currentControllerBindings = { ...defaultControllerBindings };
 let preEditBindings = {};
+let preEditControllerBindings = {};
 window.onload = () => {
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     if (isMobile) {
@@ -158,6 +164,23 @@ window.onload = () => {
     if (savedBindings) {
         try { currentBindings = { ...defaultBindings, ...JSON.parse(savedBindings) }; }
         catch (_) { currentBindings = { ...defaultBindings }; }
+    }
+    const savedControllerBindings =
+        localStorage.getItem('nswc_controller_bindings');
+    if (savedControllerBindings) {
+        try {
+            const parsed = JSON.parse(savedControllerBindings);
+            currentControllerBindings = { ...defaultControllerBindings };
+            for (const action of Object.keys(defaultControllerBindings)) {
+                const source = parsed[action];
+                if (source === 'Unbound'
+                        || owns(defaultControllerBindings, source)) {
+                    currentControllerBindings[action] = source;
+                }
+            }
+        } catch (_) {
+            currentControllerBindings = { ...defaultControllerBindings };
+        }
     }
     wireMacroMenu();
     NSCore.dispatch.mountUI('index');
@@ -207,7 +230,7 @@ function getKeyboardState() {
     else if (keysDown.has(currentBindings['RSTICK_DOWN']) && !keysDown.has(currentBindings['RSTICK_UP'])) ry = 255;
     return { buttons, extraBits, hat, lx, ly, rx, ry };
 }
-function getGamepadState(pad) {
+function getRawGamepadState(pad) {
     if (!pad) return null;
     let buttons = 0, hat = HAT_NEUTRAL, lx = 128, ly = 128, rx = 128, ry = 128;
     if (pad.buttons[0]?.pressed) buttons |= BTN_B;
@@ -224,8 +247,6 @@ function getGamepadState(pad) {
     if (pad.buttons[11]?.pressed) buttons |= BTN_RSTICK;
     if (pad.buttons[16]?.pressed) buttons |= BTN_HOME;
     if (pad.buttons[17]?.pressed) buttons |= BTN_CAPTURE;
-    if ((buttons & BTN_LSTICK) && (buttons & BTN_RSTICK)) buttons |= BTN_HOME;
-    if ((buttons & BTN_MINUS) && (buttons & BTN_PLUS)) buttons |= BTN_CAPTURE;
     const pup = pad.buttons[12]?.pressed, pdown = pad.buttons[13]?.pressed;
     const pleft = pad.buttons[14]?.pressed, pright = pad.buttons[15]?.pressed;
     if (pup && pright) hat = HAT_NE; else if (pup && pleft) hat = HAT_NW;
@@ -240,6 +261,88 @@ function getGamepadState(pad) {
         rx = applyDeadzone(pad.axes[2]); ry = applyDeadzone(pad.axes[3]);
     }
     return { buttons, extraBits: 0, hat, lx, ly, rx, ry };
+}
+function controllerActionStrength(state, action) {
+    const buttonMap = {
+        BTN_Y, BTN_B, BTN_A, BTN_X, BTN_L, BTN_R, BTN_ZL, BTN_ZR,
+        BTN_MINUS, BTN_PLUS, BTN_LSTICK, BTN_RSTICK, BTN_HOME, BTN_CAPTURE
+    };
+    if (owns(buttonMap, action))
+        return (state.buttons & buttonMap[action]) ? 128 : 0;
+    const extraMap = {
+        BTN_C: NC.EXT_BUTTON_C,
+        BTN_GL: NC.EXT_BUTTON_GL,
+        BTN_GR: NC.EXT_BUTTON_GR
+    };
+    if (owns(extraMap, action))
+        return (state.extraBits & extraMap[action]) ? 128 : 0;
+    const up = state.hat === HAT_N || state.hat === HAT_NE || state.hat === HAT_NW;
+    const down = state.hat === HAT_S || state.hat === HAT_SE || state.hat === HAT_SW;
+    const left = state.hat === HAT_W || state.hat === HAT_NW || state.hat === HAT_SW;
+    const right = state.hat === HAT_E || state.hat === HAT_NE || state.hat === HAT_SE;
+    if (action === 'DPAD_UP') return up ? 128 : 0;
+    if (action === 'DPAD_DOWN') return down ? 128 : 0;
+    if (action === 'DPAD_LEFT') return left ? 128 : 0;
+    if (action === 'DPAD_RIGHT') return right ? 128 : 0;
+    if (action === 'LSTICK_LEFT') return Math.max(0, 128 - state.lx);
+    if (action === 'LSTICK_RIGHT') return Math.max(0, state.lx - 128);
+    if (action === 'LSTICK_UP') return Math.max(0, 128 - state.ly);
+    if (action === 'LSTICK_DOWN') return Math.max(0, state.ly - 128);
+    if (action === 'RSTICK_LEFT') return Math.max(0, 128 - state.rx);
+    if (action === 'RSTICK_RIGHT') return Math.max(0, state.rx - 128);
+    if (action === 'RSTICK_UP') return Math.max(0, 128 - state.ry);
+    if (action === 'RSTICK_DOWN') return Math.max(0, state.ry - 128);
+    return 0;
+}
+function applyControllerBindings(source) {
+    const mapped = getNeutralState();
+    const strength = target => {
+        const action = currentControllerBindings[target];
+        return !action || action === 'Unbound'
+            ? 0 : controllerActionStrength(source, action);
+    };
+    const buttonMap = {
+        BTN_Y, BTN_B, BTN_A, BTN_X, BTN_L, BTN_R, BTN_ZL, BTN_ZR,
+        BTN_MINUS, BTN_PLUS, BTN_LSTICK, BTN_RSTICK, BTN_HOME, BTN_CAPTURE
+    };
+    for (const [target, flag] of Object.entries(buttonMap))
+        if (strength(target) > 48) mapped.buttons |= flag;
+    const extraMap = {
+        BTN_C: NC.EXT_BUTTON_C,
+        BTN_GL: NC.EXT_BUTTON_GL,
+        BTN_GR: NC.EXT_BUTTON_GR
+    };
+    for (const [target, flag] of Object.entries(extraMap))
+        if (strength(target) > 48) mapped.extraBits |= flag;
+    const up = strength('DPAD_UP') > 48, down = strength('DPAD_DOWN') > 48;
+    const left = strength('DPAD_LEFT') > 48, right = strength('DPAD_RIGHT') > 48;
+    if (up && right) mapped.hat = HAT_NE;
+    else if (up && left) mapped.hat = HAT_NW;
+    else if (down && right) mapped.hat = HAT_SE;
+    else if (down && left) mapped.hat = HAT_SW;
+    else if (up) mapped.hat = HAT_N;
+    else if (down) mapped.hat = HAT_S;
+    else if (left) mapped.hat = HAT_W;
+    else if (right) mapped.hat = HAT_E;
+    const axis = (negative, positive) => {
+        const neg = strength(negative), pos = strength(positive);
+        if (neg === pos) return 128;
+        return neg > pos ? 128 - Math.min(128, neg)
+            : 128 + Math.min(127, pos);
+    };
+    mapped.lx = axis('LSTICK_LEFT', 'LSTICK_RIGHT');
+    mapped.ly = axis('LSTICK_UP', 'LSTICK_DOWN');
+    mapped.rx = axis('RSTICK_LEFT', 'RSTICK_RIGHT');
+    mapped.ry = axis('RSTICK_UP', 'RSTICK_DOWN');
+    return mapped;
+}
+function getGamepadState(pad) {
+    const source = getRawGamepadState(pad);
+    if (!source) return null;
+    // Match the greyed-out Controllers tab: horizontal Joy-Con mode owns the
+    // physical layout and ignores saved full-controller remaps.
+    return NSCore.settings.get('joyconHorizontal')
+        ? source : applyControllerBindings(source);
 }
 function mergeStates(s1, s2) {
     if (!s1) return s2; if (!s2) return s1;
@@ -633,6 +736,67 @@ function renderBindings() {
         row.appendChild(label); row.appendChild(btnChange); list.appendChild(row);
     }
 }
+function displayControllerAction(action) {
+    return String(action || '').replace(/^BTN_/, '').replace(/_/g, ' ');
+}
+function renderControllerBindings() {
+    const list = document.getElementById('controllerBindingsList');
+    list.innerHTML = '';
+    const actions = Object.keys(defaultControllerBindings);
+    for (const target of actions) {
+        const row = document.createElement('div');
+        row.className = 'bind-row';
+        const label = document.createElement('span');
+        label.innerText = displayControllerAction(target);
+        const select = document.createElement('select');
+        select.className = 'controller-bind-select';
+        const unbound = document.createElement('option');
+        unbound.value = 'Unbound';
+        unbound.innerText = 'Unbound';
+        select.appendChild(unbound);
+        for (const source of actions) {
+            const option = document.createElement('option');
+            option.value = source;
+            option.innerText = displayControllerAction(source);
+            select.appendChild(option);
+        }
+        select.value = currentControllerBindings[target] || 'Unbound';
+        select.onchange = () => {
+            currentControllerBindings[target] = select.value;
+        };
+        row.appendChild(label);
+        row.appendChild(select);
+        list.appendChild(row);
+    }
+    updateControllerBindingsAvailability();
+}
+function updateControllerBindingsAvailability() {
+    const disabled = !!NSCore.settings.get('joyconHorizontal');
+    const panel = document.getElementById('controllerBindingsPanel');
+    const note = document.getElementById('controllerBindingsNote');
+    panel.classList.toggle('bindings-disabled', disabled);
+    panel.querySelectorAll('select,button').forEach(control => {
+        control.disabled = disabled;
+    });
+    note.innerText = disabled
+        ? 'Controller bindings are unavailable while Horizontal mode is enabled. Disable Horizontal mode in Settings to edit them.'
+        : 'Choose which physical controller input drives each emulated control.';
+}
+function selectBindingsTab(tab) {
+    const keyboard = tab === 'keyboard';
+    document.getElementById('tabKeyboardBindings').classList.toggle('active', keyboard);
+    document.getElementById('tabKeyboardBindings')
+        .setAttribute('aria-selected', keyboard ? 'true' : 'false');
+    document.getElementById('tabControllerBindings').classList.toggle('active', !keyboard);
+    document.getElementById('tabControllerBindings')
+        .setAttribute('aria-selected', keyboard ? 'false' : 'true');
+    document.getElementById('keyboardBindingsPane').classList.toggle('active', keyboard);
+    document.getElementById('controllerBindingsPane').classList.toggle('active', !keyboard);
+    activeBindKey = null;
+    isSetupMode = false;
+    if (keyboard) renderBindings();
+    else renderControllerBindings();
+}
 function startNextSetupBind() {
     if (setupQueue.length === 0) {
         isSetupMode = false; activeBindKey = null; renderBindings(); return;
@@ -656,14 +820,19 @@ function remapKey(code) {
 }
 document.getElementById('btnBindings').onclick = () => {
     preEditBindings = { ...currentBindings }; isSetupMode = false; activeBindKey = null;
-    renderBindings(); document.getElementById('modalOverlay').style.display = 'flex';
+    preEditControllerBindings = { ...currentControllerBindings };
+    selectBindingsTab('keyboard');
+    document.getElementById('modalOverlay').style.display = 'flex';
 };
 document.getElementById('btnSaveBindings').onclick = () => {
     localStorage.setItem('nswc_bindings', JSON.stringify(currentBindings));
+    localStorage.setItem(
+        'nswc_controller_bindings', JSON.stringify(currentControllerBindings));
     isSetupMode = false; activeBindKey = null; document.getElementById('modalOverlay').style.display = 'none';
 };
 document.getElementById('btnCancelBindings').onclick = () => {
     currentBindings = { ...preEditBindings };
+    currentControllerBindings = { ...preEditControllerBindings };
     isSetupMode = false; activeBindKey = null; document.getElementById('modalOverlay').style.display = 'none';
 };
 document.getElementById('btnClearBindings').onclick = () => {
@@ -679,3 +848,16 @@ document.getElementById('btnSetupBindings').onclick = () => {
     for (let k in currentBindings) currentBindings[k] = 'Unbound';
     setupQueue = Object.keys(currentBindings); isSetupMode = true; startNextSetupBind();
 };
+document.getElementById('btnClearControllerBindings').onclick = () => {
+    for (const action of Object.keys(currentControllerBindings))
+        currentControllerBindings[action] = 'Unbound';
+    renderControllerBindings();
+};
+document.getElementById('btnResetControllerBindings').onclick = () => {
+    currentControllerBindings = { ...defaultControllerBindings };
+    renderControllerBindings();
+};
+document.getElementById('tabKeyboardBindings').onclick =
+    () => selectBindingsTab('keyboard');
+document.getElementById('tabControllerBindings').onclick =
+    () => selectBindingsTab('controllers');

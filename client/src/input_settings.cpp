@@ -36,6 +36,8 @@ std::string g_switch2MicrophoneDevice = S2_AUDIO_DEVICE_DEFAULT;
 std::atomic<bool> g_horiModeEnabled{false};    // Runtime server-selected mode, not saved locally.
 std::unordered_map<std::string, std::string> g_keyBindings;
 std::mutex g_keyBindingsMutex;
+std::unordered_map<std::string, std::string> g_controllerBindings;
+std::mutex g_controllerBindingsMutex;
 std::mutex g_pressedKeysMutex;
 std::unordered_set<std::string> g_pressedKeys;
 SDLInputManager g_sdlInput;
@@ -98,6 +100,22 @@ std::unordered_map<std::string, std::string> default_key_bindings() {
     std::unordered_map<std::string, std::string> out;
     for (const auto& kv : binding_keys()) out[kv.first] = kv.second;
     for (const auto& kv : s2_binding_keys()) out[kv.first] = kv.second;
+    return out;
+}
+
+std::vector<std::pair<std::string, std::string>> controller_binding_keys() {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& binding : binding_keys())
+        out.emplace_back(binding.first, binding.first);
+    for (const auto& binding : s2_binding_keys())
+        out.emplace_back(binding.first, binding.first);
+    return out;
+}
+
+std::unordered_map<std::string, std::string> default_controller_bindings() {
+    std::unordered_map<std::string, std::string> out;
+    for (const auto& binding : controller_binding_keys())
+        out[binding.first] = binding.second;
     return out;
 }
 
@@ -207,27 +225,61 @@ std::string normalize_macro_hotkey_for_io(const std::string& s) {
 }
 
 void load_saved_bindings() {
-    std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
-    g_keyBindings = default_key_bindings();
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
-    settings.beginGroup("Bindings");
-    for (const auto& key : settings.childKeys()) {
-        auto it = g_keyBindings.find(key.toStdString());
-        if (it != g_keyBindings.end()) {
-            it->second = normalize_key_name(settings.value(key).toString().toStdString());
+    {
+        std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
+        g_keyBindings = default_key_bindings();
+        settings.beginGroup("Bindings");
+        for (const auto& key : settings.childKeys()) {
+            auto it = g_keyBindings.find(key.toStdString());
+            if (it != g_keyBindings.end()) {
+                it->second = normalize_key_name(
+                    settings.value(key).toString().toStdString());
+            }
         }
+        settings.endGroup();
     }
-    settings.endGroup();
+    {
+        std::lock_guard<std::mutex> lk(g_controllerBindingsMutex);
+        g_controllerBindings = default_controller_bindings();
+        settings.beginGroup("ControllerBindings");
+        for (const auto& key : settings.childKeys()) {
+            auto it = g_controllerBindings.find(key.toStdString());
+            if (it != g_controllerBindings.end()) {
+                const std::string source = settings.value(key).toString().toStdString();
+                const auto valid = controller_binding_keys();
+                const bool known = source.empty() || std::any_of(
+                    valid.begin(), valid.end(),
+                    [&](const auto& item) { return item.first == source; });
+                if (known) it->second = source;
+            }
+        }
+        settings.endGroup();
+    }
 }
 
 void save_bindings() {
-    std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "NSPCControl", "NSControl");
-    settings.beginGroup("Bindings");
-    for (const auto& kv : g_keyBindings) {
-        settings.setValue(QString::fromStdString(kv.first), QString::fromStdString(kv.second));
+    {
+        std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
+        settings.beginGroup("Bindings");
+        for (const auto& kv : g_keyBindings) {
+            settings.setValue(
+                QString::fromStdString(kv.first),
+                QString::fromStdString(kv.second));
+        }
+        settings.endGroup();
     }
-    settings.endGroup();
+    {
+        std::lock_guard<std::mutex> lk(g_controllerBindingsMutex);
+        settings.beginGroup("ControllerBindings");
+        for (const auto& kv : g_controllerBindings) {
+            settings.setValue(
+                QString::fromStdString(kv.first),
+                QString::fromStdString(kv.second));
+        }
+        settings.endGroup();
+    }
 }
 
 std::string load_saved_ip() {
@@ -443,6 +495,132 @@ void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode) {
     apply_axis("RSTICK_LEFT", "RSTICK_RIGHT", rep.rx);
     apply_axis("RSTICK_UP", "RSTICK_DOWN", rep.ry);
 
+}
+
+void apply_controller_bindings(ns::HoriHIDReport& rep) {
+    // Horizontal mode has its own physical-layout transform. The controller
+    // bindings UI is deliberately disabled in that mode, so saved full-pad
+    // remaps must not leak into the sideways Joy-Con layout either.
+    if (g_joyconHorizontalMode.load(std::memory_order_relaxed)) return;
+    const ns::HoriHIDReport source = rep;
+    ns::HoriHIDReport mapped;
+    mapped.reset();
+
+    auto strength = [&](const std::string& action) -> int {
+        struct ButtonMap { const char* name; uint16_t flag; };
+        static constexpr ButtonMap buttons[] = {
+            {"Y", ns::BTN_Y}, {"B", ns::BTN_B}, {"A", ns::BTN_A},
+            {"X", ns::BTN_X}, {"L", ns::BTN_L}, {"R", ns::BTN_R},
+            {"ZL", ns::BTN_ZL}, {"ZR", ns::BTN_ZR},
+            {"MINUS", ns::BTN_MINUS}, {"PLUS", ns::BTN_PLUS},
+            {"LSTICK", ns::BTN_LSTICK}, {"RSTICK", ns::BTN_RSTICK},
+            {"HOME", ns::BTN_HOME}, {"CAPTURE", ns::BTN_CAPTURE},
+        };
+        for (const auto& button : buttons) {
+            if (action == button.name)
+                return (source.buttons & button.flag) ? 128 : 0;
+        }
+        struct ExtraMap { const char* name; uint8_t flag; };
+        static constexpr ExtraMap extras[] = {
+            {"C", ns::EXT_BUTTON_C}, {"GL", ns::EXT_BUTTON_GL},
+            {"GR", ns::EXT_BUTTON_GR}, {"SL", ns::EXT_BUTTON_SL},
+            {"SR", ns::EXT_BUTTON_SR},
+        };
+        for (const auto& extra : extras) {
+            if (action == extra.name)
+                return (source.vendor & extra.flag) ? 128 : 0;
+        }
+        const bool up = source.hat == ns::HAT_N || source.hat == ns::HAT_NE
+            || source.hat == ns::HAT_NW;
+        const bool down = source.hat == ns::HAT_S || source.hat == ns::HAT_SE
+            || source.hat == ns::HAT_SW;
+        const bool left = source.hat == ns::HAT_W || source.hat == ns::HAT_NW
+            || source.hat == ns::HAT_SW;
+        const bool right = source.hat == ns::HAT_E || source.hat == ns::HAT_NE
+            || source.hat == ns::HAT_SE;
+        if (action == "DPAD_UP") return up ? 128 : 0;
+        if (action == "DPAD_DOWN") return down ? 128 : 0;
+        if (action == "DPAD_LEFT") return left ? 128 : 0;
+        if (action == "DPAD_RIGHT") return right ? 128 : 0;
+        if (action == "LSTICK_LEFT") return std::max(0, 128 - source.lx);
+        if (action == "LSTICK_RIGHT") return std::max(0, source.lx - 128);
+        if (action == "LSTICK_UP") return std::max(0, 128 - source.ly);
+        if (action == "LSTICK_DOWN") return std::max(0, source.ly - 128);
+        if (action == "RSTICK_LEFT") return std::max(0, 128 - source.rx);
+        if (action == "RSTICK_RIGHT") return std::max(0, source.rx - 128);
+        if (action == "RSTICK_UP") return std::max(0, 128 - source.ry);
+        if (action == "RSTICK_DOWN") return std::max(0, source.ry - 128);
+        return 0;
+    };
+
+    std::lock_guard<std::mutex> lk(g_controllerBindingsMutex);
+    auto value = [&](const char* target) -> int {
+        const auto it = g_controllerBindings.find(target);
+        return it == g_controllerBindings.end() || it->second.empty()
+            ? 0 : strength(it->second);
+    };
+
+    struct ButtonMap { const char* name; uint16_t flag; };
+    static constexpr ButtonMap buttons[] = {
+        {"Y", ns::BTN_Y}, {"B", ns::BTN_B}, {"A", ns::BTN_A},
+        {"X", ns::BTN_X}, {"L", ns::BTN_L}, {"R", ns::BTN_R},
+        {"ZL", ns::BTN_ZL}, {"ZR", ns::BTN_ZR},
+        {"MINUS", ns::BTN_MINUS}, {"PLUS", ns::BTN_PLUS},
+        {"LSTICK", ns::BTN_LSTICK}, {"RSTICK", ns::BTN_RSTICK},
+        {"HOME", ns::BTN_HOME}, {"CAPTURE", ns::BTN_CAPTURE},
+    };
+    for (const auto& button : buttons) {
+        if (value(button.name) > 48) mapped.buttons |= button.flag;
+    }
+    struct ExtraMap { const char* name; uint8_t flag; };
+    static constexpr ExtraMap extras[] = {
+        {"C", ns::EXT_BUTTON_C}, {"GL", ns::EXT_BUTTON_GL},
+        {"GR", ns::EXT_BUTTON_GR}, {"SL", ns::EXT_BUTTON_SL},
+        {"SR", ns::EXT_BUTTON_SR},
+    };
+    for (const auto& extra : extras) {
+        if (value(extra.name) > 48) mapped.vendor |= extra.flag;
+    }
+
+    const bool up = value("DPAD_UP") > 48;
+    const bool down = value("DPAD_DOWN") > 48;
+    const bool left = value("DPAD_LEFT") > 48;
+    const bool right = value("DPAD_RIGHT") > 48;
+    if (up && right) mapped.hat = ns::HAT_NE;
+    else if (up && left) mapped.hat = ns::HAT_NW;
+    else if (down && right) mapped.hat = ns::HAT_SE;
+    else if (down && left) mapped.hat = ns::HAT_SW;
+    else if (up) mapped.hat = ns::HAT_N;
+    else if (down) mapped.hat = ns::HAT_S;
+    else if (left) mapped.hat = ns::HAT_W;
+    else if (right) mapped.hat = ns::HAT_E;
+
+    auto axis = [&](const char* negative, const char* positive) -> uint8_t {
+        const int neg = value(negative);
+        const int pos = value(positive);
+        if (neg == pos) return 128;
+        if (neg > pos) return static_cast<uint8_t>(128 - std::min(128, neg));
+        return static_cast<uint8_t>(128 + std::min(127, pos));
+    };
+    mapped.lx = axis("LSTICK_LEFT", "LSTICK_RIGHT");
+    mapped.ly = axis("LSTICK_UP", "LSTICK_DOWN");
+    mapped.rx = axis("RSTICK_LEFT", "RSTICK_RIGHT");
+    mapped.ry = axis("RSTICK_UP", "RSTICK_DOWN");
+    if (g_homeShortcutEnabled.load(std::memory_order_relaxed)
+            && (mapped.buttons & ns::BTN_LSTICK)
+            && (mapped.buttons & ns::BTN_RSTICK)) {
+        mapped.buttons |= ns::BTN_HOME;
+        mapped.buttons &= static_cast<uint16_t>(
+            ~(ns::BTN_LSTICK | ns::BTN_RSTICK));
+    }
+    if (g_captureShortcutEnabled.load(std::memory_order_relaxed)
+            && (mapped.buttons & ns::BTN_MINUS)
+            && (mapped.buttons & ns::BTN_PLUS)) {
+        mapped.buttons |= ns::BTN_CAPTURE;
+        mapped.buttons &= static_cast<uint16_t>(
+            ~(ns::BTN_MINUS | ns::BTN_PLUS));
+    }
+    rep = mapped;
 }
 
 void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_type) {

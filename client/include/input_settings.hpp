@@ -35,6 +35,8 @@ void set_switch2_audio_device_selections(std::string playback, std::string micro
 extern std::atomic<bool> g_horiModeEnabled;
 extern std::unordered_map<std::string, std::string> g_keyBindings;
 extern std::mutex g_keyBindingsMutex;
+extern std::unordered_map<std::string, std::string> g_controllerBindings;
+extern std::mutex g_controllerBindingsMutex;
 extern std::mutex g_pressedKeysMutex;
 extern std::unordered_set<std::string> g_pressedKeys;
 extern SDLInputManager g_sdlInput;
@@ -49,6 +51,8 @@ std::string macros_path();
 std::vector<std::pair<std::string, std::string>> binding_keys();
 std::vector<std::pair<std::string, std::string>> s2_binding_keys();
 std::unordered_map<std::string, std::string> default_key_bindings();
+std::vector<std::pair<std::string, std::string>> controller_binding_keys();
+std::unordered_map<std::string, std::string> default_controller_bindings();
 std::string normalize_key_name(std::string s);
 bool is_valid_key_code(const std::string& s);
 std::string normalize_macro_hotkey_for_io(const std::string& s);
@@ -69,6 +73,7 @@ void clear_pressed_key_cache();
 void update_keyboard_state_cache();
 bool key_is_down(const std::string& name_raw);
 void apply_keyboard_to_report(ns::HoriHIDReport& rep, bool override_mode);
+void apply_controller_bindings(ns::HoriHIDReport& rep);
 void apply_joycon_horizontal_transform(ns::HoriHIDReport& rep, int controller_type);
 void apply_joycon_horizontal_motion_transform(ns::MotionReport& m, int controller_type);
 

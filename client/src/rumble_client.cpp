@@ -11,8 +11,6 @@
 #include <cstring>
 #include <thread>
 #include <span>
-#include <QFileInfo>
-#include <QSaveFile>
 
 
 static void apply_server_info_reply(const ns::ServerInfoReply& reply) {
@@ -92,7 +90,7 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble,
                       const int controller_for_slot[4]) {
     // Audio has moved to its own socket/thread, so this input-reply pump no
     // longer sees or dispatches audio datagrams.
-    uint8_t buf[1024];
+    uint8_t buf[sizeof(ns::AmiiboDataPacket)];
     for (;;) {
         int n = (int)recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, nullptr, nullptr);
         if (n < 0) break;
@@ -149,33 +147,48 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble,
                     g_amiiboScanPending[ar.subpad] = requested;
                 }
             }
+        } else if (magic == ns::AMIIBO_LIBRARY_RESULT_MAGIC
+                   && n == static_cast<int>(sizeof(ns::AmiiboLibraryResultPacket))) {
+            ns::AmiiboLibraryResultPacket result{};
+            std::memcpy(&result, buf, sizeof(result));
+            if (result.version != ns::AMIIBO_LIBRARY_VERSION) continue;
+            const char* message = "The server rejected the Amiibo library request.";
+            switch (result.result) {
+                case ns::AMIIBO_LIBRARY_OK:
+                    if (result.action == ns::AMIIBO_LIBRARY_SELECT) {
+                        message = "Amiibo selected and sent to the console.";
+                    } else if (result.action == ns::AMIIBO_LIBRARY_CLEAR) {
+                        message = "All private Amiibo data was cleared from the server.";
+                    }
+                    break;
+                case ns::AMIIBO_LIBRARY_STORAGE_ERROR:
+                    message = "The server could not update its private Amiibo data folder.";
+                    break;
+                case ns::AMIIBO_LIBRARY_GENERATION_ERROR:
+                    message = "This build does not contain a valid template for that Amiibo.";
+                    break;
+                default:
+                    break;
+            }
+            set_status_message(message);
+            if (result.subpad < 4
+                    && result.action == ns::AMIIBO_LIBRARY_SELECT
+                    && result.result == ns::AMIIBO_LIBRARY_OK) {
+                g_amiiboScanPending[result.subpad] = false;
+                g_amiiboScanDeadlineUs[result.subpad] = 0;
+            }
         } else if (magic == ns::AMIIBO_DATA_MAGIC && n >= static_cast<int>(offsetof(ns::AmiiboDataPacket, data))) {
             ns::AmiiboDataPacket ad{};
             std::memcpy(&ad, buf, std::min((size_t)n, sizeof(ad)));
             const uint16_t amiibo_data_len = ad.data_len;
             constexpr size_t amiibo_packet_header = offsetof(ns::AmiiboDataPacket, data);
-            const bool supported_size = amiibo_data_len == ns::AMIIBO_RAW_DUMP_SIZE
-                || amiibo_data_len == ns::AMIIBO_EXTENDED_DUMP_SIZE;
+            const bool supported_size = ns::is_supported_amiibo_dump_size(amiibo_data_len);
             const bool complete_packet = static_cast<size_t>(n) >= amiibo_packet_header + amiibo_data_len;
             if (ad.subpad < 4 && supported_size && complete_packet) {
-                // Writeback from server (modified Amiibo after NFC 0x14/0x08) -> persist to the selected dump.
-                const QString path = amiibo_path_snapshot(ad.subpad);
-                if (path.isEmpty()) {
-                    set_status_message("Amiibo write completed, but no destination file is selected.");
-                } else {
-                    QSaveFile file(path);
-                    const bool opened = file.open(QIODevice::WriteOnly);
-                    const qint64 written = opened
-                        ? file.write(reinterpret_cast<const char*>(ad.data), amiibo_data_len)
-                        : -1;
-                    const bool saved = opened && written == amiibo_data_len && file.commit();
-                    if (saved) {
-                        set_status_message("Amiibo saved to " + q_to_std(QFileInfo(path).fileName()));
-                    } else {
-                        if (opened && written != amiibo_data_len) file.cancelWriting();
-                        set_status_message("Failed to save Amiibo: " + q_to_std(file.errorString()));
-                    }
-                }
+                // The server owns the persistent library and saves this writeback
+                // before forwarding it to the UI.
+                set_status_message(
+                    "Console updated the Amiibo; writeback saved in the server library.");
                 g_amiiboScanPending[ad.subpad] = false;
                 g_amiiboScanDeadlineUs[ad.subpad] = 0;
             }

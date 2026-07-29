@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -477,10 +478,21 @@ bool switch2_native_handle_vendor_command(int port,
     }
     update_stage(s, id, sub);
 
-    if (g_ctx.verbose && id == 0x01) {
-        std::println("[s2][nfc][rx] t_us={} port={} id=0x{:02x} transport=0x{:02x} sub=0x{:02x} total_len={} header={} data={}",
-                     now_us(), port, id, transport, sub, c.size(),
-                     s2_hex(c.first(8)), s2_hex(c.subspan(8)));
+    // TEMPORARY TEST INSTRUMENTATION: NFC tracing intentionally bypasses the
+    // global verbose flag until the v2/v3 hardware capture work is complete.
+    static std::atomic<uint64_t> nfc_trace_counter{0};
+    const uint64_t nfc_trace = id == 0x01
+        ? nfc_trace_counter.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+    if (id == 0x01) {
+        const size_t declared = c[5];
+        const size_t actual = c.size() - 8;
+        std::println("[s2][nfc][rx] trace={} t_us={} port={} id=0x{:02x} "
+                     "direction=0x{:02x} transport=0x{:02x} sub=0x{:02x} "
+                     "declared_data_len={} actual_data_len={} length_match={} "
+                     "total_len={} header={} data={} raw={}",
+                     nfc_trace, now_us(), port, id, c[1], transport, sub,
+                     declared, actual, declared == actual, c.size(),
+                     s2_hex(c.first(8)), s2_hex(c.subspan(8)), s2_hex(c));
     }
 
     // NFC Read Buffer replies are 630 bytes in the real USB capture.
@@ -657,17 +669,21 @@ bool switch2_native_handle_vendor_command(int port,
                 std::memcpy(d, nfc, sizeof(nfc));
                 dl = sizeof(nfc);
             } else if (sub == 0x03 || sub == 0x04 || sub == 0x05
-                    || sub == 0x06 || sub == 0x08 || sub == 0x14 || sub == 0x15) {
+                    || sub == 0x06 || sub == 0x08 || sub == 0x14 || sub == 0x15
+                    || sub == 0x1E || sub == 0x20 || sub == 0x21) {
                 // The native S2 NFC transport uses the vendor command channel,
                 // not the legacy 0x21 HID-subcommand wrapper. Keep the exact
                 // eight-byte command header above and append the tag payload
                 // produced by the shared Amiibo state machine.
                 const std::span<const uint8_t> nfc_data = c.subspan(8);
+                const bool v3_amiibo = is_v3_amiibo_placed(port);
                 dl = fill_nfc_response_payload(sub, nfc_data, d, port);
+                if (dl == 0 && v3_amiibo)
+                    r[1] = 0x04;
 
-                // Real NFC replies, including the 630-byte 0x15 response,
-                // retain the ordinary 00 F8 ACK. USB bulk packetisation is
-                // handled by Raw Gadget and must not alter the command header.
+                // Data replies retain the ordinary 00 F8 ACK. Figure-v3
+                // header-only acknowledgements use direction 0x04, as observed
+                // on a genuine Pro Controller 2.
             }
             break;
         case 0x18:
@@ -686,9 +702,14 @@ bool switch2_native_handle_vendor_command(int port,
         std::fprintf(stdout, "[s2] native port 0 streaming enabled\n");
 
     response.assign(r.begin(), r.begin() + 8 + dl);
-    if (g_ctx.verbose && id == 0x01) {
-        std::println("[s2][nfc][tx-build] t_us={} port={} sub=0x{:02x} request_data_len={} response_len={} ack={:02x}{:02x} header={} payload={} raw={}",
-                     now_us(), port, sub, c.size() - 8, response.size(),
+    if (id == 0x01) {
+        std::println("[s2][nfc][tx-build] trace={} t_us={} port={} sub=0x{:02x} "
+                     "request_data_len={} response_direction=0x{:02x} "
+                     "response_len={} response_payload_len={} ack={:02x}{:02x} "
+                     "header={} payload={} raw={}",
+                     nfc_trace, now_us(), port, sub, c.size() - 8,
+                     response.size() > 1 ? response[1] : 0, response.size(),
+                     response.size() >= 8 ? response.size() - 8 : 0,
                      response.size() > 4 ? response[4] : 0,
                      response.size() > 5 ? response[5] : 0,
                      s2_hex(std::span<const uint8_t>(response.data(), std::min<size_t>(8, response.size()))),

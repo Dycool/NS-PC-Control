@@ -122,7 +122,8 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 pending_amiibo_data[s] = ns::AmiiboDataPacket{};
                 pending_amiibo_data[s].subpad = static_cast<uint8_t>(s);
                 pending_amiibo_data[s].data_len = c.amiibo_writeback_len[s];
-                std::memcpy(pending_amiibo_data[s].data, c.amiibo_writeback_data[s], std::min<size_t>(c.amiibo_writeback_len[s], ns::AMIIBO_EXTENDED_DUMP_SIZE));
+                std::memcpy(pending_amiibo_data[s].data, c.amiibo_writeback_data[s],
+                            std::min<size_t>(c.amiibo_writeback_len[s], ns::AMIIBO_MAX_DUMP_SIZE));
                 has_amiibo_data[s] = true;
                 c.amiibo_writeback_pending[s] = false;
                 if (g_ctx.verbose)
@@ -178,7 +179,9 @@ void flush_feedback_to_udp(int sock, int client_idx) {
             }
         }
         if (has_amiibo_data[s]) {
-            ssize_t sent = sendto(sock, &pending_amiibo_data[s], sizeof(ns::AmiiboDataPacket), 0,
+            const size_t packet_size = offsetof(ns::AmiiboDataPacket, data)
+                + pending_amiibo_data[s].data_len;
+            ssize_t sent = sendto(sock, &pending_amiibo_data[s], packet_size, 0,
                                   reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
             if (g_ctx.verbose) {
                 if (sent < 0) {
@@ -187,7 +190,8 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                                  s, static_cast<unsigned>(pending_amiibo_data[s].data_len), std::strerror(errno));
                 } else {
                     std::println("[s2][nfc][udp-tx] writeback sent subpad={} len={} packet_bytes={}/{}",
-                                 s, static_cast<unsigned>(pending_amiibo_data[s].data_len), sent, sizeof(ns::AmiiboDataPacket));
+                                 s, static_cast<unsigned>(pending_amiibo_data[s].data_len),
+                                 sent, packet_size);
                 }
             }
         }

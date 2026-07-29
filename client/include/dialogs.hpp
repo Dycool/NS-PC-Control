@@ -41,12 +41,16 @@ protected:
 
 private:
     std::unordered_map<std::string, std::string> editBindings;
+    std::unordered_map<std::string, std::string> editControllerBindings;
     std::vector<QLabel*> valueLabels;
+    std::vector<QComboBox*> controllerBindingBoxes;
+    QWidget* controllerBindingsPanel = nullptr;
     int listeningIndex = -1;
     bool setupMode = false;
 
     void addRow(QGridLayout* grid, int row, int col, int index, const std::string& name);
     void refresh();
+    void refreshControllerBindings();
     void applyCapturedKey(const std::string& name);
 };
 

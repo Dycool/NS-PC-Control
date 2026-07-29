@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="css/ns_ui.css">
     <link rel="stylesheet" href="css/index.css">
     <script src="js/bridge.js"></script>
+    <script src="data/amiibo_catalog.js"></script>
     <script src="js/ns_core.js"></script>
 </head>
 <body>
@@ -50,19 +51,39 @@
 
     <div id="modalOverlay">
         <div id="modalContent">
-            <h3>Keyboard Bindings</h3>
-            <div id="bindingsScrollArea">
-                <div id="bindingsList"></div>
+            <h3>Bindings</h3>
+            <div class="binding-tabs" role="tablist" aria-label="Binding type">
+                <button id="tabKeyboardBindings" class="binding-tab active"
+                        role="tab" aria-selected="true">Keyboard</button>
+                <button id="tabControllerBindings" class="binding-tab"
+                        role="tab" aria-selected="false">Controllers</button>
+            </div>
+            <div id="keyboardBindingsPane" class="binding-pane active" role="tabpanel">
+                <div class="bindings-scroll-area">
+                    <div id="bindingsList"></div>
+                </div>
+                <div class="binding-actions">
+                    <button id="btnSetupBindings">Setup Wizard</button>
+                    <button id="btnClearBindings">Clear</button>
+                    <button id="btnResetBindings">Reset</button>
+                </div>
+            </div>
+            <div id="controllerBindingsPane" class="binding-pane" role="tabpanel">
+                <div id="controllerBindingsNote" class="binding-note"></div>
+                <div id="controllerBindingsPanel">
+                    <div class="bindings-scroll-area">
+                        <div id="controllerBindingsList"></div>
+                    </div>
+                    <div class="binding-actions">
+                        <button id="btnClearControllerBindings">Clear</button>
+                        <button id="btnResetControllerBindings">Reset</button>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <div class="footer-group">
                     <button id="btnSaveBindings" class="btn-primary">Save</button>
                     <button id="btnCancelBindings">Cancel</button>
-                </div>
-                <div class="footer-group">
-                    <button id="btnSetupBindings">Setup Wizard</button>
-                    <button id="btnClearBindings">Clear</button>
-                    <button id="btnResetBindings">Reset</button>
                 </div>
             </div>
         </div>

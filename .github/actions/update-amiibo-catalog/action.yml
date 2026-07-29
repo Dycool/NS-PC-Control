@@ -1,0 +1,47 @@
+name: Update offline Amiibo catalogue
+description: Download AmiiboAPI metadata and rebuild the checked-out catalogue with the C++ tool
+
+runs:
+  using: composite
+  steps:
+    - name: Build catalogue tool and refresh metadata
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        source_json="$RUNNER_TEMP/ns-pc-control-amiiboapi.json"
+        build_dir="$RUNNER_TEMP/ns-pc-control-catalog-build"
+        install_dir="$RUNNER_TEMP/ns-pc-control-catalog-tool"
+
+        curl --fail --silent --show-error --location \
+          --header 'Accept: application/json' \
+          --user-agent 'NS-PC-Control catalogue workflow' \
+          https://www.amiiboapi.org/api/amiibo/ \
+          --output "$source_json"
+        cmake -S scripts -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
+        cmake --build "$build_dir" --config Release --parallel
+        cmake --install "$build_dir" --config Release --prefix "$install_dir"
+        "$install_dir/bin/update-amiibo-catalog" \
+          --source "$source_json" \
+          --root "$GITHUB_WORKSPACE"
+
+    - name: Build catalogue tool and refresh metadata
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $sourceJson = Join-Path $env:RUNNER_TEMP 'ns-pc-control-amiiboapi.json'
+        $buildDir = Join-Path $env:RUNNER_TEMP 'ns-pc-control-catalog-build'
+        $installDir = Join-Path $env:RUNNER_TEMP 'ns-pc-control-catalog-tool'
+
+        curl.exe --fail --silent --show-error --location `
+          --header 'Accept: application/json' `
+          --user-agent 'NS-PC-Control catalogue workflow' `
+          https://www.amiiboapi.org/api/amiibo/ `
+          --output $sourceJson
+        cmake -S scripts -B $buildDir
+        cmake --build $buildDir --config Release --parallel
+        cmake --install $buildDir --config Release --prefix $installDir
+        & (Join-Path $installDir 'bin/update-amiibo-catalog.exe') `
+          --source $sourceJson `
+          --root $env:GITHUB_WORKSPACE

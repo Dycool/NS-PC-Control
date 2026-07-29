@@ -50,6 +50,7 @@
 using namespace ns;
 
 #include "app_state.hpp"
+#include "amiibo_library.hpp"
 
 static void on_signal(int) { g_ctx.running.store(false, std::memory_order_relaxed); }
 
@@ -440,6 +441,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> udp_rx(
         std::max({UDP_RX_MAX_PACKET_SIZE,
                   ns::S2_AUDIO_PACKET_SIZE,
+                  sizeof(ns::AmiiboDataPacket),
                   ns::macro::CHUNK_HEADER_SIZE + ns::macro::UDP_CHUNK_MAX + HMAC_TAG_SIZE}));
 
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
@@ -730,6 +732,95 @@ int main(int argc, char** argv) {
                     server_macro_handle_chunk_packet({udp_rx.data(), static_cast<size_t>(bytes)}, sender);
                     continue;
                 }
+                if (mmagic == ns::AMIIBO_LIBRARY_MAGIC
+                        && bytes == static_cast<ssize_t>(sizeof(ns::AmiiboLibraryPacket))) {
+                    ns::AmiiboLibraryPacket request{};
+                    std::memcpy(&request, udp_rx.data(), sizeof(request));
+                    ns::AmiiboLibraryResultPacket reply{};
+                    reply.action = request.action;
+                    reply.subpad = request.subpad;
+                    reply.head = request.head;
+                    reply.tail = request.tail;
+
+                    const bool authenticated =
+                        request.version == ns::AMIIBO_LIBRARY_VERSION
+                        && hmac_verify(
+                            {g_ctx.hmac_key, 32},
+                            {udp_rx.data(), ns::AMIIBO_LIBRARY_AUTH_SIZE},
+                            {udp_rx.data() + ns::AMIIBO_LIBRARY_AUTH_SIZE,
+                             HMAC_TAG_SIZE}) == 0;
+                    amiibo_library::OperationResult result{
+                        ns::AMIIBO_LIBRARY_INVALID_REQUEST, 0,
+                        "invalid or unauthenticated request"};
+                    if (authenticated && rate_allow(sender.sin_addr.s_addr)) {
+                        if (request.action == ns::AMIIBO_LIBRARY_CLEAR) {
+                            result = amiibo_library::clear();
+                        } else if (request.action == ns::AMIIBO_LIBRARY_SELECT
+                                   && request.subpad < 4) {
+                            int client_idx = -1;
+                            for (int i = 0; i < MAX_CLIENTS; ++i) {
+                                std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+                                if (g_ctx.clients[i].active
+                                        && g_ctx.clients[i].source == InputSource::Udp
+                                        && g_ctx.clients[i].addr.sin_addr.s_addr
+                                            == sender.sin_addr.s_addr
+                                        && g_ctx.clients[i].addr.sin_port
+                                            == sender.sin_port) {
+                                    client_idx = i;
+                                    break;
+                                }
+                            }
+                            int port = client_idx >= 0
+                                ? console_port_for_client_subpad(
+                                    client_idx, request.subpad)
+                                : -1;
+                            if (client_idx >= 0
+                                    && (port < 0
+                                        || !controller_port_supports_amiibo(port))) {
+                                uint8_t mask = 0;
+                                {
+                                    std::lock_guard<std::mutex> lk(
+                                        g_ctx.mtx[client_idx]);
+                                    mask = g_ctx.clients[client_idx]
+                                        .client_assignment[request.subpad]
+                                        .console_port_mask;
+                                }
+                                port = -1;
+                                for (int candidate = 0;
+                                     candidate < HID_PORT_COUNT; ++candidate) {
+                                    if ((mask & (1u << candidate))
+                                            && controller_port_supports_amiibo(
+                                                candidate)) {
+                                        port = candidate;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (port >= 0) {
+                                std::vector<uint8_t> tag;
+                                result = amiibo_library::select(
+                                    request.head, request.tail, port,
+                                    tag);
+                                if (result) {
+                                    set_amiibo_data_for_port(
+                                        port, tag.data(), tag.size());
+                                }
+                            }
+                        }
+                    }
+                    reply.result = result.code;
+                    reply.tag_size = result.tag_size;
+                    sendto(sock, &reply, sizeof(reply), 0,
+                           reinterpret_cast<const sockaddr*>(&sender), slen);
+                    if (g_ctx.verbose) {
+                        std::println(
+                            "[s2][nfc][library] udp action={} subpad={} id={:08x}{:08x} result={} tag_size={} detail={}",
+                            request.action, request.subpad, request.head,
+                            request.tail, result.code, result.tag_size,
+                            result.detail);
+                    }
+                    continue;
+                }
                 if (mmagic == ns::AMIIBO_DATA_MAGIC) {
                     ns::AmiiboDataPacket ad{};
                     memcpy(&ad, udp_rx.data(), std::min((size_t)bytes, sizeof(ad)));
@@ -738,8 +829,8 @@ int main(int argc, char** argv) {
                     // not try to bind a reference to a potentially unaligned field.
                     const uint16_t amiibo_data_len = ad.data_len;
                     constexpr size_t amiibo_packet_header = offsetof(ns::AmiiboDataPacket, data);
-                    const bool amiibo_size_supported = amiibo_data_len == ns::AMIIBO_RAW_DUMP_SIZE
-                        || amiibo_data_len == ns::AMIIBO_EXTENDED_DUMP_SIZE;
+                    const bool amiibo_size_supported =
+                        ns::is_supported_amiibo_dump_size(amiibo_data_len);
                     const bool amiibo_packet_complete = bytes >= 0
                         && static_cast<size_t>(bytes) >= amiibo_packet_header + amiibo_data_len;
                     if (g_ctx.verbose) {

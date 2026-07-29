@@ -350,7 +350,7 @@ class MainActivity : AppCompatActivity() {
     // path used to deliver through the close reason).
     private fun startReceiver(transport: NsUdp) {
         Thread {
-            val buf = ByteArray(1024)
+            val buf = ByteArray(4096)
             while (udp === transport && !transport.closed) {
                 val n = transport.receive(buf)
                 if (n < 0) break
@@ -384,6 +384,9 @@ class MainActivity : AppCompatActivity() {
                     }
                     n == NsUdp.CLIENT_ASSIGNMENT_SIZE && magic == NsUdp.CLIENT_ASSIGNMENT_MAGIC -> {
                         val flags = buf[5].toInt() and 0xFF
+                        val assignmentSubpad = buf[7].toInt() and 0xFF
+                        val assignmentMask = buf[8].toInt() and 0xFF
+                        val assignmentVirtualType = buf[11].toInt() and 0xFF
                         if (flags and NsUdp.ASSIGNMENT_FLAG_ACCEPTED != 0) {
                             runOnUiThread {
                                 if (udp === transport && controlClientActive) {
@@ -393,6 +396,11 @@ class MainActivity : AppCompatActivity() {
                                     if (activeClientMode == ClientMode.PHYSICAL) {
                                         updatePhysicalStatusOnPage("Connected")
                                     }
+                                    publishAmiiboAssignment(
+                                        assignmentSubpad,
+                                        assignmentMask,
+                                        assignmentVirtualType
+                                    )
                                 }
                             }
                         }
@@ -404,6 +412,31 @@ class MainActivity : AppCompatActivity() {
                         }
                         if (message != null) {
                             runOnUiThread { handleTransportClosed(transport, message) }
+                        }
+                    }
+                    n == NsUdp.AMIIBO_REQUEST_SIZE
+                            && magic == NsUdp.AMIIBO_REQUEST_MAGIC -> {
+                        val subpad = buf[4].toInt() and 0xFF
+                        val requested = (buf[5].toInt() and 0xFF) != 0
+                        val sequence = (buf[6].toInt() and 0xFF) or
+                            ((buf[7].toInt() and 0xFF) shl 8)
+                        runOnUiThread {
+                            publishAmiiboRequest(subpad, requested, sequence)
+                        }
+                    }
+                    n == NsUdp.AMIIBO_LIBRARY_RESULT_SIZE
+                            && magic == NsUdp.AMIIBO_LIBRARY_RESULT_MAGIC -> {
+                        val action = buf[5].toInt() and 0xFF
+                        val result = buf[6].toInt() and 0xFF
+                        val subpad = buf[7].toInt() and 0xFF
+                        val head = NsUdp.readU32LE(buf, 8)
+                        val tail = NsUdp.readU32LE(buf, 12)
+                        val tagSize = (buf[16].toInt() and 0xFF) or
+                            ((buf[17].toInt() and 0xFF) shl 8)
+                        runOnUiThread {
+                            publishAmiiboResult(
+                                action, result, subpad, head, tail, tagSize
+                            )
                         }
                     }
                     else -> Log.d(TAG, "ignored udp feedback magic=0x${magic.toString(16)} size=$n")
@@ -952,6 +985,26 @@ class MainActivity : AppCompatActivity() {
         fun onPhysicalRefresh() { runOnUiThread { scanPhysicalControllers(); updatePhysicalStatusOnPage() } }
 
         @JavascriptInterface
+        fun onAmiiboLibrary(action: Int, subpad: Int, headHex: String, tailHex: String) {
+            if (currentPage != Page.MAIN_MENU || !controlClientActive) return
+            val transport = udp ?: return
+            val head = headHex.toLongOrNull(16)?.and(0xFFFF_FFFFL)?.toInt() ?: return
+            val tail = tailHex.toLongOrNull(16)?.and(0xFFFF_FFFFL)?.toInt() ?: return
+            val packet = ByteArray(
+                NsUdp.AMIIBO_LIBRARY_AUTH_SIZE + NsUdp.HMAC_TAG_SIZE
+            )
+            NsUdp.writeU32LE(packet, 0, NsUdp.AMIIBO_LIBRARY_MAGIC)
+            packet[4] = 1
+            packet[5] = action.toByte()
+            packet[6] = (subpad and 3).toByte()
+            NsUdp.writeU32LE(packet, 8, head)
+            NsUdp.writeU32LE(packet, 12, tail)
+            try {
+                transport.sendSigned(packet, NsUdp.AMIIBO_LIBRARY_AUTH_SIZE)
+            } catch (_: Throwable) {}
+        }
+
+        @JavascriptInterface
         fun onOpenTouch() { runOnUiThread { navTo(Page.TOUCH_CONTROLS) } }
 
         @JavascriptInterface
@@ -1346,6 +1399,54 @@ class MainActivity : AppCompatActivity() {
 
     private fun jsEscape(v: String): String = v.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
 
+    private fun publishAmiiboAssignment(subpad: Int, mask: Int, virtualType: Int) {
+        if (currentPage != Page.MAIN_MENU) return
+        try {
+            webView.evaluateJavascript(
+                "if(window.__nsAmiiboNativeAssignment)" +
+                    "window.__nsAmiiboNativeAssignment(true,$subpad,$mask,$virtualType);",
+                null
+            )
+        } catch (_: Throwable) {}
+    }
+
+    private fun publishAmiiboDisconnected() {
+        runOnUiThread {
+            if (currentPage != Page.MAIN_MENU) return@runOnUiThread
+            try {
+                webView.evaluateJavascript(
+                    "if(window.__nsAmiiboNativeAssignment)" +
+                        "window.__nsAmiiboNativeAssignment(false,0,0,0);",
+                    null
+                )
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun publishAmiiboRequest(subpad: Int, requested: Boolean, sequence: Int) {
+        if (currentPage != Page.MAIN_MENU) return
+        try {
+            webView.evaluateJavascript(
+                "if(window.__nsAmiiboNativeRequest)" +
+                    "window.__nsAmiiboNativeRequest($subpad,${if (requested) "true" else "false"},$sequence);",
+                null
+            )
+        } catch (_: Throwable) {}
+    }
+
+    private fun publishAmiiboResult(
+        action: Int, result: Int, subpad: Int, head: Int, tail: Int, tagSize: Int
+    ) {
+        if (currentPage != Page.MAIN_MENU) return
+        try {
+            webView.evaluateJavascript(
+                "if(window.__nsAmiiboNativeResult)" +
+                    "window.__nsAmiiboNativeResult($action,$result,$subpad,$head,$tail,$tagSize);",
+                null
+            )
+        } catch (_: Throwable) {}
+    }
+
     private fun updatePhysicalStatusOnPage(prefix: String? = null) {
         if (currentPage != Page.MAIN_MENU) return
         val lines = synchronized(physicalLock) {
@@ -1416,6 +1517,7 @@ class MainActivity : AppCompatActivity() {
         stopPhysicalControllerSensors()
         stopAllPhysicalRumble()
         activeClientMode = ClientMode.NONE
+        publishAmiiboDisconnected()
 
         if (closing != null) {
             Thread {

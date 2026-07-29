@@ -1,13 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
 project(ns-control CXX)
 
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR
+        "ns-backend is supported only on Linux for Raspberry Pi deployments")
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-if(APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum OS X deployment version" FORCE)
-    add_link_options("-Wl,-w")
-endif()
 
 add_compile_options(-O3 -Wall -Wextra)
 
@@ -81,11 +82,11 @@ else()
     message(STATUS "Bluetooth/local controller support disabled by user")
 endif()
 
-if(USE_SDL_BT AND UNIX AND NOT APPLE AND NOT USE_BLUEZ_DBUS)
+if(USE_SDL_BT AND NOT USE_BLUEZ_DBUS)
     message(FATAL_ERROR "Bluetooth/local controller support requires USE_BLUEZ_DBUS=ON; shell fallback was removed")
 endif()
 
-if(USE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
+if(USE_BLUEZ_DBUS)
     set(NS_SDBUS_CPP_TAG "v2.3.1" CACHE STRING "Pinned sdbus-c++ v2 tag used by the BlueZ manager")
 
     set(SDBUSCPP_INSTALL          OFF CACHE BOOL "" FORCE)
@@ -112,10 +113,8 @@ if(USE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
     else()
         message(STATUS "BlueZ D-Bus manager disabled (pinned sdbus-c++ target unavailable)")
     endif()
-elseif(REQUIRE_BLUEZ_DBUS AND UNIX AND NOT APPLE)
+elseif(REQUIRE_BLUEZ_DBUS)
     message(FATAL_ERROR "BlueZ D-Bus manager requires sdbus-c++ on Linux; shell fallback was removed")
-else()
-    message(STATUS "BlueZ D-Bus manager disabled for this platform")
 endif()
 
 find_package(OpenSSL REQUIRED)
@@ -171,6 +170,8 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_mouse.js >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_amiibo.js >> ${WEBAPP_EMBED}
     COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i js/feat_audio.js >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i data/amiibo_catalog.json >> ${WEBAPP_EMBED}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${WEBAPP_DIR} ${XXD_EXECUTABLE} -i data/amiibo_catalog.js >> ${WEBAPP_EMBED}
     DEPENDS
         ${WEBAPP_DIR}/index.html
         ${WEBAPP_DIR}/mobile.html
@@ -191,6 +192,8 @@ add_custom_command(
         ${WEBAPP_DIR}/js/feat_mouse.js
         ${WEBAPP_DIR}/js/feat_amiibo.js
         ${WEBAPP_DIR}/js/feat_audio.js
+        ${WEBAPP_DIR}/data/amiibo_catalog.json
+        ${WEBAPP_DIR}/data/amiibo_catalog.js
     COMMENT "Embedding webapp files via xxd..."
     VERBATIM
 )
@@ -209,6 +212,7 @@ add_executable(ns-backend
     ${RAW_GADGET_EMBED_CPP}
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
+    src/amiibo_library.cpp
     src/s2_motion_carrier.cpp
     src/s2_native_command.cpp
     src/s2_enumeration.cpp
@@ -219,6 +223,45 @@ add_executable(ns-backend
     src/bluetooth_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/src/macros.cpp
     ${WEBAPP_EMBED}
+)
+
+set(AMIIBO_TEMPLATE_BUNDLE
+    "${CMAKE_CURRENT_SOURCE_DIR}/generated/amiibo_templates.bin"
+    CACHE FILEPATH "Release-generated synthetic Amiibo template bundle")
+if(EXISTS "${AMIIBO_TEMPLATE_BUNDLE}")
+    get_filename_component(AMIIBO_TEMPLATE_DIR "${AMIIBO_TEMPLATE_BUNDLE}" DIRECTORY)
+    get_filename_component(AMIIBO_TEMPLATE_NAME "${AMIIBO_TEMPLATE_BUNDLE}" NAME)
+    set(AMIIBO_TEMPLATES_EMBED
+        "${CMAKE_CURRENT_BINARY_DIR}/amiibo_templates_embed.h")
+    add_custom_command(
+        OUTPUT "${AMIIBO_TEMPLATES_EMBED}"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${AMIIBO_TEMPLATE_DIR}"
+                ${XXD_EXECUTABLE} -i "${AMIIBO_TEMPLATE_NAME}" >
+                "${AMIIBO_TEMPLATES_EMBED}"
+        DEPENDS "${AMIIBO_TEMPLATE_BUNDLE}"
+        COMMENT "Embedding release-generated Amiibo templates"
+        VERBATIM
+    )
+    target_sources(ns-backend PRIVATE "${AMIIBO_TEMPLATES_EMBED}")
+    target_compile_definitions(ns-backend PRIVATE
+        NS_EMBEDDED_AMIIBO_TEMPLATES=1)
+else()
+    message(WARNING
+        "No Amiibo template bundle configured. The backend will build, but "
+        "new Amiibo selections will require an official release artifact.")
+endif()
+
+add_executable(amiibo-bundle-generator EXCLUDE_FROM_ALL
+    tools/amiibo_bundle_generator.cpp
+    src/amiibo_library.cpp
+)
+target_include_directories(amiibo-bundle-generator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
+)
+target_link_libraries(amiibo-bundle-generator PRIVATE
+    nlohmann_json::nlohmann_json
+    OpenSSL::Crypto
 )
 
 if(SDL3_FOUND)
@@ -284,4 +327,24 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     add_test(NAME s2-native-command COMMAND s2-native-command-test)
+
+    add_executable(s2-nfc-codec-test
+        tests/s2_nfc_codec_test.cpp
+        src/s2_nfc_codec.cpp
+    )
+    target_include_directories(s2-nfc-codec-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME s2-nfc-codec COMMAND s2-nfc-codec-test)
+
+    add_executable(amiibo-library-test
+        tests/amiibo_library_test.cpp
+        src/amiibo_library.cpp
+    )
+    target_include_directories(amiibo-library-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
+    )
+    target_link_libraries(amiibo-library-test PRIVATE OpenSSL::Crypto)
+    add_test(NAME amiibo-library COMMAND amiibo-library-test)
 endif()

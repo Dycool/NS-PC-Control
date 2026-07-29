@@ -2,5 +2,6 @@
   <qresource prefix="/">
     <file alias="icon.png">icon.png</file>
     <file alias="icon.ico">icon.ico</file>
+    <file alias="data/amiibo_catalog.json">../shared/data/amiibo_catalog.json</file>
   </qresource>
 </RCC>

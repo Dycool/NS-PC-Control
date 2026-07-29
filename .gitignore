@@ -26,6 +26,7 @@ mobile/ios/build/
 # Local builds
 /build/
 /build-client/
+/server/generated/
 
 # Local diagnostic captures and helper binaries
 /debug/

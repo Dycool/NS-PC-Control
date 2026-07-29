@@ -44,10 +44,23 @@ window.NSCore = (function () {
         ROSTER_NAME_CAP: 48,
         CLIENT_NAMES_SIZE: 224,
         AMIIBO_REQUEST_SIZE: 8,
+        AMIIBO_TAGMO_DUMP_SIZE: 532,
         AMIIBO_RAW_DUMP_SIZE: 540,
         AMIIBO_EXTENDED_DUMP_SIZE: 572,
-        AMIIBO_DATA_SIZE: 579,                // 4+1+2+572 packed
+        AMIIBO_V3_DUMP_SIZE: 2048,
+        AMIIBO_DATA_SIZE: 2055,               // 4+1+2+2048 packed maximum
         AMIIBO_DATA_HEADER: 7,                // offsetof(AmiiboDataPacket, data)
+        AMIIBO_LIBRARY_MAGIC: 0x4E53414C,      // 'NSAL'
+        AMIIBO_LIBRARY_RESULT_MAGIC: 0x4E534C52, // 'NSLR'
+        AMIIBO_LIBRARY_VERSION: 1,
+        AMIIBO_LIBRARY_PACKET_SIZE: 32,
+        AMIIBO_LIBRARY_RESULT_SIZE: 20,
+        AMIIBO_LIBRARY_SELECT: 1,
+        AMIIBO_LIBRARY_CLEAR: 2,
+        AMIIBO_LIBRARY_OK: 0,
+        AMIIBO_LIBRARY_STORAGE_ERROR: 1,
+        AMIIBO_LIBRARY_GENERATION_ERROR: 2,
+        AMIIBO_LIBRARY_INVALID_REQUEST: 3,
         JOYCON_MOUSE_SIZE: 47,
         S2_AUDIO_CAPS_SIZE: 36,
         S2_AUDIO_PCM_SIZE: 996,               // 36 + 960

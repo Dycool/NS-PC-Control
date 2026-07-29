@@ -11,8 +11,6 @@
 #include <array>
 #include <thread>
 #include <expected>
-#include <QByteArray>
-#include <QString>
 
 extern std::atomic<bool> g_connected;
 extern std::atomic<bool> g_connecting;
@@ -96,11 +94,9 @@ void send_client_frame(SOCKET sock,
 extern std::atomic<bool> g_amiiboScanPending[4];
 extern std::atomic<uint16_t> g_amiiboRequestSequence[4];
 extern std::atomic<uint64_t> g_amiiboScanDeadlineUs[4];
-void set_amiibo_path(uint8_t subpad, const QString& path);
-QString amiibo_path_snapshot(uint8_t subpad);
-void clear_amiibo_paths();
 
-void sendAmiiboData(uint8_t subpad, const QByteArray& data);
+bool sendAmiiboLibraryCommand(uint8_t action, uint8_t subpad = 0,
+                              uint32_t head = 0, uint32_t tail = 0);
 int run_client_stream(const ClientStreamConfig& cfg,
                       std::atomic<bool>& running,
                       std::string* err_out = nullptr);

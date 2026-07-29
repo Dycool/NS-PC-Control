@@ -32,6 +32,12 @@ class NsUdp(host: String, port: Int) {
         const val ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10
         const val ROSTER_MAGIC = 0x4E53524F
         const val ROSTER_SIZE = 208
+        const val AMIIBO_REQUEST_MAGIC = 0x4E534152
+        const val AMIIBO_REQUEST_SIZE = 8
+        const val AMIIBO_LIBRARY_MAGIC = 0x4E53414C
+        const val AMIIBO_LIBRARY_RESULT_MAGIC = 0x4E534C52
+        const val AMIIBO_LIBRARY_RESULT_SIZE = 20
+        const val AMIIBO_LIBRARY_AUTH_SIZE = 16
 
         private const val SECRET = "nsc-R2xvCy7Eyw2nfbZIOGyKZPnostpaRY"
         private val KEY: ByteArray =
@@ -70,7 +76,7 @@ class NsUdp(host: String, port: Int) {
                 ((b[off + 2].toInt() and 0xFF) shl 16) or
                 ((b[off + 3].toInt() and 0xFF) shl 24)
 
-        private fun writeU32LE(b: ByteArray, off: Int, v: Int) {
+        fun writeU32LE(b: ByteArray, off: Int, v: Int) {
             b[off] = (v and 0xFF).toByte()
             b[off + 1] = ((v ushr 8) and 0xFF).toByte()
             b[off + 2] = ((v ushr 16) and 0xFF).toByte()

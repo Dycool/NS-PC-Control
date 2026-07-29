@@ -25,8 +25,6 @@ std::atomic<uint64_t> g_amiiboScanDeadlineUs[4]{};
 SOCKET g_sendSock = INVALID_SOCKET;
 sockaddr_in g_sendDest{};
 static std::mutex g_sendTransportMutex;
-static std::mutex g_amiiboPathMutex;
-static QString g_amiiboPaths[4];
 std::thread g_senderThread;
 std::atomic<bool> g_senderRunning{false};
 uint8_t g_hmacKey[32]{};
@@ -38,23 +36,6 @@ std::mutex g_assignmentMutex;
 ServerAssignmentView g_serverAssignment;
 std::mutex g_rosterMutex;
 RosterView g_roster;
-
-void set_amiibo_path(uint8_t subpad, const QString& path) {
-    if (subpad >= 4) return;
-    std::lock_guard<std::mutex> lk(g_amiiboPathMutex);
-    g_amiiboPaths[subpad] = path;
-}
-
-QString amiibo_path_snapshot(uint8_t subpad) {
-    if (subpad >= 4) return {};
-    std::lock_guard<std::mutex> lk(g_amiiboPathMutex);
-    return g_amiiboPaths[subpad];
-}
-
-void clear_amiibo_paths() {
-    std::lock_guard<std::mutex> lk(g_amiiboPathMutex);
-    for (QString& path : g_amiiboPaths) path.clear();
-}
 
 static void sleep_while_running(std::atomic<bool>& running, std::chrono::microseconds duration) {
     constexpr auto SLICE = std::chrono::microseconds(20'000);
@@ -223,6 +204,9 @@ void ClientFrame::reset() {
 void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], bool send_motion, int keyboard_mode) {
     frame.reset();
     auto sdl = g_sdlInput.snapshot();
+    for (auto& pad : sdl) {
+        if (pad.connected) apply_controller_bindings(pad.input);
+    }
     const uint64_t filter_now = ns::now_us();
     const bool s2 = g_switch2ModeEnabled.load(std::memory_order_relaxed);
 
@@ -388,17 +372,26 @@ void build_client_frame(ClientFrame& frame, DigitalReleaseFilter filters[4], boo
     }
 }
 
-void sendAmiiboData(uint8_t subpad, const QByteArray& data) {
+bool sendAmiiboLibraryCommand(uint8_t action, uint8_t subpad,
+                              uint32_t head, uint32_t tail) {
     std::lock_guard<std::mutex> transport_lk(g_sendTransportMutex);
-    if (g_sendSock == INVALID_SOCKET) return;
-    ns::AmiiboDataPacket pkt{};
-    pkt.magic = ns::AMIIBO_DATA_MAGIC;
+    if (g_sendSock == INVALID_SOCKET) return false;
+    ns::AmiiboLibraryPacket pkt{};
+    pkt.action = action;
     pkt.subpad = subpad;
-    size_t dl = std::min<size_t>(data.size(), ns::AMIIBO_EXTENDED_DUMP_SIZE);
-    pkt.data_len = static_cast<uint16_t>(dl);
-    if (dl > 0) std::memcpy(pkt.data, data.constData(), dl);
-    // Server accepts directly on magic match (no hmac verification for this control packet)
-    send_all_udp(g_sendSock, g_sendDest, std::span(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)));
+    pkt.head = head;
+    pkt.tail = tail;
+    uint8_t full_hmac[32]{};
+    hmac_sha256(
+        std::span(g_hmacKey, sizeof(g_hmacKey)),
+        std::span(reinterpret_cast<const uint8_t*>(&pkt),
+                  ns::AMIIBO_LIBRARY_AUTH_SIZE),
+        std::span<uint8_t, 32>(full_hmac));
+    std::memcpy(pkt.hmac, full_hmac, ns::HMAC_TAG_SIZE);
+    return send_all_udp(
+        g_sendSock, g_sendDest,
+        std::span(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt)))
+        == static_cast<int>(sizeof(pkt));
 }
 
 void send_client_frame(SOCKET sock, const sockaddr_in& dest, const uint8_t hmac_key[32], uint32_t& seq, const ClientFrame& frame) {
@@ -849,7 +842,6 @@ std::expected<void, std::string> start_connection(const std::string& target) {
         g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);
         g_amiiboScanDeadlineUs[i].store(0, std::memory_order_relaxed);
     }
-    clear_amiibo_paths();
     mouse_input_reset();
     g_lastError.clear();
     if (g_senderThread.joinable()) {
@@ -884,7 +876,6 @@ void stop_connection() {
         g_amiiboRequestSequence[i].store(0, std::memory_order_relaxed);
         g_amiiboScanDeadlineUs[i].store(0, std::memory_order_relaxed);
     }
-    clear_amiibo_paths();
     if (was_connected || was_connecting) set_status_message("Disconnected");
 }
 

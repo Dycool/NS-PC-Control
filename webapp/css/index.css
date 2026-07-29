@@ -89,10 +89,25 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 #modalContent h3 { margin-top: 0; margin-bottom: 15px; color: var(--ns-accent); flex-shrink: 0; }
 
-#bindingsScrollArea { overflow-y: auto; flex-grow: 1; padding-right: 10px; }
+.binding-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.binding-tab { flex: 1; }
+.binding-tab.active {
+    color: var(--ns-accent); border-color: var(--ns-accent);
+    background: rgba(204, 0, 0, 0.14);
+    background: color-mix(in srgb, var(--ns-accent) 14%, var(--ns-surface-2));
+}
+.binding-pane { display: none; min-height: 0; flex: 1; flex-direction: column; }
+.binding-pane.active { display: flex; }
+.bindings-scroll-area { overflow-y: auto; flex-grow: 1; padding-right: 10px; }
+.binding-actions { display: flex; gap: 8px; padding-top: 10px; flex-wrap: wrap; }
+.binding-note { color: var(--ns-muted); font-size: 12px; margin-bottom: 10px; }
+#controllerBindingsPanel.bindings-disabled {
+    opacity: 0.42; filter: grayscale(1); pointer-events: none;
+}
 
 .bind-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; }
 .bind-btn { width: 120px; font-family: 'Consolas', monospace; font-size: 12px; transition: background 0.2s; }
+.controller-bind-select { width: 150px; font-family: 'Consolas', monospace; font-size: 12px; }
 .listening { background: #ffeb3b !important; border-color: #fbc02d !important; color: #000; transform: scale(1.02); }
 
 .modal-footer {

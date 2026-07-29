@@ -6,6 +6,8 @@ on:
       - 'mobile/**'
       - 'shared/**'
       - 'webapp/**'
+      - 'scripts/**'
+      - '.github/actions/update-amiibo-catalog/**'
       - '.github/workflows/build-mobile.yml'
   workflow_dispatch:
   workflow_call:
@@ -22,6 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -57,6 +62,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Refresh the offline Amiibo catalogue
+        uses: ./.github/actions/update-amiibo-catalog
 
       - name: Build unsigned iOS app
         run: |

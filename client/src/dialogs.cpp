@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QTabWidget>
 #include <QWidget>
 #include <algorithm>
 #include <cmath>
@@ -136,10 +137,18 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
         std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
         editBindings = g_keyBindings;
     }
-    setWindowTitle("Keyboard Bindings");
+    {
+        std::lock_guard<std::mutex> lk(g_controllerBindingsMutex);
+        editControllerBindings = g_controllerBindings;
+    }
+    setWindowTitle("Bindings");
     setModal(true);
-    setMinimumWidth(620);
+    setMinimumWidth(760);
     auto* outer = new QVBoxLayout(this);
+    auto* tabs = new QTabWidget(this);
+
+    auto* keyboardTab = new QWidget(tabs);
+    auto* keyboardOuter = new QVBoxLayout(keyboardTab);
     auto* grid = new QGridLayout();
     grid->setHorizontalSpacing(4);
     grid->setVerticalSpacing(4);
@@ -151,37 +160,130 @@ BindingsDialog::BindingsDialog(QWidget* parent) : QDialog(parent) {
             addRow(grid, i, 3, i + rows, keys[i + rows].first);
         }
     }
-    outer->addLayout(grid);
+    keyboardOuter->addLayout(grid);
 
-    auto* buttons = new QHBoxLayout();
-    auto add_btn = [&](const QString& text, auto callback) {
-        auto* b = new QPushButton(text, this);
+    auto* keyboardButtons = new QHBoxLayout();
+    auto add_keyboard_btn = [&](const QString& text, auto callback) {
+        auto* b = new QPushButton(text, keyboardTab);
         connect(b, &QPushButton::clicked, this, callback);
-        buttons->addWidget(b);
+        keyboardButtons->addWidget(b);
     };
-    add_btn("Setup", [this] {
+    add_keyboard_btn("Setup", [this] {
         setupMode = true; listeningIndex = 0;
         for (const auto& kv : binding_keys()) editBindings[kv.first].clear();
         refresh();
         if (!valueLabels.empty()) valueLabels[0]->setText("...");
         setFocus();
     });
-    add_btn("Clear", [this] {
+    add_keyboard_btn("Clear", [this] {
         setupMode = false; listeningIndex = -1;
         for (const auto& kv : binding_keys()) editBindings[kv.first].clear();
         for (const auto& kv : s2_binding_keys()) editBindings[kv.first].clear();
         refresh();
     });
-    add_btn("Reset", [this] { editBindings = default_key_bindings(); refresh(); });
-    buttons->addStretch();
-    add_btn("S2", [this] { open_s2_bindings_dialog(this, editBindings); });
-    add_btn("Save", [this] {
-        { std::lock_guard<std::mutex> lk(g_keyBindingsMutex); g_keyBindings = editBindings; }
-        save_bindings(); accept();
+    add_keyboard_btn("Reset", [this] {
+        editBindings = default_key_bindings();
+        refresh();
     });
-    add_btn("Cancel", &QDialog::reject);
+    keyboardButtons->addStretch();
+    add_keyboard_btn("S2", [this] {
+        open_s2_bindings_dialog(this, editBindings);
+    });
+    keyboardOuter->addLayout(keyboardButtons);
+    tabs->addTab(keyboardTab, "Keyboard");
+
+    auto* controllerTab = new QWidget(tabs);
+    auto* controllerOuter = new QVBoxLayout(controllerTab);
+    auto* controllerNote = new QLabel(controllerTab);
+    controllerNote->setWordWrap(true);
+    const bool horizontal = g_joyconHorizontalMode.load(std::memory_order_relaxed);
+    controllerNote->setText(horizontal
+        ? "Controller bindings are unavailable while Horizontal mode is enabled. "
+          "Disable Horizontal mode in Settings to edit them."
+        : "Choose which physical controller input drives each emulated control.");
+    controllerOuter->addWidget(controllerNote);
+
+    controllerBindingsPanel = new QWidget(controllerTab);
+    auto* controllerPanelOuter = new QVBoxLayout(controllerBindingsPanel);
+    controllerPanelOuter->setContentsMargins(0, 0, 0, 0);
+    auto* controllerGrid = new QGridLayout();
+    controllerGrid->setHorizontalSpacing(8);
+    controllerGrid->setVerticalSpacing(4);
+    const auto controllerKeys = controller_binding_keys();
+    const int controllerRows =
+        static_cast<int>((controllerKeys.size() + 1) / 2);
+    const QStringList sourceChoices = [&] {
+        QStringList choices{QStringLiteral("Unbound")};
+        for (const auto& item : controllerKeys)
+            choices.push_back(std_to_q(item.first));
+        return choices;
+    }();
+    controllerBindingBoxes.resize(controllerKeys.size());
+    for (int i = 0; i < static_cast<int>(controllerKeys.size()); ++i) {
+        const int column = i < controllerRows ? 0 : 2;
+        const int row = i < controllerRows ? i : i - controllerRows;
+        auto* label = new QLabel(std_to_q(controllerKeys[i].first),
+                                 controllerBindingsPanel);
+        label->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        auto* combo = new QComboBox(controllerBindingsPanel);
+        combo->addItems(sourceChoices);
+        combo->setMinimumWidth(150);
+        combo->setProperty("bindingTarget", std_to_q(controllerKeys[i].first));
+        connect(combo, &QComboBox::currentTextChanged, this,
+                [this, combo](const QString& selected) {
+            const std::string target =
+                combo->property("bindingTarget").toString().toStdString();
+            editControllerBindings[target] =
+                selected == QStringLiteral("Unbound")
+                    ? std::string{} : selected.toStdString();
+        });
+        controllerBindingBoxes[i] = combo;
+        controllerGrid->addWidget(label, row, column);
+        controllerGrid->addWidget(combo, row, column + 1);
+    }
+    controllerPanelOuter->addLayout(controllerGrid);
+    auto* controllerButtons = new QHBoxLayout();
+    auto* clearController = new QPushButton("Clear", controllerBindingsPanel);
+    auto* resetController = new QPushButton("Reset", controllerBindingsPanel);
+    connect(clearController, &QPushButton::clicked, this, [this] {
+        for (auto& binding : editControllerBindings) binding.second.clear();
+        refreshControllerBindings();
+    });
+    connect(resetController, &QPushButton::clicked, this, [this] {
+        editControllerBindings = default_controller_bindings();
+        refreshControllerBindings();
+    });
+    controllerButtons->addWidget(clearController);
+    controllerButtons->addWidget(resetController);
+    controllerButtons->addStretch();
+    controllerPanelOuter->addLayout(controllerButtons);
+    controllerBindingsPanel->setEnabled(!horizontal);
+    controllerOuter->addWidget(controllerBindingsPanel);
+    tabs->addTab(controllerTab, "Controllers");
+    outer->addWidget(tabs);
+
+    auto* buttons = new QHBoxLayout();
+    buttons->addStretch();
+    auto* save = new QPushButton("Save", this);
+    auto* cancel = new QPushButton("Cancel", this);
+    connect(save, &QPushButton::clicked, this, [this] {
+        {
+            std::lock_guard<std::mutex> lk(g_keyBindingsMutex);
+            g_keyBindings = editBindings;
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_controllerBindingsMutex);
+            g_controllerBindings = editControllerBindings;
+        }
+        save_bindings();
+        accept();
+    });
+    connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+    buttons->addWidget(save);
+    buttons->addWidget(cancel);
     outer->addLayout(buttons);
     refresh();
+    refreshControllerBindings();
 }
 
 BindingsDialog::~BindingsDialog() {
@@ -268,6 +370,21 @@ void BindingsDialog::refresh() {
     for (int i = 0; i < (int)keys.size(); ++i) {
         auto it = editBindings.find(keys[i].first);
         valueLabels[i]->setText(it == editBindings.end() ? "" : std_to_q(it->second));
+    }
+}
+
+void BindingsDialog::refreshControllerBindings() {
+    const auto keys = controller_binding_keys();
+    for (int i = 0; i < static_cast<int>(keys.size())
+            && i < static_cast<int>(controllerBindingBoxes.size()); ++i) {
+        QComboBox* box = controllerBindingBoxes[i];
+        const auto it = editControllerBindings.find(keys[i].first);
+        const QString selected =
+            it == editControllerBindings.end() || it->second.empty()
+                ? QStringLiteral("Unbound") : std_to_q(it->second);
+        const QSignalBlocker blocker(box);
+        const int index = box->findText(selected);
+        box->setCurrentIndex(index >= 0 ? index : 0);
     }
 }
 
@@ -408,6 +525,43 @@ SettingsDialog::SettingsDialog(QWidget* parent, const QString& host) : QDialog(p
     sep->setFrameShape(QFrame::HLine);
     sep->setFrameShadow(QFrame::Sunken);
     outer->addWidget(sep);
+
+    auto* amiiboGroup = new QGroupBox("Amiibo library", this);
+    auto* amiiboLayout = new QVBoxLayout(amiiboGroup);
+    auto* amiiboNote = new QLabel(
+        "Amiibo templates and catalogue metadata are bundled with the release. "
+        "Your console writebacks are stored privately on the NS-PC-Control server.",
+        amiiboGroup);
+    amiiboNote->setWordWrap(true);
+    amiiboLayout->addWidget(amiiboNote);
+    auto* clearAmiiboData = new QPushButton("Clear Amiibo Data...", amiiboGroup);
+    const bool amiiboServerAvailable =
+        g_connected.load(std::memory_order_relaxed)
+        && g_switch2ModeEnabled.load(std::memory_order_relaxed);
+    clearAmiiboData->setEnabled(amiiboServerAvailable);
+    if (!amiiboServerAvailable) {
+        const QString tip =
+            "Connect to a Switch 2 NS-PC-Control server first.";
+        clearAmiiboData->setToolTip(tip);
+    }
+    amiiboLayout->addWidget(clearAmiiboData);
+    amiiboGroup->setVisible(amiiboServerAvailable);
+    outer->addWidget(amiiboGroup);
+    connect(clearAmiiboData, &QPushButton::clicked, this, [this] {
+        const auto answer = QMessageBox::warning(
+            this, "Clear Amiibo Data",
+            "This permanently removes every saved Amiibo and all console "
+            "writebacks from the NS-PC-Control server. Bundled factory "
+            "templates remain available.\n\nContinue?",
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel);
+        if (answer != QMessageBox::Yes) return;
+        if (!sendAmiiboLibraryCommand(ns::AMIIBO_LIBRARY_CLEAR)) {
+            QMessageBox::warning(
+                this, "Clear Amiibo Data",
+                "Could not send the clear request to the server.");
+        }
+    });
 
     serverTypeBtn = new QPushButton("Change Server Type...", this);
     outer->addWidget(serverTypeBtn);

@@ -422,18 +422,77 @@ struct AmiiboRequestPacket {
 } NS_PACKED_ATTR;
 
 static constexpr uint32_t AMIIBO_DATA_MAGIC = 0x4E534144u; // 'NSAD'
+static constexpr std::size_t AMIIBO_TAGMO_DUMP_SIZE = 532;
 static constexpr std::size_t AMIIBO_RAW_DUMP_SIZE = 540;
 static constexpr std::size_t AMIIBO_SIGNATURE_SIZE = 32;
 static constexpr std::size_t AMIIBO_EXTENDED_DUMP_SIZE = AMIIBO_RAW_DUMP_SIZE + AMIIBO_SIGNATURE_SIZE;
+static constexpr std::size_t AMIIBO_V3_DUMP_SIZE = 2048;
+static constexpr std::size_t AMIIBO_MAX_DUMP_SIZE = AMIIBO_V3_DUMP_SIZE;
+
+constexpr bool is_supported_amiibo_dump_size(std::size_t size) noexcept {
+    return size == AMIIBO_TAGMO_DUMP_SIZE
+        || size == AMIIBO_RAW_DUMP_SIZE
+        || size == AMIIBO_EXTENDED_DUMP_SIZE
+        || size == AMIIBO_V3_DUMP_SIZE;
+}
+
 struct AmiiboDataPacket {
     uint32_t magic = AMIIBO_DATA_MAGIC;
     uint8_t subpad = 0;
     uint16_t data_len = 0;
-    // 540-byte raw NTAG215 image, optionally followed by the 32-byte NTAG
-    // READ_SIG originality signature (the established 572-byte dump format).
-    uint8_t data[AMIIBO_EXTENDED_DUMP_SIZE]{};
+    // Supported representations: 532-byte TagMo, 540-byte raw NTAG215,
+    // 572-byte NTAG215 + READ_SIG, or 2048-byte NTAG I2C Plus 2K (amiibo v3).
+    uint8_t data[AMIIBO_MAX_DUMP_SIZE]{};
 } NS_PACKED_ATTR;
-static_assert(sizeof(AmiiboDataPacket) == 4 + 1 + 2 + AMIIBO_EXTENDED_DUMP_SIZE);
+static_assert(sizeof(AmiiboDataPacket) == 4 + 1 + 2 + AMIIBO_MAX_DUMP_SIZE);
+
+// Persistent Amiibo library control. Clients send only a public catalogue ID;
+// official builds resolve it to a bundled factory template on the server.
+// UDP requests are authenticated like the other control packets; the trusted
+// WebSocket transport leaves hmac zeroed.
+static constexpr uint32_t AMIIBO_LIBRARY_MAGIC = 0x4E53414Cu; // 'NSAL'
+static constexpr uint32_t AMIIBO_LIBRARY_RESULT_MAGIC = 0x4E534C52u; // 'NSLR'
+static constexpr uint8_t AMIIBO_LIBRARY_VERSION = 1;
+
+enum AmiiboLibraryAction : uint8_t {
+    AMIIBO_LIBRARY_SELECT = 1,
+    AMIIBO_LIBRARY_CLEAR = 2,
+};
+
+enum AmiiboLibraryResult : uint8_t {
+    AMIIBO_LIBRARY_OK = 0,
+    AMIIBO_LIBRARY_STORAGE_ERROR = 1,
+    AMIIBO_LIBRARY_GENERATION_ERROR = 2,
+    AMIIBO_LIBRARY_INVALID_REQUEST = 3,
+};
+
+struct AmiiboLibraryPacket {
+    uint32_t magic = AMIIBO_LIBRARY_MAGIC;
+    uint8_t version = AMIIBO_LIBRARY_VERSION;
+    uint8_t action = 0;
+    uint8_t subpad = 0;
+    uint8_t reserved = 0;
+    uint32_t head = 0;
+    uint32_t tail = 0;
+    uint8_t hmac[HMAC_TAG_SIZE]{};
+} NS_PACKED_ATTR;
+
+struct AmiiboLibraryResultPacket {
+    uint32_t magic = AMIIBO_LIBRARY_RESULT_MAGIC;
+    uint8_t version = AMIIBO_LIBRARY_VERSION;
+    uint8_t action = 0;
+    uint8_t result = AMIIBO_LIBRARY_INVALID_REQUEST;
+    uint8_t subpad = 0;
+    uint32_t head = 0;
+    uint32_t tail = 0;
+    uint16_t tag_size = 0;
+    uint16_t reserved = 0;
+} NS_PACKED_ATTR;
+
+static constexpr std::size_t AMIIBO_LIBRARY_AUTH_SIZE =
+    offsetof(AmiiboLibraryPacket, hmac);
+static_assert(sizeof(AmiiboLibraryPacket) == 4 + 4 + 4 + 4 + HMAC_TAG_SIZE);
+static_assert(sizeof(AmiiboLibraryResultPacket) == 20);
 // ── Unified UDP packet ───────────────────────────────────────────────────────
 struct Packet {
     uint32_t    magic = PROTO_MAGIC;

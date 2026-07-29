@@ -1,12 +1,11 @@
 #include "main_window.hpp"
+#include "amiibo_picker.hpp"
 #include "dialogs.hpp"
 #include "input_settings.hpp"
 #include "macro_client.hpp"
 #include "qt_helpers.hpp"
 #include "stream_runtime.hpp"
 #include <QApplication>
-#include <QFileDialog>
-#include <QFileInfo>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QGridLayout>
@@ -60,7 +59,7 @@ MainWindow::MainWindow() {
     grid->addWidget(settingsBtn, 3, 3);
 
     connectBtn = new QPushButton("Connect", this);
-    scanAmiiboBtn = new QPushButton("Scan Amiibo", this);
+    scanAmiiboBtn = new QPushButton("Choose Amiibo...", this);
     quitBtn = new QPushButton("Quit", this);
 
     // Restore exact original grid positions from main branch:
@@ -267,38 +266,25 @@ void MainWindow::onScanAmiiboClicked() {
     for (int i = 0; i < 4; ++i) {
         if (g_amiiboScanPending[i].load()) { subpad = i; break; }
     }
-    if (subpad < 0) subpad = 0;
-    QString path = QFileDialog::getOpenFileName(this, "Select Amiibo .bin file", "", "Amiibo files (*.bin)");
-    if (path.isEmpty()) return;
-
-    QFileInfo fileInfo(path);
-    constexpr qint64 AMIIBO_RAW_FILE_SIZE = static_cast<qint64>(ns::AMIIBO_RAW_DUMP_SIZE);
-    constexpr qint64 AMIIBO_EXTENDED_FILE_SIZE = static_cast<qint64>(ns::AMIIBO_EXTENDED_DUMP_SIZE);
-    if (fileInfo.size() != AMIIBO_RAW_FILE_SIZE && fileInfo.size() != AMIIBO_EXTENDED_FILE_SIZE) {
-        QMessageBox::warning(this, "Invalid Amiibo File",
-            QString("Selected file is %1 bytes. Use a 540-byte raw NTAG215 dump, or a 572-byte dump with the 32-byte originality signature appended.")
-                .arg(fileInfo.size()));
+    if (subpad < 0) return;
+    AmiiboPickerDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const AmiiboCatalogItem* amiibo = dialog.selectedAmiibo();
+    if (!amiibo) return;
+    bool headOk = false;
+    bool tailOk = false;
+    const uint32_t head = amiibo->head.toUInt(&headOk, 16);
+    const uint32_t tail = amiibo->tail.toUInt(&tailOk, 16);
+    if (!headOk || !tailOk
+            || !sendAmiiboLibraryCommand(
+                ns::AMIIBO_LIBRARY_SELECT,
+                static_cast<uint8_t>(subpad), head, tail)) {
+        QMessageBox::warning(
+            this, QStringLiteral("Choose Amiibo"),
+            QStringLiteral("Could not send the Amiibo selection to the server."));
         return;
     }
-
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, "Error", "Failed to open file.");
-        return;
-    }
-    QByteArray data = f.readAll();
-    const QString readError = f.errorString();
-    f.close();
-    if (data.size() != AMIIBO_RAW_FILE_SIZE && data.size() != AMIIBO_EXTENDED_FILE_SIZE) {
-        QMessageBox::warning(this, "Error",
-            readError.isEmpty() ? "The Amiibo file changed while it was being read." : readError);
-        return;
-    }
-    set_amiibo_path(static_cast<uint8_t>(subpad), path);
-    // send to server
-    sendAmiiboData(subpad, data);
-    // local pending clear after click? server will handle timeout
-    g_amiiboScanPending[subpad].store(false);
-    g_amiiboScanDeadlineUs[subpad].store(0);
-    updateUi();
+    set_status_message(
+        "Selecting " + q_to_std(amiibo->name)
+        + " in the server Amiibo library...");
 }
