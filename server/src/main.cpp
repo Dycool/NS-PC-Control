@@ -4,6 +4,7 @@
 
 // Standard library
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -443,6 +444,56 @@ int main(int argc, char** argv) {
 
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
+    enum class AdmissionRejection : uint8_t {
+        ServerFull = 1u << 0,
+        UnsupportedProfile = 1u << 1,
+    };
+    struct AdmissionLogEntry {
+        uint64_t endpoint = 0;
+        uint8_t reasons = 0;
+    };
+    std::array<AdmissionLogEntry, 32> admission_logs{};
+    size_t admission_log_count = 0;
+    size_t admission_log_next = 0;
+    const auto admission_endpoint_key = [](const sockaddr_in& addr) {
+        return (static_cast<uint64_t>(addr.sin_addr.s_addr) << 16)
+            | static_cast<uint64_t>(addr.sin_port);
+    };
+    const auto clear_admission_log = [&](const sockaddr_in& addr) {
+        const uint64_t key = admission_endpoint_key(addr);
+        for (size_t i = 0; i < admission_log_count; ++i) {
+            if (admission_logs[i].endpoint != key) continue;
+            admission_logs[i] = admission_logs[admission_log_count - 1];
+            --admission_log_count;
+            return;
+        }
+    };
+    const auto log_admission_rejection_once =
+        [&](const sockaddr_in& addr, AdmissionRejection reason) {
+            if (!g_ctx.verbose) return;
+            const uint64_t key = admission_endpoint_key(addr);
+            const uint8_t reason_bit = static_cast<uint8_t>(reason);
+            for (size_t i = 0; i < admission_log_count; ++i) {
+                if (admission_logs[i].endpoint != key) continue;
+                if ((admission_logs[i].reasons & reason_bit) != 0) return;
+                admission_logs[i].reasons |= reason_bit;
+                if (reason == AdmissionRejection::ServerFull)
+                    std::println("[udp] server full; refusing client");
+                else
+                    std::println("[udp] refused Joy-Con L+R: native S2 mode "
+                                 "supports one controller only");
+                return;
+            }
+            const size_t slot = admission_log_count < admission_logs.size()
+                ? admission_log_count++ : admission_log_next++ % admission_logs.size();
+            admission_logs[slot] = {.endpoint = key, .reasons = reason_bit};
+            if (reason == AdmissionRejection::ServerFull)
+                std::println("[udp] server full; refusing client");
+            else
+                std::println("[udp] refused Joy-Con L+R: native S2 mode "
+                             "supports one controller only");
+        };
+
     // Set by a Gadget mode request once accepted; consumed after shutdown below
     // to re-exec this same binary with the new --hori/--s2 flag.
     bool pending_restart = false;
@@ -489,6 +540,9 @@ int main(int argc, char** argv) {
                     if (switch2_sleep_confirmed(reply_now)
                             && switch2_dormant_udp_endpoint_matches(sender)) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH_ASLEEP;
+                    }
+                    if (switch2_dormant_udp_endpoint_matches(sender)) {
+                        reply.reserved[0] |= SERVER_INFO_FLAG_SESSION_TERMINATED;
                     }
                     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
                         reply.reserved[0] |= SERVER_INFO_FLAG_SWITCH2_MODE;
@@ -815,6 +869,7 @@ int main(int argc, char** argv) {
                     }
                 }
                 forget_switch2_dormant_udp_endpoint(sender);
+                clear_admission_log(sender);
                 if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
                     s2_udp_audio_forget_endpoint(sender);
                 if (cidx >= 0) {
@@ -842,7 +897,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            const bool dormant_endpoint = sleeping && switch2_dormant_udp_endpoint_matches(sender);
+            const bool dormant_endpoint = switch2_dormant_udp_endpoint_matches(sender);
             const bool unsupported_s2_pair = report_requests_unsupported_s2_pair(report, pad_present, true);
             if (cidx >= 0 && unsupported_s2_pair) {
                 ns::ClientAssignmentPacket unsupported = make_server_profile_unsupported_assignment_packet(
@@ -851,14 +906,23 @@ int main(int argc, char** argv) {
                     sleeping);
                 sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
                 reset_client_session(cidx);
-                if (g_ctx.verbose) std::println("[udp] refused Joy-Con L+R: native S2 mode supports one controller only");
+                log_admission_rejection_once(
+                    sender, AdmissionRejection::UnsupportedProfile);
                 continue;
             }
             if (cidx == -1) {
                 if (dormant_endpoint) {
-                    // This endpoint belonged to a pre-sleep client. Keep dropping
-                    // until the desktop client observes the sleep flag, disconnects,
-                    // and reconnects as a fresh wake attempt.
+                    ns::ClientAssignmentPacket terminated =
+                        make_session_terminated_assignment_packet(
+                            static_cast<uint8_t>(std::clamp(
+                                active_client_count(now), 0,
+                                configured_client_capacity())),
+                            static_cast<uint8_t>(std::clamp(
+                                free_virtual_slot_count(now), 0,
+                                configured_virtual_port_count())),
+                            sleeping);
+                    sendto(sock, &terminated, sizeof(terminated), 0,
+                           reinterpret_cast<const sockaddr*>(&sender), slen);
                     ++g_ctx.pkts_rx;
                     continue;
                 }
@@ -873,7 +937,8 @@ int main(int argc, char** argv) {
                         static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                    if (g_ctx.verbose) std::println("[udp] refused Joy-Con L+R: native S2 mode supports one controller only");
+                    log_admission_rejection_once(
+                        sender, AdmissionRejection::UnsupportedProfile);
                     continue;
                 }
                 if (free_slots_now <= 0 || active_now >= configured_client_capacity()) {
@@ -882,7 +947,8 @@ int main(int argc, char** argv) {
                         static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                    if (g_ctx.verbose) std::println("server is full, refused UDP client");
+                    log_admission_rejection_once(
+                        sender, AdmissionRejection::ServerFull);
                     continue;
                 }
                 const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
@@ -892,6 +958,8 @@ int main(int argc, char** argv) {
                         static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
+                    log_admission_rejection_once(
+                        sender, AdmissionRejection::ServerFull);
                     continue;
                 }
 
@@ -899,6 +967,7 @@ int main(int argc, char** argv) {
                 if (cidx >= 0) {
                     wake_on_new_client = true;
                     forget_switch2_dormant_udp_endpoint(sender);
+                    clear_admission_log(sender);
                     std::println("New UDP client accepted into Slot {}", cidx + 1);
                 }
             }
@@ -909,7 +978,8 @@ int main(int argc, char** argv) {
                     static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
                     sleeping);
                 sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                if (g_ctx.verbose) std::println("server is full, dropped");
+                log_admission_rejection_once(
+                    sender, AdmissionRejection::ServerFull);
                 continue;
             }
 

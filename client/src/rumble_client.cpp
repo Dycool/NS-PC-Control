@@ -23,7 +23,8 @@ static void apply_server_info_reply(const ns::ServerInfoReply& reply) {
                                   std::memory_order_relaxed);
     g_horiModeEnabled.store((reply.reserved[0] & ns::SERVER_INFO_FLAG_HORI_MODE) != 0,
                             std::memory_order_relaxed);
-    if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SWITCH_ASLEEP) {
+    if (reply.reserved[0] & (ns::SERVER_INFO_FLAG_SWITCH_ASLEEP
+                           | ns::SERVER_INFO_FLAG_SESSION_TERMINATED)) {
         g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
     }
     if (reply.reserved[0] & ns::SERVER_INFO_FLAG_SERVER_FULL) {

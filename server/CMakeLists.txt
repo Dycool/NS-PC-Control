@@ -211,6 +211,8 @@ add_executable(ns-backend
     src/gadget_wakeup.cpp
     src/virtual_controller.cpp
     src/s2_motion_carrier.cpp
+    src/s2_native_command.cpp
+    src/s2_enumeration.cpp
     src/switch2_native.cpp
     src/s2_nfc_codec.cpp
     src/writers.cpp
@@ -274,4 +276,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include
     )
     add_test(NAME s2-motion-carrier COMMAND s2-motion-carrier-test)
+
+    add_executable(s2-native-command-test
+        tests/s2_native_command_test.cpp
+        src/s2_native_command.cpp
+    )
+    target_include_directories(s2-native-command-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME s2-native-command COMMAND s2-native-command-test)
 endif()

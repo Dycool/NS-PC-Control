@@ -55,6 +55,7 @@ struct SessionData {
     bool has_pending_gadget_reply = false;
     bool close_after_write = false;
     bool close_profile_unsupported = false;
+    bool admission_rejection_logged = false;
     uint64_t assigned_sleep_seq = 0;
     bool had_slot = false;
 };
@@ -178,6 +179,7 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
             sd->has_pending_gadget_reply = false;
             sd->close_after_write = false;
             sd->close_profile_unsupported = false;
+            sd->admission_rejection_logged = false;
             lws_set_timer_usecs(wsi, 10 * 1000);
             std::println("[ws] Connection established from client");
             break;
@@ -481,7 +483,11 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                 sd->has_pending_assignment[0] = true;
                 sd->close_after_write = true;
                 sd->close_profile_unsupported = true;
-                if (g_ctx.verbose) std::println("[ws] refused Joy-Con L+R in native S2 single-controller mode");
+                if (g_ctx.verbose && !sd->admission_rejection_logged) {
+                    std::println("[ws] refused Joy-Con L+R in native S2 "
+                                 "single-controller mode");
+                    sd->admission_rejection_logged = true;
+                }
                 lws_callback_on_writable(wsi);
                 break;
             }
@@ -496,7 +502,11 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     std::memcpy(sd->pending_assignment[0], &full, sizeof(full));
                     sd->has_pending_assignment[0] = true;
                     sd->close_after_write = true;
-                    if (g_ctx.verbose) std::println("[ws] server virtual controller slot full, refusing client");
+                    if (g_ctx.verbose && !sd->admission_rejection_logged) {
+                        std::println("[ws] server virtual controller slot full, "
+                                     "refusing client");
+                        sd->admission_rejection_logged = true;
+                    }
                     lws_callback_on_writable(wsi);
                     break;
                 }

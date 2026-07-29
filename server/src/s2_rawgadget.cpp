@@ -2,6 +2,7 @@
 
 #include "app_state.hpp"
 #include "raw_gadget_embedded.hpp"
+#include "s2_enumeration.hpp"
 #include "switch2_native.hpp"
 #include "virtual_controller.hpp"
 #include "shared/protocol.hpp"
@@ -58,6 +59,10 @@ constexpr uint8_t EP_AS_OUT = 0x03;
 constexpr uint8_t EP_AS_IN = 0x04;
 constexpr size_t QUEUE_LIMIT = 32;
 constexpr size_t AUDIO_FRAME_BYTES = ns::S2_AUDIO_USB_FRAME_BYTES;
+// A forced recovery must be observable as a physical detach by the host.
+// 100 ms is the single bounded disconnect interval used for that USB debounce.
+constexpr auto SWITCH2_REENUMERATION_DISCONNECT_INTERVAL =
+    std::chrono::milliseconds(100);
 // Server-side audio jitter buffers, in 1 ms USB frames. These absorb transient
 // scheduling/UDP hiccups so a single late tick does not drop a frame, which the
 // console (mic) or PC (playback) would otherwise hear as a click. Each queue
@@ -756,37 +761,21 @@ void handle_control(const usb_ctrlrequest& ctrl) {
         return;
     }
 
-    if ((bm & USB_TYPE_MASK) == USB_TYPE_STANDARD && !dir_in && req == USB_REQ_SET_CONFIGURATION) {
-        if (value > 1 || index != 0 || length != 0) {
+    if ((bm & USB_TYPE_MASK) == USB_TYPE_STANDARD && req == USB_REQ_SET_CONFIGURATION) {
+        constexpr uint8_t expected_type =
+            USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+        if (bm != expected_type || value > 1 || index != 0 || length != 0) {
             raw_ep0_stall();
+            request_switch2_reenumeration(
+                "malformed mandatory SET_CONFIGURATION request");
             return;
         }
-        const auto previous_state = g_rg.state.load(std::memory_order_acquire);
-        const bool already_configured = previous_state >= S2GadgetState::Configured
-                                     && previous_state < S2GadgetState::Resetting;
-        raw_ep0_ack_out(0);
+        if (!raw_ep0_ack_out(0)) {
+            request_switch2_reenumeration(
+                "failed to acknowledge mandatory SET_CONFIGURATION request");
+            return;
+        }
         if (value == 1) {
-            // A sleeping console may send SET_CONFIGURATION on the preserved
-            // pre-suspend Raw Gadget session without first delivering RESUME.
-            // If a new client is waiting, this request is the wake edge: ACK it
-            // and let the writer perform the intentional fresh hot-plug. Trying
-            // to tear down/re-enable live endpoints here races their queued I/O.
-            const bool deferred_reenumeration =
-                g_ctx.switch2_usb_reenumeration_after_resume.load(
-                    std::memory_order_acquire);
-            if (already_configured && deferred_reenumeration
-                    && any_recent_client_active(ns::now_us())) {
-                g_ctx.switch2_usb_reenumeration_after_resume.store(
-                    false, std::memory_order_release);
-                mark_switch2_usb_host_resumed();
-                g_ctx.switch2_usb_reenumeration_requested.store(
-                    true, std::memory_order_release);
-                if (g_ctx.verbose) {
-                    std::println("[s2-rg] configured session woke without RESUME; "
-                                 "scheduling deferred client hot-plug");
-                }
-                return;
-            }
             g_rg.generation.fetch_add(1, std::memory_order_relaxed);
             g_rg.halted_endpoints.store(0, std::memory_order_release);
             g_rg.fu_playback.mute.store(false, std::memory_order_release);
@@ -796,40 +785,30 @@ void handle_control(const usb_ctrlrequest& ctrl) {
             clear_connection_queues();
             switch2_native_reset_port(0);
             g_rg.state.store(S2GadgetState::Configured, std::memory_order_release);
+            switch2_enumeration_usb_configured();
             if (enable_all_endpoints()) {
                 if (ioctl(g_rg.fd, USB_RAW_IOCTL_CONFIGURE, 0) >= 0) {
                     g_rg.state.store(S2GadgetState::HidReady, std::memory_order_release);
-                    // A completed SET_CONFIGURATION is the definitive "host is
-                    // awake and has enumerated us" signal, covering both a cold
-                    // plug-in and a wake-from-suspend re-enumeration where no
-                    // RESUME event precedes the fresh enumeration. Establishing
-                    // the authoritative lifecycle here keeps poll_switch2_sleep_state
-                    // from falsely confirming sleep during the console's init
-                    // handshake, whose natural pauses would otherwise trip the
-                    // RX-gap heuristic and reset the client session mid-handshake.
-                    const bool deferred_reenumeration =
-                        g_ctx.switch2_usb_reenumeration_after_resume.exchange(
-                            false, std::memory_order_acq_rel);
                     mark_switch2_usb_host_resumed();
-                    if (deferred_reenumeration && any_recent_client_active(ns::now_us())) {
-                        if (g_ctx.verbose) {
-                            std::println("[s2-rg] host configured without RESUME; "
-                                         "performing deferred client hot-plug");
-                        }
-                        g_ctx.switch2_usb_reenumeration_requested.store(
-                            true, std::memory_order_release);
-                    }
+                    switch2_enumeration_native_handshake();
+                    if (g_ctx.verbose)
+                        std::println("[s2-rg] valid SET_CONFIGURATION(1); required endpoints enabled");
                 } else {
                     std::println(stderr, "[s2-rg] USB_RAW_IOCTL_CONFIGURE failed: {}", strerror(errno));
                     disable_all_endpoints();
                     g_rg.state.store(S2GadgetState::Failed);
+                    request_switch2_reenumeration(
+                        "USB_RAW_IOCTL_CONFIGURE failed for required S2 endpoints");
                 }
             } else {
                 std::println(stderr, "[s2-rg] one or more required endpoints could not be enabled");
                 g_rg.state.store(S2GadgetState::Failed);
+                request_switch2_reenumeration(
+                    "failed to enable one or more required S2 endpoints");
             }
         } else {
             reset_connection_state(S2GadgetState::Addressed);
+            switch2_enumeration_bus_reset();
         }
         return;
     }
@@ -1053,6 +1032,7 @@ void event_pump_loop() {
             if (errno == EINTR) continue;
             std::println(stderr, "[s2-rg] event fetch failed: {}", strerror(errno));
             g_rg.state.store(S2GadgetState::Failed, std::memory_order_release);
+            request_switch2_reenumeration("Raw Gadget event fetch failed");
             g_rg.io_running.store(false, std::memory_order_release);
             disable_all_endpoints();
             g_rg.in_cv.notify_all();
@@ -1063,43 +1043,35 @@ void event_pump_loop() {
         switch (ev->type) {
             case USB_RAW_EVENT_CONNECT:
                 g_rg.state.store(S2GadgetState::Connected);
+                switch2_enumeration_bus_reset();
                 break;
             case USB_RAW_EVENT_CONTROL:
-                if (ev->length >= sizeof(usb_ctrlrequest))
-                    handle_control(*reinterpret_cast<usb_ctrlrequest*>(ev->data));
+                if (ev->length < sizeof(usb_ctrlrequest)) {
+                    raw_ep0_stall();
+                    request_switch2_reenumeration(
+                        "truncated Raw Gadget control event");
+                } else {
+                    usb_ctrlrequest ctrl{};
+                    std::memcpy(&ctrl, ev->data, sizeof(ctrl));
+                    handle_control(ctrl);
+                }
                 break;
             case USB_RAW_EVENT_SUSPEND:
-                // Authoritative bus lifecycle: the console stopped driving the
-                // bus (it is going to sleep, or a transient idle). Feed the
-                // sleep-state tracker directly instead of inferring sleep from an
-                // idle RX stream. poll_switch2_sleep_state() debounces this, so a
-                // brief suspend that resumes within the grace window is ignored.
                 mark_switch2_usb_host_disconnected();
-                if (g_ctx.verbose) std::println("[s2-rg] USB suspend");
+                release_switch2_active_session("USB suspend", true);
+                if (g_ctx.verbose) {
+                    std::println("[s2-rg] USB suspend; active P1 session disconnected "
+                                 "without enumeration retry");
+                }
                 break;
             case USB_RAW_EVENT_RESUME: {
-                // Console resumed the bus. Clears the suspended/asleep state and
-                // marks the lifecycle as authoritative so sleep detection uses
-                // these events rather than the RX-gap heuristic.
-                // A client that arrived while suspended deferred its virtual
-                // hot-plug until this observable wake edge. Do not recycle the
-                // gadget for an ordinary transient suspend/resume with no new
-                // client; the configured USB session can continue normally.
                 const bool was_suspended =
                     g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed);
-                const bool deferred_reenumeration =
-                    g_ctx.switch2_usb_reenumeration_after_resume.exchange(
-                        false, std::memory_order_acq_rel);
                 mark_switch2_usb_host_resumed();
-                const bool client_active = any_recent_client_active(ns::now_us());
-                if (deferred_reenumeration && client_active) {
-                    g_ctx.switch2_usb_reenumeration_requested.store(
-                        true, std::memory_order_release);
-                }
                 if (g_ctx.verbose) {
-                    std::println("[s2-rg] USB resume (was_suspended={}, "
-                                 "deferred_hotplug={}, active_client={})",
-                                 was_suspended, deferred_reenumeration, client_active);
+                    std::println("[s2-rg] USB resume (was_suspended={}); "
+                                 "leaving USB lifecycle unchanged",
+                                 was_suspended);
                 }
                 break;
             }
@@ -1110,6 +1082,7 @@ void event_pump_loop() {
                 // the debounce if the bus comes back promptly.
                 mark_switch2_usb_host_disconnected();
                 reset_connection_state(S2GadgetState::Resetting);
+                switch2_enumeration_bus_reset();
                 break;
             case USB_RAW_EVENT_DISCONNECT:
                 // Unlike SUSPEND, some UDCs report only DISCONNECT when the
@@ -1117,6 +1090,7 @@ void event_pump_loop() {
                 // path before dropping the Raw Gadget connection state.
                 mark_switch2_usb_host_disconnected();
                 reset_connection_state(S2GadgetState::DeviceInitialized);
+                switch2_enumeration_bus_reset();
                 break;
             default: break;
         }
@@ -1518,9 +1492,8 @@ bool s2_rawgadget_setup(bool force, const char* reason) {
 
     if (g_rg.fd >= 0 || g_rg.io_running.load(std::memory_order_acquire)) {
         s2_rawgadget_teardown();
-        // Keep the device detached long enough for the host controller to
-        // observe a real disconnect before USB_RAW_IOCTL_RUN reconnects it.
-        if (force) std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        if (force)
+            std::this_thread::sleep_for(SWITCH2_REENUMERATION_DISCONNECT_INTERVAL);
     }
 
     if (!s2_rawgadget_module_available()) {
@@ -1579,6 +1552,7 @@ bool s2_rawgadget_setup(bool force, const char* reason) {
     g_rg.halted_endpoints.store(0, std::memory_order_release);
     clear_connection_queues();
     g_rg.state.store(S2GadgetState::DeviceInitialized);
+    switch2_enumeration_gadget_started();
     g_rg.io_running.store(true);
     g_rg.event_exited.store(false);
     g_rg.hid_in_exited.store(false);
@@ -1649,7 +1623,7 @@ bool s2_rawgadget_io_ready() {
     return state >= S2GadgetState::HidReady && state < S2GadgetState::Resetting;
 }
 bool s2_rawgadget_host_enabled() {
-    return s2_rawgadget_io_ready();
+    return switch2_enumeration_state() == S2EnumerationState::Streaming;
 }
 
 bool s2_rawgadget_submit_input_report(const uint8_t* data, size_t len) {

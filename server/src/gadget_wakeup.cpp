@@ -822,35 +822,7 @@ static void switch2_wake_adv_worker(int burst_ms) {
     send_switch2_wake_advert_once(g_ctx.switch2_wake_mac,
                                   g_ctx.switch2_wake_adv_hex,
                                   seconds, g_ctx.verbose);
-    // The advert duration gives the console time to wake. Reconnect the sole
-    // native S2 gadget afterwards so a backend that started while the USB host
-    // was suspended cannot remain attached in an unenumerated Raw Gadget state.
-    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-            && !s2_gadget_io_ready(0)) {
-        // This is the fallback for a host that never delivered RESUME or a new
-        // SET_CONFIGURATION. It supersedes the deferred wake-edge request so
-        // the successful fallback enumeration is not immediately recycled.
-        g_ctx.switch2_usb_reenumeration_after_resume.store(
-            false, std::memory_order_release);
-        g_ctx.switch2_usb_reenumeration_requested.store(true, std::memory_order_release);
-    }
     g_ctx.switch2_wake_adv_running.store(false, std::memory_order_relaxed);
-}
-
-[[maybe_unused]] static void switch2_delayed_wake_check_worker(const char* reason) {
-    std::string w_reason = reason ? reason : "client connected";
-    for (int i = 0; i < 32 && g_ctx.running.load(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        if (!any_recent_client_active(now_us())) {
-            g_ctx.switch2_delayed_wake_check_running.store(false);
-            return;
-        }
-    }
-    g_ctx.switch2_delayed_wake_check_running.store(false);
-    if (!g_ctx.switch2_usb_host_connected.load()) {
-        std::println("[wake] USB host is STILL quiet; launching Switch 2 wake advert");
-        maybe_send_switch2_wake_advert(w_reason.c_str());
-    }
 }
 
 void maybe_send_switch2_wake_advert(const char* reason, bool force) {

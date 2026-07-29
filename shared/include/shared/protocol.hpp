@@ -112,6 +112,10 @@ static constexpr uint8_t SERVER_INFO_FLAG_SERVER_FULL   = 1u << 1;
 static constexpr uint8_t SERVER_INFO_FLAG_SWITCH2_MODE  = 1u << 2;
 static constexpr uint8_t SERVER_INFO_FLAG_HORI_MODE     = 1u << 3;
 static constexpr uint8_t SERVER_INFO_FLAG_S2_AUDIO      = 1u << 4;
+// The server ended this UDP endpoint's controller session (for example after
+// S2 suspend or enumeration retry exhaustion). The client must disconnect and
+// reconnect before the endpoint can allocate another session.
+static constexpr uint8_t SERVER_INFO_FLAG_SESSION_TERMINATED = 1u << 5;
 
 // ── Buttons / hats / flags ───────────────────────────────────────────────────
 enum Button : uint16_t {
@@ -199,6 +203,7 @@ static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SERVER_FULL      = 0x02;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP    = 0x04;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_ASSIGNMENT_VALID = 0x08;
 static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED = 0x10;
+static constexpr uint8_t CLIENT_ASSIGNMENT_FLAG_SESSION_TERMINATED = 0x20;
 static constexpr uint8_t JOYCON_MOUSE_FLAG_ACTIVE = 0x01;
 static constexpr uint8_t JOYCON_MOUSE_FLAG_LEFT_BUTTON = 0x02;
 static constexpr uint8_t JOYCON_MOUSE_FLAG_RIGHT_BUTTON = 0x04;

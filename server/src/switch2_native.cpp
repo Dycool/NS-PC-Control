@@ -1,5 +1,7 @@
 #include "switch2_native.hpp"
 #include "gadget_wakeup.hpp"
+#include "s2_enumeration.hpp"
+#include "s2_native_command.hpp"
 
 #include <algorithm>
 #include <array>
@@ -434,15 +436,33 @@ bool switch2_native_handle_vendor_command(int port,
                                           std::vector<uint8_t>& response,
                                           ControllerRuntime& rt) {
     response.clear();
+    const S2StreamingCommandValidation streaming_command =
+        validate_s2_streaming_command(c);
+    if (streaming_command.status == S2StreamingCommandStatus::Truncated) {
+        request_switch2_reenumeration(
+            "truncated mandatory native streaming command 0x03/0x0A");
+        return false;
+    }
+    if (streaming_command.status == S2StreamingCommandStatus::UnsupportedReportId) {
+        if (g_ctx.verbose) {
+            std::println(stderr,
+                         "[s2][stream] rejected unsupported report id 0x{:02x}",
+                         streaming_command.report_id);
+        }
+        request_switch2_reenumeration(
+            "invalid report ID in mandatory native streaming command 0x03/0x0A");
+        return false;
+    }
     if (c.size() < 8) {
         if (g_ctx.verbose)
-            std::println(stderr, "[s2][nfc][rx] malformed vendor packet port={} len={} raw={}",
+            std::println(stderr, "[s2][native][rx] ignored short optional packet port={} len={} raw={}",
                          port, c.size(), s2_hex(c));
         return false;
     }
 
     std::lock_guard<std::mutex> lk(g_mtx);
     NativeState& s = state_for_port(port);
+    switch2_enumeration_native_handshake();
     const uint8_t id = c[0];
     const uint8_t transport = c[2];
     const uint8_t sub = c[3];
@@ -482,15 +502,18 @@ bool switch2_native_handle_vendor_command(int port,
             if (sub == 0x0D) { d[0] = 0x01; dl = 4; }
             else if (sub == 0x03) { d[0] = 0x01; dl = 4; }
             else if (sub == 0x0A) {
-                if (c.size() > 8 && (c[8] == 0x05 || c[8] == 0x07 || c[8] == 0x08 || c[8] == 0x09)) s.selected_report = c[8];
+                // validate_s2_streaming_command() above guarantees both the
+                // payload byte and a project-supported report ID are present.
+                s.selected_report = streaming_command.report_id;
                 if (g_ctx.verbose) {
                     std::println("[s2][stream] port={} console selected report=0x{:02x} "
                                  "(requested=0x{:02x})",
-                                 port, s.selected_report, c.size() > 8 ? c[8] : 0xFFu);
+                                 port, s.selected_report, streaming_command.report_id);
                 }
                 s.streaming = true;
                 rt.full_report_enabled = true;
                 rt.input_report_mode = s.selected_report;
+                switch2_enumeration_streaming_validated(s.selected_report);
                 dl = 0;
             }
             break;

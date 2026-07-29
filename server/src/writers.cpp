@@ -3,6 +3,7 @@
 #include "gadget_wakeup.hpp"
 #include "virtual_controller.hpp"
 #include "bluetooth_manager.hpp"
+#include "s2_enumeration.hpp"
 #include "switch2_native.hpp"
 
 #include <fcntl.h>
@@ -159,57 +160,12 @@ void writer_thread(std::stop_token stoken, int hz) {
         memset(rt[i].cmd_response_buf, 0, sizeof(rt[i].cmd_response_buf));
     };
     bool s2_live[HID_PORT_COUNT] = {};
-    uint64_t s2_enumeration_started_us = 0;
-    constexpr uint64_t S2_ENUMERATION_WATCHDOG_US = 12'000'000ULL;
-
-    auto any_active_client = [&]() {
-        for (int c = 0; c < MAX_CLIENTS; ++c) {
-            std::lock_guard<std::mutex> lk(g_ctx.mtx[c]);
-            if (g_ctx.clients[c].active) return true;
-        }
-        return false;
-    };
 
     auto perform_requested_s2_reenumeration = [&]() -> bool {
         if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2
-                || !g_ctx.switch2_usb_reenumeration_requested.exchange(
-                    false, std::memory_order_acq_rel)) {
-            return false;
-        }
-        // Requests can arrive from the client allocator, wake worker and USB
-        // resume/configuration callbacks. If a forced enumeration is already
-        // in flight, that fresh USB session satisfies all of them. Restarting
-        // it again here cancels the console's vendor handshake and can leave
-        // hid_writes at zero until another reconnect.
-        if (s2_enumeration_started_us != 0) {
-            g_ctx.switch2_usb_reenumeration_after_resume.store(
-                false, std::memory_order_release);
-            if (g_ctx.verbose) {
-                std::println("[s2] coalescing duplicate re-enumeration request "
-                             "while the current enumeration is still in flight");
-            }
-            return false;
-        }
-        if (g_ctx.verbose)
-            std::println("[s2] client/wake boundary; re-enumerating native USB gadget");
-        g_ctx.switch2_usb_reenumeration_after_resume.store(
-            false, std::memory_order_release);
-        clear_switch2_usb_activity();
+                || !service_switch2_reenumeration()) return false;
         close_all_fds();
         s2_live[0] = false;
-        const bool started = run_gadget_setup_if_needed(true,
-            "S2 client connected or console woke; forcing USB re-enumeration");
-        if (!started) {
-            s2_enumeration_started_us = 0;
-            // A transient teardown/setup failure must remain retryable, but do
-            // not spin at full speed if the UDC is temporarily unavailable.
-            g_ctx.switch2_usb_reenumeration_requested.store(
-                true, std::memory_order_release);
-            for (int i = 0; i < 50 && !stoken.stop_requested(); ++i)
-                std::this_thread::sleep_for(ms(10));
-        } else {
-            s2_enumeration_started_us = now_us();
-        }
         return true;
     };
 
@@ -230,7 +186,6 @@ void writer_thread(std::stop_token stoken, int hz) {
                     all_open = false;
                 } else if (!s2_live[i]) {
                     s2_live[i] = true;
-                    s2_enumeration_started_us = 0;
                     reset_port_runtime(i);
                     // The port going live means the console enumerated and
                     // configured the gadget. Re-assert the authoritative host
@@ -264,24 +219,9 @@ void writer_thread(std::stop_token stoken, int hz) {
             if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2)
                 clear_switch2_usb_activity();
             close_all_fds();
-            if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
-                    && s2_enumeration_started_us != 0
-                    && elapsed_us_saturated(now_us(), s2_enumeration_started_us)
-                        >= S2_ENUMERATION_WATCHDOG_US) {
-                if (any_active_client()) {
-                    if (g_ctx.verbose) {
-                        std::println("[s2-rg] enumeration did not reach HID-ready within {} ms; "
-                                     "recycling Raw Gadget",
-                                     S2_ENUMERATION_WATCHDOG_US / 1000ULL);
-                    }
-                    s2_enumeration_started_us = 0;
-                    g_ctx.switch2_usb_reenumeration_requested.store(
-                        true, std::memory_order_release);
-                    continue;
-                }
-                s2_enumeration_started_us = 0;
-            }
-            run_gadget_setup_if_needed(false, "requested USB gadget endpoints could not all be opened");
+            if (g_ctx.usb_controller_family != UsbControllerFamily::Switch2)
+                run_gadget_setup_if_needed(
+                    false, "requested USB gadget endpoints could not all be opened");
             for (int wait_i = 0; wait_i < 50 && !stoken.stop_requested(); ++wait_i) std::this_thread::sleep_for(ms(10));
             continue;
         }
@@ -529,6 +469,8 @@ void writer_thread(std::stop_token stoken, int hz) {
                         g_ctx.clients[c].pad_present[s] = false;
                         g_ctx.clients[c].pad_last_present_us[s] = 0;
                     }
+                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+                        switch2_enumeration_client_disconnected();
                     if (!timeout_printed[c]) {
                         std::println("UDP client released from Slot {} (timeout)", c + 1);
                         timeout_printed[c] = true;
@@ -558,10 +500,8 @@ void writer_thread(std::stop_token stoken, int hz) {
 
             reconcile_hw_slots(snap, now_stamp);
 
-            // Reconcile first so a newly connected client selecting Joy-Con L/R
-            // updates the native S2 identity before the forced disconnect. The
-            // console then sees the requested identity in this single new USB
-            // enumeration instead of briefly enumerating the idle Pro identity.
+            // Failure recovery is independent of controller identity changes.
+            // Allocating a client session alone never enters this path.
             if (perform_requested_s2_reenumeration()) break;
 
             // The console latches each port's type (device info/SPI) once per
@@ -573,19 +513,13 @@ void writer_thread(std::stop_token stoken, int hz) {
             // made to re-read the native Pro2/Joy-Con2 split identity.
             if (s1_identity_reenumeration_due(now_stamp)) {
                 if (g_ctx.verbose)
-                    std::println("Controller type changed; re-enumerating USB gadget so the console re-reads identity");
+                    std::println("[gadget-identity] controller type changed; "
+                                 "re-enumerating so the console re-reads identity");
                 clear_switch2_usb_activity();
                 close_all_fds();
                 if (run_gadget_setup_if_needed(true,
                         "controller type changed; console must re-read device identity")) {
                     mark_s1_identity_enumerated();
-                    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-                        // Treat requests raised concurrently by wake/client
-                        // callbacks as part of this same fresh enumeration.
-                        s2_enumeration_started_us = now_us();
-                        g_ctx.switch2_usb_reenumeration_after_resume.store(
-                            false, std::memory_order_release);
-                    }
                 }
                 break;
             }

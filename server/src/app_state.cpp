@@ -1,5 +1,6 @@
 #include "app_state.hpp"
 #include "gadget_wakeup.hpp"
+#include "s2_enumeration.hpp"
 #include "switch2_native.hpp"
 #include "shared/sha256.h"
 
@@ -147,6 +148,7 @@ static bool same_udp_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
 }
 
 void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr) {
+    std::lock_guard<std::mutex> lk(g_ctx.switch2_dormant_udp_mtx);
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         if (g_ctx.switch2_dormant_udp_valid[i] && same_udp_endpoint(g_ctx.switch2_dormant_udp_addrs[i], addr)) {
             g_ctx.switch2_dormant_udp_valid[i] = false;
@@ -155,6 +157,7 @@ void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr) {
 }
 
 bool switch2_dormant_udp_endpoint_matches(const sockaddr_in& addr) {
+    std::lock_guard<std::mutex> lk(g_ctx.switch2_dormant_udp_mtx);
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         if (g_ctx.switch2_dormant_udp_valid[i] && same_udp_endpoint(g_ctx.switch2_dormant_udp_addrs[i], addr)) {
             return true;
@@ -177,15 +180,12 @@ bool switch2_sleep_confirmed(uint64_t now) {
     return g_ctx.switch2_sleep_confirmed.load(std::memory_order_relaxed);
 }
 
-static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
-    bool expected = false;
-    if (!g_ctx.switch2_sleep_confirmed.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
-        return;
+void release_switch2_active_session(const char* reason, bool switch_asleep) {
+    if (switch_asleep) {
+        g_ctx.switch2_sleep_confirmed.store(true, std::memory_order_release);
     }
 
-    g_ctx.switch2_sleep_seq.fetch_add(1, std::memory_order_relaxed);
-    for (int i = 0; i < MAX_CLIENTS; ++i) g_ctx.switch2_dormant_udp_valid[i] = false;
-
+    bool released_any = false;
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         bool stop_macros = false;
         {
@@ -193,19 +193,45 @@ static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
             ClientSession& c = g_ctx.clients[i];
             if (!c.active) continue;
             if (c.source == InputSource::Udp) {
-                g_ctx.switch2_dormant_udp_addrs[i] = c.addr;
-                g_ctx.switch2_dormant_udp_valid[i] = true;
+                std::lock_guard<std::mutex> dormant_lk(g_ctx.switch2_dormant_udp_mtx);
+                int target = i;
+                for (int slot = 0; slot < MAX_CLIENTS; ++slot) {
+                    if (!g_ctx.switch2_dormant_udp_valid[slot]
+                            || same_udp_endpoint(g_ctx.switch2_dormant_udp_addrs[slot], c.addr)) {
+                        target = slot;
+                        break;
+                    }
+                }
+                g_ctx.switch2_dormant_udp_addrs[target] = c.addr;
+                g_ctx.switch2_dormant_udp_valid[target] = true;
                 reset_client_session_locked(c);
                 stop_macros = true;
             } else if (c.source == InputSource::WebSocket || c.source == InputSource::Bluetooth) {
                 reset_client_session_locked(c);
                 stop_macros = true;
             }
+            released_any = released_any || stop_macros;
         }
         if (stop_macros) server_macro_stop_all_for_client(i);
     }
+    if (released_any) {
+        g_ctx.switch2_sleep_seq.fetch_add(1, std::memory_order_acq_rel);
+        switch2_enumeration_client_disconnected();
+        if (g_ctx.verbose) {
+            std::println("[s2] active P1 client session released: {}",
+                         reason ? reason : "requested");
+        }
+    }
+}
+
+static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
+    bool expected = false;
+    if (!g_ctx.switch2_sleep_confirmed.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+        return;
+    }
+    release_switch2_active_session("Switch sleep confirmed", true);
     if (g_ctx.verbose) {
-        std::println("[switch] confirmed asleep after {:.1f}s {}; input sessions released",
+        std::println("[switch] confirmed asleep after {:.1f}s {}",
                      static_cast<double>(quiet_us) / 1000000.0, evidence);
     }
 }
@@ -213,9 +239,9 @@ static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
 void poll_switch2_sleep_state(uint64_t now) {
     if (now == 0) now = now_us();
 
-    // The current native S2 transport exposes authoritative bus lifecycle
-    // events.  An idle command/RX stream is normal while the console is awake,
-    // so only a sustained S2 USB suspend/disable may release sessions.
+    // Native S2 SUSPEND releases P1 synchronously in the Raw Gadget event
+    // thread. This branch remains as the disconnect/reset fallback for UDCs
+    // that stop the bus without delivering SUSPEND.
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
             && g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
         if (!g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed)) {
@@ -799,6 +825,21 @@ ns::ClientAssignmentPacket make_server_profile_unsupported_assignment_packet(uin
     return packet;
 }
 
+ns::ClientAssignmentPacket make_session_terminated_assignment_packet(
+    uint8_t active_clients, uint8_t free_virtual_slots, bool switch_asleep) {
+    ns::ClientAssignmentPacket packet{};
+    packet.flags = ns::CLIENT_ASSIGNMENT_FLAG_SESSION_TERMINATED;
+    if (switch_asleep) packet.flags |= ns::CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP;
+    packet.server_slot = ns::CONTROLLER_PLAYER_INDEX_UNKNOWN;
+    packet.subpad = 0;
+    packet.console_port_mask = 0;
+    packet.primary_console_port = ns::CONTROLLER_CONSOLE_PORT_NONE;
+    packet.active_clients = active_clients;
+    packet.max_clients = static_cast<uint8_t>(configured_client_capacity());
+    packet.free_virtual_slots = free_virtual_slots;
+    return packet;
+}
+
 bool any_client_source_active(InputSource source, uint64_t now) {
     if (now == 0) now = now_us();
     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -1036,6 +1077,8 @@ void reset_client_session(int client_idx) {
         reset_client_session_locked(g_ctx.clients[client_idx]);
     }
     server_macro_stop_all_for_client(client_idx);
+    if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+        switch2_enumeration_client_disconnected();
 }
 
 bool reset_client_session_if_source(int client_idx, InputSource source) {
@@ -1051,6 +1094,8 @@ bool reset_client_session_if_source(int client_idx, InputSource source) {
     }
     if (reset) {
         server_macro_stop_all_for_client(client_idx);
+        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+            switch2_enumeration_client_disconnected();
     }
     return reset;
 }
@@ -1226,25 +1271,8 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         g_ctx.clients[i].uses_pad_presence = uses_pad_presence;
         g_ctx.clients[i].udp_rumble_enabled = false;
         reset_client_slot_streams_locked(g_ctx.clients[i]);
-        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2) {
-            // An awake host can observe the disconnect immediately. While the
-            // console is suspended, however, reconnecting Raw Gadget here is
-            // invisible to it and erases the suspended -> resumed edge. Keep
-            // the intentional virtual hot-plug, but perform it after wake.
-            if (switch2_usb_host_recently_active(now)) {
-                g_ctx.switch2_usb_reenumeration_after_resume.store(
-                    false, std::memory_order_release);
-                g_ctx.switch2_usb_reenumeration_requested.store(
-                    true, std::memory_order_release);
-            } else {
-                g_ctx.switch2_usb_reenumeration_after_resume.store(
-                    true, std::memory_order_release);
-                if (g_ctx.verbose) {
-                    std::println("[s2] client connected while USB host is inactive; "
-                                 "deferring re-enumeration until console resume");
-                }
-            }
-        }
+        if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2)
+            switch2_enumeration_client_connected();
         return true;
     };
 

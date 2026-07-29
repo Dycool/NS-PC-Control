@@ -30,10 +30,9 @@ constexpr uint32_t RATE_MAX_PKT = 2000;
 constexpr int RATE_TABLE = 32;
 // Number of slots to probe when the primary hash slot holds a different IP.
 constexpr int RATE_PROBE = 4;
-// Debounce for native S2 USB suspend/disable events. It is also retained
-// for the legacy host-originated HID OUT/protocol-RX fallback used without the
-// native lifecycle signal. Writes to the gadget remain intentionally excluded
-// from wake/sleep evidence.
+// Debounce for disconnect/reset lifecycle fallback and legacy host-originated
+// HID OUT/protocol-RX sleep detection. A native Raw Gadget SUSPEND releases P1
+// immediately and does not wait for this interval.
 constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 1'500'000ULL;
 // A few RX packets can appear while the Switch is entering sleep. Do not re-arm
 // suspend disconnects until the Switch has answered continuously for this long.
@@ -208,20 +207,14 @@ struct ServerContext {
     std::atomic<uint64_t> switch2_rx_stream_since_us{0};
     std::atomic<bool> switch2_rx_stream_stable{false};
     std::atomic<bool> switch2_sleep_confirmed{false};
+    // Incremented whenever the active S2 P1 session is forcibly terminated;
+    // WebSocket sessions close when their assigned sequence becomes stale.
     std::atomic<uint64_t> switch2_sleep_seq{0};
+    // UDP endpoints released by suspend/retry exhaustion stay blocked until
+    // their authenticated FLAG_DISCONNECT establishes a real reconnect edge.
     sockaddr_in switch2_dormant_udp_addrs[MAX_CLIENTS]{};
     bool switch2_dormant_udp_valid[MAX_CLIENTS]{};
-    std::atomic<bool> switch2_force_next_wake{false}; // compatibility/no-op; runtime wake is RX-state based
-    std::atomic<bool> switch2_delayed_wake_check_running{false};
-    // S2 owns the UDC exclusively and exposes one controller, so reconnecting
-    // the native gadget is safe on each new client/wake boundary. The writer
-    // consumes this flag to serialize teardown/recreate with USB I/O.
-    std::atomic<bool> switch2_usb_reenumeration_requested{false};
-    // A client can connect while the console is suspended. Reconnecting Raw
-    // Gadget before the console wakes is not an observable hot-plug and clears
-    // the suspend edge we need. Defer that reconnect until RESUME (or the next
-    // successful SET_CONFIGURATION when the host skips a RESUME event).
-    std::atomic<bool> switch2_usb_reenumeration_after_resume{false};
+    std::mutex switch2_dormant_udp_mtx;
     std::atomic<uint8_t> console_player_leds[HID_PORT_COUNT]{};
     uint8_t hmac_key[32]{0};
     RateSlot rate_table[RATE_TABLE]{};
@@ -258,6 +251,7 @@ void mark_switch2_usb_host_disconnected();
 void rearm_switch2_wake_after_client_disconnect();
 bool switch2_usb_host_recently_active(uint64_t now);
 bool switch2_sleep_confirmed(uint64_t now = 0);
+void release_switch2_active_session(const char* reason, bool switch_asleep);
 bool switch2_wake_recent(uint64_t now = 0);
 void poll_switch2_sleep_state(uint64_t now = 0);
 void forget_switch2_dormant_udp_endpoint(const sockaddr_in& addr);
@@ -297,6 +291,9 @@ ns::ClientAssignmentPacket make_server_full_assignment_packet(uint8_t active_cli
 ns::ClientAssignmentPacket make_server_profile_unsupported_assignment_packet(uint8_t active_clients,
                                                                               uint8_t free_virtual_slots,
                                                                               bool switch_asleep = false);
+ns::ClientAssignmentPacket make_session_terminated_assignment_packet(uint8_t active_clients,
+                                                                     uint8_t free_virtual_slots,
+                                                                     bool switch_asleep = false);
 int console_port_for_client_subpad(int client_idx, int sub_idx);
 bool client_subpad_for_console_port(int console_port, int& client_idx, int& sub_idx);
 void store_client_source_names(int client_idx, const ns::ClientNamesPacket& packet);

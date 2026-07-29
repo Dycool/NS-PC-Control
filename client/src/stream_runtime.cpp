@@ -111,6 +111,10 @@ void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet) {
         g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
         set_status_message("Switch 2 mode does not support Joy-Con L + R");
     }
+    if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_SESSION_TERMINATED) {
+        g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
+        set_status_message("Server ended the controller session; reconnecting");
+    }
 }
 
 ServerAssignmentView server_assignment_snapshot() {
