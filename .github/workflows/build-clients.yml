@@ -59,9 +59,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: _cache/vcpkg-bincache
-          key: vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-msvc${{ steps.msvc.outputs.ver }}-v3
+          key: vcpkg-windows-static-qtbase-core-widgets-png-network-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-msvc${{ steps.msvc.outputs.ver }}-v4
           restore-keys: |
-            vcpkg-windows-static-qtbase-core-widgets-png-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-msvc${{ steps.msvc.outputs.ver }}-
+            vcpkg-windows-static-qtbase-core-widgets-png-network-sdl3-host-release-${{ env.QT_VERSION }}-${{ env.SDL_REF }}-${{ env.VCPKG_COMMIT }}-msvc${{ steps.msvc.outputs.ver }}-
 
       - name: Bootstrap pinned vcpkg
         shell: pwsh
@@ -98,7 +98,7 @@ jobs:
           $env:VCPKG_BINARY_SOURCES = "clear;files,$env:VCPKG_DEFAULT_BINARY_CACHE,readwrite"
 
           .\_deps\vcpkg\vcpkg.exe install `
-            "qtbase[core,widgets,png]:x64-windows-static-release" `
+            "qtbase[core,widgets,png,network]:x64-windows-static-release" `
             "sdl3:x64-windows-static-release" `
             "openssl:x64-windows-static-release" `
             --overlay-triplets="$PWD/triplets" `
@@ -279,136 +279,24 @@ jobs:
           cmake --build /tmp/SDL3-build --parallel
           cmake --install /tmp/SDL3-build
 
-      - name: Create AGL link shim
-        run: |
-          set -euo pipefail
-          # Qt 6.8.x's FindWrapOpenGL.cmake links `-framework AGL`, but Apple
-          # removed the AGL linking stub from the macOS 26 SDK (Xcode 26.x). The
-          # AGL runtime dylib still ships in the dyld shared cache, so we only
-          # need to satisfy the linker: build a stub framework whose recorded
-          # install name points at the real system path, so the shipped .app
-          # depends on the genuine AGL dylib and still loads on any macOS.
-          AGL_SHIM="$HOME/.local/agl-shim"
-          mkdir -p "$AGL_SHIM/AGL.framework"
-          echo 'static int ns_agl_shim __attribute__((unused));' > /tmp/agl_shim.c
-          clang -dynamiclib -o "$AGL_SHIM/AGL.framework/AGL" /tmp/agl_shim.c \
-            -install_name /System/Library/Frameworks/AGL.framework/Versions/A/AGL
-          echo "AGL_SHIM=$AGL_SHIM" >> "$GITHUB_ENV"
-
       - name: Build client
         run: |
           cmake -S client -B client/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$HOME/.local/sdl3-static;$Qt6_DIR" \
-            -DCMAKE_EXE_LINKER_FLAGS="-F$AGL_SHIM"
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
           cmake --build client/build --parallel
 
-      - name: Create and deploy .app bundle
+      - name: Package macOS App
         run: |
-          set -euo pipefail
-
-          APP="client/artifacts/macos/ns-client.app"
-          mkdir -p client/artifacts/macos
-          rm -rf "$APP"
-
-          echo "Build output tree:"
-          find client/build -maxdepth 4 -print | sort
-
-          BUILD_APP="$(find client/build -type d -name 'ns-client.app' -print -quit)"
-          if [ -n "$BUILD_APP" ]; then
-            echo "Found CMake-generated app bundle: $BUILD_APP"
-            ditto "$BUILD_APP" "$APP"
-          else
-            BIN=""
-            for candidate in \
-              "client/build/ns-client" \
-              "client/build/Release/ns-client" \
-              "client/build/RelWithDebInfo/ns-client" \
-              "client/build/MinSizeRel/ns-client"; do
-              if [ -f "$candidate" ]; then
-                BIN="$candidate"
-                break
-              fi
-            done
-
-            if [ -z "$BIN" ]; then
-              BIN="$(find client/build -type f -name 'ns-client' -print -quit)"
-            fi
-
-            if [ -z "$BIN" ]; then
-              echo "Could not find ns-client binary or ns-client.app in client/build"
-              exit 1
-            fi
-
-            echo "Found plain binary: $BIN"
-            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-            cp "$BIN" "$APP/Contents/MacOS/ns-client"
-            chmod +x "$APP/Contents/MacOS/ns-client"
-          fi
-
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          if [ ! -f "$APP/Contents/Info.plist" ]; then
-            cat > "$APP/Contents/Info.plist" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key>
-            <string>ns-client</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.nspccontrol.ns-client</string>
-            <key>CFBundleName</key>
-            <string>NS Client</string>
-            <key>CFBundleDisplayName</key>
-            <string>NS Client</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>1.0</string>
-            <key>CFBundleVersion</key>
-            <string>1</string>
-            <key>CFBundleIconFile</key>
-            <string>icon</string>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-          </dict>
-          </plist>
-          EOF
-          else
-            /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable ns-client" "$APP/Contents/Info.plist" 2>/dev/null || \
-              /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string ns-client" "$APP/Contents/Info.plist"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile icon" "$APP/Contents/Info.plist" 2>/dev/null || \
-              /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string icon" "$APP/Contents/Info.plist"
-          fi
-
-          cp client/icon-macos.png "$APP/Contents/Resources/icon.png"
-          cd "$APP/Contents/Resources"
-          rm -rf icon.iconset
-          mkdir -p icon.iconset
-          sips -z 16 16 icon.png --out icon.iconset/icon_16x16.png >/dev/null 2>&1
-          sips -z 32 32 icon.png --out icon.iconset/icon_16x16@2x.png >/dev/null 2>&1
-          sips -z 32 32 icon.png --out icon.iconset/icon_32x32.png >/dev/null 2>&1
-          sips -z 64 64 icon.png --out icon.iconset/icon_32x32@2x.png >/dev/null 2>&1
-          sips -z 128 128 icon.png --out icon.iconset/icon_128x128.png >/dev/null 2>&1
-          sips -z 256 256 icon.png --out icon.iconset/icon_128x128@2x.png >/dev/null 2>&1
-          sips -z 256 256 icon.png --out icon.iconset/icon_256x256.png >/dev/null 2>&1
-          sips -z 512 512 icon.png --out icon.iconset/icon_256x256@2x.png >/dev/null 2>&1
-          sips -z 512 512 icon.png --out icon.iconset/icon_512x512.png >/dev/null 2>&1
-          sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png >/dev/null 2>&1
-          iconutil -c icns icon.iconset -o icon.icns
-          rm -rf icon.iconset
-          cd - >/dev/null
-
+          APP="client/build/ns-client.app"
           macdeployqt "$APP" -verbose=1
 
-          xattr -cr "$APP" || true
-          codesign --force --deep --timestamp=none --sign - "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-
-          touch "$APP"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" client/artifacts/macos/ns-client-macos.app.zip
+          mkdir -p client/artifacts/macos
+          cd client/build
+          zip -r ../artifacts/macos/ns-client-macos.zip ns-client.app
 
       - uses: actions/upload-artifact@v6
         with:
-          name: macos-app
-          path: client/artifacts/macos/ns-client-macos.app.zip
+          name: macos-app-zip
+          path: client/artifacts/macos/ns-client-macos.zip

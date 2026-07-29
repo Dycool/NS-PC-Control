@@ -110,11 +110,13 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
 }
 
 AmiiboPickerDialog::~AmiiboPickerDialog() {
+#ifdef HAS_QT_NETWORK
     if (currentReply) {
         currentReply->abort();
         currentReply->deleteLater();
         currentReply = nullptr;
     }
+#endif
     resume_keyboard_mouse_input();
 }
 
