@@ -13,9 +13,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#ifdef HAS_QT_NETWORK
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#endif
 #include <QPixmap>
 #include <QPushButton>
 #include <QSet>
@@ -37,7 +39,9 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
     setModal(true);
     resize(760, 560);
 
+#ifdef HAS_QT_NETWORK
     networkManager = new QNetworkAccessManager(this);
+#endif
 
     auto* outer = new QVBoxLayout(this);
 
@@ -237,6 +241,7 @@ void AmiiboPickerDialog::applyFilter() {
 }
 
 void AmiiboPickerDialog::updatePreview(const AmiiboCatalogItem* item) {
+#ifdef HAS_QT_NETWORK
     if (currentReply) {
         currentReply->abort();
         currentReply->deleteLater();
@@ -273,4 +278,12 @@ void AmiiboPickerDialog::updatePreview(const AmiiboCatalogItem* item) {
         currentReply->deleteLater();
         currentReply = nullptr;
     });
+#else
+    if (!item) {
+        imagePreview->clear();
+        imagePreview->setText(QStringLiteral("Select an Amiibo"));
+    } else {
+        imagePreview->setText(item->name);
+    }
+#endif
 }

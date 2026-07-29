@@ -11,7 +11,8 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 COMPONENTS Network QUIET)
 find_package(OpenSSL REQUIRED)
 
 if(APPLE)
@@ -36,18 +37,6 @@ if(APPLE)
                     endif()
 
                     list(APPEND filtered_values "-framework")
-                endif()
-
-                if(value STREQUAL "-framework")
-                    set(pending_framework TRUE)
-                    continue()
-                endif()
-
-                if(value STREQUAL "AGL"
-                    OR value STREQUAL "-framework AGL"
-                    OR value STREQUAL "SHELL:-framework AGL"
-                    OR value STREQUAL "LINKER:-framework,AGL")
-                    continue()
                 endif()
 
                 list(APPEND filtered_values "${value}")
@@ -133,7 +122,6 @@ target_include_directories(ns-client PRIVATE
 
 target_link_libraries(ns-client PRIVATE
     Qt6::Widgets
-    Qt6::Network
     SDL3::SDL3
     Threads::Threads
     nlohmann_json::nlohmann_json
@@ -141,6 +129,11 @@ target_link_libraries(ns-client PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
 )
+
+if(TARGET Qt6::Network)
+    target_link_libraries(ns-client PRIVATE Qt6::Network)
+    target_compile_definitions(ns-client PRIVATE HAS_QT_NETWORK=1)
+endif()
 
 if(WIN32 AND TARGET Qt6::EntryPoint)
     target_link_libraries(ns-client PRIVATE Qt6::EntryPoint)

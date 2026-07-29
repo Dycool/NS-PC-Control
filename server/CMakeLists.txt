@@ -375,6 +375,7 @@ if(BUILD_TESTING)
     add_executable(amiibo-library-test
         tests/amiibo_library_test.cpp
         src/amiibo_library.cpp
+        src/s2_nfc_codec.cpp
     )
     target_include_directories(amiibo-library-test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

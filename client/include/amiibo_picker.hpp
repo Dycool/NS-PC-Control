@@ -10,8 +10,10 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+#ifdef HAS_QT_NETWORK
 class QNetworkAccessManager;
 class QNetworkReply;
+#endif
 
 struct AmiiboCatalogItem {
     QString head;
@@ -41,8 +43,10 @@ private:
     QLabel* status = nullptr;
     QPushButton* chooseButton = nullptr;
     QVector<AmiiboCatalogItem> catalogue;
+#ifdef HAS_QT_NETWORK
     QNetworkAccessManager* networkManager = nullptr;
     QNetworkReply* currentReply = nullptr;
+#endif
 
     void loadCatalogue();
     bool parseCatalogue(const QByteArray& json, QString* error = nullptr);
