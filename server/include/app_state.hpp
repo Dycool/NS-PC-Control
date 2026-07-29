@@ -37,6 +37,17 @@ constexpr uint64_t SWITCH2_USB_ACTIVITY_FRESH_US = 1'500'000ULL;
 // A few RX packets can appear while the Switch is entering sleep. Do not re-arm
 // suspend disconnects until the Switch has answered continuously for this long.
 constexpr uint64_t SWITCH2_USB_ACTIVITY_STABLE_US = 3'000'000ULL;
+// Legacy f_hid gadgets can briefly re-enumerate and exchange host commands
+// while the console is powering down, even though it will stop polling again.
+// Once S1/HORI sleep is confirmed, only an explicit wake or a much longer
+// uninterrupted host-output stream proves that the console truly resumed.
+constexpr uint64_t SWITCH1_USB_RESUME_STABLE_US = 30'000'000ULL;
+// Switch 2 power-down includes a transient detach, a complete native
+// re-enumeration roughly 6-7 seconds later, and only then the durable suspend.
+// Treating the first 1.5-second gap as sleep caused reconnecting clients to
+// inject a wake advertisement into that transition. Require a quiet window
+// longer than the observed power-down re-enumeration before publishing asleep.
+constexpr uint64_t SWITCH2_USB_SLEEP_CONFIRM_US = 10'000'000ULL;
 constexpr uint64_t SWITCH2_WAKE_ADV_COOLDOWN_US = 8'000'000ULL;
 // While a wake advert has just been sent, UDP clients must be allowed to stay
 // connected even though Switch RX has not resumed yet. Otherwise a desktop
@@ -90,6 +101,7 @@ struct ClientSession {
     bool active = false;
     InputSource source = InputSource::None;
     sockaddr_in addr{};
+    uint64_t connected_us = 0;
     uint64_t last_rx_us = 0;
     uint32_t expected_seq = 0;
     bool first_pkt = true;

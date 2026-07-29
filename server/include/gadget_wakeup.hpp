@@ -3,6 +3,7 @@
 #include "shared/protocol.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -27,4 +28,5 @@ bool s2_gadget_poll_control_report(int id, std::vector<unsigned char>& out_repor
 bool s2_gadget_poll_output_report(int id, std::vector<unsigned char>& out_report);
 void s2_gadget_drain_output(int id);
 bool s2_gadget_poll_vendor_report(int id, std::vector<unsigned char>& out_report);
-bool s2_gadget_submit_vendor_report(int id, const uint8_t* data, size_t len);
+bool s2_gadget_submit_vendor_report(int id, const uint8_t* data, size_t len,
+                                    std::span<const uint8_t> request);

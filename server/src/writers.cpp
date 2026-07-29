@@ -880,7 +880,17 @@ void writer_thread(std::stop_token stoken, int hz) {
                             std::vector<uint8_t> vendor_resp;
                             if (switch2_native_handle_vendor_command(h, std::span<const uint8_t>(vendor_cmd.data(), vendor_cmd.size()), vendor_resp, rt[h])
                                     && !vendor_resp.empty()) {
-                                const bool queued = s2_gadget_submit_vendor_report(h, vendor_resp.data(), vendor_resp.size());
+                                const bool queued = s2_gadget_submit_vendor_report(
+                                    h, vendor_resp.data(), vendor_resp.size(),
+                                    std::span<const uint8_t>(
+                                        vendor_cmd.data(), vendor_cmd.size()));
+                                if (!queued
+                                        && switch2_enumeration_state()
+                                            != S2EnumerationState::Streaming) {
+                                    request_switch2_reenumeration(
+                                        "native vendor response queue could not accept "
+                                        "a mandatory handshake reply");
+                                }
                                 if (g_ctx.verbose && vendor_cmd.size() >= 4 && vendor_cmd[0] == 0x01) {
                                     std::println("[s2][nfc][tx-queue] t_us={} port={} sub=0x{:02x} response_len={} queued={}",
                                                  now_us(), h, vendor_cmd[3], vendor_resp.size(), queued);

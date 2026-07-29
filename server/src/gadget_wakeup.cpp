@@ -286,9 +286,11 @@ bool s2_gadget_poll_vendor_report(int id, std::vector<unsigned char>& out_report
     return id == 0 && s2_rawgadget_poll_vendor_report(out_report);
 }
 
-bool s2_gadget_submit_vendor_report(int id, const uint8_t* data, size_t len) {
+bool s2_gadget_submit_vendor_report(int id, const uint8_t* data, size_t len,
+                                    std::span<const uint8_t> request) {
     const bool is_nfc = data != nullptr && len != 0 && data[0] == 0x01;
-    const bool ok = id == 0 && s2_rawgadget_submit_vendor_report(data, len);
+    const bool ok = id == 0
+        && s2_rawgadget_submit_vendor_report(data, len, request);
     if (g_ctx.verbose && is_nfc) {
         std::println("[s2][nfc][tx-queue] {} t_us={} port={} len={} raw={}",
                      ok ? "accepted" : "rejected", now_us(), id, len,

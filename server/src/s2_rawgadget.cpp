@@ -339,6 +339,12 @@ struct QueueEntry {
     uint64_t generation;
 };
 
+struct VendorResponseEntry {
+    std::vector<uint8_t> data;
+    std::vector<uint8_t> request;
+    uint64_t generation;
+};
+
 struct S2RawGadgetCtx {
     std::atomic<S2GadgetState> state{S2GadgetState::Stopped};
     std::atomic<bool> io_running{false};
@@ -365,7 +371,7 @@ struct S2RawGadgetCtx {
 
     std::mutex vendor_in_mtx;
     std::condition_variable vendor_in_cv;
-    std::deque<QueueEntry> vendor_in_reports;
+    std::deque<VendorResponseEntry> vendor_in_reports;
 
     std::mutex vendor_out_mtx;
     std::deque<QueueEntry> vendor_out_reports;
@@ -1058,7 +1064,10 @@ void event_pump_loop() {
                 break;
             case USB_RAW_EVENT_SUSPEND:
                 mark_switch2_usb_host_disconnected();
-                release_switch2_active_session("USB suspend", true);
+                // Release P1 immediately, but do not publish durable sleep yet:
+                // Switch 2 power-down includes a transient suspend followed by
+                // a native re-enumeration several seconds later.
+                release_switch2_active_session("USB suspend", false);
                 if (g_ctx.verbose) {
                     std::println("[s2-rg] USB suspend; active P1 session disconnected "
                                  "without enumeration retry");
@@ -1154,6 +1163,25 @@ void vendor_out_loop() {
         if (r > 0) {
             if (generation != g_rg.generation.load(std::memory_order_acquire)) continue;
             std::lock_guard<std::mutex> lk(g_rg.vendor_out_mtx);
+            const auto duplicate = std::find_if(
+                g_rg.vendor_out_reports.begin(), g_rg.vendor_out_reports.end(),
+                [&](const QueueEntry& pending) {
+                    return pending.generation == generation
+                        && pending.data.size() == static_cast<size_t>(r)
+                        && std::equal(pending.data.begin(), pending.data.end(),
+                                      buf.begin());
+                });
+            if (duplicate != g_rg.vendor_out_reports.end()) {
+                // Native commands are request/reply transactions. During a
+                // cold wake the host can enqueue the same OUT command twice
+                // before the writer thread has consumed the first one. If both
+                // reach the response queue, the extra reply is delivered as the
+                // answer to the next command and every following step waits for
+                // the host's 10-second retry timeout. Coalesce only while the
+                // exact request is still unprocessed; a later repeat after the
+                // transaction drains remains a new request.
+                continue;
+            }
             if (g_rg.vendor_out_reports.size() >= QUEUE_LIMIT) g_rg.vendor_out_reports.pop_front();
             g_rg.vendor_out_reports.push_back({std::vector<uint8_t>(buf.begin(), buf.begin() + r), generation});
             continue;
@@ -1166,6 +1194,7 @@ void vendor_out_loop() {
 void vendor_in_loop() {
     while (g_rg.io_running.load(std::memory_order_relaxed)) {
         std::vector<uint8_t> report;
+        std::vector<uint8_t> request;
         uint64_t report_gen = 0;
         {
             std::unique_lock<std::mutex> lk(g_rg.vendor_in_mtx);
@@ -1174,12 +1203,28 @@ void vendor_in_loop() {
             });
             if (!g_rg.io_running.load(std::memory_order_relaxed)) break;
             if (g_rg.vendor_in_reports.empty()) continue;
-            report = std::move(g_rg.vendor_in_reports.front().data);
+            // Leave the entry at the front until its endpoint write completes.
+            // A retried command can then see that its response is already
+            // pending instead of appending a stale duplicate behind it.
+            report = g_rg.vendor_in_reports.front().data;
+            request = g_rg.vendor_in_reports.front().request;
             report_gen = g_rg.vendor_in_reports.front().generation;
-            g_rg.vendor_in_reports.pop_front();
         }
-        if (g_rg.vendor_in_h < 0 || report.empty()) continue;
-        if (report_gen != g_rg.generation.load(std::memory_order_relaxed)) continue;
+        const auto remove_pending_response = [&] {
+            std::lock_guard<std::mutex> lk(g_rg.vendor_in_mtx);
+            if (g_rg.vendor_in_reports.empty()) return;
+            const auto& pending = g_rg.vendor_in_reports.front();
+            if (pending.generation == report_gen
+                    && pending.request == request
+                    && pending.data == report) {
+                g_rg.vendor_in_reports.pop_front();
+            }
+        };
+        if (g_rg.vendor_in_h < 0 || report.empty()
+                || report_gen != g_rg.generation.load(std::memory_order_relaxed)) {
+            remove_pending_response();
+            continue;
+        }
 
         // Vendor responses are part of the controller initialisation handshake.
         // Unlike periodic HID input, they cannot be dropped when the UDC briefly
@@ -1203,6 +1248,7 @@ void vendor_in_loop() {
             if (write_errno != EAGAIN && write_errno != EWOULDBLOCK) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        remove_pending_response();
         if (g_ctx.verbose) {
             const uint8_t id = report.empty() ? 0 : report[0];
             const uint8_t sub = report.size() > 3 ? report[3] : 0;
@@ -1662,11 +1708,27 @@ bool s2_rawgadget_poll_vendor_report(std::vector<uint8_t>& out_report) {
     }
     return false;
 }
-bool s2_rawgadget_submit_vendor_report(const uint8_t* data, size_t len) {
+bool s2_rawgadget_submit_vendor_report(const uint8_t* data, size_t len,
+                                       std::span<const uint8_t> request) {
     if (!data || len == 0) return false;
     std::lock_guard<std::mutex> lk(g_rg.vendor_in_mtx);
-    if (g_rg.vendor_in_reports.size() >= QUEUE_LIMIT) g_rg.vendor_in_reports.pop_front();
-    g_rg.vendor_in_reports.push_back({std::vector<uint8_t>(data, data + len), g_rg.generation.load()});
+    const uint64_t generation = g_rg.generation.load(std::memory_order_acquire);
+    for (const auto& pending : g_rg.vendor_in_reports) {
+        if (pending.generation == generation
+                && pending.request.size() == request.size()
+                && std::equal(pending.request.begin(), pending.request.end(),
+                              request.begin())) {
+            // The console retried a command whose reply is still queued or in
+            // flight. One response satisfies that transaction; queuing another
+            // would be delivered stale after the host advances its handshake.
+            return true;
+        }
+    }
+    if (g_rg.vendor_in_reports.size() >= QUEUE_LIMIT) return false;
+    g_rg.vendor_in_reports.push_back({
+        std::vector<uint8_t>(data, data + len),
+        std::vector<uint8_t>(request.begin(), request.end()),
+        generation});
     g_rg.vendor_in_cv.notify_one();
     return true;
 }

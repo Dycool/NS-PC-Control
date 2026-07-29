@@ -115,10 +115,6 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                 pending_amiibo_request[s].sequence_le[0] = static_cast<uint8_t>(c.amiibo_request_seq[s]);
                 pending_amiibo_request[s].sequence_le[1] = static_cast<uint8_t>(c.amiibo_request_seq[s] >> 8);
                 has_amiibo_request[s] = true;
-                if (g_ctx.verbose)
-                    std::println("[s2][nfc][udp-tx] preparing ui request client={} subpad={} requested={} seq={} repeats_before={}",
-                                 client_idx, s, c.amiibo_requested[s], c.amiibo_request_seq[s],
-                                 c.amiibo_request_repeats[s]);
                 if (c.amiibo_request_repeats[s] != 0) --c.amiibo_request_repeats[s];
                 c.amiibo_request_pending[s] = c.amiibo_request_repeats[s] != 0;
             }
@@ -178,10 +174,6 @@ void flush_feedback_to_udp(int sock, int client_idx) {
                     std::println(stderr,
                                  "[s2][nfc][udp-tx] ui request send failed subpad={} requested={} seq={} error={}",
                                  s, pending_amiibo_request[s].requested != 0, seq, std::strerror(errno));
-                } else {
-                    std::println("[s2][nfc][udp-tx] ui request sent subpad={} requested={} seq={} bytes={}/{}",
-                                 s, pending_amiibo_request[s].requested != 0, seq, sent,
-                                 sizeof(ns::AmiiboRequestPacket));
                 }
             }
         }

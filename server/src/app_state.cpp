@@ -80,7 +80,14 @@ void mark_switch2_usb_activity(uint64_t now) {
 
     g_ctx.switch2_usb_host_connected.store(true, std::memory_order_relaxed);
 
-    if (elapsed_us_saturated(now, stream_since) >= SWITCH2_USB_ACTIVITY_STABLE_US) {
+    const bool legacy_unprompted_resume =
+        g_ctx.usb_controller_family != UsbControllerFamily::Switch2 &&
+        g_ctx.switch2_sleep_confirmed.load(std::memory_order_relaxed) &&
+        !switch2_wake_recent(now);
+    const uint64_t stable_required = legacy_unprompted_resume
+        ? SWITCH1_USB_RESUME_STABLE_US
+        : SWITCH2_USB_ACTIVITY_STABLE_US;
+    if (elapsed_us_saturated(now, stream_since) >= stable_required) {
         bool was_stable = g_ctx.switch2_rx_stream_stable.exchange(true, std::memory_order_relaxed);
         g_ctx.switch2_sleep_confirmed.store(false, std::memory_order_relaxed);
         if (!was_stable && g_ctx.verbose) {
@@ -128,10 +135,24 @@ void mark_switch2_usb_host_disconnected() {
 bool switch2_usb_host_recently_active(uint64_t now) {
     if (g_ctx.usb_controller_family == UsbControllerFamily::Switch2
             && g_ctx.switch2_usb_lifecycle_seen.load(std::memory_order_relaxed)) {
-        const bool active = !g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed);
-        g_ctx.switch2_usb_host_connected.store(active, std::memory_order_relaxed);
-        return active;
+        const bool suspended =
+            g_ctx.switch2_usb_host_suspended.load(std::memory_order_relaxed);
+        g_ctx.switch2_usb_host_connected.store(!suspended, std::memory_order_relaxed);
+        if (!suspended) return true;
+
+        // A Switch 2 power-down briefly detaches, re-enumerates about 6-7
+        // seconds later, and then performs its durable detach. Suppress wake
+        // advertisements during that native transition; injecting one here
+        // can leave the controller enumerated but unresponsive.
+        if (g_ctx.switch2_sleep_confirmed.load(std::memory_order_relaxed))
+            return false;
+        const uint64_t inactive_since =
+            g_ctx.switch2_usb_inactive_since_us.load(std::memory_order_relaxed);
+        return inactive_since == 0 ||
+               elapsed_us_saturated(now, inactive_since) <=
+                   SWITCH2_USB_SLEEP_CONFIRM_US;
     }
+
     uint64_t last = g_ctx.switch2_last_usb_activity_us.load(std::memory_order_relaxed);
     if (last == 0 || elapsed_us_saturated(now, last) > SWITCH2_USB_ACTIVITY_FRESH_US) {
         g_ctx.switch2_usb_host_connected.store(false, std::memory_order_relaxed);
@@ -229,10 +250,34 @@ static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
     if (!g_ctx.switch2_sleep_confirmed.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
         return;
     }
+    const uint64_t inactive_since =
+        g_ctx.switch2_usb_inactive_since_us.load(std::memory_order_relaxed);
+    bool client_waiting = false;
+    if (inactive_since != 0) {
+        const uint64_t now = now_us();
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            std::lock_guard<std::mutex> lk(g_ctx.mtx[i]);
+            const ClientSession& client = g_ctx.clients[i];
+            if (client.active && client.connected_us >= inactive_since &&
+                    client.last_rx_us != 0 &&
+                    elapsed_us_saturated(now, client.last_rx_us) <=
+                        CLIENT_TIMEOUT_US) {
+                client_waiting = true;
+                break;
+            }
+        }
+    }
     release_switch2_active_session("Switch sleep confirmed", true);
     if (g_ctx.verbose) {
         std::println("[switch] confirmed asleep after {:.1f}s {}",
                      static_cast<double>(quiet_us) / 1000000.0, evidence);
+    }
+    // A new client may have arrived during the power-down debounce. Its first
+    // wake was deliberately suppressed while the Switch could still
+    // re-enumerate by itself, so issue one now that sleep is durable.
+    if (client_waiting) {
+        maybe_send_switch2_wake_advert(
+            "client waiting after durable Switch sleep");
     }
 }
 
@@ -250,7 +295,7 @@ void poll_switch2_sleep_state(uint64_t now) {
         }
         const uint64_t inactive_since = g_ctx.switch2_usb_inactive_since_us.load(std::memory_order_relaxed);
         if (inactive_since == 0
-                || elapsed_us_saturated(now, inactive_since) <= SWITCH2_USB_ACTIVITY_FRESH_US
+                || elapsed_us_saturated(now, inactive_since) <= SWITCH2_USB_SLEEP_CONFIRM_US
                 || switch2_wake_recent(now)) {
             return;
         }
@@ -1060,7 +1105,8 @@ static void reset_client_slot_streams_locked(ClientSession& c) {
 }
 
 void reset_client_session_locked(ClientSession& c) {
-    c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0; c.last_rx_us = 0;
+    c.active = false; c.source = InputSource::None; c.first_pkt = true; c.expected_seq = 0;
+    c.connected_us = 0; c.last_rx_us = 0;
     c.report.reset(); c.has_new_report = false; c.report_generation = 0;
     clear_all_motion(c);
     c.uses_pad_presence = c.udp_rumble_enabled = false;
@@ -1264,6 +1310,7 @@ int allocate_client_session(uint64_t now, const sockaddr_in* addr, bool uses_pad
         g_ctx.clients[i].source = source;
         g_ctx.clients[i].first_pkt = true;
         g_ctx.clients[i].expected_seq = 0;
+        g_ctx.clients[i].connected_us = now;
         g_ctx.clients[i].last_rx_us = now;
         g_ctx.clients[i].addr = addr ? *addr : sockaddr_in{};
         g_ctx.clients[i].report.reset();

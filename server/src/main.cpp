@@ -444,13 +444,20 @@ int main(int argc, char** argv) {
 
     pollfd udp_poll{.fd = sock, .events = POLLIN, .revents = 0};
 
-    enum class AdmissionRejection : uint8_t {
-        ServerFull = 1u << 0,
-        UnsupportedProfile = 1u << 1,
+    enum class UdpRejection : uint16_t {
+        ServerFull           = 1u << 0,
+        UnsupportedProfile   = 1u << 1,
+        BadControllerHmac    = 1u << 2,
+        ShortControllerPacket = 1u << 3,
+        BadGadgetModeHmac    = 1u << 4,
+        BadMouseHmac         = 1u << 5,
+        MouseWithoutClient   = 1u << 6,
+        BadMacroHmac         = 1u << 7,
+        BadNamesHmac         = 1u << 8,
     };
     struct AdmissionLogEntry {
         uint64_t endpoint = 0;
-        uint8_t reasons = 0;
+        uint16_t reasons = 0;
     };
     std::array<AdmissionLogEntry, 32> admission_logs{};
     size_t admission_log_count = 0;
@@ -459,39 +466,83 @@ int main(int argc, char** argv) {
         return (static_cast<uint64_t>(addr.sin_addr.s_addr) << 16)
             | static_cast<uint64_t>(addr.sin_port);
     };
+    const auto admission_ip_key = [](const sockaddr_in& addr) {
+        return static_cast<uint64_t>(addr.sin_addr.s_addr) << 16;
+    };
     const auto clear_admission_log = [&](const sockaddr_in& addr) {
-        const uint64_t key = admission_endpoint_key(addr);
-        for (size_t i = 0; i < admission_log_count; ++i) {
-            if (admission_logs[i].endpoint != key) continue;
+        const uint64_t endpoint_key = admission_endpoint_key(addr);
+        const uint64_t ip_key = admission_ip_key(addr);
+        for (size_t i = 0; i < admission_log_count;) {
+            if (admission_logs[i].endpoint != endpoint_key
+                    && admission_logs[i].endpoint != ip_key) {
+                ++i;
+                continue;
+            }
             admission_logs[i] = admission_logs[admission_log_count - 1];
             --admission_log_count;
-            return;
         }
     };
-    const auto log_admission_rejection_once =
-        [&](const sockaddr_in& addr, AdmissionRejection reason) {
+    const auto print_udp_rejection = [](UdpRejection reason) {
+        switch (reason) {
+            case UdpRejection::ServerFull:
+                std::println("[udp] server full; refusing client");
+                break;
+            case UdpRejection::UnsupportedProfile:
+                std::println("[udp] refused Joy-Con L+R: native S2 mode "
+                             "supports one controller only");
+                break;
+            case UdpRejection::BadControllerHmac:
+                std::println("[udp] bad controller HMAC; dropping endpoint packets");
+                break;
+            case UdpRejection::ShortControllerPacket:
+                std::println("[udp] short controller packet; dropping endpoint packets");
+                break;
+            case UdpRejection::BadGadgetModeHmac:
+                std::println("[udp] bad gadget-mode HMAC; dropping endpoint packets");
+                break;
+            case UdpRejection::BadMouseHmac:
+                std::println("[udp] bad Joy-Con mouse HMAC; dropping endpoint packets");
+                break;
+            case UdpRejection::MouseWithoutClient:
+                std::println("[s2][mouse][udp-rx] packets matched no active UDP client; "
+                             "dropping endpoint packets");
+                break;
+            case UdpRejection::BadMacroHmac:
+                std::println("[udp] bad macro HMAC; dropping endpoint packets");
+                break;
+            case UdpRejection::BadNamesHmac:
+                std::println("[udp] bad names HMAC; dropping endpoint packets");
+                break;
+        }
+    };
+    const auto log_udp_rejection_once =
+        [&](const sockaddr_in& addr, UdpRejection reason) {
             if (!g_ctx.verbose) return;
-            const uint64_t key = admission_endpoint_key(addr);
-            const uint8_t reason_bit = static_cast<uint8_t>(reason);
+            // Authentication and framing failures are IP-scoped so rotating a
+            // UDP source port cannot turn one bad client into console spam.
+            // Capacity/profile refusals remain endpoint-scoped and are cleared
+            // when that concrete client later connects successfully.
+            const bool ip_scoped =
+                reason == UdpRejection::BadControllerHmac
+                || reason == UdpRejection::ShortControllerPacket
+                || reason == UdpRejection::BadGadgetModeHmac
+                || reason == UdpRejection::BadMouseHmac
+                || reason == UdpRejection::BadMacroHmac
+                || reason == UdpRejection::BadNamesHmac;
+            const uint64_t key = ip_scoped
+                ? admission_ip_key(addr) : admission_endpoint_key(addr);
+            const uint16_t reason_bit = static_cast<uint16_t>(reason);
             for (size_t i = 0; i < admission_log_count; ++i) {
                 if (admission_logs[i].endpoint != key) continue;
                 if ((admission_logs[i].reasons & reason_bit) != 0) return;
                 admission_logs[i].reasons |= reason_bit;
-                if (reason == AdmissionRejection::ServerFull)
-                    std::println("[udp] server full; refusing client");
-                else
-                    std::println("[udp] refused Joy-Con L+R: native S2 mode "
-                                 "supports one controller only");
+                print_udp_rejection(reason);
                 return;
             }
             const size_t slot = admission_log_count < admission_logs.size()
                 ? admission_log_count++ : admission_log_next++ % admission_logs.size();
             admission_logs[slot] = {.endpoint = key, .reasons = reason_bit};
-            if (reason == AdmissionRejection::ServerFull)
-                std::println("[udp] server full; refusing client");
-            else
-                std::println("[udp] refused Joy-Con L+R: native S2 mode "
-                             "supports one controller only");
+            print_udp_rejection(reason);
         };
 
     // Set by a Gadget mode request once accepted; consumed after shutdown below
@@ -618,8 +669,9 @@ int main(int argc, char** argv) {
                                 g_ctx.running.store(false, std::memory_order_relaxed);
                             }
                         }
-                    } else if (g_ctx.verbose) {
-                        std::println("bad gadget-mode HMAC, dropped");
+                    } else {
+                        log_udp_rejection_once(
+                            sender, UdpRejection::BadGadgetModeHmac);
                     }
                     continue;
                 }
@@ -633,7 +685,8 @@ int main(int argc, char** argv) {
                     if (hmac_verify({g_ctx.hmac_key, 32},
                                     {udp_rx.data(), ns::JOYCON_MOUSE_AUTH_SIZE},
                                     {udp_rx.data() + ns::JOYCON_MOUSE_AUTH_SIZE, HMAC_TAG_SIZE}) != 0) {
-                        if (g_ctx.verbose) std::println("bad Joy-Con mouse HMAC, dropped");
+                        log_udp_rejection_once(
+                            sender, UdpRejection::BadMouseHmac);
                         continue;
                     }
                     if (!rate_allow(sender.sin_addr.s_addr)) continue;
@@ -655,9 +708,9 @@ int main(int argc, char** argv) {
                     }
                     if (client_idx >= 0) {
                         update_joycon_mouse_stream(client_idx, mouse, now_us());
-                    } else if (g_ctx.verbose) {
-                        std::println("[s2][mouse][udp-rx] packet from {}:{} matched no active UDP client; dropped",
-                                     inet_ntoa(sender.sin_addr), ntohs(sender.sin_port));
+                    } else {
+                        log_udp_rejection_once(
+                            sender, UdpRejection::MouseWithoutClient);
                     }
                     continue;
                 }
@@ -787,8 +840,9 @@ int main(int argc, char** argv) {
                                                  text_len);
                                 server_macro_start(cidx, mh.subpad < 4 ? mh.subpad : 0, text);
                             }
-                        } else if (g_ctx.verbose) {
-                            std::println("bad macro HMAC, dropped");
+                        } else {
+                            log_udp_rejection_once(
+                                sender, UdpRejection::BadMacroHmac);
                         }
                     }
                     continue;
@@ -819,8 +873,9 @@ int main(int argc, char** argv) {
                             }
                             if (cidx >= 0) store_client_source_names(cidx, names);
                         }
-                    } else if (g_ctx.verbose) {
-                        std::println("bad names HMAC, dropped");
+                    } else {
+                        log_udp_rejection_once(
+                            sender, UdpRejection::BadNamesHmac);
                     }
                     continue;
                 }
@@ -831,7 +886,8 @@ int main(int argc, char** argv) {
             if (!rate_allow(src_ip)) continue;
 
             if (bytes < static_cast<ssize_t>(20 + HMAC_TAG_SIZE)) {
-                if (g_ctx.verbose) std::println("[udp] short packet, dropped");
+                log_udp_rejection_once(
+                    sender, UdpRejection::ShortControllerPacket);
                 continue;
             }
 
@@ -839,7 +895,8 @@ int main(int argc, char** argv) {
             if (hmac_verify({g_ctx.hmac_key, 32},
                             {udp_rx.data(), auth_len},
                             {udp_rx.data() + auth_len, HMAC_TAG_SIZE}) != 0) {
-                if (g_ctx.verbose) std::println("bad HMAC, dropped");
+                log_udp_rejection_once(
+                    sender, UdpRejection::BadControllerHmac);
                 continue;
             }
 
@@ -906,8 +963,8 @@ int main(int argc, char** argv) {
                     sleeping);
                 sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
                 reset_client_session(cidx);
-                log_admission_rejection_once(
-                    sender, AdmissionRejection::UnsupportedProfile);
+                log_udp_rejection_once(
+                    sender, UdpRejection::UnsupportedProfile);
                 continue;
             }
             if (cidx == -1) {
@@ -937,8 +994,8 @@ int main(int argc, char** argv) {
                         static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &unsupported, sizeof(unsupported), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                    log_admission_rejection_once(
-                        sender, AdmissionRejection::UnsupportedProfile);
+                    log_udp_rejection_once(
+                        sender, UdpRejection::UnsupportedProfile);
                     continue;
                 }
                 if (free_slots_now <= 0 || active_now >= configured_client_capacity()) {
@@ -947,8 +1004,8 @@ int main(int argc, char** argv) {
                         static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                    log_admission_rejection_once(
-                        sender, AdmissionRejection::ServerFull);
+                    log_udp_rejection_once(
+                        sender, UdpRejection::ServerFull);
                     continue;
                 }
                 const int required_slots = requested_virtual_slots_for_report(report, pad_present, true);
@@ -958,8 +1015,8 @@ int main(int argc, char** argv) {
                         static_cast<uint8_t>(std::clamp(free_slots_now, 0, configured_virtual_port_count())),
                         sleeping);
                     sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                    log_admission_rejection_once(
-                        sender, AdmissionRejection::ServerFull);
+                    log_udp_rejection_once(
+                        sender, UdpRejection::ServerFull);
                     continue;
                 }
 
@@ -978,8 +1035,8 @@ int main(int argc, char** argv) {
                     static_cast<uint8_t>(std::clamp(free_virtual_slot_count(now), 0, configured_virtual_port_count())),
                     sleeping);
                 sendto(sock, &full, sizeof(full), 0, reinterpret_cast<const sockaddr*>(&sender), slen);
-                log_admission_rejection_once(
-                    sender, AdmissionRejection::ServerFull);
+                log_udp_rejection_once(
+                    sender, UdpRejection::ServerFull);
                 continue;
             }
 
@@ -1035,7 +1092,10 @@ int main(int argc, char** argv) {
             if (!accepted) continue;
             ++g_ctx.pkts_rx;
             if (wake_on_new_client) {
-                maybe_send_switch2_wake_advert("UDP client connected", true);
+                // A reconnect can arrive while the Switch is already in its
+                // native USB handshake. Respect live USB activity and the wake
+                // cooldown instead of sending another forced wake advert.
+                maybe_send_switch2_wake_advert("UDP client connected");
             }
             flush_feedback_to_udp(sock, cidx);
         }
