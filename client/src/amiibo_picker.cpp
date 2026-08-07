@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #ifdef HAS_QT_NETWORK
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -25,6 +26,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 
 bool AmiiboCatalogItem::isV3() const {
     bool ok = false;
@@ -83,9 +85,13 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
     outer->addWidget(status);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+    formatButton = buttons->addButton(
+        QStringLiteral("Format Amiibo"),
+        QDialogButtonBox::DestructiveRole);
     chooseButton = buttons->addButton(
         QStringLiteral("Use selected Amiibo"),
         QDialogButtonBox::AcceptRole);
+    formatButton->setEnabled(false);
     chooseButton->setEnabled(false);
     outer->addWidget(buttons);
 
@@ -94,15 +100,39 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
     connect(seriesBox, &QComboBox::currentTextChanged,
             this, [this] { applyFilter(); });
     connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
-        chooseButton->setEnabled(row >= 0);
+        const bool selected = row >= 0;
+        chooseButton->setEnabled(selected);
+        formatButton->setEnabled(selected);
         updatePreview(selectedAmiibo());
     });
     connect(list, &QListWidget::itemDoubleClicked,
             this, [this](QListWidgetItem*) {
-                if (selectedAmiibo()) accept();
+                if (!selectedAmiibo()) return;
+                action = AmiiboPickerAction::Use;
+                accept();
             });
-    connect(chooseButton, &QPushButton::clicked,
-            this, &QDialog::accept);
+    connect(chooseButton, &QPushButton::clicked, this, [this] {
+        if (!selectedAmiibo()) return;
+        action = AmiiboPickerAction::Use;
+        accept();
+    });
+    connect(formatButton, &QPushButton::clicked, this, [this] {
+        const AmiiboCatalogItem* item = selectedAmiibo();
+        if (!item) return;
+        const QString formatKind = item->isV3()
+            ? QStringLiteral("2048-byte Switch 2 Amiibo")
+            : QStringLiteral("Amiibo");
+        const auto answer = QMessageBox::warning(
+            this, QStringLiteral("Format Amiibo"),
+            QStringLiteral(
+                "This will erase the saved data for %1 and generate a new "
+                "tag identity for this %2. Continue?")
+                .arg(item->name, formatKind),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Yes) return;
+        action = AmiiboPickerAction::Format;
+        accept();
+    });
     connect(buttons, &QDialogButtonBox::rejected,
             this, &QDialog::reject);
 
@@ -111,11 +141,7 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
 
 AmiiboPickerDialog::~AmiiboPickerDialog() {
 #ifdef HAS_QT_NETWORK
-    if (currentReply) {
-        currentReply->abort();
-        currentReply->deleteLater();
-        currentReply = nullptr;
-    }
+    cancelCurrentReply();
 #endif
     resume_keyboard_mouse_input();
 }
@@ -238,17 +264,26 @@ void AmiiboPickerDialog::applyFilter() {
         row->setToolTip(QStringLiteral("%1\nID: %2\nAmiibo series: %3")
                             .arg(item.character, item.id(), item.amiiboSeries));
     }
-    chooseButton->setEnabled(list->currentRow() >= 0);
+    const bool selected = list->currentRow() >= 0;
+    chooseButton->setEnabled(selected);
+    formatButton->setEnabled(selected);
     updatePreview(selectedAmiibo());
 }
 
+#ifdef HAS_QT_NETWORK
+void AmiiboPickerDialog::cancelCurrentReply() {
+    QNetworkReply* reply = std::exchange(currentReply, nullptr);
+    if (!reply) return;
+
+    QObject::disconnect(reply, nullptr, this, nullptr);
+    reply->abort();
+    reply->deleteLater();
+}
+#endif
+
 void AmiiboPickerDialog::updatePreview(const AmiiboCatalogItem* item) {
 #ifdef HAS_QT_NETWORK
-    if (currentReply) {
-        currentReply->abort();
-        currentReply->deleteLater();
-        currentReply = nullptr;
-    }
+    cancelCurrentReply();
     if (!item) {
         imagePreview->clear();
         imagePreview->setText(QStringLiteral("Select an Amiibo"));
@@ -262,9 +297,14 @@ void AmiiboPickerDialog::updatePreview(const AmiiboCatalogItem* item) {
     QNetworkRequest request(url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
 
-    currentReply = networkManager->get(request);
-    connect(currentReply, &QNetworkReply::finished, this, [this, reply = currentReply]() {
-        if (reply != currentReply) return;
+    QNetworkReply* reply = networkManager->get(request);
+    currentReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply != currentReply) {
+            reply->deleteLater();
+            return;
+        }
+        currentReply = nullptr;
         if (reply->error() == QNetworkReply::NoError) {
             const QByteArray data = reply->readAll();
             QPixmap pixmap;
@@ -277,8 +317,7 @@ void AmiiboPickerDialog::updatePreview(const AmiiboCatalogItem* item) {
         } else {
             imagePreview->setText(QStringLiteral("Image unavailable"));
         }
-        currentReply->deleteLater();
-        currentReply = nullptr;
+        reply->deleteLater();
     });
 #else
     if (!item) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -37,17 +38,41 @@ inline constexpr std::size_t READ_CHUNK_PAYLOAD_SIZE =
     READ_CHUNK_HEADER_SIZE + READ_CHUNK_DATA_SIZE;
 inline constexpr std::size_t WRITE_STAGING_SIZE = 454;
 
-using Signature = std::array<std::uint8_t, ORIGINALITY_SIGNATURE_SIZE>;
+struct Signature;
+using V3ReadPrefixResolver = bool (*)(Signature& output);
+
+inline V3ReadPrefixResolver g_v3_read_prefix_resolver = nullptr;
+inline void set_v3_read_prefix_resolver(V3ReadPrefixResolver resolver) noexcept {
+    g_v3_read_prefix_resolver = resolver;
+}
+
+struct Signature : std::array<std::uint8_t, ORIGINALITY_SIGNATURE_SIZE> {
+    using Base = std::array<std::uint8_t, ORIGINALITY_SIGNATURE_SIZE>;
+    using Base::operator=;
+
+    Signature() {
+        Base::fill(0);
+        if (g_v3_read_prefix_resolver) (void)g_v3_read_prefix_resolver(*this);
+    }
+    constexpr explicit Signature(const Base& value) : Base(value) {}
+
+    void fill(std::uint8_t value) {
+        Base::fill(value);
+        if (value == 0 && g_v3_read_prefix_resolver)
+            (void)g_v3_read_prefix_resolver(*this);
+    }
+};
 
 // Known-good fallback used by mature Switch 1 controller emulators when a
 // normal 540-byte dump does not include the NTAG21x READ_SIG result. A real
 // 572-byte dump should be preferred because the actual signature is per-tag.
-inline constexpr Signature FALLBACK_ORIGINALITY_SIGNATURE = {
-    0x7D, 0xFD, 0xF0, 0x79, 0x36, 0x51, 0xAB, 0xD7,
-    0x46, 0x6E, 0x39, 0xC1, 0x91, 0xBA, 0xBE, 0xB8,
-    0x56, 0xCE, 0xED, 0xF1, 0xCE, 0x44, 0xCC, 0x75,
-    0xEA, 0xFB, 0x27, 0x09, 0x4D, 0x08, 0x7A, 0xE8,
-};
+inline constexpr Signature FALLBACK_ORIGINALITY_SIGNATURE{
+    Signature::Base{
+        0x7D, 0xFD, 0xF0, 0x79, 0x36, 0x51, 0xAB, 0xD7,
+        0x46, 0x6E, 0x39, 0xC1, 0x91, 0xBA, 0xBE, 0xB8,
+        0x56, 0xCE, 0xED, 0xF1, 0xCE, 0x44, 0xCC, 0x75,
+        0xEA, 0xFB, 0x27, 0x09, 0x4D, 0x08, 0x7A, 0xE8,
+    }};
 
 struct WriteApplyResult {
     bool ok = false;

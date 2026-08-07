@@ -28,12 +28,19 @@ struct AmiiboCatalogItem {
     bool isV3() const;
 };
 
+enum class AmiiboPickerAction {
+    None,
+    Use,
+    Format,
+};
+
 class AmiiboPickerDialog final : public QDialog {
 public:
     explicit AmiiboPickerDialog(QWidget* parent = nullptr);
     ~AmiiboPickerDialog() override;
 
     const AmiiboCatalogItem* selectedAmiibo() const;
+    AmiiboPickerAction selectedAction() const { return action; }
 
 private:
     QLineEdit* searchEdit = nullptr;
@@ -42,7 +49,9 @@ private:
     QLabel* imagePreview = nullptr;
     QLabel* status = nullptr;
     QPushButton* chooseButton = nullptr;
+    QPushButton* formatButton = nullptr;
     QVector<AmiiboCatalogItem> catalogue;
+    AmiiboPickerAction action = AmiiboPickerAction::None;
 #ifdef HAS_QT_NETWORK
     QNetworkAccessManager* networkManager = nullptr;
     QNetworkReply* currentReply = nullptr;
@@ -53,4 +62,7 @@ private:
     void rebuildSeries();
     void applyFilter();
     void updatePreview(const AmiiboCatalogItem* item);
+#ifdef HAS_QT_NETWORK
+    void cancelCurrentReply();
+#endif
 };

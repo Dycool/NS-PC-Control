@@ -1,4 +1,5 @@
 #include "amiibo_library.hpp"
+#include "s2_nfc_codec.hpp"
 
 // Key derivation/tag packing is based on amiitool:
 // Copyright (c) 2015-2017 Marcos Del Sol Vives
@@ -40,9 +41,24 @@ constexpr std::size_t CIPHER_OFFSET = 0x02c;
 constexpr std::size_t CIPHER_LENGTH = 0x188;
 constexpr std::size_t DATA_HMAC_POS = 0x008;
 constexpr std::size_t TAG_HMAC_POS = 0x1b4;
+constexpr uint32_t FORMAT_REQUEST_FLAG = 0x80000000u;
 
 std::mutex g_mutex;
 std::array<std::string, 4> g_selected_ids;
+thread_local std::optional<ns::s2nfc::Signature> g_pending_v3_read_prefix;
+
+bool consume_pending_v3_read_prefix(ns::s2nfc::Signature& output) {
+    if (!g_pending_v3_read_prefix) return false;
+    output = *g_pending_v3_read_prefix;
+    g_pending_v3_read_prefix.reset();
+    return true;
+}
+
+struct V3ReadPrefixResolverRegistration {
+    V3ReadPrefixResolverRegistration() {
+        ns::s2nfc::set_v3_read_prefix_resolver(&consume_pending_v3_read_prefix);
+    }
+} g_v3_read_prefix_resolver_registration;
 
 std::filesystem::path library_root() {
     if (const char* configured = std::getenv("NS_PC_CONTROL_DATA_DIR");
@@ -146,6 +162,31 @@ std::optional<std::vector<uint8_t>> read_file(const std::filesystem::path& path)
     }
     if (!in) return std::nullopt;
     return data;
+}
+
+std::optional<std::array<uint8_t, RETAIL_KEY_SIZE>> load_retail_key(
+    std::string& error) {
+    std::vector<std::filesystem::path> candidates;
+    if (const char* configured = std::getenv("NS_AMIIBO_RETAIL_KEY");
+            configured && *configured) {
+        candidates.emplace_back(configured);
+    }
+    candidates.push_back(library_root() / "key_retail.bin");
+    for (const auto& path : candidates) {
+        const auto bytes = read_file(path);
+        if (!bytes) continue;
+        if (!validate_key(*bytes)) {
+            error = path.string() + " is not a valid 160-byte key_retail.bin";
+            return std::nullopt;
+        }
+        std::array<uint8_t, RETAIL_KEY_SIZE> key{};
+        std::copy_n(bytes->begin(), key.size(), key.begin());
+        return key;
+    }
+    error = "Format Amiibo requires a valid 160-byte key_retail.bin at "
+        + (library_root() / "key_retail.bin").string()
+        + " or NS_AMIIBO_RETAIL_KEY";
+    return std::nullopt;
 }
 
 std::array<uint8_t, 32> hmac_sha256(std::span<const uint8_t> key,
@@ -423,6 +464,27 @@ std::optional<std::vector<uint8_t>> embedded_template(
     return std::nullopt;
 }
 
+std::optional<std::vector<uint8_t>> factory_template(
+    uint32_t head, uint32_t tail, std::span<const uint8_t> fallback_template) {
+    std::optional<std::vector<uint8_t>> factory = embedded_template(head, tail);
+    if (!factory && ns::is_supported_amiibo_dump_size(fallback_template.size())) {
+        factory = std::vector<uint8_t>(fallback_template.begin(), fallback_template.end());
+    }
+    return factory;
+}
+
+OperationResult stage_v3_read_prefix(std::span<const uint8_t> tag) {
+    g_pending_v3_read_prefix.reset();
+    if (tag.size() != V3_SIZE) {
+        return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
+    }
+    ns::s2nfc::Signature prefix{ns::s2nfc::Signature::Base{}};
+    std::copy_n(tag.begin() + ns::s2nfc::V3_SRAM_OFFSET,
+                prefix.size(), prefix.begin());
+    g_pending_v3_read_prefix = prefix;
+    return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
+}
+
 } // namespace
 
 OperationResult generate_template(uint32_t head, uint32_t tail,
@@ -448,30 +510,62 @@ OperationResult select(uint32_t head, uint32_t tail, int console_port,
                        std::vector<uint8_t>& tag,
                        std::span<const uint8_t> fallback_template) {
     std::lock_guard lock(g_mutex);
+    g_pending_v3_read_prefix.reset();
+    const bool format_requested = (tail & FORMAT_REQUEST_FLAG) != 0;
+    tail &= ~FORMAT_REQUEST_FLAG;
     if (console_port < 0 || console_port >= static_cast<int>(g_selected_ids.size())
             || (head == 0 && tail == 0)) {
         return {ns::AMIIBO_LIBRARY_INVALID_REQUEST, 0, "invalid Amiibo selection"};
     }
 
     const std::string id = tag_id(head, tail);
-    const auto stored = read_file(tag_path(id));
-    if (stored && ns::is_supported_amiibo_dump_size(stored->size())) {
-        tag = *stored;
+    auto stored = read_file(tag_path(id));
+
+    if (format_requested) {
+        std::string key_error;
+        const auto retail_key = load_retail_key(key_error);
+        if (!retail_key) {
+            return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0, std::move(key_error)};
+        }
+
+        const auto generated = generate_tag(
+            head, tail,
+            std::span<const uint8_t, RETAIL_KEY_SIZE>(retail_key->data(),
+                                                      retail_key->size()));
+        if (!generated) {
+            return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0,
+                    "OpenSSL could not format the selected Amiibo"};
+        }
+        const OperationResult prefix_result = stage_v3_read_prefix(*generated);
+        if (!prefix_result) return prefix_result;
+        std::string error;
+        if (!atomic_write(tag_path(id), *generated, error)) {
+            g_pending_v3_read_prefix.reset();
+            return {ns::AMIIBO_LIBRARY_STORAGE_ERROR, 0, std::move(error)};
+        }
+        tag = *generated;
         g_selected_ids[console_port] = id;
         return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
     }
 
-    std::optional<std::vector<uint8_t>> factory = embedded_template(head, tail);
-    if (!factory && ns::is_supported_amiibo_dump_size(fallback_template.size())) {
-        factory = std::vector<uint8_t>(
-            fallback_template.begin(), fallback_template.end());
+    if (stored && ns::is_supported_amiibo_dump_size(stored->size())) {
+        tag = *stored;
+        const OperationResult prefix_result = stage_v3_read_prefix(tag);
+        if (!prefix_result) return prefix_result;
+        g_selected_ids[console_port] = id;
+        return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
     }
+
+    const auto factory = factory_template(head, tail, fallback_template);
     if (!factory) {
         return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0,
                 "this build has no factory template for the selected Amiibo"};
     }
+    const OperationResult prefix_result = stage_v3_read_prefix(*factory);
+    if (!prefix_result) return prefix_result;
     std::string error;
     if (!atomic_write(tag_path(id), *factory, error)) {
+        g_pending_v3_read_prefix.reset();
         return {ns::AMIIBO_LIBRARY_STORAGE_ERROR, 0, std::move(error)};
     }
     tag = *factory;
@@ -489,6 +583,7 @@ OperationResult clear() {
                 "cannot clear " + root.string() + ": " + ec.message()};
     }
     g_selected_ids.fill({});
+    g_pending_v3_read_prefix.reset();
     return {ns::AMIIBO_LIBRARY_OK, 0, {}};
 }
 
