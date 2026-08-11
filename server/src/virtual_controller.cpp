@@ -431,8 +431,7 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
     }
 
     const bool has_real_signature = len == ns::s2nfc::EXTENDED_DUMP_SIZE;
-    ns::s2nfc::Signature signature = is_v3
-        ? ns::s2nfc::Signature{} : ns::s2nfc::FALLBACK_ORIGINALITY_SIGNATURE;
+    ns::s2nfc::Signature signature = ns::s2nfc::FALLBACK_ORIGINALITY_SIGNATURE;
     if (has_real_signature) {
         std::copy_n(data + ns::s2nfc::RAW_DUMP_SIZE,
                     ns::s2nfc::ORIGINALITY_SIGNATURE_SIZE, signature.begin());
@@ -1601,6 +1600,14 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
                     g_amiibo_operation_buffer[port], offset,
                     std::span<uint8_t>(payload, ns::s2nfc::READ_CHUNK_PAYLOAD_SIZE),
                     payload_len, &error)) {
+                if (payload[0] != 0) {
+                    if (g_amiibo_nfc_status[port] == 0x18) {
+                        g_amiibo_nfc_status[port] = 0x09;
+                    }
+                    g_amiibo_nfc_detail[port] = 0x00;
+                    signal_amiibo_hid_state_locked(port, NfcHidEventReason::OperationReady);
+                    g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
+                }
                 if (nfc_debug_enabled()) {
                     std::println("[s2][nfc][parse] sub=0x15 v3-buffer offset=0x{:04x} operation_len={} chunk_len={} last={}",
                                  offset, g_amiibo_operation_buffer[port].size(),
@@ -1733,6 +1740,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
 
             if (valid && offset == 0
                     && ns::s2nfc::is_v3_device_command(data, raw)) {
+                ns::s2nfc::apply_v3_device_command(data, raw);
                 g_amiibo_v3_device_command_staged[port] = true;
                 family = "device";
                 g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;

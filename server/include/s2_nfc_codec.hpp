@@ -134,6 +134,8 @@ bool build_buffer_chunk(std::span<const std::uint8_t> buffer,
 
 bool is_v3_device_command(std::span<const std::uint8_t> data,
                           std::span<const std::uint8_t> image);
+bool apply_v3_device_command(std::span<const std::uint8_t> data,
+                             std::span<std::uint8_t> image);
 bool is_v3_write_start(std::span<const std::uint8_t> data,
                        std::span<const std::uint8_t> image);
 std::size_t v3_extended_expected_size(std::span<const std::uint8_t> data,

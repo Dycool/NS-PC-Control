@@ -390,7 +390,7 @@ bool build_v3_sector_read_buffer(std::span<const std::uint8_t> image,
         set_error(error, "NTAG originality signature must be exactly 32 bytes");
         return false;
     }
-    if (request.size() < 17 || request.size() > 23
+    if (request.size() < 17 || request.size() > 29
             || !std::equal(image.begin(), image.begin() + 7, request.begin() + 2)
             || request[9] != 0x01) {
         set_error(error, "invalid v3 sector-read identity or envelope");
@@ -398,14 +398,15 @@ bool build_v3_sector_read_buffer(std::span<const std::uint8_t> image,
     }
     const std::size_t range_count = request[10];
     const std::size_t ranges_end = 11 + range_count * 3;
-    if (range_count == 0 || range_count > 2 || ranges_end + 6 != request.size()
+    if (range_count == 0 || range_count > 4 || ranges_end + 6 != request.size()
             || std::any_of(request.begin() + static_cast<std::ptrdiff_t>(ranges_end),
                            request.end(), [](std::uint8_t v) { return v != 0; })) {
         set_error(error, "invalid v3 sector-read range list");
         return false;
     }
 
-    std::size_t result_size = V3_SECTOR_READ_PREFIX_SIZE;
+    std::size_t prefix_size = request.size() >= 29 ? 76 : V3_SECTOR_READ_PREFIX_SIZE;
+    std::size_t result_size = prefix_size;
     for (std::size_t i = 0; i < range_count; ++i) {
         const std::uint8_t sector = request[11 + i * 3];
         const std::uint8_t first = request[12 + i * 3];
@@ -437,7 +438,7 @@ bool build_v3_sector_read_buffer(std::span<const std::uint8_t> image,
 
     static constexpr std::array<std::uint8_t, 4> FIRST_USE_CAPABILITY{
         0xA5, 0x00, 0x01, 0x00};
-    std::size_t cursor = V3_SECTOR_READ_PREFIX_SIZE;
+    std::size_t cursor = prefix_size;
     for (std::size_t i = 0; i < range_count; ++i) {
         const std::uint8_t sector = request[11 + i * 3];
         const std::uint8_t first = request[12 + i * 3];
@@ -482,6 +483,15 @@ bool is_v3_device_command(std::span<const std::uint8_t> data,
                           std::span<const std::uint8_t> image) {
     return data.size() == V3_DEVICE_COMMAND_SIZE
         && command_identity_matches(data, image) && data[10] == 0x01;
+}
+
+bool apply_v3_device_command(std::span<const std::uint8_t> data,
+                             std::span<std::uint8_t> image) {
+    if (!is_v3_device_command(data, image) || image.size() != V3_DUMP_SIZE) {
+        return false;
+    }
+    std::copy_n(data.begin() + 10, V3_SRAM_SIZE, image.begin() + V3_SRAM_OFFSET);
+    return true;
 }
 
 bool is_v3_write_start(std::span<const std::uint8_t> data,
