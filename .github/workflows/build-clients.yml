@@ -291,7 +291,7 @@ jobs:
         run: |
           set -euo pipefail
           APP="client/build/ns-client.app"
-          macdeployqt "$APP" -verbose=1 -no-translations
+          macdeployqt "$APP" -verbose=1
 
           # Qt frameworks use symlinks from the framework root and
           # Versions/Current to the versioned payload. Some macdeployqt builds
