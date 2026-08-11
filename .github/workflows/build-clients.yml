@@ -268,7 +268,7 @@ jobs:
         run: |
           git clone --depth 1 --branch "$SDL_REF" https://github.com/libsdl-org/SDL.git /tmp/SDL3
           cmake -S /tmp/SDL3 -B /tmp/SDL3-build -G Ninja \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="14.0" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="15.0" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$HOME/.local/sdl3-static" \
             -DSDL_SHARED=OFF \
@@ -289,12 +289,48 @@ jobs:
 
       - name: Package macOS App
         run: |
+          set -euo pipefail
           APP="client/build/ns-client.app"
-          macdeployqt "$APP" -verbose=1
+          macdeployqt "$APP" -verbose=1 -no-translations
+
+          # Qt frameworks use symlinks from the framework root and
+          # Versions/Current to the versioned payload. Some macdeployqt builds
+          # materialize those links as full copies, tripling framework size.
+          # Restore the canonical framework layout before stripping/signing.
+          shopt -s nullglob
+          for framework in "$APP"/Contents/Frameworks/*.framework; do
+            versioned="$framework/Versions/A"
+            [[ -d "$versioned" ]] || continue
+
+            rm -rf "$framework/Versions/Current"
+            ln -s A "$framework/Versions/Current"
+
+            for versioned_item in "$versioned"/*; do
+              item_name="${versioned_item##*/}"
+              [[ "$item_name" == "_CodeSignature" ]] && continue
+              rm -rf "$framework/$item_name"
+              ln -s "Versions/Current/$item_name" "$framework/$item_name"
+            done
+          done
+
+          # macdeployqt copies release frameworks but does not strip them.
+          # Remove local symbols before signing; this is safe for distribution
+          # binaries and substantially reduces the deployed app size.
+          find "$APP/Contents" -type f \
+            \( -perm -111 -o -name '*.dylib' -o -name '*.framework' \) \
+            -exec strip -x {} \; 2>/dev/null || true
+
+          echo "Largest files in macOS bundle:"
+          du -ah "$APP/Contents" | sort -h | tail -20
+
+          # Ad-hoc signing requires no certificate or Apple account and makes
+          # every nested framework/plugin and the app itself internally signed.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
           mkdir -p client/artifacts/macos
           cd client/build
-          zip -r ../artifacts/macos/ns-client-macos.zip ns-client.app
+          ditto -c -k --sequesterRsrc --keepParent ns-client.app ../artifacts/macos/ns-client-macos.zip
 
       - uses: actions/upload-artifact@v6
         with:

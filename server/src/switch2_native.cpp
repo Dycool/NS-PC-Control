@@ -478,12 +478,10 @@ bool switch2_native_handle_vendor_command(int port,
     }
     update_stage(s, id, sub);
 
-    // TEMPORARY TEST INSTRUMENTATION: NFC tracing intentionally bypasses the
-    // global verbose flag until the v2/v3 hardware capture work is complete.
     static std::atomic<uint64_t> nfc_trace_counter{0};
     const uint64_t nfc_trace = id == 0x01
         ? nfc_trace_counter.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
-    if (id == 0x01) {
+    if (g_ctx.verbose && id == 0x01) {
         const size_t declared = c[5];
         const size_t actual = c.size() - 8;
         std::println("[s2][nfc][rx] trace={} t_us={} port={} id=0x{:02x} "
@@ -702,7 +700,7 @@ bool switch2_native_handle_vendor_command(int port,
         std::fprintf(stdout, "[s2] native port 0 streaming enabled\n");
 
     response.assign(r.begin(), r.begin() + 8 + dl);
-    if (id == 0x01) {
+    if (g_ctx.verbose && id == 0x01) {
         std::println("[s2][nfc][tx-build] trace={} t_us={} port={} sub=0x{:02x} "
                      "request_data_len={} response_direction=0x{:02x} "
                      "response_len={} response_payload_len={} ack={:02x}{:02x} "

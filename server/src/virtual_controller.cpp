@@ -180,15 +180,8 @@ static void publish_amiibo_request_for_port(int port, bool requested);
 
 namespace {
 
-// TEMPORARY TEST INSTRUMENTATION.
-// Keep NFC tracing independent from the process-wide --verbose switch so field
-// tests always produce a complete transcript. Set this to false (or remove the
-// helper and restore the g_ctx.verbose guards) once the v2/v3 capture work is
-// complete.
-constexpr bool kTemporaryNfcDebug = true;
-
 bool nfc_debug_enabled() {
-    return kTemporaryNfcDebug || g_ctx.verbose;
+    return g_ctx.verbose;
 }
 
 size_t write_coverage_count(int port);

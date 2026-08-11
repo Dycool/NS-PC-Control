@@ -337,21 +337,16 @@ std::optional<std::vector<uint8_t>> generate_tag(
     std::copy(uid.begin() + 3, uid.end(), plain.begin() + 0x1d8);
     std::copy(a5_static.begin(), a5_static.end(), plain.begin() + 0x028);
 
-    std::vector<uint8_t> tag(RAW_SIZE);
-    if (!pack_tag(retail_key, plain, tag, false)) return std::nullopt;
+    const bool v3 = (tail & 0xffu) == 0x03u;
+    std::vector<uint8_t> tag(v3 ? V3_SIZE : RAW_SIZE);
+    if (!pack_tag(retail_key, plain, tag, v3)) return std::nullopt;
     constexpr std::array<uint8_t, 20> lock{
         0x01, 0x00, 0x0f, 0xbd, 0x00, 0x00, 0x00, 0x04, 0x5f, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    std::copy(lock.begin(), lock.end(), tag.begin() + INTERNAL_SIZE);
+    std::copy(lock.begin(), lock.end(), tag.begin() + (v3 ? 0x248 : INTERNAL_SIZE));
 
-    if ((tail & 0xffu) != 0x03u) return tag;
+    if (!v3) return tag;
 
-    // Pixl.js represents v3 figures as a 2 KiB NTAG I2C Plus image. Its
-    // public implementation inserts the 64-byte nonce/SRAM window after
-    // 0x80, then fills the I2C configuration and SRAM pages.
-    tag.resize(V3_SIZE, 0);
-    std::memmove(tag.data() + 0x0c0, tag.data() + 0x080, RAW_SIZE - 0x080);
-    std::fill(tag.begin() + 0x080, tag.begin() + 0x0c0, 0);
     std::fill(tag.begin() + 0x25c, tag.begin() + 0x388, 0);
     constexpr std::array<uint8_t, 4> page_e2{0x01, 0x00, 0xff, 0x00};
     constexpr std::array<uint8_t, 4> page_e3{0x00, 0x00, 0x00, 0x04};
