@@ -8,8 +8,8 @@
 namespace ns::s2 {
 namespace {
 
-// Carrier layout and quaternion model follow PicoSwitch2's hardware-confirmed
-// ns2-testing implementation (Apache-2.0), adapted here to NS-PC-Control's
+// Carrier layout and quaternion model follow hardware-confirmed
+// implementation (Apache-2.0), adapted here to NS-PC-Control's
 // already normalized 4096-counts/g MotionReport input.
 constexpr uint64_t MOTION_PERIOD_US = 3'800;
 constexpr uint64_t INTEGRATION_STEP_US = 4'000;
@@ -60,7 +60,7 @@ void write_i32le(uint8_t* out, int32_t value) {
 }
 
 // MotionReport is the established Switch-1 Pro frame (X forward, Y left,
-// Z face-up). PicoSwitch2's hardware-validated Switch-1 seam remounts that
+// Z face-up). The hardware-validated Switch-1 seam remounts that
 // frame into the Pro Controller 2 carrier as {-Y, +X, +Z}. Acceleration is
 // already 4096 counts/g in NS-PC-Control, so it must not be halved here.
 void prepare_sample(const MotionCarrierSample samples[3],

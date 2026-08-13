@@ -12,8 +12,7 @@ struct usb_ctrlrequest;
 
 std::string s2_hex(std::span<const uint8_t> data);
 
-// Native Switch 2 Pro Controller USB backend, ported from PicoSwitch2's
-// ns2-testing model: HID interface for report 0x09/rumble 0x02 plus a
+// Native Switch 2 Pro Controller USB backend: HID interface for report 0x09/rumble 0x02 plus a
 // vendor-bulk command channel for init, pairing, feature select and memory.
 void switch2_native_init();
 void switch2_native_reset_port(int port);
