@@ -45,6 +45,7 @@ public:
 private:
     QLineEdit* searchEdit = nullptr;
     QComboBox* seriesBox = nullptr;
+    QComboBox* recentBox = nullptr;
     QListWidget* list = nullptr;
     QLabel* imagePreview = nullptr;
     QLabel* status = nullptr;
@@ -62,6 +63,8 @@ private:
     void rebuildSeries();
     void applyFilter();
     void updatePreview(const AmiiboCatalogItem* item);
+    void loadRecents();
+    void saveRecent(const AmiiboCatalogItem* item);
 #ifdef HAS_QT_NETWORK
     void cancelCurrentReply();
 #endif

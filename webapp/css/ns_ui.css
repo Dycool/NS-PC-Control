@@ -157,6 +157,52 @@ body.ns-modal-open { overflow: hidden; }
     box-shadow: 0 0 0 1px var(--ns-accent);
 }
 .ns-amiibo-item-name { font-size: 13px; font-weight: 600; line-height: 1.2; word-break: break-word; }
+.ns-amiibo-item-sub { font-size: 11px; color: var(--ns-text-dim); margin-top: 3px; }
+.ns-amiibo-badges { display: flex; gap: 4px; margin-top: 4px; }
+.ns-badge { font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 4px; text-transform: uppercase; }
+.ns-badge-v3 { background: #1a4d2e; color: #52d683; border: 1px solid #2e7d4a; }
+.ns-badge-ntag { background: #1e3a5f; color: #60a5fa; border: 1px solid #2563eb; }
+
+/* Quick filter chips & recent choices */
+.ns-amiibo-recents-section {
+    padding: 10px 18px 6px; border-bottom: 1px solid var(--ns-border); background: var(--ns-surface-2);
+}
+.ns-amiibo-recents-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ns-accent); margin-bottom: 6px;
+}
+.ns-amiibo-recents-bar {
+    display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin;
+}
+.ns-amiibo-recent-chip {
+    flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+    background: var(--ns-surface); border: 1px solid var(--ns-border); border-radius: 20px;
+    color: var(--ns-text); font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+}
+.ns-amiibo-recent-chip:hover {
+    border-color: var(--ns-accent); background: #333; transform: translateY(-1px);
+}
+.ns-amiibo-chip-img { width: 22px; height: 22px; object-fit: contain; }
+
+.ns-amiibo-filter-chips {
+    display: flex; gap: 6px; overflow-x: auto; padding: 8px 18px; border-bottom: 1px solid var(--ns-border); background: var(--ns-surface);
+}
+.ns-filter-chip {
+    padding: 4px 10px; border-radius: 14px; background: var(--ns-surface-2); border: 1px solid var(--ns-border);
+    color: var(--ns-text-dim); font-size: 12px; cursor: pointer; white-space: nowrap; transition: all 0.15s;
+}
+.ns-filter-chip:hover { color: var(--ns-text); border-color: var(--ns-text-dim); }
+.ns-filter-chip.active { background: var(--ns-accent); color: #fff; border-color: var(--ns-accent); font-weight: 600; }
+
+/* Active Amiibo Card on Main Shell */
+.ns-amiibo-active-card {
+    display: flex; align-items: center; gap: 14px; padding: 12px; border-radius: 8px;
+    background: var(--ns-surface-2); border: 1px solid var(--ns-border); margin-top: 10px;
+}
+.ns-amiibo-active-img { width: 48px; height: 48px; object-fit: contain; }
+.ns-amiibo-active-info { flex: 1; min-width: 0; }
+.ns-amiibo-active-title { font-size: 14px; font-weight: 600; color: var(--ns-text); margin: 0 0 2px; }
+.ns-amiibo-active-series { font-size: 12px; color: var(--ns-text-dim); margin: 0; }
+
 .ns-amiibo-preview {
     width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; padding: 18px;

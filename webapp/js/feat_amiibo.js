@@ -18,13 +18,63 @@
     let results = null, modalStatus = null;
     let previewImg = null, previewPlaceholder = null, previewName = null, useBtn = null;
     let selectedAmiiboObj = null;
+    let activeAmiibo = null;
     let catalogue = [];
     let cataloguePromise = null;
     let selectionPending = false;
+    let currentFilterChip = '';
+    let recentsContainer = null;
+    let filterChipsContainer = null;
+    let activeAmiiboCard = null;
+
+    const RECENTS_KEY = 'ns_amiibo_recents';
+    const POPULAR_SERIES = [
+        { label: 'All', value: '' },
+        { label: 'Recents', value: '__recents__' },
+        { label: 'Super Mario', value: 'Super Mario' },
+        { label: 'Zelda', value: 'The Legend of Zelda' },
+        { label: 'Smash Bros.', value: 'Super Smash Bros.' },
+        { label: 'Animal Crossing', value: 'Animal Crossing' },
+        { label: 'Splatoon', value: 'Splatoon' },
+        { label: 'Pokémon', value: 'Pokémon' }
+    ];
+
+    function getRecentAmiibos() {
+        try {
+            const raw = localStorage.getItem(RECENTS_KEY);
+            return raw ? JSON.parse(raw) : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
+    function addRecentAmiibo(amiibo) {
+        if (!amiibo || !amiibo.head || !amiibo.tail) return;
+        try {
+            let list = getRecentAmiibos();
+            list = list.filter(item => !(item.head === amiibo.head && item.tail === amiibo.tail));
+            list.unshift({
+                head: amiibo.head,
+                tail: amiibo.tail,
+                name: amiibo.name,
+                gameSeries: amiibo.gameSeries,
+                amiiboSeries: amiibo.amiiboSeries,
+                type: amiibo.type
+            });
+            if (list.length > 10) list = list.slice(0, 10);
+            localStorage.setItem(RECENTS_KEY, JSON.stringify(list));
+            renderRecentChips();
+        } catch (_) {}
+    }
 
     function activeSubpad() {
         for (let s = 0; s < 4; s++) if (scanRequested[s]) return s;
         return 0;
+    }
+
+    function isV3Amiibo(amiibo) {
+        if (!amiibo || !amiibo.tail) return false;
+        return (parseInt(amiibo.tail, 16) & 0xff) === 0x03;
     }
 
     function normalizeCatalogue(raw) {
@@ -64,12 +114,10 @@
                 catalogue = fresh;
                 rebuildSeries();
                 renderResults();
-                setModalStatus(catalogue.length
-                    + ' Amiibo available offline. Catalogue metadata: AmiiboAPI.');
+                renderRecentChips();
+                setModalStatus(catalogue.length + ' Amiibo available.');
             } catch (error) {
-                setModalStatus(
-                    'Could not load the bundled Amiibo catalogue: '
-                    + error.message, true);
+                setModalStatus('Could not load catalogue: ' + error.message, true);
             }
             return catalogue;
         })();
@@ -95,8 +143,6 @@
             view.setUint32(8, parseInt(amiibo.head, 16) >>> 0, true);
             view.setUint32(12, parseInt(amiibo.tail, 16) >>> 0, true);
         }
-        // The trailing bytes are the UDP HMAC. WebSocket is the trusted,
-        // session-scoped transport and intentionally leaves them zero.
         return NSCore.wsSend(buffer);
     }
 
@@ -104,12 +150,25 @@
         const subpad = activeSubpad();
         if (!scanRequested[subpad] || selectionPending) return;
         if (!sendLibraryCommand(C.AMIIBO_LIBRARY_SELECT, subpad, amiibo)) {
-            alert('Could not send the Amiibo selection to the server.');
+            alert('Could not send Amiibo selection.');
             return;
         }
         selectionPending = true;
-        setStatus('Selecting ' + amiibo.name + ' in the server Amiibo library…');
-        setModalStatus('Sending ' + amiibo.name + ' to the server…');
+        addRecentAmiibo(amiibo);
+        activeAmiibo = amiibo;
+        setStatus('Selecting ' + amiibo.name + '…');
+        setModalStatus('Sending ' + amiibo.name + '…');
+    }
+
+    function ejectAmiibo() {
+        const subpad = activeSubpad();
+        if (!sendLibraryCommand(C.AMIIBO_LIBRARY_CLEAR, subpad, null)) {
+            alert('Could not clear Amiibo.');
+            return;
+        }
+        activeAmiibo = null;
+        setStatus('Amiibo ejected.');
+        refreshUi();
     }
 
     function onLibraryResult(view) {
@@ -126,20 +185,18 @@
                     scanDeadline[subpad] = 0;
                 }
                 closePicker();
-                setStatus('Amiibo selected and sent to the console.');
+                setStatus('Amiibo connected.');
             } else if (action === C.AMIIBO_LIBRARY_CLEAR) {
-                setStatus('All private Amiibo data was cleared from the server.');
+                activeAmiibo = null;
+                setStatus('Amiibo cleared.');
             }
         } else {
             const messages = {
-                [C.AMIIBO_LIBRARY_STORAGE_ERROR]:
-                    'The server could not update its private Amiibo data folder.',
-                [C.AMIIBO_LIBRARY_GENERATION_ERROR]:
-                    'This build does not contain a valid template for that Amiibo.',
-                [C.AMIIBO_LIBRARY_INVALID_REQUEST]:
-                    'The server rejected the Amiibo library request.'
+                [C.AMIIBO_LIBRARY_STORAGE_ERROR]: 'Server storage error.',
+                [C.AMIIBO_LIBRARY_GENERATION_ERROR]: 'Missing template for this Amiibo.',
+                [C.AMIIBO_LIBRARY_INVALID_REQUEST]: 'Invalid request.'
             };
-            const message = messages[result] || 'Unknown Amiibo library error.';
+            const message = messages[result] || 'Unknown Amiibo error.';
             setStatus(message);
             if (action === C.AMIIBO_LIBRARY_SELECT) {
                 openPicker();
@@ -163,7 +220,7 @@
             scanRequested[subpad] = false;
             scanDeadline[subpad] = 0;
         }
-        setStatus('Console updated the Amiibo; writeback saved in the server library.');
+        setStatus('Amiibo saved on server.');
         refreshUi();
     }
 
@@ -184,20 +241,16 @@
                         || Date.now() < deadline) return;
                 scanRequested[subpad] = false;
                 scanDeadline[subpad] = 0;
-                setStatus('Waiting for the console to request an Amiibo scan.');
+                setStatus('Ready for Amiibo scan.');
                 refreshUi();
             }, 10050);
         }
         setStatus(requested
-            ? 'Console is waiting for an Amiibo — choose one from the library.'
-            : 'Waiting for the console to request an Amiibo scan.');
+            ? 'Console ready — select an Amiibo.'
+            : 'Ready for Amiibo scan.');
         refreshUi();
     }
 
-    // NS Mobile's main menu uses the native authenticated UDP transport rather
-    // than a WebSocket. Android/iOS call these hooks with the same packet
-    // fields their receive loops parsed; touch controls and the editor never
-    // call or expose this UI.
     window.__nsAmiiboNativeAssignment =
         (connected, subpad, mask, virtualType) => {
             if (!connected) {
@@ -259,15 +312,73 @@
         }
     }
 
+    function renderRecentChips() {
+        if (!recentsContainer) return;
+        const recents = getRecentAmiibos();
+        recentsContainer.innerHTML = '';
+        if (!recents.length) {
+            recentsContainer.parentElement.style.display = 'none';
+            return;
+        }
+        recentsContainer.parentElement.style.display = 'block';
+        recents.forEach(amiibo => {
+            const chip = el('button', {
+                class: 'ns-amiibo-recent-chip',
+                title: 'Scan ' + amiibo.name,
+                onclick: () => selectAmiibo(amiibo)
+            }, [
+                el('img', {
+                    class: 'ns-amiibo-chip-img',
+                    src: 'https://raw.githubusercontent.com/8bitDream/AmiiboAPI/master/images/icon_'
+                        + amiibo.head + '-' + amiibo.tail + '.png',
+                    alt: amiibo.name
+                }),
+                el('span', { text: amiibo.name })
+            ]);
+            recentsContainer.appendChild(chip);
+        });
+    }
+
+    function renderFilterChips() {
+        if (!filterChipsContainer) return;
+        filterChipsContainer.innerHTML = '';
+        POPULAR_SERIES.forEach(chip => {
+            const btn = el('button', {
+                class: 'ns-filter-chip' + (currentFilterChip === chip.value ? ' active' : ''),
+                text: chip.label,
+                onclick: () => {
+                    currentFilterChip = chip.value;
+                    renderFilterChips();
+                    renderResults();
+                }
+            });
+            filterChipsContainer.appendChild(btn);
+        });
+    }
+
     function ensurePicker() {
         if (modal) return;
         searchInput = el('input', {
             class: 'ns-amiibo-search', type: 'search',
-            placeholder: 'Search name, character, series or type…'
+            placeholder: 'Search name, series…'
         });
         seriesSelect = el('select', { class: 'ns-select ns-amiibo-series' });
         searchInput.oninput = renderResults;
-        seriesSelect.onchange = renderResults;
+        seriesSelect.onchange = () => {
+            currentFilterChip = '';
+            renderFilterChips();
+            renderResults();
+        };
+
+        recentsContainer = el('div', { class: 'ns-amiibo-recents-bar' });
+        const recentsSection = el('div', { class: 'ns-amiibo-recents-section' }, [
+            el('div', { class: 'ns-amiibo-recents-title', text: 'Recent Choices' }),
+            recentsContainer
+        ]);
+
+        filterChipsContainer = el('div', { class: 'ns-amiibo-filter-chips' });
+        renderFilterChips();
+
         results = el('div', { class: 'ns-amiibo-grid' });
         
         previewImg = el('img', {
@@ -285,7 +396,7 @@
         });
         useBtn = el('button', {
             class: 'ns-amiibo-select-btn',
-            text: 'Use Selected Amiibo',
+            text: 'Use Amiibo',
             disabled: true,
             onclick: () => {
                 if (selectedAmiiboObj) selectAmiibo(selectedAmiiboObj);
@@ -305,7 +416,7 @@
 
         modalStatus = el('div', {
             class: 'ns-note',
-            text: 'Loading Amiibo catalogue…'
+            text: 'Loading catalogue…'
         });
         modal = el('section', {
             class: 'ns-amiibo-modal', role: 'dialog',
@@ -320,9 +431,11 @@
                     title: 'Close', onclick: closePicker
                 })
             ]),
+            recentsSection,
             el('div', { class: 'ns-amiibo-toolbar' }, [
                 searchInput, seriesSelect
             ]),
+            filterChipsContainer,
             bodyContainer,
             modalStatus
         ]);
@@ -336,6 +449,7 @@
             if (event.key === 'Escape'
                     && modalBackdrop.classList.contains('open')) closePicker();
         });
+        renderRecentChips();
     }
 
     function rebuildSeries() {
@@ -354,7 +468,17 @@
         if (!results) return;
         const query = (searchInput.value || '').trim().toLocaleLowerCase();
         const series = seriesSelect.value;
-        const matching = catalogue.filter(a => {
+        
+        let pool = catalogue;
+        if (currentFilterChip === '__recents__') {
+            const recents = getRecentAmiibos();
+            const recentIds = new Set(recents.map(r => r.head + r.tail));
+            pool = catalogue.filter(a => recentIds.has(a.head + a.tail));
+        } else if (currentFilterChip) {
+            pool = catalogue.filter(a => a.gameSeries.includes(currentFilterChip));
+        }
+
+        const matching = pool.filter(a => {
             if (series && a.gameSeries !== series) return false;
             if (!query) return true;
             return [a.name, a.character, a.gameSeries, a.amiiboSeries, a.type]
@@ -362,26 +486,33 @@
         });
         results.innerHTML = '';
         matching.slice(0, 160).forEach(amiibo => {
+            const isV3 = isV3Amiibo(amiibo);
+            const badgeClass = isV3 ? 'ns-badge-v3' : 'ns-badge-ntag';
+            const badgeLabel = isV3 ? 'Figure-v3' : 'NTAG215';
+
             const itemBtn = el('button', {
                 class: 'ns-amiibo-item' + (selectedAmiiboObj === amiibo ? ' selected' : ''),
                 title: 'Select ' + amiibo.name,
                 onclick: (e) => highlightAmiibo(amiibo, e.currentTarget),
                 ondblclick: () => selectAmiibo(amiibo)
             }, [
-                el('span', { class: 'ns-amiibo-item-name', text: amiibo.name })
+                el('span', { class: 'ns-amiibo-item-name', text: amiibo.name }),
+                el('span', { class: 'ns-amiibo-item-sub', text: amiibo.gameSeries || amiibo.amiiboSeries }),
+                el('div', { class: 'ns-amiibo-badges' }, [
+                    el('span', { class: 'ns-badge ' + badgeClass, text: badgeLabel })
+                ])
             ]);
             results.appendChild(itemBtn);
         });
         if (matching.length > 160) {
             results.appendChild(el('div', {
                 class: 'ns-note ns-amiibo-limit',
-                text: 'Showing 160 of ' + matching.length
-                    + ' results. Refine the search to see the rest.'
+                text: 'Showing 160 of ' + matching.length + ' results.'
             }));
         } else if (!matching.length && catalogue.length) {
             results.appendChild(el('div', {
                 class: 'ns-note ns-amiibo-empty',
-                text: 'No Amiibo match these filters.'
+                text: 'No Amiibo found.'
             }));
         }
     }
@@ -407,17 +538,25 @@
         if (!shell) return;
         statusEl = el('div', {
             class: 'status',
-            text: 'Waiting for the console to request an Amiibo scan.'
+            text: 'Ready for Amiibo scan.'
         });
         chooseBtn = el('button', { text: 'Scan Amiibo…', onclick: openPicker });
+        
+        activeAmiiboCard = el('div', {
+            class: 'ns-amiibo-active-card',
+            style: 'display:none;'
+        });
+
         card = el('section', { class: 'card' }, [
             el('div', { class: 'card-title', text: 'Amiibo (Switch 2)' }),
             el('div', { class: 'btn-group' }, [chooseBtn]),
+            activeAmiiboCard,
             statusEl
         ]);
         card.style.display = 'none';
         shell.appendChild(card);
     }
+
     function refreshUi() {
         const eligible = NSCore.s2NfcAssigned();
         const waiting = scanRequested.some(Boolean);
@@ -428,6 +567,37 @@
                 chooseBtn.disabled = !(NSCore.state.connected && waiting);
             if (settingsChooseBtn)
                 settingsChooseBtn.disabled = !(NSCore.state.connected && waiting);
+
+            if (activeAmiiboCard) {
+                if (activeAmiibo) {
+                    activeAmiiboCard.style.display = 'flex';
+                    activeAmiiboCard.innerHTML = '';
+                    const isV3 = isV3Amiibo(activeAmiibo);
+                    const badgeClass = isV3 ? 'ns-badge-v3' : 'ns-badge-ntag';
+                    const badgeLabel = isV3 ? 'Figure-v3' : 'NTAG215';
+
+                    activeAmiiboCard.appendChild(el('img', {
+                        class: 'ns-amiibo-active-img',
+                        src: 'https://raw.githubusercontent.com/8bitDream/AmiiboAPI/master/images/icon_'
+                            + activeAmiibo.head + '-' + activeAmiibo.tail + '.png',
+                        alt: activeAmiibo.name
+                    }));
+                    activeAmiiboCard.appendChild(el('div', { class: 'ns-amiibo-active-info' }, [
+                        el('div', { class: 'ns-amiibo-active-title', text: activeAmiibo.name }),
+                        el('div', { class: 'ns-amiibo-active-series', text: activeAmiibo.gameSeries || activeAmiibo.amiiboSeries }),
+                        el('div', { class: 'ns-amiibo-badges' }, [
+                            el('span', { class: 'ns-badge ' + badgeClass, text: badgeLabel })
+                        ])
+                    ]));
+                    activeAmiiboCard.appendChild(el('button', {
+                        class: 'ns-btn',
+                        text: 'Eject Tag',
+                        onclick: ejectAmiibo
+                    }));
+                } else {
+                    activeAmiiboCard.style.display = 'none';
+                }
+            }
         }
     }
 
@@ -448,7 +618,7 @@
             lastSeq = [null, null, null, null];
             selectionPending = false;
             closePicker();
-            setStatus('Waiting for the console to request an Amiibo scan.');
+            setStatus('Ready for Amiibo scan.');
             refreshUi();
         },
         onWsMessage(magic, view) {
@@ -481,16 +651,11 @@
             });
             section.button('Clear Amiibo Data…', () => {
                 if (!NSCore.state.connected) return;
-                if (!confirm(
-                    'Permanently remove every saved Amiibo and all console '
-                    + 'writebacks from the NS-PC-Control server? Bundled '
-                    + 'factory templates remain available.')) return;
+                if (!confirm('Delete all saved Amiibo data on server?')) return;
                 if (!sendLibraryCommand(C.AMIIBO_LIBRARY_CLEAR, 0, null))
-                    alert('Could not send the clear request to the server.');
+                    alert('Could not clear data.');
             }, { disabled: !NSCore.state.connected });
-            section.note(
-                'The release contains an offline metadata catalogue and '
-                + 'ready-to-use templates. No runtime downloads or key files are required.');
+            section.note('Offline catalogue ready. No keys needed.');
         }
     });
 })();
