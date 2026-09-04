@@ -82,6 +82,18 @@ impl HidReport {
         self.reserved
     }
 
+    #[must_use]
+    pub const fn requested_profile_raw(&self) -> u8 {
+        self.reserved[2]
+    }
+
+    #[must_use]
+    pub fn neutral_preserving_requested_profile(&self) -> Self {
+        let mut neutral = Self::default();
+        neutral.reserved[2] = self.reserved[2];
+        neutral
+    }
+
     pub fn controller_type(&self) -> Result<ControllerType, WireError> {
         ControllerType::try_from(self.reserved[2])
     }
