@@ -520,7 +520,7 @@ mod tests {
         let controller = controller();
         let command = [0x03,0,0,0x0a,0,0,0,0,0x09];
         let response = controller.handle_vendor_command(&command, 0).expect("stream");
-        assert_eq!(response, command[..8]);
+        assert_eq!(response, [0x03,0x01,0x00,0x0a,0x00,0xf8,0x00,0x00]);
         assert!(controller.streaming_enabled());
         assert_eq!(controller.selected_report(), 0x09);
         let mut enable = [0u8; 12];
