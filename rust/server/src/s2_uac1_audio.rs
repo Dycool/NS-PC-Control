@@ -134,11 +134,11 @@ pub fn apply_gain_mute(pcm: &mut [u8], control: AudioControl) {
     }
     let db = f32::from(control.volume_1_256_db()) / 256.0;
     let gain = 10.0_f32.powf(db / 20.0);
-    for sample_bytes in pcm.chunks_exact_mut(2) {
-        let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
+    let (samples, _) = pcm.as_chunks_mut::<2>();
+    for sample_bytes in samples {
+        let sample = i16::from_le_bytes(*sample_bytes);
         let scaled = (f32::from(sample) * gain).clamp(-32768.0, 32767.0);
-        let encoded = (scaled as i16).to_le_bytes();
-        sample_bytes.copy_from_slice(&encoded);
+        *sample_bytes = (scaled as i16).to_le_bytes();
     }
 }
 
