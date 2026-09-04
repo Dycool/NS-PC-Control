@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/shared", "rust/server", "rust/client"]
+members = ["rust/shared", "rust/server", "rust/client", "rust/raw-gadget"]
 resolver = "2"
 
 [workspace.package]

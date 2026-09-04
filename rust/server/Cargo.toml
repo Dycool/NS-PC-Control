@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 ns-shared = { path = "../shared" }
+ns-raw-gadget = { path = "../raw-gadget" }
 
 [lints.rust]
 unsafe_code = "forbid"
