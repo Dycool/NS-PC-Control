@@ -51,8 +51,7 @@ impl Sha256 {
     fn update(&mut self, mut data: &[u8]) {
         self.total_len = self
             .total_len
-            .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
+            .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
 
         if self.buffer_len != 0 {
             let take = (BLOCK_BYTES - self.buffer_len).min(data.len());
@@ -81,12 +80,14 @@ impl Sha256 {
 
     fn transform(&mut self, block: &[u8; BLOCK_BYTES]) {
         let mut schedule = [0u32; 64];
-        for (index, chunk) in block.chunks_exact(4).enumerate() {
-            schedule[index] = u32::from_be_bytes(
-                chunk
-                    .try_into()
-                    .expect("chunks_exact(4) always yields four bytes"),
-            );
+        for (index, word) in schedule[..16].iter_mut().enumerate() {
+            let start = index * 4;
+            *word = u32::from_be_bytes([
+                block[start],
+                block[start + 1],
+                block[start + 2],
+                block[start + 3],
+            ]);
         }
         for index in 16..64 {
             let s0 = schedule[index - 15].rotate_right(7)
@@ -153,8 +154,9 @@ impl Sha256 {
         self.transform(&block);
 
         let mut digest = [0u8; DIGEST_BYTES];
-        for (chunk, value) in digest.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&value.to_be_bytes());
+        for (index, value) in self.state.iter().copied().enumerate() {
+            let start = index * 4;
+            digest[start..start + 4].copy_from_slice(&value.to_be_bytes());
         }
         digest
     }
