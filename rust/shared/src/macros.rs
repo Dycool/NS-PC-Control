@@ -13,8 +13,7 @@ pub const UDP_MAGIC: u32 = 0x4e53_4d43;
 pub const UDP_CHUNK_MAGIC: u32 = 0x4e53_4d4b;
 pub const UDP_TEXT_MAX: usize = JSON_MAX_BYTES;
 pub const UDP_CHUNK_MAX: usize = 1200;
-pub const UDP_CHUNK_COUNT_MAX: u32 =
-    ((UDP_TEXT_MAX + UDP_CHUNK_MAX - 1) / UDP_CHUNK_MAX) as u32;
+pub const UDP_CHUNK_COUNT_MAX: u32 = UDP_TEXT_MAX.div_ceil(UDP_CHUNK_MAX) as u32;
 pub const CHUNK_FLAG_LAST: u8 = 0x01;
 pub const UDP_HEADER_SIZE: usize = 14;
 pub const CHUNK_HEADER_SIZE: usize = 30;
@@ -190,8 +189,7 @@ impl MacroUdpChunkHeader {
         flags: u8,
         upload_id: u32,
         chunk: [u32; 2],
-        total_len: u32,
-        chunk_len: u16,
+        lengths: (u32, u16),
         seq: u32,
     ) -> Self {
         Self {
@@ -201,8 +199,8 @@ impl MacroUdpChunkHeader {
             upload_id,
             chunk_index: chunk[0],
             chunk_count: chunk[1],
-            total_len,
-            chunk_len,
+            total_len: lengths.0,
+            chunk_len: lengths.1,
             seq,
         }
     }
