@@ -89,7 +89,7 @@ fn aes_expand_key(key: &[u8; 16]) -> [u8; 176] {
     let mut temp = [0u8; 4];
     while generated < expanded.len() {
         temp.copy_from_slice(&expanded[generated - 4..generated]);
-        if generated % 16 == 0 {
+        if generated.is_multiple_of(16) {
             temp.rotate_left(1);
             for value in &mut temp {
                 *value = AES_SBOX[usize::from(*value)];
@@ -130,7 +130,8 @@ fn aes_xtime(value: u8) -> u8 {
 }
 
 fn aes_mix_columns(state: &mut [u8; 16]) {
-    for column in state.chunks_exact_mut(4) {
+    let (columns, []) = state.as_chunks_mut::<4>();
+    for column in columns {
         let a = [column[0], column[1], column[2], column[3]];
         let t = a[0] ^ a[1] ^ a[2] ^ a[3];
         column[0] = a[0] ^ t ^ aes_xtime(a[0] ^ a[1]);
