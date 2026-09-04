@@ -85,10 +85,10 @@ fn library_root() -> PathBuf {
             return root.join("amiibo");
         }
     }
-    if let Some(configured) = std::env::var_os("NS_PC_CONTROL_DATA_DIR") {
-        if !configured.is_empty() {
-            return PathBuf::from(configured).join("amiibo");
-        }
+    if let Some(configured) = std::env::var_os("NS_PC_CONTROL_DATA_DIR")
+        && !configured.is_empty()
+    {
+        return PathBuf::from(configured).join("amiibo");
     }
     PathBuf::from("/var/lib/ns-pc-control/amiibo")
 }
@@ -161,10 +161,10 @@ fn read_file(path: &Path) -> Option<Vec<u8>> {
 
 fn load_retail_key() -> Result<[u8; RETAIL_KEY_SIZE], String> {
     let mut candidates = Vec::new();
-    if let Some(configured) = std::env::var_os("NS_AMIIBO_RETAIL_KEY") {
-        if !configured.is_empty() {
-            candidates.push(PathBuf::from(configured));
-        }
+    if let Some(configured) = std::env::var_os("NS_AMIIBO_RETAIL_KEY")
+        && !configured.is_empty()
+    {
+        candidates.push(PathBuf::from(configured));
     }
     candidates.push(library_root().join("key_retail.bin"));
     for path in candidates {
@@ -190,10 +190,10 @@ fn read_le32(bytes: &[u8]) -> Option<u32> {
 
 fn template_bundle_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(configured) = std::env::var_os("NS_AMIIBO_TEMPLATE_BUNDLE") {
-        if !configured.is_empty() {
-            candidates.push(PathBuf::from(configured));
-        }
+    if let Some(configured) = std::env::var_os("NS_AMIIBO_TEMPLATE_BUNDLE")
+        && !configured.is_empty()
+    {
+        candidates.push(PathBuf::from(configured));
     }
     candidates.push(library_root().join("amiibo_templates.bin"));
     candidates
@@ -387,14 +387,14 @@ pub fn clear() -> OperationResult {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = library_root();
-    if let Err(error) = fs::remove_dir_all(&root) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return OperationResult::new(
-                AmiiboLibraryResult::StorageError,
-                0,
-                format!("cannot clear {}: {error}", root.display()),
-            );
-        }
+    if let Err(error) = fs::remove_dir_all(&root)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return OperationResult::new(
+            AmiiboLibraryResult::StorageError,
+            0,
+            format!("cannot clear {}: {error}", root.display()),
+        );
     }
     state.selected_ids.fill(None);
     state.pending_v3_read_prefix = None;
