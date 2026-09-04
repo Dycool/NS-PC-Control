@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -356,8 +356,8 @@ fn ensure_ini_key(lines: &mut Vec<String>, section: &str, key: &str, value: &str
             trimmed.starts_with('[') && trimmed.ends_with(']')
         })
         .map_or(lines.len(), |(index, _)| index);
-    for index in section_index + 1..end_index {
-        let trimmed = lines[index].trim();
+    for line in lines.iter_mut().take(end_index).skip(section_index + 1) {
+        let trimmed = line.trim();
         let candidate = trimmed.strip_prefix('#').map_or(trimmed, str::trim);
         let key_matches = candidate
             .strip_prefix(key)
@@ -366,7 +366,7 @@ fn ensure_ini_key(lines: &mut Vec<String>, section: &str, key: &str, value: &str
             if trimmed == wanted {
                 return false;
             }
-            lines[index] = wanted;
+            *line = wanted.clone();
             return true;
         }
     }
