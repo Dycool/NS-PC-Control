@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed if Rust safety invariants are weakened."""
+"""Fail closed if first-party Rust safety invariants are weakened."""
 from __future__ import annotations
 
 import pathlib
@@ -33,17 +33,31 @@ for crate in CRATES:
         if "#![forbid(unsafe_code)]" not in source:
             errors.append(f"{root.relative_to(ROOT)}: missing #![forbid(unsafe_code)]")
 
+cargo_config = (ROOT / ".cargo" / "config.toml").read_text(encoding="utf-8")
+if 'rustflags = ["-Funsafe-code"]' not in cargo_config:
+    errors.append(".cargo/config.toml: missing compiler-level -Funsafe-code")
+
 rust_files = sorted((ROOT / "rust").rglob("*.rs"))
 attribute_override = re.compile(r"#\s*!?\s*\[\s*(?:allow|warn)\s*\(")
 raw_pointer = re.compile(r"\*(?:const|mut)\b")
+unsafe_token = re.compile(r"\bunsafe\b")
+extern_c = re.compile(r'\bextern\s+"C"')
 for path in rust_files:
     source = path.read_text(encoding="utf-8")
-    if attribute_override.search(source):
+    code_lines = "\n".join(line.split("//", 1)[0] for line in source.splitlines())
+    if attribute_override.search(code_lines):
         errors.append(f"{path.relative_to(ROOT)}: allow/warn lint overrides are forbidden")
-    if raw_pointer.search(source):
+    if raw_pointer.search(code_lines):
         errors.append(f"{path.relative_to(ROOT)}: raw pointer types are forbidden in first-party Rust")
-    for forbidden in ("std::mem::transmute", "core::mem::transmute", "std::ptr::", "core::ptr::"):
-        if forbidden in source:
+    if unsafe_token.search(code_lines) and "#![forbid(unsafe_code)]" not in code_lines:
+        errors.append(f"{path.relative_to(ROOT)}: unsafe token is forbidden in first-party Rust")
+    if extern_c.search(code_lines):
+        errors.append(f"{path.relative_to(ROOT)}: C FFI is forbidden in first-party Rust")
+    for forbidden in (
+        "std::mem::transmute", "core::mem::transmute", "std::ptr::", "core::ptr::",
+        "MaybeUninit", "NonNull", "asm!", "global_asm!", "#[no_mangle]",
+    ):
+        if forbidden in code_lines:
             errors.append(f"{path.relative_to(ROOT)}: forbidden escape hatch {forbidden}")
 
 if errors:

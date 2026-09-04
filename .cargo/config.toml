@@ -1,2 +1,5 @@
+[build]
+rustflags = ["-Funsafe-code"]
+
 [alias]
 safety = "clippy --workspace --all-targets --all-features -- -D warnings"
