@@ -11,6 +11,7 @@ pub mod s2_native_command;
 pub mod s2_nfc_codec;
 pub mod s2_rawgadget;
 pub mod s2_uac1_audio;
+pub mod s2_usb_descriptors;
 pub mod switch2_native;
 pub mod udp_audio;
 pub mod udp_feedback;
