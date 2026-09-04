@@ -35,6 +35,54 @@ include!("s2_rawgadget/runtime.rs");
 include!("s2_rawgadget/transport.rs");
 
 impl RawGadgetRuntime {
+    /// Start the native transport with the logical Switch 2 controller identity
+    /// already installed before the EP0/event worker can observe the host.
+    ///
+    /// This mirrors the C++ re-enumeration contract: factory memory 0x13014 and
+    /// the EP0 identity must agree from the first request after reconnect.
+    pub fn setup_with_pid(
+        configuration: &RawGadgetConfiguration,
+        pid_low: u8,
+    ) -> io::Result<Self> {
+        ensure_raw_gadget_device(configuration.device_path())?;
+        unbind_legacy_gadget(&configuration.legacy_gadget_dir)?;
+        let udc = first_udc_name(configuration.udc_root())?;
+        install_interrupt_handler()?;
+        let gadget = Arc::new(RawGadget::open(
+            configuration.device_path(),
+            &udc,
+            &udc,
+            UsbSpeed::Full,
+        )?);
+        let native = Arc::new(NativeController::default());
+        native.reset();
+        native.set_pid(pid_low);
+        native.enumeration().gadget_started();
+        let inner = Arc::new(Inner {
+            gadget,
+            native,
+            running: AtomicBool::new(true),
+            generation: AtomicU64::new(1),
+            state: Mutex::new(RuntimeState {
+                state: GadgetState::DeviceInitialized,
+                ..RuntimeState::default()
+            }),
+            queues: Mutex::new(Queues::default()),
+            input_cv: Condvar::new(),
+            vendor_cv: Condvar::new(),
+            audio_cv: Condvar::new(),
+            worker_tokens: Mutex::new([None; WORKER_COUNT]),
+            motion: Mutex::new(MotionTiming::default()),
+            serial: configuration.serial.clone(),
+            origin: Instant::now(),
+        });
+        let workers = spawn_workers(&inner);
+        Ok(Self {
+            inner,
+            workers: Mutex::new(workers),
+        })
+    }
+
     /// Interrupt one blocking worker by index. This is used by recovery paths
     /// that need to drain a specific endpoint without tearing down the entire
     /// native transport.
