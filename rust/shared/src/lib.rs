@@ -3,6 +3,7 @@
 //! Shared protocol, cryptography, and deterministic pure logic for NS PC Control.
 
 mod compat;
+mod protocol_ext;
 pub mod control_packets;
 pub mod crypto;
 pub mod macros;
