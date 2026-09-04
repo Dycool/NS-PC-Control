@@ -33,3 +33,14 @@ const S2_PRO_REPORT_DESC: &[u8] = &S2_PRO_REPORT_DESC_BYTES;
 
 include!("s2_rawgadget/runtime.rs");
 include!("s2_rawgadget/transport.rs");
+
+impl RawGadgetRuntime {
+    /// Interrupt one blocking worker by index. This is used by recovery paths
+    /// that need to drain a specific endpoint without tearing down the entire
+    /// native transport.
+    pub fn interrupt_endpoint_worker(&self, worker_index: usize) {
+        if worker_index < WORKER_COUNT {
+            interrupt_worker(&self.inner, worker_index);
+        }
+    }
+}
