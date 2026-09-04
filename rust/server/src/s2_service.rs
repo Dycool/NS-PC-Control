@@ -116,7 +116,7 @@ impl S2SourceTracker {
             let stale = !controls_present
                 || now_us.saturating_sub(self.generation_seen_us) > CLIENT_STALE_NEUTRAL_US;
             let report = if stale {
-                neutral_preserving_profile(profile)
+                source_report.neutral_preserving_requested_profile()
             } else {
                 source_report
             };
@@ -140,14 +140,6 @@ impl S2SourceTracker {
         self.reset();
         S2SourceDecision::None
     }
-}
-
-fn neutral_preserving_profile(profile: ControllerType) -> HidReport {
-    let mut report = HidReport::default();
-    report
-        .set_status_bytes([0, 0, profile as u8])
-        .expect("controller profile from enum is always wire-valid");
-    report
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,13 +347,13 @@ mod tests {
         assert_eq!(source.client_index(), client);
         assert_eq!(source.subpad(), 0);
         assert_eq!(source.profile(), ControllerType::JoyconLS2);
-        assert_eq!(source.report().status_bytes()[2], ControllerType::JoyconL as u8);
+        assert_eq!(source.report().requested_profile_raw(), ControllerType::JoyconL as u8);
     }
 
     #[test]
-    fn stale_controls_neutralize_but_keep_requested_identity() {
+    fn stale_controls_neutralize_but_keep_raw_requested_identity() {
         let now = 2_000_000;
-        let (context, _) = context_with_profile(ControllerType::JoyconRS2, now);
+        let (context, _) = context_with_profile(ControllerType::JoyconR, now);
         let mut tracker = S2SourceTracker::default();
         let _ = tracker.resolve(&context, now);
         let S2SourceDecision::Source(source) = tracker.resolve(
@@ -373,7 +365,7 @@ mod tests {
         assert_eq!(source.profile(), ControllerType::JoyconRS2);
         assert_eq!(source.report().input().buttons(), 0);
         assert_eq!(source.report().input().axes(), [128; 4]);
-        assert_eq!(source.report().status_bytes()[2], ControllerType::JoyconRS2 as u8);
+        assert_eq!(source.report().requested_profile_raw(), ControllerType::JoyconR as u8);
     }
 
     #[test]
