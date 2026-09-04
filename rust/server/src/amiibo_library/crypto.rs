@@ -130,7 +130,7 @@ fn aes_xtime(value: u8) -> u8 {
 }
 
 fn aes_mix_columns(state: &mut [u8; 16]) {
-    let (columns, []) = state.as_chunks_mut::<4>();
+    let (columns, _) = state.as_chunks_mut::<4>();
     for column in columns {
         let a = [column[0], column[1], column[2], column[3]];
         let t = a[0] ^ a[1] ^ a[2] ^ a[3];
