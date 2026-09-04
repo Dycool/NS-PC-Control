@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod amiibo_library;
 pub mod app_state;
 pub mod bluetooth_input;
 pub mod bluetooth_manager;
