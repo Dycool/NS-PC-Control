@@ -1,6 +1,6 @@
 use crate::s2_enumeration::{EnumerationTracker, RecoveryDecision};
 use crate::s2_native_command::{validate_streaming_command, StreamingCommandStatus};
-use crate::s2_nfc_codec::{S2NfcRuntime, Signature};
+use crate::s2_nfc_codec::{NfcError, S2NfcRuntime, Signature};
 use ns_shared::aes::aes128_encrypt_block;
 use std::fs;
 use std::io;
@@ -11,6 +11,7 @@ const FACTORY_BASE: u32 = 0x13000;
 const FACTORY_SIZE: usize = 0x160;
 const USER_MOTION_CAL_BASE: u32 = 0x1fc000;
 const USER_MOTION_CAL_SIZE: usize = 0x80;
+const LEGACY_PORT_COUNT: usize = 4;
 const USER_MOTION_CAL_MAGIC: [u8; 8] = *b"NS2CAL\x02\0";
 const FEATURE_BUTTONS: u32 = 0x01;
 const FEATURE_STICKS: u32 = 0x02;
@@ -131,7 +132,7 @@ impl NativeState {
         self.fac(0x130e8, &[0xb1,0xa8,0x83,0xb6,0x35,0x5e,0x27,0x26,0x64]);
         self.fac(0x13100, &[0,0,0,0,0,0,0,0,0,0,0,0,0x2d,0x10,0xa7,0x3d,0xe7,0x49,0x35,0x3c,0xa4,0x2d,0x20,0x41]);
         self.fac(0x13140, &[0x00,0xd7,0xa3,0xbc,0x41,0xd7,0xa3,0xbc,0x41]);
-        self.identity[..0x25].copy_from_slice(&self.factory[..0x25]);
+        self.refresh_identity();
     }
 
     fn fac(&mut self, address: u32, data: &[u8]) {
@@ -139,6 +140,13 @@ impl NativeState {
         if offset <= self.factory.len() && data.len() <= self.factory.len() - offset {
             self.factory[offset..offset + data.len()].copy_from_slice(data);
         }
+    }
+
+    fn refresh_identity(&mut self) {
+        let prefix: [u8; 0x25] = self.factory[..0x25]
+            .try_into()
+            .expect("factory identity prefix is 37 bytes");
+        self.identity[..0x25].copy_from_slice(&prefix);
     }
 
     fn is_joycon(&self) -> bool {
@@ -228,9 +236,7 @@ pub struct NativeController {
 }
 
 impl Default for NativeController {
-    fn default() -> Self {
-        Self::new("/var/lib/ns-pc-control/switch2_motion_calibration.bin")
-    }
+    fn default() -> Self { Self::new("/var/lib/ns-pc-control/switch2_motion_calibration.bin") }
 }
 
 impl NativeController {
@@ -239,11 +245,7 @@ impl NativeController {
         let calibration_path = calibration_path.into();
         let mut state = NativeState::new(0);
         let _ = load_calibration(&calibration_path, &mut state.user_motion_cal);
-        Self {
-            state: Mutex::new(state),
-            enumeration: EnumerationTracker::default(),
-            calibration_path,
-        }
+        Self { state: Mutex::new(state), enumeration: EnumerationTracker::default(), calibration_path }
     }
 
     #[must_use]
@@ -261,7 +263,7 @@ impl NativeController {
         let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
         state.factory[0x14] = pid_low;
         state.factory[0x15] = 0x20;
-        state.identity[..0x25].copy_from_slice(&state.factory[..0x25]);
+        state.refresh_identity();
         state.selected_report = match pid_low { 0x67 => 0x07, 0x66 => 0x08, _ => 0x09 };
         if matches!(pid_low, 0x66 | 0x67) {
             state.feature_mask |= FEATURE_MOUSE;
@@ -273,8 +275,7 @@ impl NativeController {
 
     #[must_use]
     pub fn streaming_enabled(&self) -> bool {
-        std::env::var_os("NS_S2_BENCH_STREAM").is_some_and(|value| !value.is_empty() && value != "0")
-            || self.state.lock().unwrap_or_else(|poison| poison.into_inner()).streaming
+        bench_stream_enabled() || self.state.lock().unwrap_or_else(|poison| poison.into_inner()).streaming
     }
 
     #[must_use]
@@ -284,11 +285,7 @@ impl NativeController {
 
     #[must_use]
     pub fn enabled_features(&self) -> u32 {
-        if std::env::var_os("NS_S2_BENCH_STREAM").is_some_and(|value| !value.is_empty() && value != "0") {
-            DEFAULT_FEATURE_MASK
-        } else {
-            self.state.lock().unwrap_or_else(|poison| poison.into_inner()).enabled_features
-        }
+        if bench_stream_enabled() { DEFAULT_FEATURE_MASK } else { self.state.lock().unwrap_or_else(|poison| poison.into_inner()).enabled_features }
     }
 
     #[must_use]
@@ -296,12 +293,8 @@ impl NativeController {
         self.state.lock().unwrap_or_else(|poison| poison.into_inner()).runtime
     }
 
-    pub fn set_amiibo_data(&self, data: &[u8], has_real_signature: bool, signature: Signature) -> Result<(), crate::s2_nfc_codec::NfcError> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .nfc
-            .set_tag_data(data, has_real_signature, signature)
+    pub fn set_amiibo_data(&self, data: &[u8], has_real_signature: bool, signature: Signature) -> Result<(), NfcError> {
+        self.state.lock().unwrap_or_else(|poison| poison.into_inner()).nfc.set_tag_data(data, has_real_signature, signature)
     }
 
     pub fn clear_amiibo(&self) {
@@ -334,25 +327,15 @@ impl NativeController {
             _ => {}
         }
         if command.len() < 8 { return Err(NativeCommandError::ShortOptionalPacket); }
-
         let id = command[0];
         let transport = command[2];
         let sub = command[3];
-        if id == 0x0d && sub != 0x01 {
-            return Err(NativeCommandError::FirmwareUpdateRejected(sub));
-        }
+        if id == 0x0d && sub != 0x01 { return Err(NativeCommandError::FirmwareUpdateRejected(sub)); }
 
         let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
         self.enumeration.native_handshake();
         state.update_stage(id, sub);
-        let mut response = vec![0u8; 8];
-        response[0] = id;
-        response[1] = 0x01;
-        response[2] = transport;
-        response[3] = sub;
-        response[4] = 0x00;
-        response[5] = 0xf8;
-
+        let mut response = vec![id, 0x01, transport, sub, 0x00, 0xf8, 0x00, 0x00];
         let mut payload = Vec::new();
         match id {
             0x03 => match sub {
@@ -372,11 +355,7 @@ impl NativeController {
                 0x01 => payload.extend_from_slice(&state.pairing_info),
                 0x02 => {
                     payload.push(1);
-                    if command.len() >= 25 {
-                        payload.extend_from_slice(&state.answer_challenge(&command[9..25]));
-                    } else {
-                        payload.resize(17, 0);
-                    }
+                    if command.len() >= 25 { payload.extend_from_slice(&state.answer_challenge(&command[9..25])); } else { payload.resize(17, 0); }
                 }
                 0x03 => payload.push(1),
                 0x04 => {
@@ -393,7 +372,7 @@ impl NativeController {
                 response[4] = 0x10;
                 response[5] = 0x78;
                 if sub == 0x01 {
-                    let features = command.get(8).copied().unwrap_or(0) as u32;
+                    let features = u32::from(command.get(8).copied().unwrap_or(0));
                     let joycon = state.is_joycon();
                     payload.resize(12, 0);
                     payload[4] = if features & FEATURE_BUTTONS != 0 { 0x07 } else { 0 };
@@ -431,7 +410,7 @@ impl NativeController {
                         payload.resize(8, 0);
                         if command.len() >= 16 { payload[4..8].copy_from_slice(&command[12..16]); }
                         if command.len() > 16 {
-                            let declared = command.get(5).copied().unwrap_or(0).saturating_sub(8) as usize;
+                            let declared = usize::from(command.get(5).copied().unwrap_or(0).saturating_sub(8));
                             let length = declared.min(command.len() - 16);
                             if length != 0 && state.write_motion_calibration(address, &command[16..16 + length]) {
                                 let _ = save_calibration(&self.calibration_path, &state.user_motion_cal);
@@ -450,11 +429,7 @@ impl NativeController {
             },
             0x11 => match sub {
                 0x01 => payload.extend_from_slice(&[0x03,0,0,0]),
-                0x03 => payload.extend_from_slice(&[
-                    0x01,0x20,0x03,0x00,0x00,0x0a,0xe8,0x1c,0x3b,0x79,
-                    0x7d,0x8b,0x3a,0x0a,0xe8,0x9c,0x42,0x58,0xa0,0x0b,
-                    0x42,0x0a,0xe8,0x9c,0x41,0x58,0xa0,0x0b,0x41,
-                ]),
+                0x03 => payload.extend_from_slice(&[0x01,0x20,0x03,0x00,0x00,0x0a,0xe8,0x1c,0x3b,0x79,0x7d,0x8b,0x3a,0x0a,0xe8,0x9c,0x42,0x58,0xa0,0x0b,0x42,0x0a,0xe8,0x9c,0x41,0x58,0xa0,0x0b,0x41]),
                 _ => {}
             },
             0x01 => {
@@ -478,25 +453,28 @@ impl NativeController {
     }
 
     #[must_use]
-    pub fn recovery_decision(&self, reason: &str) -> RecoveryDecision {
-        self.enumeration.request_reenumeration(reason)
-    }
+    pub fn recovery_decision(&self, reason: &str) -> RecoveryDecision { self.enumeration.request_reenumeration(reason) }
+}
+
+fn bench_stream_enabled() -> bool {
+    std::env::var_os("NS_S2_BENCH_STREAM")
+        .is_some_and(|value| value.to_string_lossy() != "0" && !value.is_empty())
 }
 
 fn read_le32(bytes: &[u8], offset: usize) -> u32 {
-    bytes
-        .get(offset..offset + 4)
-        .and_then(|value| value.try_into().ok())
-        .map(u32::from_le_bytes)
-        .unwrap_or(0)
+    bytes.get(offset..offset + 4).and_then(|value| value.try_into().ok()).map(u32::from_le_bytes).unwrap_or(0)
 }
 
 fn load_calibration(path: &Path, output: &mut [u8; USER_MOTION_CAL_SIZE]) -> io::Result<()> {
     let bytes = fs::read(path)?;
-    if bytes.len() != USER_MOTION_CAL_MAGIC.len() + USER_MOTION_CAL_SIZE || bytes[..8] != USER_MOTION_CAL_MAGIC {
+    if bytes.len() < USER_MOTION_CAL_MAGIC.len() + USER_MOTION_CAL_SIZE || bytes[..8] != USER_MOTION_CAL_MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid Switch 2 calibration file"));
     }
-    output.copy_from_slice(&bytes[8..]);
+    let payload = bytes.len() - USER_MOTION_CAL_MAGIC.len();
+    if payload != USER_MOTION_CAL_SIZE && payload != USER_MOTION_CAL_SIZE * LEGACY_PORT_COUNT {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Switch 2 calibration file size"));
+    }
+    output.copy_from_slice(&bytes[8..8 + USER_MOTION_CAL_SIZE]);
     Ok(())
 }
 
@@ -504,9 +482,9 @@ fn save_calibration(path: &Path, data: &[u8; USER_MOTION_CAL_SIZE]) -> io::Resul
     let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "calibration path has no parent"))?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension("bin.tmp");
-    let mut bytes = Vec::with_capacity(USER_MOTION_CAL_MAGIC.len() + data.len());
-    bytes.extend_from_slice(&USER_MOTION_CAL_MAGIC);
-    bytes.extend_from_slice(data);
+    let mut bytes = vec![0xff; USER_MOTION_CAL_MAGIC.len() + USER_MOTION_CAL_SIZE * LEGACY_PORT_COUNT];
+    bytes[..8].copy_from_slice(&USER_MOTION_CAL_MAGIC);
+    bytes[8..8 + USER_MOTION_CAL_SIZE].copy_from_slice(data);
     fs::write(&temporary, bytes)?;
     #[cfg(unix)]
     {
@@ -541,10 +519,10 @@ mod tests {
     fn streaming_and_feature_negotiation_match_cpp_contract() {
         let controller = controller();
         let command = [0x03,0,0,0x0a,0,0,0,0,0x09];
-        assert_eq!(controller.handle_vendor_command(&command, 0).expect("stream"), command[..8]);
+        let response = controller.handle_vendor_command(&command, 0).expect("stream");
+        assert_eq!(response, command[..8]);
         assert!(controller.streaming_enabled());
         assert_eq!(controller.selected_report(), 0x09);
-
         let mut enable = [0u8; 12];
         enable[0] = 0x0c;
         enable[3] = 0x04;
@@ -582,5 +560,18 @@ mod tests {
         let response = controller.handle_vendor_command(&challenge, 0).expect("challenge");
         assert_eq!(response.len(), 25);
         assert_ne!(&response[9..25], &[0; 16]);
+    }
+
+    #[test]
+    fn calibration_loader_accepts_cpp_four_port_file() {
+        let path = std::env::temp_dir().join("nspc-s2-calibration-compat.bin");
+        let mut bytes = vec![0xff; 8 + USER_MOTION_CAL_SIZE * LEGACY_PORT_COUNT];
+        bytes[..8].copy_from_slice(&USER_MOTION_CAL_MAGIC);
+        bytes[8] = 0x42;
+        fs::write(&path, bytes).expect("write");
+        let mut data = [0u8; USER_MOTION_CAL_SIZE];
+        load_calibration(&path, &mut data).expect("load");
+        assert_eq!(data[0], 0x42);
+        let _ = fs::remove_file(path);
     }
 }
