@@ -162,11 +162,18 @@ pub struct S2LiveService {
 
 impl S2LiveService {
     pub fn setup(configuration: &RawGadgetConfiguration) -> io::Result<Self> {
+        Self::setup_for_profile(configuration, ControllerType::ProS2)
+    }
+
+    pub fn setup_for_profile(
+        configuration: &RawGadgetConfiguration,
+        profile: ControllerType,
+    ) -> io::Result<Self> {
         Ok(Self {
-            runtime: RawGadgetRuntime::setup(configuration)?,
+            runtime: RawGadgetRuntime::setup_with_pid(configuration, switch2_pid_low(profile))?,
             source: S2SourceTracker::default(),
             builder: S2ReportBuilder::default(),
-            enumerated_profile: ControllerType::ProS2,
+            enumerated_profile: profile,
             owner: None,
             rumble_active: false,
         })
@@ -224,8 +231,6 @@ impl S2LiveService {
         self.service_rumble(context, source.client_index(), source.subpad());
 
         if source.profile() != self.enumerated_profile {
-            self.runtime.native().set_pid(switch2_pid_low(source.profile()));
-            self.enumerated_profile = source.profile();
             self.builder.reset();
             return S2TickOutcome::ReenumerateForIdentity {
                 profile: source.profile(),
