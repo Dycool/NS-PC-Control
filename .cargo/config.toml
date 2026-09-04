@@ -1,0 +1,2 @@
+[alias]
+safety = "clippy --workspace --all-targets --all-features -- -D warnings"

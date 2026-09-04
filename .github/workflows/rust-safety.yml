@@ -1,0 +1,30 @@
+name: Rust safety gate
+
+on:
+  push:
+    branches: [rust-port]
+  pull_request:
+    branches: [rust-port]
+
+permissions:
+  contents: read
+
+jobs:
+  safe-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-31
+          components: clippy,miri,rustfmt
+      - name: Enforce Rust policy
+        run: python3 scripts/verify-rust-policy.py
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --all-features
+      - name: Miri
+        run: cargo miri test -p ns-shared

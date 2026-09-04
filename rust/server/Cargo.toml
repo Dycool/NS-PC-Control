@@ -1,0 +1,17 @@
+[package]
+name = "ns-backend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ns-shared = { path = "../shared" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+transmute_ptr_to_ptr = "forbid"
+undocumented_unsafe_blocks = "forbid"

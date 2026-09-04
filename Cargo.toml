@@ -1,0 +1,15 @@
+[workspace]
+members = ["rust/shared", "rust/server", "rust/client"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Dycool/NS-PC-Control"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
