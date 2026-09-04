@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use ns_backend::app_state::{ServerContext, UsbControllerFamily};
+use ns_backend::app_state::{ServerContext, UsbControllerFamily, MAX_CLIENTS};
+use ns_backend::udp_feedback::flush_feedback_to_udp;
 use ns_backend::virtual_controller::{HidGadgetController, VirtualController};
 use ns_backend::writers::write_once;
 use ns_shared::crypto::derive_key;
@@ -85,12 +86,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = context.disconnect(slot);
                         continue;
                     }
-                    let _ = context.update_udp_report(
-                        slot,
-                        packet.sequence(),
-                        *packet.report(),
-                        now_us,
-                    );
+                    if context
+                        .update_udp_report(slot, packet.sequence(), *packet.report(), now_us)
+                        .is_ok()
+                    {
+                        let _ = context.enable_udp_feedback(slot);
+                    }
                 }
             }
             Ok(_) => {}
@@ -102,6 +103,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             context.expire_stale_clients(now_us);
             if !controllers.is_empty() {
                 write_once(&context, &mut controllers, now_us)?;
+            }
+            for client_index in 0..MAX_CLIENTS {
+                if let Err(error) = flush_feedback_to_udp(&socket, &context, client_index, now_us)
+                    && options.verbose
+                {
+                    eprintln!("[udp] feedback send failed for slot {}: {error}", client_index + 1);
+                }
             }
             next_write += Duration::from_millis(4);
             if next_write < Instant::now() {
@@ -142,7 +150,9 @@ fn parse_args(arguments: impl Iterator<Item = String>) -> Result<Options, String
                 .push(PathBuf::from(take_value(&mut arguments, "--hid-path")?)),
             "--verbose" | "-v" => options.verbose = true,
             "--help" | "-h" => {
-                println!("ns-backend [--bind ADDR] [--port PORT] [--secret SECRET] [--family switch1|switch2|hori] [--hid-path PATH]... [-v]");
+                println!(
+                    "ns-backend [--bind ADDR] [--port PORT] [--secret SECRET] [--family switch1|switch2|hori] [--hid-path PATH]... [-v]"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
