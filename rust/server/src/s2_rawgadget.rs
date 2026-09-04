@@ -1,35 +1,34 @@
+//! Safe application-side Switch 2 Raw Gadget runtime.
+//!
+//! `ns-backend` remains `#![forbid(unsafe_code)]`. All Linux Raw Gadget
+//! ioctls, raw pointers, C ABI calls, and thread-interrupt primitives live in
+//! the dependency-free `ns-raw-gadget` crate, which is the repository's sole
+//! approved unsafe Rust boundary.
+
+use crate::s2_uac1_audio::AudioControl;
+use crate::s2_usb_descriptors::{
+    config_descriptor, device_descriptor, hid_descriptor, string_descriptor,
+    AUDIO_CAPTURE_ADDRESS, AUDIO_CAPTURE_INTERFACE, AUDIO_PLAYBACK_ADDRESS,
+    AUDIO_PLAYBACK_INTERFACE, HID_IN_ADDRESS, HID_OUT_ADDRESS, VENDOR_IN_ADDRESS,
+    VENDOR_OUT_ADDRESS,
+};
+use crate::switch2_native::{Ep0Reply, NativeController};
+use crate::virtual_controller::S2_PRO_REPORT_DESC;
+use ns_raw_gadget::{
+    current_thread_interrupt_token, install_interrupt_handler, interrupt_thread,
+    ControlRequest, EndpointDescriptor, EndpointHandle, EventKind, RawGadget,
+    ThreadInterruptToken, UsbSpeed,
+};
+use ns_shared::protocol::S2_AUDIO_USB_FRAME_BYTES;
+use std::collections::VecDeque;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UsbEventKind { Connect, Control, Reset, Suspend, Resume, Disconnect }
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UsbEvent { kind: UsbEventKind, payload: Vec<u8> }
-impl UsbEvent {
-    pub fn new(kind: UsbEventKind, payload: Vec<u8>) -> Self { Self { kind, payload } }
-    pub fn kind(&self) -> UsbEventKind { self.kind }
-    pub fn payload(&self) -> &[u8] { &self.payload }
-}
-
-pub trait RawGadgetTransport: Send {
-    fn next_event(&mut self) -> io::Result<UsbEvent>;
-    fn ep0_reply(&mut self, data: &[u8]) -> io::Result<()>;
-    fn endpoint_read(&mut self, endpoint: u16, output: &mut [u8]) -> io::Result<usize>;
-    fn endpoint_write(&mut self, endpoint: u16, data: &[u8]) -> io::Result<usize>;
-}
-
-#[derive(Clone, Debug)]
-pub struct RawGadgetConfiguration { device_path: PathBuf, udc_driver: String, udc_device: String }
-impl RawGadgetConfiguration {
-    pub fn new(device_path: impl Into<PathBuf>, udc_driver: impl Into<String>, udc_device: impl Into<String>) -> Result<Self, String> {
-        let configuration = Self { device_path: device_path.into(), udc_driver: udc_driver.into(), udc_device: udc_device.into() };
-        if configuration.udc_driver.trim().is_empty() || configuration.udc_device.trim().is_empty() { return Err("UDC driver and device must be non-empty".to_string()); }
-        Ok(configuration)
-    }
-    pub fn device_path(&self) -> &Path { &self.device_path }
-    pub fn udc_driver(&self) -> &str { &self.udc_driver }
-    pub fn udc_device(&self) -> &str { &self.udc_device }
-}
-
-pub fn raw_gadget_available(path: &Path) -> bool { path.exists() }
+include!("s2_rawgadget/runtime.rs");
+include!("s2_rawgadget/transport.rs");
