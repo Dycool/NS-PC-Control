@@ -12,6 +12,8 @@ use ns_shared::protocol::{
 };
 use std::io;
 
+pub const S2_IDENTITY_REENUM_QUIET_US: u64 = 1_000_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct S2Source {
     client_index: usize,
@@ -156,6 +158,8 @@ pub struct S2LiveService {
     source: S2SourceTracker,
     builder: S2ReportBuilder,
     enumerated_profile: ControllerType,
+    live_profile: ControllerType,
+    identity_change_us: Option<u64>,
     owner: Option<(usize, usize)>,
     rumble_active: bool,
 }
@@ -174,6 +178,8 @@ impl S2LiveService {
             source: S2SourceTracker::default(),
             builder: S2ReportBuilder::default(),
             enumerated_profile: profile,
+            live_profile: profile,
+            identity_change_us: None,
             owner: None,
             rumble_active: false,
         })
@@ -182,6 +188,11 @@ impl S2LiveService {
     #[must_use]
     pub const fn enumerated_profile(&self) -> ControllerType {
         self.enumerated_profile
+    }
+
+    #[must_use]
+    pub const fn live_profile(&self) -> ControllerType {
+        self.live_profile
     }
 
     #[must_use]
@@ -230,10 +241,20 @@ impl S2LiveService {
         }
         self.service_rumble(context, source.client_index(), source.subpad());
 
-        if source.profile() != self.enumerated_profile {
+        if source.profile() != self.live_profile {
+            self.live_profile = source.profile();
+            self.runtime.native().set_pid(switch2_pid_low(source.profile()));
+            self.identity_change_us = Some(now_us);
             self.builder.reset();
+        }
+        if self.live_profile == self.enumerated_profile {
+            self.identity_change_us = None;
+        } else if self
+            .identity_change_us
+            .is_some_and(|changed| now_us.saturating_sub(changed) >= S2_IDENTITY_REENUM_QUIET_US)
+        {
             return S2TickOutcome::ReenumerateForIdentity {
-                profile: source.profile(),
+                profile: self.live_profile,
             };
         }
 
