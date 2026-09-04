@@ -431,7 +431,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
     let mut h3 = 0x1032_5476u32;
     let mut h4 = 0xc3d2_e1f0u32;
 
-    for chunk in message.chunks_exact(64) {
+    let (chunks, remainder) = message.as_chunks::<64>();
+    debug_assert!(remainder.is_empty());
+    for chunk in chunks {
         let mut words = [0u32; 80];
         for (index, word) in words[..16].iter_mut().enumerate() {
             let start = index * 4;
