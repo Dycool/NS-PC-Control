@@ -20,12 +20,28 @@ pub struct JoyconMouseInput {
 
 impl JoyconMouseInput {
     #[must_use]
-    pub const fn new(dx: i16, dy: i16, scroll_y: i8, left_down: bool, right_down: bool, active: bool) -> Self {
-        Self { dx, dy, scroll_y, left_down, right_down, active }
+    pub const fn new(
+        dx: i16,
+        dy: i16,
+        scroll_y: i8,
+        left_down: bool,
+        right_down: bool,
+        active: bool,
+    ) -> Self {
+        Self {
+            dx,
+            dy,
+            scroll_y,
+            left_down,
+            right_down,
+            active,
+        }
     }
 
     #[must_use]
-    pub const fn active(self) -> bool { self.active }
+    pub const fn active(self) -> bool {
+        self.active
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -33,6 +49,24 @@ pub struct S2ReportContext {
     pub nfc_state: u8,
     pub headset_state: u8,
     pub mouse: Option<JoyconMouseInput>,
+}
+
+#[derive(Clone, Copy)]
+struct BuildParameters {
+    timer: u8,
+    imu_enabled: bool,
+    fresh_motion: bool,
+    now_us: u64,
+    context: S2ReportContext,
+}
+
+#[derive(Clone, Copy)]
+struct MotionParameters<'a> {
+    source: &'a HidReport,
+    imu_enabled: bool,
+    fresh_motion: bool,
+    now_us: u64,
+    stationary_mouse: bool,
 }
 
 #[derive(Default)]
@@ -57,12 +91,18 @@ impl S2ReportBuilder {
         now_us: u64,
         context: S2ReportContext,
     ) -> [u8; S2_REPORT_SIZE] {
-        let timer = self.counter;
+        let parameters = BuildParameters {
+            timer: self.counter,
+            imu_enabled,
+            fresh_motion,
+            now_us,
+            context,
+        };
         self.counter = self.counter.wrapping_add(1);
         match selected_report {
-            0x07 => self.build_joycon(source, false, timer, imu_enabled, fresh_motion, now_us, context),
-            0x08 => self.build_joycon(source, true, timer, imu_enabled, fresh_motion, now_us, context),
-            _ => self.build_pro(source, timer, imu_enabled, fresh_motion, now_us, context),
+            0x07 => self.build_joycon(source, false, parameters),
+            0x08 => self.build_joycon(source, true, parameters),
+            _ => self.build_pro(source, parameters),
         }
     }
 
@@ -71,23 +111,22 @@ impl S2ReportBuilder {
         output: &mut [u8; S2_REPORT_SIZE],
         length_index: usize,
         data_index: usize,
-        source: &HidReport,
-        imu_enabled: bool,
-        fresh_motion: bool,
-        now_us: u64,
-        stationary_mouse: bool,
+        parameters: MotionParameters<'_>,
     ) {
-        if !imu_enabled || !source.has_motion() {
+        if !parameters.imu_enabled || !parameters.source.has_motion() {
             self.motion.reset();
             return;
         }
-        if fresh_motion || stationary_mouse {
-            let samples = if stationary_mouse {
+        if parameters.fresh_motion || parameters.stationary_mouse {
+            let samples = if parameters.stationary_mouse {
                 [MotionCarrierSample::new([0, -4096, 0], [0; 3]); 3]
             } else {
-                source.motion().map(|sample| MotionCarrierSample::new(sample.accel(), sample.gyro()))
+                parameters
+                    .source
+                    .motion()
+                    .map(|sample| MotionCarrierSample::new(sample.accel(), sample.gyro()))
             };
-            let _ = self.motion.update(&samples, now_us);
+            let _ = self.motion.update(&samples, parameters.now_us);
         }
         if self.motion.carrier_valid() && data_index + MOTION_CARRIER_SIZE <= output.len() {
             output[length_index] = MOTION_CARRIER_SIZE as u8;
@@ -99,11 +138,7 @@ impl S2ReportBuilder {
     fn build_pro(
         &mut self,
         source: &HidReport,
-        timer: u8,
-        imu_enabled: bool,
-        fresh_motion: bool,
-        now_us: u64,
-        context: S2ReportContext,
+        parameters: BuildParameters,
     ) -> [u8; S2_REPORT_SIZE] {
         let input = source.input();
         let buttons = input.buttons();
@@ -111,7 +146,7 @@ impl S2ReportBuilder {
         let [lx, ly, rx, ry] = input.axes();
         let mut output = [0u8; S2_REPORT_SIZE];
         output[0] = 0x09;
-        output[1] = timer;
+        output[1] = parameters.timer;
         output[2] = power_info(source);
         output[3] = bit(buttons, BTN_RSTICK, 0x80)
             | bit(buttons, BTN_PLUS, 0x40)
@@ -134,9 +169,20 @@ impl S2ReportBuilder {
         pack_stick(&mut output[6..9], lx, ly);
         pack_stick(&mut output[9..12], rx, ry);
         output[12] = 0x30;
-        output[13] = context.nfc_state;
-        output[14] = context.headset_state;
-        self.write_motion(&mut output, 15, 16, source, imu_enabled, fresh_motion, now_us, false);
+        output[13] = parameters.context.nfc_state;
+        output[14] = parameters.context.headset_state;
+        self.write_motion(
+            &mut output,
+            15,
+            16,
+            MotionParameters {
+                source,
+                imu_enabled: parameters.imu_enabled,
+                fresh_motion: parameters.fresh_motion,
+                now_us: parameters.now_us,
+                stationary_mouse: false,
+            },
+        );
         output
     }
 
@@ -144,30 +190,34 @@ impl S2ReportBuilder {
         &mut self,
         source: &HidReport,
         right: bool,
-        timer: u8,
-        imu_enabled: bool,
-        fresh_motion: bool,
-        now_us: u64,
-        context: S2ReportContext,
+        parameters: BuildParameters,
     ) -> [u8; S2_REPORT_SIZE] {
         let input = source.input();
         let mut buttons = input.buttons();
         let extra = input.vendor() & EXT_BUTTON_MASK;
         let [lx, ly, rx, ry] = input.axes();
-        let mouse = context.mouse;
+        let mouse = parameters.context.mouse;
         if let Some(mouse) = mouse.filter(|mouse| mouse.active()) {
             if right {
-                if mouse.left_down { buttons |= BTN_R; }
-                if mouse.right_down { buttons |= BTN_ZR; }
+                if mouse.left_down {
+                    buttons |= BTN_R;
+                }
+                if mouse.right_down {
+                    buttons |= BTN_ZR;
+                }
             } else {
-                if mouse.left_down { buttons |= BTN_L; }
-                if mouse.right_down { buttons |= BTN_ZL; }
+                if mouse.left_down {
+                    buttons |= BTN_L;
+                }
+                if mouse.right_down {
+                    buttons |= BTN_ZL;
+                }
             }
         }
 
         let mut output = [0u8; S2_REPORT_SIZE];
         output[0] = if right { 0x08 } else { 0x07 };
-        output[1] = timer;
+        output[1] = parameters.timer;
         output[2] = power_info(source);
         if right {
             output[3] = bit(buttons, BTN_RSTICK, 0x80)
@@ -184,7 +234,8 @@ impl S2ReportBuilder {
                 | extra_bit(extra, EXT_BUTTON_SR, 0x40)
                 | extra_bit(extra, EXT_BUTTON_C, 0x10)
                 | bit(buttons, BTN_HOME, 0x01);
-            let scroll_y = mouse.filter(|mouse| mouse.active && mouse.scroll_y != 0)
+            let scroll_y = mouse
+                .filter(|mouse| mouse.active && mouse.scroll_y != 0)
                 .map_or(ry, |mouse| if mouse.scroll_y > 0 { 0 } else { 255 });
             pack_stick(&mut output[6..9], rx, scroll_y);
         } else {
@@ -198,7 +249,8 @@ impl S2ReportBuilder {
                 | extra_bit(extra, EXT_BUTTON_SL, 0x80)
                 | extra_bit(extra, EXT_BUTTON_SR, 0x40)
                 | bit(buttons, BTN_CAPTURE, 0x01);
-            let scroll_y = mouse.filter(|mouse| mouse.active && mouse.scroll_y != 0)
+            let scroll_y = mouse
+                .filter(|mouse| mouse.active && mouse.scroll_y != 0)
                 .map_or(ly, |mouse| if mouse.scroll_y > 0 { 0 } else { 255 });
             pack_stick(&mut output[6..9], lx, scroll_y);
         }
@@ -210,15 +262,17 @@ impl S2ReportBuilder {
             &mut output,
             16,
             17,
-            source,
-            imu_enabled,
-            fresh_motion,
-            now_us,
-            mouse_active,
+            MotionParameters {
+                source,
+                imu_enabled: parameters.imu_enabled,
+                fresh_motion: parameters.fresh_motion,
+                now_us: parameters.now_us,
+                stationary_mouse: mouse_active,
+            },
         );
         if let Some(mut mouse) = mouse {
             if mouse.active && mouse.scroll_y != 0 && mouse.dx == 0 && mouse.dy == 0 {
-                mouse.dx = if timer & 1 != 0 { 1 } else { -1 };
+                mouse.dx = if parameters.timer & 1 != 0 { 1 } else { -1 };
             }
             let dx = mouse.dx.to_le_bytes();
             let dy = mouse.dy.to_le_bytes();
@@ -226,7 +280,11 @@ impl S2ReportBuilder {
             output[0x0c..0x0e].copy_from_slice(&dy);
             output[0x0e] = if mouse.active { 0x17 } else { 0xff };
         }
-        output[15] = if right { context.nfc_state } else { 0 };
+        output[15] = if right {
+            parameters.context.nfc_state
+        } else {
+            0
+        };
         output
     }
 }
@@ -241,15 +299,27 @@ fn power_info(source: &HidReport) -> u8 {
     .min(9);
     (level << 2)
         | 0x01
-        | if reserved[1] & EXT_STATUS_BATTERY_CHARGING != 0 { 0x02 } else { 0 }
+        | if reserved[1] & EXT_STATUS_BATTERY_CHARGING != 0 {
+            0x02
+        } else {
+            0
+        }
 }
 
 fn bit(buttons: u16, mask: u16, output: u8) -> u8 {
-    if buttons & mask != 0 { output } else { 0 }
+    if buttons & mask != 0 {
+        output
+    } else {
+        0
+    }
 }
 
 fn extra_bit(buttons: u8, mask: u8, output: u8) -> u8 {
-    if buttons & mask != 0 { output } else { 0 }
+    if buttons & mask != 0 {
+        output
+    } else {
+        0
+    }
 }
 
 fn dpad(hat: Hat) -> u8 {
@@ -276,7 +346,11 @@ fn axis8_to_12(value: u8) -> u16 {
 }
 
 fn invert_axis(value: u8) -> u8 {
-    if value == 128 { 128 } else { 255 - value }
+    if value == 128 {
+        128
+    } else {
+        255 - value
+    }
 }
 
 fn pack_stick(output: &mut [u8], x: u8, y: u8) {
@@ -294,9 +368,21 @@ mod tests {
 
     #[test]
     fn neutral_pro2_report_matches_cpp_layout() {
-        let source = HidReport::new(HoriHidReport::default(), [MotionReport::default(); 3], false, [0; 3]);
+        let source = HidReport::new(
+            HoriHidReport::default(),
+            [MotionReport::default(); 3],
+            false,
+            [0; 3],
+        );
         let mut builder = S2ReportBuilder::default();
-        let report = builder.build(&source, 0x09, false, false, 0, S2ReportContext::default());
+        let report = builder.build(
+            &source,
+            0x09,
+            false,
+            false,
+            0,
+            S2ReportContext::default(),
+        );
         assert_eq!(report[0], 0x09);
         assert_eq!(report[2], 0x25);
         assert_eq!(&report[6..9], &[0x00, 0x08, 0x80]);
@@ -307,7 +393,12 @@ mod tests {
 
     #[test]
     fn joycon_mouse_block_preserves_cpp_offsets() {
-        let source = HidReport::new(HoriHidReport::default(), [MotionReport::default(); 3], true, [0; 3]);
+        let source = HidReport::new(
+            HoriHidReport::default(),
+            [MotionReport::default(); 3],
+            true,
+            [0; 3],
+        );
         let mut builder = S2ReportBuilder::default();
         let report = builder.build(
             &source,
