@@ -592,7 +592,7 @@ mod sys {
 
     pub fn install_interrupt_handler() -> Result<(), i32> {
         // SAFETY: `interrupt_handler` has the C signal-handler ABI and is process-static.
-        let previous = unsafe { signal(SIGUSR1, interrupt_handler as usize) };
+        let previous = unsafe { signal(SIGUSR1, interrupt_handler as *const () as usize) };
         if previous == usize::MAX {
             return Err(io::Error::last_os_error().raw_os_error().unwrap_or(22));
         }
