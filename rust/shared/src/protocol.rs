@@ -450,8 +450,9 @@ impl MotionReport {
     pub fn encode(&self) -> [u8; MOTION_REPORT_SIZE] {
         let values = [self.ax, self.ay, self.az, self.gx, self.gy, self.gz];
         let mut out = [0u8; MOTION_REPORT_SIZE];
-        for (chunk, value) in out.chunks_exact_mut(2).zip(values) {
-            chunk.copy_from_slice(&value.to_le_bytes());
+        for (index, value) in values.iter().copied().enumerate() {
+            let start = index * 2;
+            out[start..start + 2].copy_from_slice(&value.to_le_bytes());
         }
         out
     }
@@ -465,23 +466,12 @@ impl MotionReport {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HidReport {
     pub(crate) input: HoriHidReport,
     pub(crate) motion: [MotionReport; 3],
     pub(crate) has_motion: bool,
     pub(crate) reserved: [u8; 3],
-}
-
-impl Default for HidReport {
-    fn default() -> Self {
-        Self {
-            input: HoriHidReport::default(),
-            motion: [MotionReport::default(); 3],
-            has_motion: false,
-            reserved: [0; 3],
-        }
-    }
 }
 
 impl HidReport {
