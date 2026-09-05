@@ -30,7 +30,12 @@ impl IdentityState {
         }
     }
 
-    fn observe(&mut self, family: UsbControllerFamily, slots: &[LegacySlot; LEGACY_PORTS], now_us: u64) {
+    fn observe(
+        &mut self,
+        family: UsbControllerFamily,
+        slots: &[LegacySlot; LEGACY_PORTS],
+        now_us: u64,
+    ) {
         if self.family != family {
             *self = Self::for_family(family);
         }
@@ -141,25 +146,6 @@ fn profile_for_slot(slot: LegacySlot, family: UsbControllerFamily) -> Controller
 mod tests {
     use super::*;
 
-    fn slot(profile: ControllerType) -> LegacySlot {
-        // Build through the public reconciler shape rather than exposing a
-        // constructor solely for tests.
-        let family = if matches!(profile, ControllerType::JoyconLS2 | ControllerType::JoyconRS2 | ControllerType::ProS2) {
-            UsbControllerFamily::Switch2
-        } else {
-            UsbControllerFamily::Switch1
-        };
-        let mut identity = IdentityState::for_family(family);
-        let idle = [LegacySlot::default(); LEGACY_PORTS];
-        identity.observe(family, &idle, 1);
-        let mut candidate = LegacySlot::default();
-        // The tracker behavior itself is tested below with direct live arrays;
-        // this helper only exists to keep the type in scope.
-        let _ = profile;
-        let _ = &mut candidate;
-        candidate
-    }
-
     #[test]
     fn mismatch_requires_full_one_second_quiet_window() {
         let mut state = IdentityState::for_family(UsbControllerFamily::Switch1);
@@ -195,10 +181,5 @@ mod tests {
         state.live[0] = ControllerType::JoyconL;
         state.change_us = 1;
         assert!(!state.due(u64::MAX));
-    }
-
-    #[test]
-    fn helper_compiles_with_legacy_slot_contract() {
-        let _ = slot(ControllerType::Pro);
     }
 }
