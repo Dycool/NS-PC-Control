@@ -350,6 +350,11 @@ impl S2LiveService {
                         }
                     }
                     let _ = self.runtime.submit_vendor_report(&response, &request);
+                    if let Some(data) = self.runtime.native().take_modified_amiibo()
+                        && let Some((client_index, subpad)) = self.owner
+                    {
+                        let _ = context.publish_amiibo_writeback(client_index, subpad, &data);
+                    }
                 }
                 Err(
                     NativeCommandError::TruncatedStreamingCommand
