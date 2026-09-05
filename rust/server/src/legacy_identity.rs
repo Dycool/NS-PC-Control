@@ -75,6 +75,14 @@ impl IdentityState {
         self.enumerated = self.live;
         self.change_us = 0;
     }
+
+    const fn live_profiles(&self) -> [ControllerType; LEGACY_PORTS] {
+        self.live
+    }
+
+    const fn enumerated_profiles(&self) -> [ControllerType; LEGACY_PORTS] {
+        self.enumerated
+    }
 }
 
 fn state() -> &'static Mutex<IdentityState> {
@@ -97,6 +105,22 @@ pub fn legacy_identity_reenumeration_due(now_us: u64) -> bool {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .due(now_us)
+}
+
+#[must_use]
+pub fn legacy_identity_live_profiles() -> [ControllerType; LEGACY_PORTS] {
+    state()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .live_profiles()
+}
+
+#[must_use]
+pub fn legacy_identity_enumerated_profiles() -> [ControllerType; LEGACY_PORTS] {
+    state()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .enumerated_profiles()
 }
 
 pub fn mark_legacy_identity_enumerated() {
@@ -173,6 +197,33 @@ mod tests {
         state.mark_enumerated();
         assert_eq!(state.enumerated[0], ControllerType::JoyconL);
         assert_eq!(state.change_us, 0);
+    }
+
+    #[test]
+    fn profile_snapshots_preserve_live_and_console_latched_identity() {
+        let mut state = IdentityState::for_family(UsbControllerFamily::Switch1);
+        assert_eq!(state.live_profiles(), [ControllerType::Pro; LEGACY_PORTS]);
+        assert_eq!(
+            state.enumerated_profiles(),
+            [ControllerType::Pro; LEGACY_PORTS]
+        );
+
+        state.live[0] = ControllerType::JoyconR;
+        assert_eq!(state.live_profiles()[0], ControllerType::JoyconR);
+        assert_eq!(state.enumerated_profiles()[0], ControllerType::Pro);
+
+        state.mark_enumerated();
+        assert_eq!(state.enumerated_profiles(), state.live_profiles());
+    }
+
+    #[test]
+    fn family_reset_exposes_family_native_idle_identity() {
+        let s1 = IdentityState::for_family(UsbControllerFamily::Switch1);
+        let s2 = IdentityState::for_family(UsbControllerFamily::Switch2);
+        let hori = IdentityState::for_family(UsbControllerFamily::Hori);
+        assert_eq!(s1.live_profiles(), [ControllerType::Pro; LEGACY_PORTS]);
+        assert_eq!(s2.live_profiles(), [ControllerType::ProS2; LEGACY_PORTS]);
+        assert_eq!(hori.live_profiles(), [ControllerType::Hori; LEGACY_PORTS]);
     }
 
     #[test]
