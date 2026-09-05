@@ -231,8 +231,7 @@ fn publish_assignments(
         if !snapshot.is_some_and(|snapshot| snapshot.active()) {
             continue;
         }
-        for subpad in 0..4 {
-            let assignment = assignments[client][subpad];
+        for (subpad, assignment) in assignments[client].iter().copied().enumerate() {
             if context.assignment(client, subpad) != Some(assignment) {
                 context
                     .publish_assignment(client, subpad, assignment)
