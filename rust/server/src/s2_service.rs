@@ -2,6 +2,8 @@ use crate::app_state::{ServerContext, CLIENT_STALE_NEUTRAL_US, MAX_CLIENTS};
 use crate::controller_profiles::{
     report_requests_pair, requested_profile_from_report, switch2_pid_low,
 };
+use crate::s2_nfc_codec::{NfcError, Signature};
+use crate::s2_nfc_hid::NfcHidState;
 use crate::s2_rawgadget::{RawGadgetConfiguration, RawGadgetRuntime};
 use crate::s2_reports::{S2ReportBuilder, S2ReportContext};
 use crate::s2_rumble::decode_s2_rumble;
@@ -163,6 +165,8 @@ pub struct S2LiveService {
     identity_change_us: Option<u64>,
     owner: Option<(usize, usize)>,
     rumble_active: bool,
+    nfc_hid: NfcHidState,
+    nfc_tag_present: bool,
 }
 
 impl S2LiveService {
@@ -184,6 +188,8 @@ impl S2LiveService {
             identity_change_us: None,
             owner: None,
             rumble_active: false,
+            nfc_hid: NfcHidState::default(),
+            nfc_tag_present: false,
         })
     }
 
@@ -207,20 +213,42 @@ impl S2LiveService {
         &self.runtime
     }
 
+    pub fn set_amiibo_data(&mut self, data: &[u8]) -> Result<(), NfcError> {
+        self.runtime
+            .native()
+            .set_amiibo_data(data, false, Signature::from_bytes([0; 32]))?;
+        if self.nfc_tag_present {
+            self.nfc_hid.tag_removed();
+        }
+        self.nfc_tag_present = true;
+        self.nfc_hid.tag_presented();
+        Ok(())
+    }
+
+    pub fn clear_amiibo(&mut self) {
+        self.runtime.native().clear_amiibo();
+        if self.nfc_tag_present {
+            self.nfc_hid.tag_removed();
+        }
+        self.nfc_tag_present = false;
+    }
+
     pub fn tick(
         &mut self,
         context: &ServerContext,
         now_us: u64,
-        report_context: S2ReportContext,
+        mut report_context: S2ReportContext,
     ) -> S2TickOutcome {
-        if self.service_vendor(now_us) {
+        if self.service_vendor(context, now_us) {
             return S2TickOutcome::ReenumerateForProtocol;
         }
 
         let decision = self.source.resolve(context, now_us);
         let source = match decision {
             S2SourceDecision::None => {
-                self.owner = None;
+                if self.owner.take().is_some() {
+                    self.clear_amiibo();
+                }
                 self.rumble_active = false;
                 self.drain_output_without_owner();
                 return S2TickOutcome::Idle;
@@ -229,7 +257,9 @@ impl S2LiveService {
                 client_index,
                 subpad,
             } => {
-                self.owner = None;
+                if self.owner.take().is_some() {
+                    self.clear_amiibo();
+                }
                 self.rumble_active = false;
                 self.drain_output_without_owner();
                 return S2TickOutcome::UnsupportedPair {
@@ -242,6 +272,9 @@ impl S2LiveService {
 
         let new_owner = (source.client_index(), source.subpad());
         if self.owner != Some(new_owner) {
+            if self.owner.is_some() {
+                self.clear_amiibo();
+            }
             self.owner = Some(new_owner);
             self.rumble_active = false;
             self.builder.reset();
@@ -273,6 +306,7 @@ impl S2LiveService {
         }
         let flags = native.runtime_flags();
         let selected_report = native.selected_report();
+        report_context.nfc_state = self.nfc_hid.report_state(now_us / 1_000);
         let report = self.builder.build(
             &source.report(),
             selected_report,
@@ -289,12 +323,32 @@ impl S2LiveService {
         }
     }
 
-    fn service_vendor(&self, now_us: u64) -> bool {
-        let native = self.runtime.native();
+    fn service_vendor(&mut self, context: &ServerContext, now_us: u64) -> bool {
         let mut reenumerate = false;
         while let Some(request) = self.runtime.poll_vendor_report() {
-            match native.handle_vendor_command(&request, now_us / 1_000) {
+            let nfc_command = request
+                .get(0..4)
+                .map(|header| (header[0], header[3]))
+                .filter(|(id, _)| *id == 0x01);
+            match self
+                .runtime
+                .native()
+                .handle_vendor_command(&request, now_us / 1_000)
+            {
                 Ok(response) => {
+                    if let Some((_, subcommand)) = nfc_command {
+                        self.nfc_hid.note_command(
+                            now_us / 1_000,
+                            subcommand,
+                            self.nfc_tag_present,
+                        );
+                        if subcommand == 0x03
+                            && !self.nfc_tag_present
+                            && let Some((client_index, subpad)) = self.owner
+                        {
+                            let _ = context.publish_amiibo_request(client_index, subpad, true);
+                        }
+                    }
                     let _ = self.runtime.submit_vendor_report(&response, &request);
                 }
                 Err(
@@ -367,7 +421,17 @@ mod tests {
             [0, 0, profile as u8],
         );
         context
-            .update_udp_report(client, 1, MultiReport::new([report, HidReport::default(), HidReport::default(), HidReport::default()]), now_us)
+            .update_udp_report(
+                client,
+                1,
+                MultiReport::new([
+                    report,
+                    HidReport::default(),
+                    HidReport::default(),
+                    HidReport::default(),
+                ]),
+                now_us,
+            )
             .expect("report");
         (context, client)
     }
@@ -383,7 +447,10 @@ mod tests {
         assert_eq!(source.client_index(), client);
         assert_eq!(source.subpad(), 0);
         assert_eq!(source.profile(), ControllerType::JoyconLS2);
-        assert_eq!(source.report().requested_profile_raw(), ControllerType::JoyconL as u8);
+        assert_eq!(
+            source.report().requested_profile_raw(),
+            ControllerType::JoyconL as u8
+        );
     }
 
     #[test]
@@ -392,16 +459,18 @@ mod tests {
         let (context, _) = context_with_profile(ControllerType::JoyconR, now);
         let mut tracker = S2SourceTracker::default();
         let _ = tracker.resolve(&context, now);
-        let S2SourceDecision::Source(source) = tracker.resolve(
-            &context,
-            now + CLIENT_STALE_NEUTRAL_US + 1,
-        ) else {
+        let S2SourceDecision::Source(source) =
+            tracker.resolve(&context, now + CLIENT_STALE_NEUTRAL_US + 1)
+        else {
             panic!("source");
         };
         assert_eq!(source.profile(), ControllerType::JoyconRS2);
         assert_eq!(source.report().input().buttons(), 0);
         assert_eq!(source.report().input().axes(), [128; 4]);
-        assert_eq!(source.report().requested_profile_raw(), ControllerType::JoyconR as u8);
+        assert_eq!(
+            source.report().requested_profile_raw(),
+            ControllerType::JoyconR as u8
+        );
     }
 
     #[test]
