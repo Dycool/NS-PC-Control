@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed unless Raw Gadget is the sole Rust unsafe-code boundary."""
+"""Fail closed around a minimal, audited set of Rust unsafe/FFI boundaries."""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,7 @@ SAFE_CRATES = (
 )
 BOUNDARY = ROOT / "rust" / "raw-gadget"
 BOUNDARY_NAME = "ns-raw-gadget"
+ALLOWLIST_PATH = ROOT / "scripts" / "rust-unsafe-allowlist.toml"
 errors: list[str] = []
 
 
@@ -31,6 +32,40 @@ def manifest_data(path: pathlib.Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def load_unsafe_allowlist() -> dict[str, str]:
+    if not ALLOWLIST_PATH.exists():
+        errors.append(f"{rel(ALLOWLIST_PATH)}: required audited unsafe dependency allowlist is missing")
+        return {}
+    try:
+        data = manifest_data(ALLOWLIST_PATH)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        errors.append(f"{rel(ALLOWLIST_PATH)}: cannot parse allowlist: {exc}")
+        return {}
+    packages = data.get("packages", {})
+    if not isinstance(packages, dict):
+        errors.append(f"{rel(ALLOWLIST_PATH)}: [packages] must be a TOML table")
+        return {}
+    output: dict[str, str] = {}
+    for package, reason in packages.items():
+        if not isinstance(package, str) or "@" not in package:
+            errors.append(
+                f"{rel(ALLOWLIST_PATH)}: unsafe exception keys must be exact 'package@version' strings"
+            )
+            continue
+        if package.startswith(f"{BOUNDARY_NAME}@"):
+            errors.append(
+                f"{rel(ALLOWLIST_PATH)}: {BOUNDARY_NAME!r} is the dedicated first-party boundary and must not be allowlisted here"
+            )
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"{rel(ALLOWLIST_PATH)}: {package!r} needs a non-empty parity justification")
+            continue
+        output[package] = reason.strip()
+    return output
+
+
+unsafe_allowlist = load_unsafe_allowlist()
+
 # First-party application crates remain compiler-forbidden from unsafe.
 for crate in SAFE_CRATES:
     manifest = crate / "Cargo.toml"
@@ -44,7 +79,7 @@ for crate in SAFE_CRATES:
         if needle not in text:
             errors.append(f"{rel(manifest)}: missing required safety lint: {needle!r}")
     if (crate / "build.rs").exists():
-        errors.append(f"{rel(crate / 'build.rs')}: build scripts are forbidden in first-party crates")
+        errors.append(f"{rel(crate / 'build.rs')}: build scripts are forbidden in first-party application crates")
     roots = [path for path in (crate / "src" / "lib.rs", crate / "src" / "main.rs") if path.exists()]
     if not roots:
         errors.append(f"{rel(crate)}: crate has no lib.rs or main.rs")
@@ -52,10 +87,12 @@ for crate in SAFE_CRATES:
         if "#![forbid(unsafe_code)]" not in root.read_text(encoding="utf-8"):
             errors.append(f"{rel(root)}: missing #![forbid(unsafe_code)]")
 
-# Exactly one unsafe boundary exists and it cannot hide transitive dependencies.
+# Raw Gadget remains the sole first-party unsafe boundary and cannot hide
+# transitive dependencies. Additional exceptions may only be external crates
+# pinned by exact package name + version in rust-unsafe-allowlist.toml.
 boundary_manifest = BOUNDARY / "Cargo.toml"
 if not boundary_manifest.exists():
-    errors.append("rust/raw-gadget/Cargo.toml: required exclusive unsafe boundary is missing")
+    errors.append("rust/raw-gadget/Cargo.toml: required first-party unsafe boundary is missing")
 else:
     boundary = manifest_data(boundary_manifest)
     if boundary.get("package", {}).get("name") != BOUNDARY_NAME:
@@ -70,22 +107,31 @@ else:
         if needle not in boundary_text:
             errors.append(f"{rel(boundary_manifest)}: missing boundary hardening lint {needle!r}")
 
-# A global -Funsafe-code would also disable the one explicitly approved boundary.
-# Compiler-level forbids live in each safe crate manifest/root instead.
+# A global -Funsafe-code would also disable the explicitly approved boundaries.
+# Compiler-level forbids live in every first-party safe crate instead.
 cargo_config = (ROOT / ".cargo" / "config.toml").read_text(encoding="utf-8")
 if "-Funsafe-code" in cargo_config or "-Aunsafe-code" in cargo_config:
-    errors.append(".cargo/config.toml: global unsafe-code rustflags are forbidden; safe crates enforce forbid locally")
+    errors.append(
+        ".cargo/config.toml: global unsafe-code rustflags are forbidden; safe crates enforce forbid locally"
+    )
 
 attribute_override = re.compile(r"#\s*!?\s*\[\s*(?:allow|warn)\s*\(")
 raw_pointer = re.compile(r"\*(?:const|mut)\b")
 unsafe_token = re.compile(r"\bunsafe\b")
 extern_c = re.compile(r'\bextern\s+"C"')
 forbidden_tokens = (
-    "std::mem::transmute", "core::mem::transmute", "std::ptr::", "core::ptr::",
-    "MaybeUninit", "NonNull", "asm!", "global_asm!", "#[no_mangle]",
+    "std::mem::transmute",
+    "core::mem::transmute",
+    "std::ptr::",
+    "core::ptr::",
+    "MaybeUninit",
+    "NonNull",
+    "asm!",
+    "global_asm!",
+    "#[no_mangle]",
 )
 
-# First-party code may not contain safety escape hatches at all.
+# First-party application code may not contain safety escape hatches at all.
 for crate in SAFE_CRATES:
     for path in sorted(crate.rglob("*.rs")):
         source = path.read_text(encoding="utf-8")
@@ -103,41 +149,55 @@ for crate in SAFE_CRATES:
             if forbidden in code_lines:
                 errors.append(f"{rel(path)}: forbidden escape hatch {forbidden}")
 
-# The boundary itself must document every unsafe block and may not weaken lints.
+# The first-party Raw Gadget boundary itself must document every unsafe block
+# and may never weaken lints.
 for path in sorted(BOUNDARY.rglob("*.rs")) if BOUNDARY.exists() else ():
     source = path.read_text(encoding="utf-8")
     code_lines = "\n".join(line.split("//", 1)[0] for line in source.splitlines())
     if attribute_override.search(code_lines):
         errors.append(f"{rel(path)}: allow/warn lint overrides are forbidden even in the boundary")
 
-# Resolve the real Cargo graph. Every non-workspace dependency is scanned for
-# unsafe source; only ns-raw-gadget may contain it. This catches transitive crates.
+# Resolve the real Cargo graph. Every external dependency is scanned for unsafe
+# source. Any dependency that contains unsafe/FFI/raw pointers must be explicitly
+# approved by exact Cargo package name + version. This lets Qt/SDL/audio/platform
+# bindings preserve C++ parity without creating a blanket unsafe exemption.
 try:
-    metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--format-version", "1"],
-        cwd=ROOT,
-        text=True,
-        stderr=subprocess.STDOUT,
-    ))
+    metadata = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--format-version", "1"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    )
 except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as exc:
     errors.append(f"cargo metadata failed while enforcing dependency safety: {exc}")
     metadata = {"packages": []}
 
 workspace_ids = set(metadata.get("workspace_members", []))
+safe_manifest_paths = {(crate / "Cargo.toml").resolve() for crate in SAFE_CRATES}
+boundary_manifest_path = boundary_manifest.resolve()
+used_unsafe_exceptions: set[str] = set()
+
 for package in metadata.get("packages", []):
     package_id = package.get("id", "")
     name = package.get("name", "")
+    version = package.get("version", "")
     manifest_path = pathlib.Path(package.get("manifest_path", ""))
     package_root = manifest_path.parent
-    if name == BOUNDARY_NAME:
-        if package_id not in workspace_ids:
-            errors.append(f"{BOUNDARY_NAME}: unsafe boundary must be the pinned workspace package")
-        continue
-    # Workspace safe crates were exhaustively checked above. External/path
-    # dependencies are additionally scanned here so future additions cannot
-    # silently introduce another unsafe island.
+
     if package_id in workspace_ids:
+        resolved_manifest = manifest_path.resolve()
+        if resolved_manifest == boundary_manifest_path:
+            if name != BOUNDARY_NAME:
+                errors.append(f"{rel(manifest_path)}: first-party unsafe boundary has unexpected package name {name!r}")
+        elif resolved_manifest not in safe_manifest_paths:
+            errors.append(
+                f"{rel(manifest_path)}: unrecognized workspace crate; first-party crates must be safe or the dedicated {BOUNDARY_NAME} boundary"
+            )
         continue
+
+    contains_unsafe = False
     for path in sorted(package_root.rglob("*.rs")):
         try:
             source = path.read_text(encoding="utf-8")
@@ -145,8 +205,24 @@ for package in metadata.get("packages", []):
             continue
         code_lines = "\n".join(line.split("//", 1)[0] for line in source.splitlines())
         if unsafe_token.search(code_lines) or extern_c.search(code_lines) or raw_pointer.search(code_lines):
-            errors.append(f"dependency {name!r} ({manifest_path}) contains unsafe/FFI/raw-pointer Rust; only {BOUNDARY_NAME!r} is permitted")
+            contains_unsafe = True
             break
+
+    if not contains_unsafe:
+        continue
+
+    exception_key = f"{name}@{version}"
+    if exception_key not in unsafe_allowlist:
+        errors.append(
+            f"dependency {exception_key!r} ({manifest_path}) contains unsafe/FFI/raw-pointer Rust and is not in the audited parity allowlist"
+        )
+    else:
+        used_unsafe_exceptions.add(exception_key)
+
+for exception_key in sorted(set(unsafe_allowlist) - used_unsafe_exceptions):
+    errors.append(
+        f"{rel(ALLOWLIST_PATH)}: stale unsafe exception {exception_key!r}; remove it unless that exact package version is in the resolved dependency graph and actually requires unsafe"
+    )
 
 if errors:
     print("Rust safety policy violations:", file=sys.stderr)
@@ -158,5 +234,6 @@ safe_count = sum(1 for crate in SAFE_CRATES for _ in crate.rglob("*.rs"))
 boundary_count = sum(1 for _ in BOUNDARY.rglob("*.rs")) if BOUNDARY.exists() else 0
 print(
     f"Rust safety policy OK ({safe_count} safe first-party files; "
-    f"{boundary_count} file(s) in exclusive {BOUNDARY_NAME} unsafe boundary)"
+    f"{boundary_count} file(s) in {BOUNDARY_NAME}; "
+    f"{len(used_unsafe_exceptions)} audited external unsafe exception(s))"
 )
