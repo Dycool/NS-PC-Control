@@ -60,6 +60,13 @@ impl Default for Options {
     }
 }
 
+struct InputReceiveState<'a> {
+    options: &'a Options,
+    packet_buffer: &'a mut [u8; 65_535],
+    endpoint_slots: &'a mut HashMap<SocketAddr, usize>,
+    pending_restart: &'a mut Option<UsbControllerFamily>,
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let original_arguments = env::args().skip(1).collect::<Vec<_>>();
     let options = parse_args(original_arguments.clone().into_iter())
@@ -141,10 +148,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             &socket,
             &context,
             &key,
-            &options,
-            &mut packet_buffer,
-            &mut endpoint_slots,
-            &mut pending_restart,
+            InputReceiveState {
+                options: &options,
+                packet_buffer: &mut packet_buffer,
+                endpoint_slots: &mut endpoint_slots,
+                pending_restart: &mut pending_restart,
+            },
             now_us,
         )?;
 
@@ -229,12 +238,15 @@ fn receive_input_datagrams(
     socket: &UdpSocket,
     context: &ServerContext,
     key: &[u8; 32],
-    options: &Options,
-    packet_buffer: &mut [u8; 65_535],
-    endpoint_slots: &mut HashMap<SocketAddr, usize>,
-    pending_restart: &mut Option<UsbControllerFamily>,
+    state: InputReceiveState<'_>,
     now_us: u64,
 ) -> io::Result<()> {
+    let InputReceiveState {
+        options,
+        packet_buffer,
+        endpoint_slots,
+        pending_restart,
+    } = state;
     loop {
         match socket.recv_from(packet_buffer) {
             Ok((size, address)) => {
