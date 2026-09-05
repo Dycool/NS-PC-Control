@@ -89,10 +89,15 @@ impl LegacyLayout {
                 || snapshot.pad_last_present_us().iter().any(|stamp| *stamp != 0);
             let mut any_request = false;
 
-            for subpad in 0..4 {
-                let report = &snapshot.report().pads()[subpad];
+            for (subpad, (report, present)) in snapshot
+                .report()
+                .pads()
+                .iter()
+                .zip(pad_present)
+                .enumerate()
+            {
                 let active = if presence_seen {
-                    pad_present[subpad]
+                    present
                 } else {
                     *report.input() != HoriHidReport::default()
                 };
@@ -195,8 +200,8 @@ impl LegacyLayout {
             let Some(snapshot) = snapshot.filter(|snapshot| snapshot.active()) else {
                 continue;
             };
-            for subpad in 0..4 {
-                assignments[client_index][subpad] = ClientAssignmentState::new(
+            for (subpad, assignment) in assignments[client_index].iter_mut().enumerate() {
+                *assignment = ClientAssignmentState::new(
                     0,
                     0xff,
                     requested_profile_from_report(&snapshot.report().pads()[subpad], family),
@@ -332,7 +337,7 @@ fn existing_single_port(
 mod tests {
     use super::*;
     use crate::app_state::ServerContext;
-    use ns_shared::protocol::{HidReport, MotionReport, MultiReport, EXT_PAD_PRESENT};
+    use ns_shared::protocol::{HidReport, MotionReport, MultiReport};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn snapshots(
@@ -393,7 +398,7 @@ mod tests {
         let mut pads = *first[0].expect("snapshot").report();
         let mut input = HoriHidReport::default();
         input.set_pad_present(true);
-        pads.pads_mut()[0] = HidReport::new(
+        *pads.pad_mut(0).expect("pad 0") = HidReport::new(
             input,
             [MotionReport::default(); 3],
             false,
