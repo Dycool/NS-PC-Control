@@ -274,7 +274,7 @@ fn handle_mapping_changes(
                 client,
                 current[port].subpad(),
                 0,
-                VIRTUAL_BODY_RGB[port],
+                Some(VIRTUAL_BODY_RGB[port]),
             );
         }
     }
@@ -310,7 +310,7 @@ fn process_s1_output(
                 client,
                 slot.subpad(),
                 lights,
-                VIRTUAL_BODY_RGB[port],
+                Some(VIRTUAL_BODY_RGB[port]),
             );
         }
     }
@@ -414,9 +414,7 @@ pub fn run_writer_loop(
 mod tests {
     use super::*;
     use crate::virtual_controller::MemoryController;
-    use ns_shared::protocol::{
-        Hat, MultiReport, BTN_A, EXT_PAD_PRESENT,
-    };
+    use ns_shared::protocol::{Hat, MultiReport, BTN_A, EXT_PAD_PRESENT};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn context_with_report(profile: ControllerType, now_us: u64) -> ServerContext {
