@@ -2,7 +2,8 @@ use ns_shared::crypto::{hmac_sha256, hmac_verify};
 use ns_shared::protocol::{
     S2_AUDIO_CAPS_AUTH_SIZE, S2_AUDIO_CAPS_MAGIC, S2_AUDIO_CAPS_PACKET_SIZE,
     S2_AUDIO_DIR_CLIENT_TO_CONSOLE, S2_AUDIO_DIR_CONSOLE_TO_CLIENT, S2_AUDIO_PCM_AUTH_SIZE,
-    S2_AUDIO_PCM_BYTES, S2_AUDIO_PCM_MAGIC, S2_AUDIO_PCM_PACKET_SIZE, S2_AUDIO_VERSION,
+    S2_AUDIO_PCM_BYTES, S2_AUDIO_PCM_MAGIC, S2_AUDIO_PCM_PACKET_SIZE, S2_AUDIO_USB_FRAME_BYTES,
+    S2_AUDIO_VERSION,
 };
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -14,6 +15,8 @@ const PLAYBACK_MAX_CONCEAL_DATAGRAMS: u32 = 8;
 const PLAYBACK_MIN_RATIO: f64 = 0.9975;
 const PLAYBACK_MAX_RATIO: f64 = 1.0025;
 const PLAYBACK_TRIM_COEFF: f64 = 0.0005;
+const MICROPHONE_MAX_MS: usize = 40;
+const MICROPHONE_MAX_PACKETS_PER_PUMP: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlaybackPacket<'a> {
@@ -29,6 +32,32 @@ pub struct PlaybackDecision {
     pub frequency_ratio: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicrophonePumpPlan {
+    Idle,
+    ClearBacklog,
+    SendPackets(usize),
+}
+
+/// Mirror the C++ microphone pump's backlog policy without tying the state
+/// machine to SDL. One audio USB frame is exactly one millisecond, and the C++
+/// client drops the entire capture queue only once it grows strictly beyond
+/// 40 ms. Otherwise, each update sends at most four complete UDP payloads.
+#[must_use]
+pub fn microphone_pump_plan(available_bytes: i32) -> MicrophonePumpPlan {
+    let available = usize::try_from(available_bytes).unwrap_or(0);
+    if available > S2_AUDIO_USB_FRAME_BYTES * MICROPHONE_MAX_MS {
+        return MicrophonePumpPlan::ClearBacklog;
+    }
+
+    let packets = (available / S2_AUDIO_PCM_BYTES).min(MICROPHONE_MAX_PACKETS_PER_PUMP);
+    if packets == 0 {
+        MicrophonePumpPlan::Idle
+    } else {
+        MicrophonePumpPlan::SendPackets(packets)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlaybackState {
     last_sequence: Option<u32>,
@@ -40,7 +69,12 @@ pub struct PlaybackState {
 
 impl PlaybackState {
     #[must_use]
-    pub fn accept(&mut self, packet: PlaybackPacket<'_>, arrival_us: u64, queued_ms: f64) -> Option<PlaybackDecision> {
+    pub fn accept(
+        &mut self,
+        packet: PlaybackPacket<'_>,
+        arrival_us: u64,
+        queued_ms: f64,
+    ) -> Option<PlaybackDecision> {
         let delta = match self.last_sequence {
             None => 1_i32,
             Some(previous) => packet.sequence.wrapping_sub(previous) as i32,
@@ -176,7 +210,11 @@ mod tests {
         AudioClient::new(socket, server, key)
     }
 
-    fn playback_packet(key: &[u8; 32], sequence: u32, timestamp_us: u64) -> [u8; S2_AUDIO_PCM_PACKET_SIZE] {
+    fn playback_packet(
+        key: &[u8; 32],
+        sequence: u32,
+        timestamp_us: u64,
+    ) -> [u8; S2_AUDIO_PCM_PACKET_SIZE] {
         let mut packet = [0_u8; S2_AUDIO_PCM_PACKET_SIZE];
         packet[..4].copy_from_slice(&S2_AUDIO_PCM_MAGIC.to_le_bytes());
         packet[4] = S2_AUDIO_VERSION;
@@ -187,6 +225,40 @@ mod tests {
         let tag = hmac_sha256(key, &packet[..S2_AUDIO_PCM_AUTH_SIZE]);
         packet[S2_AUDIO_PCM_AUTH_SIZE..].copy_from_slice(&tag[..16]);
         packet
+    }
+
+    #[test]
+    fn microphone_pump_matches_cpp_backlog_and_batch_boundaries() {
+        assert_eq!(microphone_pump_plan(-1), MicrophonePumpPlan::Idle);
+        assert_eq!(microphone_pump_plan(0), MicrophonePumpPlan::Idle);
+        assert_eq!(
+            microphone_pump_plan((S2_AUDIO_PCM_BYTES - 1) as i32),
+            MicrophonePumpPlan::Idle
+        );
+        assert_eq!(
+            microphone_pump_plan(S2_AUDIO_PCM_BYTES as i32),
+            MicrophonePumpPlan::SendPackets(1)
+        );
+        assert_eq!(
+            microphone_pump_plan((S2_AUDIO_PCM_BYTES * 4) as i32),
+            MicrophonePumpPlan::SendPackets(4)
+        );
+        assert_eq!(
+            microphone_pump_plan((S2_AUDIO_USB_FRAME_BYTES * MICROPHONE_MAX_MS) as i32),
+            MicrophonePumpPlan::SendPackets(4)
+        );
+        assert_eq!(
+            microphone_pump_plan((S2_AUDIO_USB_FRAME_BYTES * MICROPHONE_MAX_MS + 1) as i32),
+            MicrophonePumpPlan::ClearBacklog
+        );
+    }
+
+    #[test]
+    fn microphone_pump_never_sends_more_than_four_packets_per_update() {
+        assert_eq!(
+            microphone_pump_plan((S2_AUDIO_PCM_BYTES * 7) as i32),
+            MicrophonePumpPlan::SendPackets(4)
+        );
     }
 
     #[test]
@@ -215,10 +287,18 @@ mod tests {
     fn playback_state_rejects_duplicates_and_late_packets() {
         let pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         let mut state = PlaybackState::default();
-        let first = PlaybackPacket { sequence: 10, timestamp_us: 1_000, pcm: &pcm };
+        let first = PlaybackPacket {
+            sequence: 10,
+            timestamp_us: 1_000,
+            pcm: &pcm,
+        };
         assert!(state.accept(first, 2_000, 10.0).is_some());
         assert!(state.accept(first, 2_100, 10.0).is_none());
-        let late = PlaybackPacket { sequence: 9, timestamp_us: 900, pcm: &pcm };
+        let late = PlaybackPacket {
+            sequence: 9,
+            timestamp_us: 900,
+            pcm: &pcm,
+        };
         assert!(state.accept(late, 2_200, 10.0).is_none());
     }
 
@@ -226,8 +306,16 @@ mod tests {
     fn playback_state_caps_gap_concealment_at_eight_datagrams() {
         let pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         let mut state = PlaybackState::default();
-        let first = PlaybackPacket { sequence: 1, timestamp_us: 1_000, pcm: &pcm };
-        let next = PlaybackPacket { sequence: 20, timestamp_us: 6_000, pcm: &pcm };
+        let first = PlaybackPacket {
+            sequence: 1,
+            timestamp_us: 1_000,
+            pcm: &pcm,
+        };
+        let next = PlaybackPacket {
+            sequence: 20,
+            timestamp_us: 6_000,
+            pcm: &pcm,
+        };
         state.accept(first, 2_000, 10.0).expect("first packet");
         let decision = state.accept(next, 7_000, 10.0).expect("forward packet");
         assert_eq!(decision.conceal_datagrams, 8);
@@ -238,13 +326,21 @@ mod tests {
         let pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         let mut state = PlaybackState::default();
         state.accept(
-            PlaybackPacket { sequence: 1, timestamp_us: 10_000, pcm: &pcm },
+            PlaybackPacket {
+                sequence: 1,
+                timestamp_us: 10_000,
+                pcm: &pcm,
+            },
             20_000,
             10.0,
         );
         let decision = state
             .accept(
-                PlaybackPacket { sequence: 2, timestamp_us: 15_000, pcm: &pcm },
+                PlaybackPacket {
+                    sequence: 2,
+                    timestamp_us: 15_000,
+                    pcm: &pcm,
+                },
                 27_000,
                 500.0,
             )
@@ -255,7 +351,11 @@ mod tests {
 
         let decision = state
             .accept(
-                PlaybackPacket { sequence: 3, timestamp_us: 20_000, pcm: &pcm },
+                PlaybackPacket {
+                    sequence: 3,
+                    timestamp_us: 20_000,
+                    pcm: &pcm,
+                },
                 32_000,
                 0.0,
             )
@@ -268,13 +368,21 @@ mod tests {
         let pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         let mut state = PlaybackState::default();
         state.accept(
-            PlaybackPacket { sequence: u32::MAX, timestamp_us: 1_000, pcm: &pcm },
+            PlaybackPacket {
+                sequence: u32::MAX,
+                timestamp_us: 1_000,
+                pcm: &pcm,
+            },
             2_000,
             10.0,
         );
         let decision = state
             .accept(
-                PlaybackPacket { sequence: 0, timestamp_us: 6_000, pcm: &pcm },
+                PlaybackPacket {
+                    sequence: 0,
+                    timestamp_us: 6_000,
+                    pcm: &pcm,
+                },
                 7_000,
                 10.0,
             )
