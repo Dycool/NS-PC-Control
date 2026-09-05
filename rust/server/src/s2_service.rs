@@ -157,6 +157,7 @@ pub struct S2LiveService {
     runtime: RawGadgetRuntime,
     source: S2SourceTracker,
     builder: S2ReportBuilder,
+    report_timer: u8,
     enumerated_profile: ControllerType,
     live_profile: ControllerType,
     identity_change_us: Option<u64>,
@@ -177,6 +178,7 @@ impl S2LiveService {
             runtime: RawGadgetRuntime::setup_with_pid(configuration, switch2_pid_low(profile))?,
             source: S2SourceTracker::default(),
             builder: S2ReportBuilder::default(),
+            report_timer: 0,
             enumerated_profile: profile,
             live_profile: profile,
             identity_change_us: None,
@@ -193,6 +195,11 @@ impl S2LiveService {
     #[must_use]
     pub const fn live_profile(&self) -> ControllerType {
         self.live_profile
+    }
+
+    #[must_use]
+    pub const fn report_timer(&self) -> u8 {
+        self.report_timer
     }
 
     #[must_use]
@@ -238,6 +245,7 @@ impl S2LiveService {
             self.owner = Some(new_owner);
             self.rumble_active = false;
             self.builder.reset();
+            self.report_timer = 0;
         }
         self.service_rumble(context, source.client_index(), source.subpad());
 
@@ -246,6 +254,7 @@ impl S2LiveService {
             self.runtime.native().set_pid(switch2_pid_low(source.profile()));
             self.identity_change_us = Some(now_us);
             self.builder.reset();
+            self.report_timer = 0;
         }
         if self.live_profile == self.enumerated_profile {
             self.identity_change_us = None;
@@ -272,6 +281,7 @@ impl S2LiveService {
             now_us,
             report_context,
         );
+        self.report_timer = self.report_timer.wrapping_add(1);
         if self.runtime.submit_input_report(&report) {
             S2TickOutcome::Submitted
         } else {
