@@ -7,5 +7,6 @@ mod protocol_ext;
 pub mod aes;
 pub mod control_packets;
 pub mod crypto;
+pub mod joycon_mouse;
 pub mod macros;
 pub mod protocol;
