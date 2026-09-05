@@ -10,8 +10,7 @@ use ns_backend::s2_rawgadget::{
 use ns_backend::s2_reports::S2ReportContext;
 use ns_backend::s2_service::{S2LiveService, S2TickOutcome};
 use ns_backend::server_control::{
-    configured_client_capacity, configured_virtual_port_count, free_virtual_slot_count,
-    inspect_control_datagram, ControlDatagram,
+    configured_client_capacity, free_virtual_slot_count, inspect_control_datagram, ControlDatagram,
 };
 use ns_backend::udp_feedback::flush_feedback_to_udp;
 use ns_backend::virtual_controller::{HidGadgetController, VirtualController};
