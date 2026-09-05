@@ -1,4 +1,5 @@
 use crate::app_state::{requested_virtual_slots, ServerContext, UsbControllerFamily, MAX_CLIENTS};
+use crate::s2_mouse_bridge::handle_global_authenticated_datagram;
 use ns_shared::crypto::hmac_verify;
 use ns_shared::protocol::{
     GadgetFamily, GadgetModeReply, GadgetModeRequest, GadgetModeResult, ServerBackend,
@@ -69,11 +70,26 @@ pub fn free_virtual_slot_count(context: &ServerContext, now_us: u64) -> usize {
 #[must_use]
 pub fn inspect_control_datagram(
     context: &ServerContext,
-    key: &[u8],
+    key: &[u8; 32],
     bytes: &[u8],
     requester_slot: Option<usize>,
     now_us: u64,
 ) -> Option<ControlDatagram> {
+    if context.family() == UsbControllerFamily::Switch2
+        && let Some(slot) = requester_slot
+        && let Some(snapshot) = context.snapshot(slot, now_us)
+        && snapshot.active()
+        && handle_global_authenticated_datagram(
+            bytes,
+            key,
+            slot,
+            snapshot.connected_us(),
+            now_us,
+        )
+    {
+        return Some(ControlDatagram::Consumed);
+    }
+
     if bytes.len() == SERVER_INFO_PROBE_SIZE {
         if bytes.get(4).copied() != Some(SERVER_INFO_VERSION)
             || ServerInfoProbe::decode(bytes).is_err()
@@ -112,7 +128,10 @@ pub fn inspect_control_datagram(
     }
 
     if bytes.len() != GADGET_MODE_REQUEST_SIZE
-        || bytes.get(..4).and_then(|prefix| prefix.try_into().ok()).map(u32::from_le_bytes)
+        || bytes
+            .get(..4)
+            .and_then(|prefix| prefix.try_into().ok())
+            .map(u32::from_le_bytes)
             != Some(GADGET_MODE_MAGIC)
     {
         return None;
@@ -181,6 +200,7 @@ pub const fn family_to_wire(family: UsbControllerFamily) -> GadgetFamily {
 mod tests {
     use super::*;
     use ns_shared::crypto::{derive_key, hmac_sha256};
+    use ns_shared::joycon_mouse::{JoyconMousePacket, JOYCON_MOUSE_FLAG_ACTIVE};
     use ns_shared::protocol::{DEFAULT_SECRET, MultiReport};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -268,5 +288,26 @@ mod tests {
         let reply = GadgetModeReply::decode(&payload).expect("mode reply");
         assert_eq!(reply.result(), GadgetModeResult::ServerFull);
         assert!(restart.is_none());
+    }
+
+    #[test]
+    fn switch2_mouse_requires_existing_authenticated_session() {
+        let context = ServerContext::default();
+        context
+            .set_family(UsbControllerFamily::Switch2, 0)
+            .expect("family");
+        let key = derive_key(DEFAULT_SECRET);
+        let packet = JoyconMousePacket::new(JOYCON_MOUSE_FLAG_ACTIVE, 0, 1, 4, -2, 0, 10)
+            .encode_authenticated(&key);
+        assert!(inspect_control_datagram(&context, &key, &packet, None, 10).is_none());
+
+        let slot = context.register_udp(address(30_003), 10).expect("slot");
+        context
+            .update_udp_report(slot, 1, MultiReport::default(), 10)
+            .expect("report");
+        assert_eq!(
+            inspect_control_datagram(&context, &key, &packet, Some(slot), 11),
+            Some(ControlDatagram::Consumed)
+        );
     }
 }
