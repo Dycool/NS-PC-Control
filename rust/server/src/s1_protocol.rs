@@ -388,7 +388,7 @@ fn decode_legacy_half(bytes: &[u8]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ns_shared::protocol::{HoriHidReport, MotionReport};
+    use ns_shared::protocol::HoriHidReport;
 
     #[test]
     fn usb_80_01_returns_cpp_identity_shape() {
