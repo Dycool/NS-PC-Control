@@ -1,4 +1,5 @@
 use crate::app_state::{ServerContext, UsbControllerFamily, CLIENT_STALE_NEUTRAL_US, MAX_CLIENTS};
+use crate::legacy_identity::observe_legacy_identity;
 use crate::legacy_layout::{LegacyLayout, LegacySlot, LEGACY_PORTS};
 use crate::s1_protocol::S1PortRuntime;
 use crate::s1_reports::{build_standard_report, pro_timer_from_us};
@@ -55,6 +56,16 @@ impl LegacyWriterState {
         }
     }
 
+    fn reset_transport(&mut self) {
+        for runtime in &mut self.s1 {
+            runtime.reset_transport();
+        }
+        self.last_standard_report_us = [0; LEGACY_PORTS];
+        self.last_idle_neutral_us = [0; LEGACY_PORTS];
+        self.neutral_burst_until_us = [0; LEGACY_PORTS];
+        self.previous_hori = [None; LEGACY_PORTS];
+    }
+
     fn note_generations(
         &mut self,
         snapshots: &[Option<crate::app_state::ClientSnapshot>; MAX_CLIENTS],
@@ -84,6 +95,14 @@ impl LegacyWriterState {
 fn writer_state() -> &'static Mutex<LegacyWriterState> {
     static STATE: OnceLock<Mutex<LegacyWriterState>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(LegacyWriterState::default()))
+}
+
+pub fn reset_legacy_writer_transport() -> io::Result<()> {
+    writer_state()
+        .lock()
+        .map_err(|_| io::Error::other("legacy writer state poisoned"))?
+        .reset_transport();
+    Ok(())
 }
 
 #[must_use]
@@ -132,6 +151,7 @@ pub fn write_once(
 
     let previous_slots = *state.layout.slots();
     let slots = state.layout.reconcile(&snapshots, family);
+    observe_legacy_identity(family, &slots, now_us);
     publish_assignments(context, &state.layout, &snapshots, family)?;
     handle_mapping_changes(
         context,
