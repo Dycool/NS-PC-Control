@@ -1,12 +1,18 @@
 use crate::virtual_controller::{LEGACY_REPORT_DESC, VIRTUAL_CONTROLLER_REPORT_DESC};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 pub const DEFAULT_GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/ns_ctrl";
 pub const DEFAULT_UDC_ROOT: &str = "/sys/class/udc";
 pub const DEFAULT_HID_DEVICE_ROOT: &str = "/dev";
+const LEGACY_HID_COUNT: usize = 4;
+const LEGACY_NODE_WAIT_TRIES: usize = 20;
+const LEGACY_NODE_WAIT_INTERVAL: Duration = Duration::from_millis(100);
+const LEGACY_STALE_TEARDOWN_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GadgetIdentity {
@@ -223,6 +229,65 @@ impl ConfigFsGadget {
         &self.gadget_dir
     }
 
+    #[must_use]
+    pub fn hid_paths(&self, count: usize) -> Vec<PathBuf> {
+        (0..count)
+            .map(|port| self.device_root.join(format!("hidg{port}")))
+            .collect()
+    }
+
+    pub fn setup_legacy_runtime(
+        &self,
+        identity: GadgetIdentity,
+        serial: &str,
+    ) -> io::Result<Vec<PathBuf>> {
+        if identity == GadgetIdentity::Switch2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Switch 2 uses native Raw Gadget instead of legacy configfs HID",
+            ));
+        }
+        if self.hidg_nodes_writable(LEGACY_HID_COUNT) {
+            return Ok(self.hid_paths(LEGACY_HID_COUNT));
+        }
+        if !effective_uid_is_root()? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "USB gadget nodes are not ready and built-in configfs setup requires root",
+            ));
+        }
+
+        run_best_effort("modprobe", &["libcomposite"]);
+        if !Path::new("/sys/kernel/config/usb_gadget").is_dir() {
+            run_best_effort("mount", &["-t", "configfs", "none", "/sys/kernel/config"]);
+        }
+        if !Path::new("/sys/kernel/config/usb_gadget").is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "/sys/kernel/config/usb_gadget is unavailable",
+            ));
+        }
+
+        if self.gadget_dir.exists() {
+            self.teardown_legacy()?;
+            thread::sleep(LEGACY_STALE_TEARDOWN_DELAY);
+        }
+        self.setup_legacy(identity, serial)?;
+
+        for _ in 0..LEGACY_NODE_WAIT_TRIES {
+            self.make_hid_nodes_world_rw();
+            if self.hidg_nodes_writable(LEGACY_HID_COUNT) {
+                return Ok(self.hid_paths(LEGACY_HID_COUNT));
+            }
+            thread::sleep(LEGACY_NODE_WAIT_INTERVAL);
+        }
+        self.teardown_legacy()?;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "configfs gadget bound but /dev/hidg0..3 did not become writable",
+        ))
+    }
+
     pub fn setup_legacy(&self, identity: GadgetIdentity, serial: &str) -> io::Result<()> {
         if identity == GadgetIdentity::Switch2 {
             return Err(io::Error::new(
@@ -264,8 +329,12 @@ impl ConfigFsGadget {
         write_value(strings.join("manufacturer"), identity.manufacturer())?;
         write_value(strings.join("product"), identity.product_string())?;
         write_value(config.join("MaxPower"), "500")?;
+        write_value(
+            config.join("bmAttributes"),
+            if identity == GadgetIdentity::Hori { "0x80" } else { "0xA0" },
+        )?;
 
-        for port in 0..4 {
+        for port in 0..LEGACY_HID_COUNT {
             self.create_hid_function(port, identity)?;
         }
         let udc = self
@@ -282,9 +351,45 @@ impl ConfigFsGadget {
         Ok(())
     }
 
+    pub fn teardown_legacy(&self) -> io::Result<()> {
+        if !self.gadget_dir.exists() {
+            return Ok(());
+        }
+        self.unbind()?;
+        let config = self.gadget_dir.join("configs/c.1");
+        for port in 0..LEGACY_HID_COUNT {
+            let name = format!("hid.usb{port}");
+            remove_file_if_present(config.join(&name))?;
+        }
+        for port in 0..LEGACY_HID_COUNT {
+            let function = self
+                .gadget_dir
+                .join("functions")
+                .join(format!("hid.usb{port}"));
+            remove_dir_if_present(function)?;
+        }
+        remove_dir_if_present(config.join("strings/0x409"))?;
+        remove_dir_if_present(&config)?;
+        remove_dir_if_present(self.gadget_dir.join("strings/0x409"))?;
+        remove_dir_if_present(self.gadget_dir.join("strings"))?;
+        remove_dir_if_present(self.gadget_dir.join("functions"))?;
+        remove_dir_if_present(&self.gadget_dir)
+    }
+
     #[must_use]
     pub fn hidg_nodes_ready(&self, count: usize) -> bool {
         (0..count).all(|port| self.device_root.join(format!("hidg{port}")).exists())
+    }
+
+    #[must_use]
+    pub fn hidg_nodes_writable(&self, count: usize) -> bool {
+        self.hid_paths(count).iter().all(|path| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .is_ok()
+        })
     }
 
     pub fn first_udc_name(&self) -> io::Result<Option<String>> {
@@ -316,10 +421,65 @@ impl ConfigFsGadget {
         }
         create_symlink(&function, &link)
     }
+
+    fn make_hid_nodes_world_rw(&self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in self.hid_paths(LEGACY_HID_COUNT) {
+                if path.exists() {
+                    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o666));
+                }
+            }
+        }
+    }
 }
 
 fn write_value(path: impl AsRef<Path>, value: &str) -> io::Result<()> {
     fs::write(path, value.as_bytes())
+}
+
+fn run_best_effort(program: &str, arguments: &[&str]) {
+    let _ = Command::new(program).args(arguments).status();
+}
+
+fn effective_uid_is_root() -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string("/proc/self/status")?;
+        let line = status
+            .lines()
+            .find(|line| line.starts_with("Uid:"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Uid missing from /proc/self/status"))?;
+        let effective = line
+            .split_ascii_whitespace()
+            .nth(2)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "effective Uid missing"))?;
+        return effective
+            .parse::<u32>()
+            .map(|uid| uid == 0)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid effective Uid"));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(false)
+    }
+}
+
+fn remove_file_if_present(path: impl AsRef<Path>) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_dir_if_present(path: impl AsRef<Path>) -> io::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]
@@ -394,8 +554,34 @@ mod tests {
             .expect("setup");
         assert_eq!(fs::read_to_string(gadget.join("idVendor")).expect("vendor"), "0x057e");
         assert_eq!(fs::read_to_string(gadget.join("idProduct")).expect("product"), "0x2009");
+        assert_eq!(fs::read_to_string(gadget.join("configs/c.1/bmAttributes")).expect("attrs"), "0xA0");
         assert_eq!(fs::read_to_string(gadget.join("UDC")).expect("udc attr"), "dummy_udc");
         assert!(gadget.join("configs/c.1/hid.usb0").exists());
+        configurator.teardown_legacy().expect("teardown");
+        assert!(!gadget.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hori_identity_uses_bus_powered_attributes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ns-gadget-hori-{nonce}"));
+        let gadget = root.join("gadget");
+        let udc = root.join("udc");
+        let dev = root.join("dev");
+        fs::create_dir_all(udc.join("dummy_udc")).expect("udc");
+        fs::create_dir_all(&dev).expect("dev");
+        let configurator = ConfigFsGadget::new(&gadget, &udc, &dev);
+        configurator
+            .setup_legacy(GadgetIdentity::Hori, "ignored")
+            .expect("setup");
+        assert_eq!(fs::read_to_string(gadget.join("idVendor")).expect("vendor"), "0x0F0D");
+        assert_eq!(fs::read_to_string(gadget.join("idProduct")).expect("product"), "0x0092");
+        assert_eq!(fs::read_to_string(gadget.join("configs/c.1/bmAttributes")).expect("attrs"), "0x80");
+        let _ = configurator.teardown_legacy();
         let _ = fs::remove_dir_all(root);
     }
 }
