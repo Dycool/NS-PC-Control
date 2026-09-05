@@ -2,6 +2,7 @@ use crate::app_state::{ServerContext, CLIENT_STALE_NEUTRAL_US, MAX_CLIENTS};
 use crate::controller_profiles::{
     report_requests_pair, requested_profile_from_report, switch2_pid_low,
 };
+use crate::s2_mouse_bridge::consume_global_p1;
 use crate::s2_nfc_codec::{NfcError, Signature};
 use crate::s2_nfc_hid::NfcHidState;
 use crate::s2_rawgadget::{RawGadgetConfiguration, RawGadgetRuntime};
@@ -307,6 +308,14 @@ impl S2LiveService {
         let flags = native.runtime_flags();
         let selected_report = native.selected_report();
         report_context.nfc_state = self.nfc_hid.report_state(now_us / 1_000);
+        if let Some(snapshot) = context.snapshot(source.client_index(), now_us) {
+            report_context.mouse = Some(consume_global_p1(
+                source.client_index(),
+                snapshot.connected_us(),
+                now_us,
+                native.enabled_features(),
+            ));
+        }
         let report = self.builder.build(
             &source.report(),
             selected_report,
