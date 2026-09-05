@@ -1,6 +1,6 @@
 use ns_shared::protocol::HoriHidReport;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const VIRTUAL_CONTROLLER_REPORT_DESC: &[u8] = &[
@@ -68,26 +68,77 @@ pub const VIRTUAL_BODY_RGB: [[u8; 3]; 4] = [
 ];
 
 pub trait VirtualController: Send {
-    fn write_report(&mut self, report: HoriHidReport) -> io::Result<()>;
+    fn write_bytes(&mut self, report: &[u8]) -> io::Result<()>;
+
+    fn poll_output(&mut self, _buffer: &mut [u8]) -> io::Result<Option<usize>> {
+        Ok(None)
+    }
+
+    fn write_report(&mut self, report: HoriHidReport) -> io::Result<()> {
+        self.write_bytes(&report.encode())
+    }
+
     fn path(&self) -> &Path;
 }
 
 pub struct HidGadgetController {
     path: PathBuf,
     file: File,
+    readable: bool,
 }
 
 impl HidGadgetController {
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
-        let file = OpenOptions::new().write(true).open(&path)?;
-        Ok(Self { path, file })
+        let (file, readable) = open_hid(&path)?;
+        Ok(Self { path, file, readable })
     }
 }
 
+fn open_hid(path: &Path) -> io::Result<(File, bool)> {
+    let mut read_write = OpenOptions::new();
+    read_write.read(true).write(true);
+    set_nonblocking(&mut read_write);
+    match read_write.open(path) {
+        Ok(file) => Ok((file, true)),
+        Err(read_error) => {
+            let mut write_only = OpenOptions::new();
+            write_only.write(true);
+            set_nonblocking(&mut write_only);
+            write_only.open(path).map(|file| (file, false)).map_err(|_| read_error)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_nonblocking(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NONBLOCK: i32 = 0x800;
+    options.custom_flags(O_NONBLOCK);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_nonblocking(_options: &mut OpenOptions) {}
+
 impl VirtualController for HidGadgetController {
-    fn write_report(&mut self, report: HoriHidReport) -> io::Result<()> {
-        self.file.write_all(&report.encode())
+    fn write_bytes(&mut self, report: &[u8]) -> io::Result<()> {
+        match self.file.write_all(report) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            result => result,
+        }
+    }
+
+    fn poll_output(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
+        if !self.readable {
+            return Ok(None);
+        }
+        match self.file.read(buffer) {
+            Ok(0) => Ok(None),
+            Ok(size) => Ok(Some(size)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) if error.raw_os_error() == Some(11) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn path(&self) -> &Path {
@@ -97,27 +148,48 @@ impl VirtualController for HidGadgetController {
 
 #[derive(Default)]
 pub struct MemoryController {
-    last_report: HoriHidReport,
+    last_bytes: Vec<u8>,
+    output_queue: Vec<Vec<u8>>,
     writes: u64,
 }
 
 impl MemoryController {
     #[must_use]
-    pub const fn last_report(&self) -> HoriHidReport {
-        self.last_report
+    pub fn last_bytes(&self) -> &[u8] {
+        &self.last_bytes
+    }
+
+    #[must_use]
+    pub fn last_report(&self) -> HoriHidReport {
+        HoriHidReport::decode(&self.last_bytes).unwrap_or_default()
     }
 
     #[must_use]
     pub const fn writes(&self) -> u64 {
         self.writes
     }
+
+    pub fn queue_output(&mut self, packet: impl Into<Vec<u8>>) {
+        self.output_queue.push(packet.into());
+    }
 }
 
 impl VirtualController for MemoryController {
-    fn write_report(&mut self, report: HoriHidReport) -> io::Result<()> {
-        self.last_report = report;
+    fn write_bytes(&mut self, report: &[u8]) -> io::Result<()> {
+        self.last_bytes.clear();
+        self.last_bytes.extend_from_slice(report);
         self.writes = self.writes.saturating_add(1);
         Ok(())
+    }
+
+    fn poll_output(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
+        if self.output_queue.is_empty() {
+            return Ok(None);
+        }
+        let packet = self.output_queue.remove(0);
+        let size = packet.len().min(buffer.len());
+        buffer[..size].copy_from_slice(&packet[..size]);
+        Ok(Some(size))
     }
 
     fn path(&self) -> &Path {
@@ -127,12 +199,24 @@ impl VirtualController for MemoryController {
 
 #[cfg(test)]
 mod tests {
-    use super::{LEGACY_REPORT_DESC, S2_PRO_REPORT_DESC, VIRTUAL_CONTROLLER_REPORT_DESC};
+    use super::{LEGACY_REPORT_DESC, MemoryController, S2_PRO_REPORT_DESC, VIRTUAL_CONTROLLER_REPORT_DESC};
+    use crate::virtual_controller::VirtualController;
 
     #[test]
     fn descriptor_sizes_match_cpp_contract() {
         assert_eq!(LEGACY_REPORT_DESC.len(), 85);
         assert_eq!(S2_PRO_REPORT_DESC.len(), 97);
         assert_eq!(VIRTUAL_CONTROLLER_REPORT_DESC.last(), Some(&0xc0));
+    }
+
+    #[test]
+    fn memory_transport_accepts_full_nintendo_reports_and_console_output() {
+        let mut controller = MemoryController::default();
+        controller.write_bytes(&[0x30; 64]).expect("write");
+        assert_eq!(controller.last_bytes(), &[0x30; 64]);
+        controller.queue_output(vec![0x01, 0x02, 0x03]);
+        let mut buffer = [0_u8; 64];
+        assert_eq!(controller.poll_output(&mut buffer).expect("poll"), Some(3));
+        assert_eq!(&buffer[..3], &[1, 2, 3]);
     }
 }
