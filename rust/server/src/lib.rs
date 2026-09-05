@@ -7,6 +7,7 @@ pub mod bluetooth_manager;
 pub mod controller_profiles;
 pub mod gadget_wakeup;
 pub mod legacy_layout;
+pub mod s1_protocol;
 pub mod s1_reports;
 pub mod s2_audio_bridge;
 pub mod s2_enumeration;
