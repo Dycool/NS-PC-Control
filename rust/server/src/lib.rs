@@ -17,6 +17,7 @@ pub mod s2_rumble;
 pub mod s2_service;
 pub mod s2_uac1_audio;
 pub mod s2_usb_descriptors;
+pub mod server_control;
 pub mod switch2_native;
 pub mod udp_audio;
 pub mod udp_feedback;
