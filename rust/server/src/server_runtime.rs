@@ -2,6 +2,7 @@ use crate::app_state::{
     requested_virtual_slots, ServerContext, UsbControllerFamily, MAX_CLIENTS,
 };
 use crate::controller_profiles::report_requests_pair;
+use crate::gadget_wakeup::{ConfigFsGadget, GadgetIdentity};
 use crate::s2_audio_bridge::S2AudioBridge;
 use crate::s2_rawgadget::{RawGadgetConfiguration, REENUMERATION_DISCONNECT_INTERVAL};
 use crate::s2_reports::S2ReportContext;
@@ -35,6 +36,8 @@ use std::time::{Duration, Instant};
 const DEFAULT_WEB_PORT: u16 = 8080;
 const USB_WRITE_PERIOD: Duration = Duration::from_millis(4);
 const AMIIBO_DATA_HEADER_SIZE: usize = 7;
+const DEFAULT_USB_SERIAL: &str = "NSBRIDGE000001";
+const LEGACY_HID_COUNT: usize = 4;
 
 #[derive(Clone, Debug)]
 struct Options {
@@ -69,6 +72,16 @@ struct InputReceiveState<'a> {
     pending_amiibo: &'a mut Option<(usize, Vec<u8>)>,
 }
 
+struct LegacyGadgetLease {
+    gadget: ConfigFsGadget,
+}
+
+impl Drop for LegacyGadgetLease {
+    fn drop(&mut self) {
+        let _ = self.gadget.teardown_legacy();
+    }
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let original_arguments = env::args().skip(1).collect::<Vec<_>>();
     let options = parse_args(original_arguments.clone().into_iter())
@@ -97,18 +110,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let mut controllers: Vec<Box<dyn VirtualController>> = if s2_service.is_none() {
-        options
-            .hid_paths
-            .iter()
-            .filter_map(|path| match HidGadgetController::open(path) {
-                Ok(controller) => Some(Box::new(controller) as Box<dyn VirtualController>),
-                Err(error) => {
-                    eprintln!("[usb] cannot open {}: {error}", path.display());
-                    None
-                }
-            })
-            .collect()
+
+    let (controller_paths, legacy_gadget) = if s2_service.is_none() && options.hid_paths.is_empty() {
+        prepare_legacy_gadget(options.family, options.verbose)?
+    } else {
+        (options.hid_paths.clone(), None)
+    };
+    let mut controllers = if s2_service.is_none() {
+        open_hid_controllers(&controller_paths)?
     } else {
         Vec::new()
     };
@@ -128,6 +137,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     if options.verbose {
         eprintln!("[server] USB writer cadence: 250 Hz (4 ms)");
+        if legacy_gadget.is_some() {
+            eprintln!("[gadget] built-in configfs lifecycle owns /dev/hidg0..3");
+        }
         if s2_audio.is_some() {
             eprintln!(
                 "[s2][audio] dedicated UDP bridge ready on input port + {}",
@@ -248,10 +260,56 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(thread) = web_thread {
         let _ = thread.join();
     }
+    drop(controllers);
+    drop(legacy_gadget);
     if let Some(family) = pending_restart {
         restart_with_family(family, &original_arguments)?;
     }
     Ok(())
+}
+
+fn prepare_legacy_gadget(
+    family: UsbControllerFamily,
+    verbose: bool,
+) -> io::Result<(Vec<PathBuf>, Option<LegacyGadgetLease>)> {
+    let identity = match family {
+        UsbControllerFamily::Switch1 => GadgetIdentity::Switch1,
+        UsbControllerFamily::Hori => GadgetIdentity::Hori,
+        UsbControllerFamily::Switch2 => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Switch 2 must use Raw Gadget",
+            ));
+        }
+    };
+    let gadget = ConfigFsGadget::default();
+    if gadget.hidg_nodes_writable(LEGACY_HID_COUNT) {
+        if verbose {
+            eprintln!("[gadget] reusing existing writable /dev/hidg0..3");
+        }
+        return Ok((gadget.hid_paths(LEGACY_HID_COUNT), None));
+    }
+    if verbose {
+        eprintln!("[gadget] legacy HID nodes are not ready; running built-in configfs setup");
+    }
+    let paths = gadget.setup_legacy_runtime(identity, DEFAULT_USB_SERIAL)?;
+    Ok((paths, Some(LegacyGadgetLease { gadget })))
+}
+
+fn open_hid_controllers(paths: &[PathBuf]) -> io::Result<Vec<Box<dyn VirtualController>>> {
+    paths
+        .iter()
+        .map(|path| {
+            HidGadgetController::open(path)
+                .map(|controller| Box::new(controller) as Box<dyn VirtualController>)
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("cannot open {}: {error}", path.display()),
+                    )
+                })
+        })
+        .collect()
 }
 
 fn receive_input_datagrams(
