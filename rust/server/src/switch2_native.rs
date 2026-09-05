@@ -301,6 +301,17 @@ impl NativeController {
         self.state.lock().unwrap_or_else(|poison| poison.into_inner()).nfc.clear();
     }
 
+    #[must_use]
+    pub fn take_modified_amiibo(&self) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        if !state.nfc.is_modified() {
+            return None;
+        }
+        let image = state.nfc.image().to_vec();
+        state.nfc.clear_modified();
+        Some(image)
+    }
+
     pub fn handle_ep0(&self, request_type: u8, request: u8, length: u16) -> Option<Ep0Reply> {
         if request_type & 0x60 != 0x40 { return None; }
         let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
