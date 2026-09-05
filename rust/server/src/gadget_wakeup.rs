@@ -455,10 +455,10 @@ fn effective_uid_is_root() -> io::Result<bool> {
             .split_ascii_whitespace()
             .nth(2)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "effective Uid missing"))?;
-        return effective
+        effective
             .parse::<u32>()
             .map(|uid| uid == 0)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid effective Uid"));
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid effective Uid"))
     }
     #[cfg(not(target_os = "linux"))]
     {
