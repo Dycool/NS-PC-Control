@@ -70,7 +70,6 @@ impl S2AudioBridge {
         headset_state_from_capabilities(self.endpoint.capabilities, report_timer)
     }
 
-    #[must_use]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
