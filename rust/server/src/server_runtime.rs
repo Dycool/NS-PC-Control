@@ -16,11 +16,11 @@ use crate::writers::write_once;
 use ns_shared::control_packets::ClientAssignmentPacket;
 use ns_shared::crypto::derive_key;
 use ns_shared::protocol::{
-    ControllerType, MultiReport, Packet as InputPacket, DEFAULT_PORT, DEFAULT_SECRET,
-    CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED, CLIENT_ASSIGNMENT_FLAG_SERVER_FULL,
-    CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP, CONTROLLER_CONSOLE_PORT_NONE,
-    CONTROLLER_PLAYER_INDEX_UNKNOWN, EXT_PAD_PRESENT, FLAG_DISCONNECT,
-    PACKET_SIZE as INPUT_PACKET_SIZE, S2_AUDIO_PORT_OFFSET,
+    is_supported_amiibo_dump_size, ControllerType, MultiReport, Packet as InputPacket,
+    AMIIBO_DATA_MAGIC, DEFAULT_PORT, DEFAULT_SECRET, CLIENT_ASSIGNMENT_FLAG_PROFILE_UNSUPPORTED,
+    CLIENT_ASSIGNMENT_FLAG_SERVER_FULL, CLIENT_ASSIGNMENT_FLAG_SWITCH_ASLEEP,
+    CONTROLLER_CONSOLE_PORT_NONE, CONTROLLER_PLAYER_INDEX_UNKNOWN, EXT_PAD_PRESENT,
+    FLAG_DISCONNECT, PACKET_SIZE as INPUT_PACKET_SIZE, S2_AUDIO_PORT_OFFSET,
 };
 use std::collections::HashMap;
 use std::env;
@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_WEB_PORT: u16 = 8080;
 const USB_WRITE_PERIOD: Duration = Duration::from_millis(4);
+const AMIIBO_DATA_HEADER_SIZE: usize = 7;
 
 #[derive(Clone, Debug)]
 struct Options {
@@ -65,6 +66,7 @@ struct InputReceiveState<'a> {
     packet_buffer: &'a mut [u8; 65_535],
     endpoint_slots: &'a mut HashMap<SocketAddr, usize>,
     pending_restart: &'a mut Option<UsbControllerFamily>,
+    pending_amiibo: &'a mut Option<(usize, Vec<u8>)>,
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -141,6 +143,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut endpoint_slots = HashMap::<SocketAddr, usize>::new();
     let mut next_write = Instant::now();
     let mut pending_restart = None;
+    let mut pending_amiibo = None;
 
     while context.is_running() {
         let now_us = elapsed_us(&origin);
@@ -153,9 +156,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 packet_buffer: &mut packet_buffer,
                 endpoint_slots: &mut endpoint_slots,
                 pending_restart: &mut pending_restart,
+                pending_amiibo: &mut pending_amiibo,
             },
             now_us,
         )?;
+
+        if let Some((client_index, data)) = pending_amiibo.take()
+            && options.family == UsbControllerFamily::Switch2
+            && context
+                .snapshot(client_index, now_us)
+                .is_some_and(|snapshot| snapshot.active())
+            && let Some(service) = s2_service.as_mut()
+            && let Err(error) = service.set_amiibo_data(&data)
+            && options.verbose
+        {
+            eprintln!("[s2][nfc] rejected Amiibo upload: {error}");
+        }
 
         if let (Some(service), Some(audio)) = (s2_service.as_ref(), s2_audio.as_mut()) {
             let active_pro_ips = active_udp_pro_ips(&context, &endpoint_slots, now_us);
@@ -250,6 +266,7 @@ fn receive_input_datagrams(
         packet_buffer,
         endpoint_slots,
         pending_restart,
+        pending_amiibo,
     } = state;
     loop {
         match socket.recv_from(packet_buffer) {
@@ -260,6 +277,17 @@ fn receive_input_datagrams(
                         .snapshot(*slot, now_us)
                         .is_some_and(|snapshot| snapshot.active())
                 });
+
+                if options.family == UsbControllerFamily::Switch2
+                    && let Some(slot) = requester_slot
+                    && let Some((subpad, data)) = decode_amiibo_upload(bytes)
+                {
+                    if subpad == 0 {
+                        *pending_amiibo = Some((slot, data));
+                    }
+                    continue;
+                }
+
                 if let Some(control) =
                     inspect_control_datagram(context, key, bytes, requester_slot, now_us)
                 {
@@ -353,6 +381,26 @@ fn receive_input_datagrams(
             Err(error) => return Err(error),
         }
     }
+}
+
+fn decode_amiibo_upload(bytes: &[u8]) -> Option<(u8, Vec<u8>)> {
+    if bytes.len() < AMIIBO_DATA_HEADER_SIZE {
+        return None;
+    }
+    let magic = u32::from_le_bytes(bytes[..4].try_into().ok()?);
+    if magic != AMIIBO_DATA_MAGIC {
+        return None;
+    }
+    let data_len = usize::from(u16::from_le_bytes(bytes[5..7].try_into().ok()?));
+    if !is_supported_amiibo_dump_size(data_len)
+        || bytes.len() < AMIIBO_DATA_HEADER_SIZE.saturating_add(data_len)
+    {
+        return None;
+    }
+    Some((
+        bytes[4],
+        bytes[AMIIBO_DATA_HEADER_SIZE..AMIIBO_DATA_HEADER_SIZE + data_len].to_vec(),
+    ))
 }
 
 fn active_udp_pro_ips(
@@ -606,4 +654,39 @@ fn take_value(arguments: &mut impl Iterator<Item = String>, name: &str) -> Resul
     arguments
         .next()
         .ok_or_else(|| format!("{name} requires a value"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_amiibo_upload_matches_cpp_wire_acceptance() {
+        let payload = vec![0xa5; 540];
+        let mut packet = Vec::with_capacity(AMIIBO_DATA_HEADER_SIZE + payload.len());
+        packet.extend_from_slice(&AMIIBO_DATA_MAGIC.to_le_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        packet.extend_from_slice(&payload);
+        let (subpad, decoded) = decode_amiibo_upload(&packet).expect("upload");
+        assert_eq!(subpad, 0);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn amiibo_upload_rejects_unsupported_or_truncated_data() {
+        let mut unsupported = Vec::new();
+        unsupported.extend_from_slice(&AMIIBO_DATA_MAGIC.to_le_bytes());
+        unsupported.push(0);
+        unsupported.extend_from_slice(&10_u16.to_le_bytes());
+        unsupported.extend_from_slice(&[0; 10]);
+        assert!(decode_amiibo_upload(&unsupported).is_none());
+
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&AMIIBO_DATA_MAGIC.to_le_bytes());
+        truncated.push(0);
+        truncated.extend_from_slice(&540_u16.to_le_bytes());
+        truncated.extend_from_slice(&[0; 100]);
+        assert!(decode_amiibo_upload(&truncated).is_none());
+    }
 }
