@@ -3,6 +3,9 @@ use crate::app_state::{
 };
 use crate::controller_profiles::report_requests_pair;
 use crate::gadget_wakeup::{ConfigFsGadget, GadgetIdentity};
+use crate::legacy_identity::{
+    legacy_identity_reenumeration_due, mark_legacy_identity_enumerated,
+};
 use crate::s2_audio_bridge::S2AudioBridge;
 use crate::s2_rawgadget::{RawGadgetConfiguration, REENUMERATION_DISCONNECT_INTERVAL};
 use crate::s2_reports::S2ReportContext;
@@ -13,7 +16,7 @@ use crate::server_control::{
 use crate::udp_feedback::flush_feedback_to_udp;
 use crate::virtual_controller::{HidGadgetController, VirtualController};
 use crate::web_server::WebServer;
-use crate::writers::write_once;
+use crate::writers::{reset_legacy_writer_transport, write_once};
 use ns_shared::control_packets::ClientAssignmentPacket;
 use ns_shared::crypto::derive_key;
 use ns_shared::protocol::{
@@ -38,6 +41,7 @@ const USB_WRITE_PERIOD: Duration = Duration::from_millis(4);
 const AMIIBO_DATA_HEADER_SIZE: usize = 7;
 const DEFAULT_USB_SERIAL: &str = "NSBRIDGE000001";
 const LEGACY_HID_COUNT: usize = 4;
+const LEGACY_REENUMERATION_DISCONNECT_INTERVAL: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug)]
 struct Options {
@@ -232,6 +236,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if !controllers.is_empty() {
                 write_once(&context, &mut controllers, now_us)?;
+                if let Some(lease) = legacy_gadget.as_ref()
+                    && legacy_identity_reenumeration_due(now_us)
+                {
+                    if options.verbose {
+                        eprintln!(
+                            "[gadget-identity] controller type changed; re-enumerating so the console re-reads identity"
+                        );
+                    }
+                    reenumerate_legacy(
+                        &mut controllers,
+                        lease,
+                        options.family,
+                        options.verbose,
+                    )?;
+                    next_write = Instant::now();
+                    continue;
+                }
             }
 
             for client_index in 0..MAX_CLIENTS {
@@ -272,16 +293,7 @@ fn prepare_legacy_gadget(
     family: UsbControllerFamily,
     verbose: bool,
 ) -> io::Result<(Vec<PathBuf>, Option<LegacyGadgetLease>)> {
-    let identity = match family {
-        UsbControllerFamily::Switch1 => GadgetIdentity::Switch1,
-        UsbControllerFamily::Hori => GadgetIdentity::Hori,
-        UsbControllerFamily::Switch2 => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Switch 2 must use Raw Gadget",
-            ));
-        }
-    };
+    let identity = legacy_gadget_identity(family)?;
     let gadget = ConfigFsGadget::default();
     if gadget.hidg_nodes_writable(LEGACY_HID_COUNT) {
         if verbose {
@@ -294,6 +306,39 @@ fn prepare_legacy_gadget(
     }
     let paths = gadget.setup_legacy_runtime(identity, DEFAULT_USB_SERIAL)?;
     Ok((paths, Some(LegacyGadgetLease { gadget })))
+}
+
+fn legacy_gadget_identity(family: UsbControllerFamily) -> io::Result<GadgetIdentity> {
+    match family {
+        UsbControllerFamily::Switch1 => Ok(GadgetIdentity::Switch1),
+        UsbControllerFamily::Hori => Ok(GadgetIdentity::Hori),
+        UsbControllerFamily::Switch2 => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Switch 2 must use Raw Gadget",
+        )),
+    }
+}
+
+fn reenumerate_legacy(
+    controllers: &mut Vec<Box<dyn VirtualController>>,
+    lease: &LegacyGadgetLease,
+    family: UsbControllerFamily,
+    verbose: bool,
+) -> io::Result<()> {
+    controllers.clear();
+    lease.gadget.teardown_legacy()?;
+    thread::sleep(LEGACY_REENUMERATION_DISCONNECT_INTERVAL);
+    let identity = legacy_gadget_identity(family)?;
+    let paths = lease
+        .gadget
+        .setup_legacy_runtime(identity, DEFAULT_USB_SERIAL)?;
+    *controllers = open_hid_controllers(&paths)?;
+    reset_legacy_writer_transport()?;
+    mark_legacy_identity_enumerated();
+    if verbose {
+        eprintln!("[gadget-identity] legacy HID gadget re-enumerated successfully");
+    }
+    Ok(())
 }
 
 fn open_hid_controllers(paths: &[PathBuf]) -> io::Result<Vec<Box<dyn VirtualController>>> {
