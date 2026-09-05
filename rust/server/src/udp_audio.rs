@@ -16,10 +16,21 @@ pub struct AudioCapabilities {
 }
 
 impl AudioCapabilities {
-    pub fn new(flags: u8, sequence: u32, timestamp_us: u64) -> Self {
+    #[must_use]
+    pub const fn new(flags: u8, sequence: u32, timestamp_us: u64) -> Self {
         Self { flags, sequence, timestamp_us }
     }
-    pub fn flags(&self) -> u8 { self.flags }
+
+    #[must_use]
+    pub const fn flags(&self) -> u8 { self.flags }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u32 { self.sequence }
+
+    #[must_use]
+    pub const fn timestamp_us(&self) -> u64 { self.timestamp_us }
+
+    #[must_use]
     pub fn encode(&self, key: &[u8]) -> [u8; AUDIO_CAPS_SIZE] {
         let mut output = [0_u8; AUDIO_CAPS_SIZE];
         output[..4].copy_from_slice(&S2_AUDIO_CAPS_MAGIC.to_le_bytes());
@@ -31,13 +42,19 @@ impl AudioCapabilities {
         output[AUDIO_CAPS_AUTH_SIZE..].copy_from_slice(&tag[..16]);
         output
     }
+
+    #[must_use]
     pub fn decode(bytes: &[u8], key: &[u8]) -> Option<Self> {
         if bytes.len() != AUDIO_CAPS_SIZE
             || u32::from_le_bytes(bytes[..4].try_into().ok()?) != S2_AUDIO_CAPS_MAGIC
             || bytes[4] != S2_AUDIO_VERSION
             || !hmac_verify(key, &bytes[..AUDIO_CAPS_AUTH_SIZE], &bytes[AUDIO_CAPS_AUTH_SIZE..])
         { return None; }
-        Some(Self { flags: bytes[5], sequence: u32::from_le_bytes(bytes[8..12].try_into().ok()?), timestamp_us: u64::from_le_bytes(bytes[12..20].try_into().ok()?) })
+        Some(Self {
+            flags: bytes[5],
+            sequence: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            timestamp_us: u64::from_le_bytes(bytes[12..20].try_into().ok()?),
+        })
     }
 }
 
@@ -50,11 +67,29 @@ pub struct AudioPcmPacket {
 }
 
 impl AudioPcmPacket {
-    pub fn new(direction: u8, sequence: u32, timestamp_us: u64, pcm: [u8; S2_AUDIO_PCM_BYTES]) -> Self {
+    #[must_use]
+    pub const fn new(
+        direction: u8,
+        sequence: u32,
+        timestamp_us: u64,
+        pcm: [u8; S2_AUDIO_PCM_BYTES],
+    ) -> Self {
         Self { direction, sequence, timestamp_us, pcm }
     }
-    pub fn direction(&self) -> u8 { self.direction }
-    pub fn pcm(&self) -> &[u8; S2_AUDIO_PCM_BYTES] { &self.pcm }
+
+    #[must_use]
+    pub const fn direction(&self) -> u8 { self.direction }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u32 { self.sequence }
+
+    #[must_use]
+    pub const fn timestamp_us(&self) -> u64 { self.timestamp_us }
+
+    #[must_use]
+    pub const fn pcm(&self) -> &[u8; S2_AUDIO_PCM_BYTES] { &self.pcm }
+
+    #[must_use]
     pub fn encode(&self, key: &[u8]) -> [u8; AUDIO_PCM_SIZE] {
         let mut output = [0_u8; AUDIO_PCM_SIZE];
         output[..4].copy_from_slice(&S2_AUDIO_PCM_MAGIC.to_le_bytes());
@@ -68,6 +103,8 @@ impl AudioPcmPacket {
         output[AUDIO_PCM_AUTH_SIZE..].copy_from_slice(&tag[..16]);
         output
     }
+
+    #[must_use]
     pub fn decode(bytes: &[u8], key: &[u8]) -> Option<Self> {
         if bytes.len() != AUDIO_PCM_SIZE
             || u32::from_le_bytes(bytes[..4].try_into().ok()?) != S2_AUDIO_PCM_MAGIC
@@ -77,7 +114,12 @@ impl AudioPcmPacket {
         { return None; }
         let mut pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         pcm.copy_from_slice(&bytes[20..20 + S2_AUDIO_PCM_BYTES]);
-        Some(Self { direction: bytes[5], sequence: u32::from_le_bytes(bytes[8..12].try_into().ok()?), timestamp_us: u64::from_le_bytes(bytes[12..20].try_into().ok()?), pcm })
+        Some(Self {
+            direction: bytes[5],
+            sequence: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            timestamp_us: u64::from_le_bytes(bytes[12..20].try_into().ok()?),
+            pcm,
+        })
     }
 }
 

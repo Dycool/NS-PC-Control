@@ -6,6 +6,7 @@ pub mod bluetooth_input;
 pub mod bluetooth_manager;
 pub mod controller_profiles;
 pub mod gadget_wakeup;
+pub mod s2_audio_bridge;
 pub mod s2_enumeration;
 pub mod s2_motion_carrier;
 pub mod s2_native_command;
