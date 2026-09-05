@@ -73,6 +73,11 @@ impl AudioLifecycle {
     }
 
     #[must_use]
+    pub const fn last_playback_receive_us(&self) -> u64 {
+        self.last_playback_receive_us
+    }
+
+    #[must_use]
     pub fn desired_flags(config: &AudioConfig<'_>) -> u8 {
         let mut desired = 0;
         if config.switch2_mode && config.playback_requested {
@@ -97,6 +102,10 @@ impl AudioLifecycle {
             && now_us >= self.next_open_retry_us;
         let reconfigure = desired != self.requested_flags || device_changed || retry_due;
 
+        // C++ only performs the idle timeout once the SDL playback stream has
+        // actually been resumed. Packets received during jitter-buffer pre-roll
+        // still refresh last_playback_receive_us, but they must not make the
+        // stream eligible for an idle reset before playback starts.
         let reset_playback = self.playback_started
             && self.last_playback_receive_us != 0
             && now_us.wrapping_sub(self.last_playback_receive_us) > PLAYBACK_IDLE_RESET_US;
@@ -157,9 +166,19 @@ impl AudioLifecycle {
         self.last_announced_flags = flags;
     }
 
+    /// Record an accepted console-to-client PCM datagram.
+    ///
+    /// This deliberately does not mark playback as started. The C++ client
+    /// keeps SDL paused while the adaptive jitter buffer pre-rolls, and only
+    /// flips `playback_started` after the queued audio reaches the target and
+    /// `SDL_ResumeAudioStreamDevice` succeeds.
     pub fn mark_playback_packet(&mut self, now_us: u64) {
-        self.playback_started = true;
         self.last_playback_receive_us = now_us;
+    }
+
+    /// Mark the point where the backend has actually resumed playback.
+    pub fn mark_playback_started(&mut self) {
+        self.playback_started = true;
     }
 
     pub fn reset_playback(&mut self) {
@@ -262,13 +281,45 @@ mod tests {
     }
 
     #[test]
+    fn playback_preroll_packets_do_not_pretend_the_stream_has_started() {
+        let mut lifecycle = AudioLifecycle::default();
+        let cfg = config(true, true, false, "", "");
+
+        lifecycle.mark_playback_packet(1_000);
+        assert_eq!(lifecycle.last_playback_receive_us(), 1_000);
+        assert!(!lifecycle.playback_started());
+        assert!(!lifecycle
+            .update(1_000 + PLAYBACK_IDLE_RESET_US + 1, &cfg)
+            .reset_playback);
+        assert_eq!(lifecycle.last_playback_receive_us(), 1_000);
+    }
+
+    #[test]
     fn playback_idle_reset_uses_strict_greater_than_half_second_boundary() {
         let mut lifecycle = AudioLifecycle::default();
         lifecycle.mark_playback_packet(1_000);
+        lifecycle.mark_playback_started();
         let cfg = config(true, true, false, "", "");
         assert!(!lifecycle.update(1_000 + PLAYBACK_IDLE_RESET_US, &cfg).reset_playback);
         assert!(lifecycle.update(1_000 + PLAYBACK_IDLE_RESET_US + 1, &cfg).reset_playback);
         assert!(!lifecycle.playback_started());
+        assert_eq!(lifecycle.last_playback_receive_us(), 0);
+    }
+
+    #[test]
+    fn later_packets_refresh_idle_deadline_after_playback_starts() {
+        let mut lifecycle = AudioLifecycle::default();
+        lifecycle.mark_playback_packet(1_000);
+        lifecycle.mark_playback_started();
+        lifecycle.mark_playback_packet(200_000);
+        let cfg = config(true, true, false, "", "");
+
+        assert!(!lifecycle
+            .update(200_000 + PLAYBACK_IDLE_RESET_US, &cfg)
+            .reset_playback);
+        assert!(lifecycle
+            .update(200_000 + PLAYBACK_IDLE_RESET_US + 1, &cfg)
+            .reset_playback);
     }
 
     #[test]
