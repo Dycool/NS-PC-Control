@@ -1,0 +1,11 @@
+# Audited Rust dependency exceptions required only for exact C++ feature parity.
+#
+# First-party NS-PC-Control Rust remains `#![forbid(unsafe_code)]`.
+# `ns-raw-gadget` remains the dedicated first-party unsafe boundary and is
+# validated separately. External crates must be listed here by exact Cargo
+# package name before their source may contain unsafe/FFI/raw-pointer Rust.
+#
+# Keep this list minimal. Each exception must describe the user-visible C++
+# feature that cannot be preserved without crossing a platform/FFI boundary.
+
+[packages]
