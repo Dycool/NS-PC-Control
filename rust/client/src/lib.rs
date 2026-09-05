@@ -3,6 +3,7 @@
 pub mod amiibo_picker;
 pub mod audio_client;
 pub mod audio_lifecycle;
+pub mod audio_playback_queue;
 pub mod cli;
 pub mod dialogs;
 pub mod input_settings;
