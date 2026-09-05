@@ -18,12 +18,11 @@ const CMD_SET_IMU_SENS: u8 = 0x41;
 const CMD_ENABLE_VIBRATION: u8 = 0x48;
 const RUMBLE_GAIN_PERCENT: i32 = 40;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum S1OutputEvent {
-    None,
-    ImmediateReport([u8; PRO_REPORT_SIZE]),
-    Rumble(RumblePacket),
-    PlayerLights(u8),
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct S1OutputEffects {
+    pub immediate_report: Option<[u8; PRO_REPORT_SIZE]>,
+    pub rumble: Option<RumblePacket>,
+    pub player_lights: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,29 +118,34 @@ impl S1PortRuntime {
         self.input_report_mode
     }
 
-    pub fn process_output(&mut self, packet: &[u8], subpad: usize) -> S1OutputEvent {
+    pub fn process_output(&mut self, packet: &[u8], subpad: usize) -> S1OutputEffects {
         if packet.len() < 2 || packet[..2] == [0, 0] {
-            return S1OutputEvent::None;
+            return S1OutputEffects::default();
         }
         match packet[0] {
-            0x80 => self.process_usb_handshake(packet[1]),
+            0x80 => S1OutputEffects {
+                immediate_report: Some(self.process_usb_handshake(packet[1])),
+                ..S1OutputEffects::default()
+            },
             RID_OUTPUT_CMD if packet.len() > 10 => {
                 let rumble = self.decode_rumble(packet, subpad, false);
                 let subcommand = packet[10];
                 let command_data = packet.get(11..).unwrap_or_default();
-                let lights = (subcommand == CMD_SET_PLAYER_LIGHTS || subcommand == 0x33)
+                let player_lights = (subcommand == CMD_SET_PLAYER_LIGHTS || subcommand == 0x33)
                     .then(|| command_data.first().copied())
                     .flatten();
                 self.handle_subcommand(subcommand, command_data);
-                lights.map_or_else(
-                    || rumble.map_or(S1OutputEvent::None, S1OutputEvent::Rumble),
-                    S1OutputEvent::PlayerLights,
-                )
+                S1OutputEffects {
+                    immediate_report: None,
+                    rumble,
+                    player_lights,
+                }
             }
-            RID_OUTPUT_RUMBLE => self
-                .decode_rumble(packet, subpad, true)
-                .map_or(S1OutputEvent::None, S1OutputEvent::Rumble),
-            _ => S1OutputEvent::None,
+            RID_OUTPUT_RUMBLE => S1OutputEffects {
+                rumble: self.decode_rumble(packet, subpad, true),
+                ..S1OutputEffects::default()
+            },
+            _ => S1OutputEffects::default(),
         }
     }
 
@@ -169,7 +173,7 @@ impl S1PortRuntime {
         Some(output)
     }
 
-    fn process_usb_handshake(&mut self, subtype: u8) -> S1OutputEvent {
+    fn process_usb_handshake(&mut self, subtype: u8) -> [u8; PRO_REPORT_SIZE] {
         let mut output = [0_u8; PRO_REPORT_SIZE];
         output[0] = 0x81;
         output[1] = subtype;
@@ -186,7 +190,7 @@ impl S1PortRuntime {
             0x05 => self.usb_timeout_disabled = false,
             _ => {}
         }
-        S1OutputEvent::ImmediateReport(output)
+        output
     }
 
     fn handle_subcommand(&mut self, subcommand: u8, command_data: &[u8]) {
@@ -389,9 +393,8 @@ mod tests {
     #[test]
     fn usb_80_01_returns_cpp_identity_shape() {
         let mut runtime = S1PortRuntime::new(0, ControllerType::JoyconR);
-        let S1OutputEvent::ImmediateReport(reply) = runtime.process_output(&[0x80, 0x01], 0) else {
-            panic!("reply");
-        };
+        let effects = runtime.process_output(&[0x80, 0x01], 0);
+        let reply = effects.immediate_report.expect("reply");
         assert_eq!(&reply[..4], &[0x81, 0x01, 0x00, 0x03]);
         assert_eq!(&reply[4..10], &[0xa0, 0x06, 0x26, 0x53, 0x4e, 0x02]);
     }
@@ -455,7 +458,21 @@ mod tests {
         packet[0] = RID_OUTPUT_RUMBLE;
         packet[2..6].copy_from_slice(&[0, 1, 0x40, 0x40]);
         packet[6..10].copy_from_slice(&[0, 1, 0x40, 0x40]);
-        assert_eq!(runtime.process_output(&packet, 0), S1OutputEvent::None);
+        assert_eq!(runtime.process_output(&packet, 0), S1OutputEffects::default());
+    }
+
+    #[test]
+    fn command_can_publish_lights_and_rumble_together() {
+        let mut runtime = S1PortRuntime::new(0, ControllerType::Pro);
+        let mut packet = [0_u8; 12];
+        packet[0] = RID_OUTPUT_CMD;
+        packet[2..6].copy_from_slice(&[0x10, 0x10, 0x50, 0x50]);
+        packet[6..10].copy_from_slice(&[0x10, 0x10, 0x50, 0x50]);
+        packet[10] = CMD_SET_PLAYER_LIGHTS;
+        packet[11] = 0x03;
+        let effects = runtime.process_output(&packet, 2);
+        assert_eq!(effects.player_lights, Some(0x03));
+        assert!(effects.rumble.is_some());
     }
 
     #[test]
@@ -467,7 +484,7 @@ mod tests {
         let _ = runtime.process_output(&packet, 0);
         let source = HidReport::new(
             HoriHidReport::default(),
-            [MotionReport::default(); 3],
+            [ns_shared::protocol::MotionReport::default(); 3],
             false,
             [0; 3],
         );
