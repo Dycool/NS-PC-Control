@@ -163,7 +163,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if Instant::now() >= next_write {
-            context.expire_stale_clients(now_us);
+            // Do not mutate a live session merely because its controls are
+            // stale. The C++ writer neutralizes a snapshot at 350 ms while
+            // retaining requested controller identity until the 30 s session
+            // timeout. snapshot()/active_client_count()/register_udp() already
+            // enforce that hard timeout from last_rx_us.
             endpoint_slots.retain(|_, slot| {
                 context
                     .snapshot(*slot, now_us)
