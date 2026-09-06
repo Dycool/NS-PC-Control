@@ -436,8 +436,13 @@ mod tests {
     use ns_shared::protocol::{Hat, MultiReport, BTN_A, EXT_PAD_PRESENT};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    fn context_with_report(profile: ControllerType, now_us: u64) -> ServerContext {
+    fn context_with_report(
+        family: UsbControllerFamily,
+        profile: ControllerType,
+        now_us: u64,
+    ) -> ServerContext {
         let context = ServerContext::default();
+        context.set_family(family, now_us).expect("family");
         let client = context
             .register_udp(
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40_001),
@@ -475,7 +480,11 @@ mod tests {
     #[test]
     fn stale_controls_neutralize_without_erasing_requested_profile() {
         let received_us = 1_000_000;
-        let context = context_with_report(ControllerType::JoyconL, received_us);
+        let context = context_with_report(
+            UsbControllerFamily::Switch1,
+            ControllerType::JoyconL,
+            received_us,
+        );
         let output = build_legacy_reports(&context, received_us + CLIENT_STALE_NEUTRAL_US + 1);
         assert_eq!(output[0], HoriHidReport::default());
         let snapshot = context
@@ -490,8 +499,7 @@ mod tests {
     #[test]
     fn hori_writer_uses_eight_byte_report_and_assignment() {
         let now = 2_000_000;
-        let context = context_with_report(ControllerType::Hori, now);
-        context.set_family(UsbControllerFamily::Hori, now).expect("family");
+        let context = context_with_report(UsbControllerFamily::Hori, ControllerType::Hori, now);
         let mut controllers: Vec<Box<dyn VirtualController>> =
             (0..4).map(|_| Box::new(MemoryController::default()) as Box<dyn VirtualController>).collect();
         let writes = write_once(&context, &mut controllers, now).expect("write");

@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn pair_consumes_contiguous_group_before_singles() {
+    fn pair_prefers_its_subpad_group_before_singles() {
         let now = 1_000_000;
         let (snapshots, _context) = snapshots(
             &[(0, ControllerType::Pro), (1, ControllerType::JoyconPair)],
@@ -379,12 +379,14 @@ mod tests {
         let mut layout = LegacyLayout::default();
         let slots = layout.reconcile(&snapshots, UsbControllerFamily::Switch1);
         assert_eq!(slots[0].client_index(), Some(0));
-        assert_eq!(slots[0].subpad(), 1);
-        assert!(slots[0].pair_member());
-        assert!(!slots[0].pair_right());
-        assert_eq!(slots[1].subpad(), 1);
-        assert!(slots[1].pair_right());
-        assert_eq!(slots[2].subpad(), 0);
+        assert_eq!(slots[0].subpad(), 0);
+        assert!(!slots[0].pair_member());
+        assert_eq!(slots[2].client_index(), Some(0));
+        assert_eq!(slots[2].subpad(), 1);
+        assert!(slots[2].pair_member());
+        assert!(!slots[2].pair_right());
+        assert_eq!(slots[3].subpad(), 1);
+        assert!(slots[3].pair_right());
     }
 
     #[test]
