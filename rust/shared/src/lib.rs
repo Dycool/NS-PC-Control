@@ -10,3 +10,4 @@ pub mod crypto;
 pub mod joycon_mouse;
 pub mod macros;
 pub mod protocol;
+pub mod sdl_input;
