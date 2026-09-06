@@ -325,7 +325,7 @@ mod tests {
     fn playback_state_tracks_rfc3550_style_jitter_and_trim_limits() {
         let pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         let mut state = PlaybackState::default();
-        state.accept(
+        let _ = state.accept(
             PlaybackPacket {
                 sequence: 1,
                 timestamp_us: 10_000,
@@ -367,7 +367,7 @@ mod tests {
     fn playback_state_accepts_wrapped_sequence_numbers() {
         let pcm = [0_u8; S2_AUDIO_PCM_BYTES];
         let mut state = PlaybackState::default();
-        state.accept(
+        let _ = state.accept(
             PlaybackPacket {
                 sequence: u32::MAX,
                 timestamp_us: 1_000,

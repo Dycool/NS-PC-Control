@@ -173,12 +173,12 @@ pub fn is_valid_key_code(raw: &str) -> bool {
     if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() {
         return true;
     }
-    if let Some(rest) = value.strip_prefix('F') {
-        if (1..=2).contains(&rest.len()) && rest.bytes().all(|byte| byte.is_ascii_digit()) {
-            if let Ok(number) = rest.parse::<u8>() {
-                return (1..=24).contains(&number);
-            }
-        }
+    if let Some(rest) = value.strip_prefix('F')
+        && (1..=2).contains(&rest.len())
+        && rest.bytes().all(|byte| byte.is_ascii_digit())
+        && let Ok(number) = rest.parse::<u8>()
+    {
+        return (1..=24).contains(&number);
     }
     false
 }
