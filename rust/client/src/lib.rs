@@ -12,6 +12,7 @@ pub mod main_window;
 pub mod mouse_input;
 pub mod persisted_settings;
 pub mod qt_helpers;
+pub mod roster_policy;
 pub mod rumble_client;
 pub mod stream_runtime;
 pub mod udp_protocol;
