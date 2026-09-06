@@ -55,10 +55,9 @@ pub fn parse_host_port(input: &str) -> Option<(String, u16)> {
 
     let mut port = DEFAULT_PORT;
     if let Some(colon) = value.find(':') {
-        if let Some(parsed) = atoi_prefix(&value[colon + 1..]) {
-            if (1..=65_535).contains(&parsed) {
-                port = parsed as u16;
-            }
+        let parsed = atoi_prefix(&value[colon + 1..]);
+        if (1..=65_535).contains(&parsed) {
+            port = parsed as u16;
         }
         value = &value[..colon];
     }
@@ -71,7 +70,7 @@ pub fn parse_host_port(input: &str) -> Option<(String, u16)> {
     }
 }
 
-fn atoi_prefix(input: &str) -> Option<i32> {
+fn atoi_prefix(input: &str) -> i32 {
     let bytes = input.as_bytes();
     let mut index = 0;
     while index < bytes.len() && bytes[index].is_ascii_whitespace() {
@@ -100,11 +99,11 @@ fn atoi_prefix(input: &str) -> Option<i32> {
         index += 1;
     }
     if index == start {
-        return Some(0);
+        return 0;
     }
 
     let signed = if negative { -magnitude } else { magnitude };
-    Some(signed.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+    signed.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 /// Inputs used by the C++ `requested_controller_profile_for_frame` decision.
