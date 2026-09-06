@@ -15,11 +15,21 @@ pub struct RosterSource {
     pub name: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalRosterEntry {
     pub present: bool,
     pub has_gyro: bool,
     pub name: [u8; ROSTER_NAME_CAP],
+}
+
+impl Default for LocalRosterEntry {
+    fn default() -> Self {
+        Self {
+            present: false,
+            has_gyro: false,
+            name: [0; ROSTER_NAME_CAP],
+        }
+    }
 }
 
 impl LocalRosterEntry {
