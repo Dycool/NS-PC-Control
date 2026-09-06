@@ -9,7 +9,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -75,6 +74,7 @@ const USB_RAW_IOCTL_EP_SET_HALT: usize = iow(13, size_of::<u32>());
 const USB_RAW_IOCTL_EP_CLEAR_HALT: usize = iow(14, size_of::<u32>());
 const USB_RAW_IOCTL_EP_SET_WEDGE: usize = iow(15, size_of::<u32>());
 
+#[cfg(target_os = "linux")]
 const SIGUSR1: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,8 +311,8 @@ impl RawGadget {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let gadget = Self { file };
         let init = encode_init(driver, device, speed)?;
-        sys::ioctl_read_only(gadget.file.as_raw_fd(), USB_RAW_IOCTL_INIT, &init)?;
-        sys::ioctl_none(gadget.file.as_raw_fd(), USB_RAW_IOCTL_RUN)?;
+        sys::ioctl_read_only(&gadget.file, USB_RAW_IOCTL_INIT, &init)?;
+        sys::ioctl_none(&gadget.file, USB_RAW_IOCTL_RUN)?;
         Ok(gadget)
     }
 
@@ -326,7 +326,7 @@ impl RawGadget {
         let mut buffer = vec![0u8; USB_RAW_EVENT_HEADER_SIZE + maximum_payload];
         buffer[4..8].copy_from_slice(&(maximum_payload as u32).to_ne_bytes());
         sys::ioctl_in_out(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_EVENT_FETCH,
             &mut buffer,
         )?;
@@ -355,14 +355,14 @@ impl RawGadget {
 
     pub fn ep0_write(&self, data: &[u8]) -> io::Result<usize> {
         let buffer = encode_ep_io(0, data)?;
-        sys::ioctl_read_only(self.file.as_raw_fd(), USB_RAW_IOCTL_EP0_WRITE, &buffer)
+        sys::ioctl_read_only(&self.file, USB_RAW_IOCTL_EP0_WRITE, &buffer)
             .map(nonnegative_to_usize)
     }
 
     pub fn ep0_read(&self, length: usize) -> io::Result<Vec<u8>> {
         let mut buffer = empty_ep_io(0, length)?;
         let transferred = sys::ioctl_in_out(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_EP0_READ,
             &mut buffer,
         )?;
@@ -370,13 +370,13 @@ impl RawGadget {
     }
 
     pub fn ep0_stall(&self) -> io::Result<()> {
-        sys::ioctl_none(self.file.as_raw_fd(), USB_RAW_IOCTL_EP0_STALL).map(|_| ())
+        sys::ioctl_none(&self.file, USB_RAW_IOCTL_EP0_STALL).map(|_| ())
     }
 
     pub fn enable_endpoint(&self, descriptor: EndpointDescriptor) -> io::Result<EndpointHandle> {
         let bytes = descriptor.encode();
         let handle = sys::ioctl_read_only(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_EP_ENABLE,
             &bytes,
         )?;
@@ -385,7 +385,7 @@ impl RawGadget {
 
     pub fn disable_endpoint(&self, endpoint: EndpointHandle) -> io::Result<()> {
         sys::ioctl_value(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_EP_DISABLE,
             endpoint.0 as usize,
         )
@@ -394,14 +394,14 @@ impl RawGadget {
 
     pub fn endpoint_write(&self, endpoint: EndpointHandle, data: &[u8]) -> io::Result<usize> {
         let buffer = encode_ep_io(endpoint.0, data)?;
-        sys::ioctl_read_only(self.file.as_raw_fd(), USB_RAW_IOCTL_EP_WRITE, &buffer)
+        sys::ioctl_read_only(&self.file, USB_RAW_IOCTL_EP_WRITE, &buffer)
             .map(nonnegative_to_usize)
     }
 
     pub fn endpoint_read(&self, endpoint: EndpointHandle, length: usize) -> io::Result<Vec<u8>> {
         let mut buffer = empty_ep_io(endpoint.0, length)?;
         let transferred = sys::ioctl_in_out(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_EP_READ,
             &mut buffer,
         )?;
@@ -409,13 +409,13 @@ impl RawGadget {
     }
 
     pub fn configure(&self) -> io::Result<()> {
-        sys::ioctl_none(self.file.as_raw_fd(), USB_RAW_IOCTL_CONFIGURE).map(|_| ())
+        sys::ioctl_none(&self.file, USB_RAW_IOCTL_CONFIGURE).map(|_| ())
     }
 
     /// Set the bus-power limit in the kernel UAPI's 2 mA units.
     pub fn set_vbus_draw(&self, units_2ma: u32) -> io::Result<()> {
         sys::ioctl_value(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_VBUS_DRAW,
             units_2ma as usize,
         )
@@ -425,7 +425,7 @@ impl RawGadget {
     pub fn endpoint_info(&self) -> io::Result<Vec<EndpointInfo>> {
         let mut buffer = vec![0u8; USB_RAW_EPS_INFO_SIZE];
         let count = sys::ioctl_in_out(
-            self.file.as_raw_fd(),
+            &self.file,
             USB_RAW_IOCTL_EPS_INFO,
             &mut buffer,
         )?;
@@ -462,7 +462,7 @@ impl RawGadget {
     }
 
     fn endpoint_control(&self, request: usize, endpoint: EndpointHandle) -> io::Result<()> {
-        sys::ioctl_value(self.file.as_raw_fd(), request, endpoint.0 as usize).map(|_| ())
+        sys::ioctl_value(&self.file, request, endpoint.0 as usize).map(|_| ())
     }
 }
 
@@ -547,7 +547,8 @@ fn unsupported() -> io::Error {
 
 #[cfg(target_os = "linux")]
 mod sys {
-    use super::{io, SIGUSR1};
+    use super::{io, File, SIGUSR1};
+    use std::os::fd::AsRawFd;
     use std::os::raw::{c_int, c_ulong, c_void};
 
     unsafe extern "C" {
@@ -568,26 +569,26 @@ mod sys {
         }
     }
 
-    pub fn ioctl_none(fd: c_int, request: usize) -> io::Result<c_int> {
+    pub fn ioctl_none(file: &File, request: usize) -> io::Result<c_int> {
         // SAFETY: Raw Gadget no-argument ioctls require an explicit zero third argument.
-        result(unsafe { ioctl(fd, request as c_ulong, 0usize) })
+        result(unsafe { ioctl(file.as_raw_fd(), request as c_ulong, 0usize) })
     }
 
-    pub fn ioctl_value(fd: c_int, request: usize, value: usize) -> io::Result<c_int> {
+    pub fn ioctl_value(file: &File, request: usize, value: usize) -> io::Result<c_int> {
         // SAFETY: `value` is the scalar argument required by this Raw Gadget ioctl.
-        result(unsafe { ioctl(fd, request as c_ulong, value) })
+        result(unsafe { ioctl(file.as_raw_fd(), request as c_ulong, value) })
     }
 
-    pub fn ioctl_read_only(fd: c_int, request: usize, bytes: &[u8]) -> io::Result<c_int> {
+    pub fn ioctl_read_only(file: &File, request: usize, bytes: &[u8]) -> io::Result<c_int> {
         let pointer = bytes.as_ptr().cast::<c_void>();
         // SAFETY: `bytes` is live and immutable for the full synchronous ioctl call.
-        result(unsafe { ioctl(fd, request as c_ulong, pointer) })
+        result(unsafe { ioctl(file.as_raw_fd(), request as c_ulong, pointer) })
     }
 
-    pub fn ioctl_in_out(fd: c_int, request: usize, bytes: &mut [u8]) -> io::Result<c_int> {
+    pub fn ioctl_in_out(file: &File, request: usize, bytes: &mut [u8]) -> io::Result<c_int> {
         let pointer = bytes.as_mut_ptr().cast::<c_void>();
         // SAFETY: `bytes` is exclusively borrowed, writable, and live for the full synchronous ioctl call.
-        result(unsafe { ioctl(fd, request as c_ulong, pointer) })
+        result(unsafe { ioctl(file.as_raw_fd(), request as c_ulong, pointer) })
     }
 
     pub fn install_interrupt_handler() -> Result<(), i32> {
@@ -623,19 +624,19 @@ mod sys {
 
 #[cfg(not(target_os = "linux"))]
 mod sys {
-    use super::unsupported;
+    use super::{unsupported, File};
     use std::io;
 
-    pub fn ioctl_none(_: i32, _: usize) -> io::Result<i32> {
+    pub fn ioctl_none(_: &File, _: usize) -> io::Result<i32> {
         Err(unsupported())
     }
-    pub fn ioctl_value(_: i32, _: usize, _: usize) -> io::Result<i32> {
+    pub fn ioctl_value(_: &File, _: usize, _: usize) -> io::Result<i32> {
         Err(unsupported())
     }
-    pub fn ioctl_read_only(_: i32, _: usize, _: &[u8]) -> io::Result<i32> {
+    pub fn ioctl_read_only(_: &File, _: usize, _: &[u8]) -> io::Result<i32> {
         Err(unsupported())
     }
-    pub fn ioctl_in_out(_: i32, _: usize, _: &mut [u8]) -> io::Result<i32> {
+    pub fn ioctl_in_out(_: &File, _: usize, _: &mut [u8]) -> io::Result<i32> {
         Err(unsupported())
     }
     pub fn install_interrupt_handler() -> Result<(), i32> {
@@ -652,6 +653,14 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_platform_rejects_open_before_accessing_the_device() {
+        let error = RawGadget::open("not-a-device", "driver", "device", UsbSpeed::High)
+            .err().expect("Raw Gadget is Linux-only");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
 
     #[test]
     fn ioctl_numbers_match_linux_uapi_on_generic_architectures() {
