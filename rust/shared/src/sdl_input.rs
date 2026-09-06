@@ -60,7 +60,7 @@ impl DigitalReleaseFilter {
 #[must_use]
 pub fn sdl_axis_to_byte(value: i16, invert: bool, deadzone: i32) -> u8 {
     let value = i32::from(value);
-    if value > -deadzone && value < deadzone {
+    if value.abs() < deadzone {
         return 128;
     }
 
@@ -105,13 +105,7 @@ pub fn sdl_stick_to_bytes(raw_x: i16, raw_y: i16, deadzone: i32) -> (u8, u8) {
 /// Matches `std::lround` plus the C++ i16 saturation boundaries.
 #[must_use]
 pub fn clamp_motion_i16(value: f32) -> i16 {
-    if value > 32_767.0 {
-        32_767
-    } else if value < -32_768.0 {
-        -32_768
-    } else {
-        value.round() as i16
-    }
+    value.clamp(-32_768.0, 32_767.0).round() as i16
 }
 
 /// Zeros the same inclusive ±32 gyro noise band as the C++ implementation.
@@ -132,8 +126,10 @@ mod tests {
     #[test]
     fn digital_button_release_grace_is_inclusive() {
         let mut filter = DigitalReleaseFilter::default();
-        let mut pressed = HoriHidReport::default();
-        pressed.buttons = BTN_A;
+        let mut pressed = HoriHidReport {
+            buttons: BTN_A,
+            ..HoriHidReport::default()
+        };
         filter.apply(&mut pressed, 100);
 
         let deadline = 100 + SDL_DIGITAL_RELEASE_GRACE_US;
@@ -149,8 +145,10 @@ mod tests {
     #[test]
     fn repeated_press_extends_button_grace_window() {
         let mut filter = DigitalReleaseFilter::default();
-        let mut report = HoriHidReport::default();
-        report.buttons = BTN_A;
+        let mut report = HoriHidReport {
+            buttons: BTN_A,
+            ..HoriHidReport::default()
+        };
         filter.apply(&mut report, 10);
         filter.apply(&mut report, 20_000);
 
@@ -166,8 +164,10 @@ mod tests {
     #[test]
     fn hat_release_grace_matches_button_boundary() {
         let mut filter = DigitalReleaseFilter::default();
-        let mut report = HoriHidReport::default();
-        report.hat = Hat::NorthEast;
+        let mut report = HoriHidReport {
+            hat: Hat::NorthEast,
+            ..HoriHidReport::default()
+        };
         filter.apply(&mut report, 50);
 
         let mut at_deadline = HoriHidReport::default();
@@ -182,9 +182,11 @@ mod tests {
     #[test]
     fn reset_forgets_all_release_history() {
         let mut filter = DigitalReleaseFilter::default();
-        let mut report = HoriHidReport::default();
-        report.buttons = BTN_A;
-        report.hat = Hat::South;
+        let mut report = HoriHidReport {
+            buttons: BTN_A,
+            hat: Hat::South,
+            ..HoriHidReport::default()
+        };
         filter.apply(&mut report, 1_000);
         filter.reset();
 
