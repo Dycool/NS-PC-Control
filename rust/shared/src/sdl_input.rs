@@ -10,23 +10,12 @@ pub const SDL_DIGITAL_RELEASE_GRACE_US: u64 = 35_000;
 const GYRO_DEADZONE: i16 = 32;
 
 /// Smooths one-poll digital releases exactly like the C++ SDL input path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DigitalReleaseFilter {
     last_buttons: u16,
     button_until: [u64; 16],
     last_hat: Hat,
     hat_until: u64,
-}
-
-impl Default for DigitalReleaseFilter {
-    fn default() -> Self {
-        Self {
-            last_buttons: 0,
-            button_until: [0; 16],
-            last_hat: Hat::Neutral,
-            hat_until: 0,
-        }
-    }
 }
 
 impl DigitalReleaseFilter {
@@ -75,13 +64,12 @@ pub fn sdl_axis_to_byte(value: i16, invert: bool, deadzone: i32) -> u8 {
         return 128;
     }
 
-    let mut scaled = 128;
-    if value >= deadzone {
-        scaled = 128 + ((value - deadzone) * 127) / (32_767 - deadzone);
+    let scaled = if value >= deadzone {
+        128 + ((value - deadzone) * 127) / (32_767 - deadzone)
     } else {
-        scaled = 128 - ((-value - deadzone) * 128) / (32_768 - deadzone);
-    }
-    scaled = scaled.clamp(0, 255);
+        128 - ((-value - deadzone) * 128) / (32_768 - deadzone)
+    };
+    let scaled = scaled.clamp(0, 255);
     if invert {
         (255 - scaled) as u8
     } else {
