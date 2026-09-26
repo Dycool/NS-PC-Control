@@ -309,7 +309,13 @@ bool SDLInputManager::init_sdl() {
         SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         SDL_SetHint("SDL_JOYSTICK_THREAD", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
+#ifdef __APPLE__
+        // Diagnostic for #10: bypass SDL's Switch HIDAPI backend on macOS to
+        // determine whether it is responsible for the Pro Controller latency.
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "0");
+#else
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
+#endif
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "JOY" "_CONS", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
