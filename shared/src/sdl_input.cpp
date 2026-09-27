@@ -16,6 +16,8 @@ constexpr int SDL_RUMBLE_PLAYSTATION_GAIN_PERCENT = 60;
 constexpr int SDL_RUMBLE_XBOX_GAIN_PERCENT = 20;
 
 constexpr auto SDL_INPUT_POLL_INTERVAL = std::chrono::milliseconds(4);
+constexpr uint64_t SDL_SLOW_CALL_WARN_US = 10'000ULL;
+constexpr uint64_t SDL_BATTERY_POLL_INTERVAL_US = 1'000'000ULL;
 constexpr float STANDARD_GRAVITY = 9.80665f;
 constexpr float ACCEL_SCALE = 4096.0f / STANDARD_GRAVITY;
 constexpr float RAD_TO_DEG = 57.29577951308232f;
@@ -51,6 +53,23 @@ bool is_xbox_controller(const std::string& name, uint16_t vid) {
            contains_case_insensitive(name, "xbox") ||
            contains_case_insensitive(name, "microsoft") ||
            contains_case_insensitive(name, "elite");
+}
+
+bool env_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && *value && !(value[0] == '0' && value[1] == '\0');
+}
+
+const char* env_or_default(const char* name, const char* fallback) {
+    const char* value = std::getenv(name);
+    return (value && *value) ? value : fallback;
+}
+
+void log_slow_sdl_call(const char* name, uint64_t started_us) {
+    const uint64_t elapsed_us = ns::now_us() - started_us;
+    if (elapsed_us >= SDL_SLOW_CALL_WARN_US) {
+        std::println("[sdl] slow {}: {} us", name, elapsed_us);
+    }
 }
 
 }
@@ -310,17 +329,34 @@ bool SDLInputManager::init_sdl() {
         SDL_SetHint("SDL_JOYSTICK_THREAD", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
 #ifdef __APPLE__
-        // Diagnostic for #10: bypass SDL's Switch HIDAPI backend on macOS to
-        // determine whether it is responsible for the Pro Controller latency.
-        SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "0");
+        // Keep Nintendo HIDAPI enabled, but don't force the controller into
+        // enhanced-report mode until SDL actually needs an enhanced feature.
+        // Issue #10 can override these at runtime from Terminal without another
+        // custom build:
+        //   NS_SDL_SWITCH_HIDAPI=0|1
+        //   NS_SDL_ENHANCED_REPORTS=0|auto|1
+        //   NS_SDL_MFI=0|1
+        const char* switch_hidapi = env_or_default("NS_SDL_SWITCH_HIDAPI", "1");
+        const char* enhanced_reports = env_or_default("NS_SDL_ENHANCED_REPORTS", "auto");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", switch_hidapi);
+        SDL_SetHint("SDL_JOYSTICK_ENHANCED_REPORTS", enhanced_reports);
+        if (const char* mfi = std::getenv("NS_SDL_MFI"); mfi && *mfi)
+            SDL_SetHint("SDL_JOYSTICK_MFI", mfi);
+        if (env_enabled("NS_SDL_DIAGNOSTICS")) {
+            SDL_SetHint("SDL_LOGGING", "input=debug");
+            SDL_SetHint("SDL_EVENT_LOGGING", "1");
+        }
+        std::println("[sdl] macOS backend hints switch_hidapi={} enhanced_reports={} mfi={}",
+                     switch_hidapi, enhanced_reports,
+                     SDL_GetHint("SDL_JOYSTICK_MFI") ? SDL_GetHint("SDL_JOYSTICK_MFI") : "default");
 #else
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "SW" "ITCH", "1");
+        SDL_SetHint("SDL_JOYSTICK_ENHANCED_REPORTS", "1");
 #endif
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_" "JOY" "_CONS", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_XBOX", "1");
-        SDL_SetHint("SDL_JOYSTICK_ENHANCED_REPORTS", "1");
         Uint32 flags = SDL_INIT_GAMEPAD | SDL_INIT_EVENTS;
 #ifdef SDL_INIT_SENSOR
         flags |= SDL_INIT_SENSOR;
@@ -360,15 +396,32 @@ void SDLInputManager::poll_once() {
         if (!initialized) return;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_EVENT_GAMEPAD_ADDED || ev.type == SDL_EVENT_GAMEPAD_REMOVED)
+            if (ev.type == SDL_EVENT_GAMEPAD_ADDED || ev.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                if (env_enabled("NS_SDL_DIAGNOSTICS")) {
+                    std::println("[sdl] event t={}us type={} which={}",
+                                 ns::now_us(), ev.type, ev.gdevice.which);
+                }
                 force_scan.store(true, std::memory_order_relaxed);
+            }
         }
+
+        const uint64_t update_started_us = ns::now_us();
         SDL_UpdateGamepads();
-        if (motion_enabled.load(std::memory_order_relaxed))
+        log_slow_sdl_call("SDL_UpdateGamepads", update_started_us);
+
+        if (motion_enabled.load(std::memory_order_relaxed)) {
+            const uint64_t sensors_started_us = ns::now_us();
             SDL_UpdateSensors();
+            log_slow_sdl_call("SDL_UpdateSensors", sensors_started_us);
+        }
+
         uint64_t now = ns::now_us();
-        if (force_scan.load(std::memory_order_relaxed) || last_scan_us == 0 || now - last_scan_us > 500000ULL)
+        if (force_scan.load(std::memory_order_relaxed) || last_scan_us == 0 || now - last_scan_us > 500000ULL) {
+            const uint64_t scan_started_us = ns::now_us();
             scan_locked(false);
+            log_slow_sdl_call("controller rescan", scan_started_us);
+            now = ns::now_us();
+        }
         refresh_states_locked(now);
     }
 
@@ -696,6 +749,8 @@ void SDLInputManager::scan_locked(bool initial) {
         last_scan_us = ns::now_us();
         std::erase_if(devices, [this](Device& d) {
             if (!d.pad || !SDL_GamepadConnected(d.pad)) {
+                std::println("[sdl] controller removed t={}us slot={} id={} path=\"{}\" name=\"{}\" vid={:04x} pid={:04x}",
+                             ns::now_us(), d.slot + 1, d.id, d.path, d.name, d.vid, d.pid);
                 if (d.slot >= 0 && d.slot < 4) {
                     states[d.slot] = SdlPadState{};
                     notify_connection(d.slot, false);
@@ -706,14 +761,18 @@ void SDLInputManager::scan_locked(bool initial) {
             return false;
         });
         int count = 0;
+        const uint64_t get_gamepads_started_us = ns::now_us();
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
+        log_slow_sdl_call("SDL_GetGamepads", get_gamepads_started_us);
         if (!ids) return;
         for (int i = 0; i < count; ++i) {
             SDL_JoystickID id = ids[i];
             if (has_device_locked(id)) continue;
             int slot = first_free_slot_locked();
             if (slot < 0) break;
+            const uint64_t open_started_us = ns::now_us();
             SDL_Gamepad* pad = SDL_OpenGamepad(id);
+            log_slow_sdl_call("SDL_OpenGamepad", open_started_us);
             if (!pad) continue;
             Device d{};
             d.pad = pad;
@@ -721,6 +780,8 @@ void SDLInputManager::scan_locked(bool initial) {
             d.slot = slot;
             const char* name = SDL_GetGamepadName(pad);
             d.name = (name && *name) ? name : "SDL3 Gamepad";
+            const char* path = SDL_GetGamepadPath(pad);
+            d.path = (path && *path) ? path : "";
             d.vid = SDL_GetGamepadVendor(pad);
             d.pid = SDL_GetGamepadProduct(pad);
             d.applied_player_index = -2;
@@ -732,8 +793,8 @@ void SDLInputManager::scan_locked(bool initial) {
                 d.trigger_rumble_capable = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
             }
             notify_connection(d.slot, true);
-            std::println("[sdl] controller slot={} name=\"{}\" vid={:04x} pid={:04x} rumble={} trigger_rumble={} profile={}",
-                         d.slot + 1, d.name, d.vid, d.pid,
+            std::println("[sdl] controller added t={}us slot={} id={} path=\"{}\" name=\"{}\" vid={:04x} pid={:04x} rumble={} trigger_rumble={} profile={}",
+                         ns::now_us(), d.slot + 1, d.id, d.path, d.name, d.vid, d.pid,
                          d.rumble_capable ? "yes" : "no",
                          d.trigger_rumble_capable ? "yes" : "no",
                          is_xbox_controller(d.name, d.vid) ? "xbox" :
@@ -764,12 +825,22 @@ void SDLInputManager::refresh_states_locked(uint64_t now) {
             st.vid = d.vid;
             st.pid = d.pid;
             st.instance_id = d.id;
-            int battery_percent = -1;
-            SDL_PowerState power_state = SDL_GetGamepadPowerInfo(d.pad, &battery_percent);
-            st.battery_percent = (battery_percent >= 0 && battery_percent <= 100) ? battery_percent : -1;
-            // SDL_POWERSTATE_CHARGED often means "full/not discharging", not necessarily actively charging.
-            // Only set the Switch charging bit when SDL explicitly reports charging.
-            st.battery_charging = (power_state == SDL_POWERSTATE_CHARGING);
+            // Battery state is informational and must not sit in the 250 Hz input
+            // hot path. Some Bluetooth backends can make power queries expensive,
+            // so cache it and refresh at most once per second.
+            if (d.last_battery_poll_us == 0 || now - d.last_battery_poll_us >= SDL_BATTERY_POLL_INTERVAL_US) {
+                int battery_percent = -1;
+                const uint64_t battery_started_us = ns::now_us();
+                const SDL_PowerState power_state = SDL_GetGamepadPowerInfo(d.pad, &battery_percent);
+                log_slow_sdl_call("SDL_GetGamepadPowerInfo", battery_started_us);
+                d.battery_percent = (battery_percent >= 0 && battery_percent <= 100) ? battery_percent : -1;
+                // SDL_POWERSTATE_CHARGED often means "full/not discharging", not necessarily actively charging.
+                // Only set the Switch charging bit when SDL explicitly reports charging.
+                d.battery_charging = (power_state == SDL_POWERSTATE_CHARGING);
+                d.last_battery_poll_us = now;
+            }
+            st.battery_percent = d.battery_percent;
+            st.battery_charging = d.battery_charging;
             apply_motion(d, st.motion_samples, st.has_motion, st.motion_sample_fresh);
             st.motion = st.has_motion ? st.motion_samples[2] : ns::MotionReport{};
             if (report_non_neutral(st.input) || st.has_motion) st.last_input_us = now;

@@ -18,7 +18,7 @@ permissions:
   actions: write
 
 env:
-  SDL_REF: release-3.4.10
+  SDL_REF: release-3.4.16
   QT_VERSION: '6.8.3'
   VCPKG_COMMIT: 9d7f79f56ae1a9b4704d6a7fb8237e347a974133
   VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/_cache/vcpkg-bincache

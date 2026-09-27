@@ -93,10 +93,14 @@ private:
         uint8_t applied_body_rgb[3]{};
         bool applied_body_rgb_valid = false;
         std::string name;
+        std::string path;
         uint16_t vid = 0;
         uint16_t pid = 0;
         float accel_rate_hz = 0.0f;
         float gyro_rate_hz = 0.0f;
+        int battery_percent = -1;
+        bool battery_charging = false;
+        uint64_t last_battery_poll_us = 0;
         bool has_motion_samples = false;
         ns::MotionReport motion_samples[3]{};
     };
