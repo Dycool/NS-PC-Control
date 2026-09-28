@@ -34,8 +34,14 @@ jobs:
           distribution: zulu
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: |
+          SDKMANAGER="sdkmanager"
+          if ! command -v sdkmanager >/dev/null 2>&1 && [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          yes | "$SDKMANAGER" --licenses || true
+          yes | "$SDKMANAGER" --install "cmake;3.22.1" || true
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
