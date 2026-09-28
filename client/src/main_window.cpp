@@ -11,10 +11,6 @@
 #include <QGridLayout>
 #include <QMessageBox>
 
-namespace {
-    constexpr uint32_t AMIIBO_FORMAT_REQUEST_FLAG = 0x80000000u;
-}
-
 MainWindow::MainWindow() {
     load_saved_feature_toggles();
     setWindowTitle("NS PC Control");
@@ -268,7 +264,14 @@ void MainWindow::onScanAmiiboClicked() {
         if (g_amiiboScanPending[i].load()) { subpad = i; break; }
     }
     if (subpad < 0) return;
-    AmiiboPickerDialog dialog(this);
+    AmiiboPickerDialog dialog(this, [this, subpad](const AmiiboCatalogItem& item) {
+        bool headOk = false;
+        bool tailOk = false;
+        const uint32_t head = item.head.toUInt(&headOk, 16);
+        const uint32_t tail = item.tail.toUInt(&tailOk, 16);
+        return headOk && tailOk && sendAmiiboLibraryCommand(
+            ns::AMIIBO_LIBRARY_DELETE, static_cast<uint8_t>(subpad), head, tail);
+    });
     if (dialog.exec() != QDialog::Accepted) return;
     const AmiiboCatalogItem* selected = dialog.selectedAmiibo();
     if (!selected || dialog.selectedAction() == AmiiboPickerAction::None) return;
@@ -279,7 +282,6 @@ void MainWindow::onScanAmiiboClicked() {
     bool tailOk = false;
     const uint32_t head = amiibo.head.toUInt(&headOk, 16);
     uint32_t tail = amiibo.tail.toUInt(&tailOk, 16);
-    if (action == AmiiboPickerAction::Format) tail |= AMIIBO_FORMAT_REQUEST_FLAG;
     if (!headOk || !tailOk
             || !sendAmiiboLibraryCommand(
                 ns::AMIIBO_LIBRARY_SELECT,
@@ -290,7 +292,7 @@ void MainWindow::onScanAmiiboClicked() {
         return;
     }
     set_status_message(
-        std::string(action == AmiiboPickerAction::Format ? "Formatting " : "Selecting ")
+        std::string("Selecting ")
         + q_to_std(amiibo.name)
         + " in the server Amiibo library...");
 }

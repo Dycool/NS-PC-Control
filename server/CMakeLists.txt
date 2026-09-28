@@ -372,6 +372,12 @@ if(BUILD_TESTING)
     )
     add_test(NAME s2-nfc-codec COMMAND s2-nfc-codec-test)
 
+    add_executable(s2-vendor-rx-test tests/s2_vendor_rx_test.cpp)
+    target_include_directories(s2-vendor-rx-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME s2-vendor-rx COMMAND s2-vendor-rx-test)
+
     add_executable(amiibo-library-test
         tests/amiibo_library_test.cpp
         src/amiibo_library.cpp

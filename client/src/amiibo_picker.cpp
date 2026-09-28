@@ -35,7 +35,9 @@ bool AmiiboCatalogItem::isV3() const {
     return ok && (value & 0xffu) == 0x03u;
 }
 
-AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
+AmiiboPickerDialog::AmiiboPickerDialog(
+    QWidget* parent, std::function<bool(const AmiiboCatalogItem&)> onFormat)
+    : QDialog(parent), formatHandler(std::move(onFormat)) {
     suspend_keyboard_mouse_input();
 
     setWindowTitle(QStringLiteral("Scan Amiibo"));
@@ -95,14 +97,18 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
     outer->addWidget(status);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
-    formatButton = buttons->addButton(
-        QStringLiteral("Format Amiibo"),
-        QDialogButtonBox::DestructiveRole);
     chooseButton = buttons->addButton(
         QStringLiteral("Use Amiibo"),
         QDialogButtonBox::AcceptRole);
+    lastButton = buttons->addButton(
+        QStringLiteral("Last Amiibo"),
+        QDialogButtonBox::ActionRole);
+    formatButton = buttons->addButton(
+        QStringLiteral("Format Amiibo"),
+        QDialogButtonBox::DestructiveRole);
     formatButton->setEnabled(false);
     chooseButton->setEnabled(false);
+    lastButton->setEnabled(false);
     outer->addWidget(buttons);
 
     connect(recentBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -140,17 +146,38 @@ AmiiboPickerDialog::AmiiboPickerDialog(QWidget* parent) : QDialog(parent) {
         action = AmiiboPickerAction::Use;
         accept();
     });
+    connect(lastButton, &QPushButton::clicked, this, [this] {
+        QSettings settings(QStringLiteral("NS-PC-Control"), QStringLiteral("AmiiboPicker"));
+        const QStringList recents = settings.value(QStringLiteral("recents")).toStringList();
+        if (recents.isEmpty()) return;
+        for (int row = 0; row < list->count(); ++row) {
+            const int catIdx = list->item(row)->data(Qt::UserRole).toInt();
+            if (catIdx < 0 || catIdx >= catalogue.size()) continue;
+            const AmiiboCatalogItem& item = catalogue[catIdx];
+            if (item.id() != recents.front()) continue;
+            list->setCurrentRow(row);
+            saveRecent(&item);
+            action = AmiiboPickerAction::Use;
+            accept();
+            return;
+        }
+    });
     connect(formatButton, &QPushButton::clicked, this, [this] {
         const AmiiboCatalogItem* item = selectedAmiibo();
         if (!item) return;
         const auto answer = QMessageBox::warning(
             this, QStringLiteral("Format Amiibo"),
-            QStringLiteral("Erase saved data for %1 and create a new tag?")
+            QStringLiteral("Delete saved data for %1? The next use will create a fresh tag.")
                 .arg(item->name),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
         if (answer != QMessageBox::Yes) return;
-        action = AmiiboPickerAction::Format;
-        accept();
+        if (formatHandler && formatHandler(*item)) {
+            status->setText(QStringLiteral("Reset request sent for %1. Choose an Amiibo when ready.")
+                                .arg(item->name));
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Format Amiibo"),
+                                 QStringLiteral("Could not send the reset request to the server."));
+        }
     });
     connect(buttons, &QDialogButtonBox::rejected,
             this, &QDialog::reject);
@@ -254,15 +281,18 @@ void AmiiboPickerDialog::loadRecents() {
     recentBox->blockSignals(true);
     recentBox->clear();
     recentBox->addItem(QStringLiteral("Select a recently used Amiibo…"));
+    bool latestAvailable = false;
     for (const QString& id : recents) {
         for (const AmiiboCatalogItem& item : catalogue) {
             if (item.id() == id) {
                 const QString label = QStringLiteral("%1 (%2)").arg(item.name, item.gameSeries);
                 recentBox->addItem(label, id);
+                if (!recents.isEmpty() && id == recents.front()) latestAvailable = true;
                 break;
             }
         }
     }
+    lastButton->setEnabled(latestAvailable);
     recentBox->blockSignals(false);
 }
 
@@ -274,6 +304,7 @@ void AmiiboPickerDialog::saveRecent(const AmiiboCatalogItem* item) {
     recents.prepend(item->id());
     while (recents.size() > 10) recents.removeLast();
     settings.setValue(QStringLiteral("recents"), recents);
+    loadRecents();
 }
 
 void AmiiboPickerDialog::rebuildSeries() {

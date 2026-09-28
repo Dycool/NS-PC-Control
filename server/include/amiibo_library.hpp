@@ -29,6 +29,7 @@ OperationResult generate_template(uint32_t head, uint32_t tail,
                                   std::span<const uint8_t> retail_key,
                                   std::vector<uint8_t>& tag);
 OperationResult clear();
+OperationResult remove(uint32_t head, uint32_t tail);
 
 // Called when the console has changed the currently selected tag.
 bool store_writeback(int console_port, const uint8_t* data, std::size_t len,

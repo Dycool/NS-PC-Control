@@ -457,6 +457,7 @@ static constexpr uint8_t AMIIBO_LIBRARY_VERSION = 1;
 enum AmiiboLibraryAction : uint8_t {
     AMIIBO_LIBRARY_SELECT = 1,
     AMIIBO_LIBRARY_CLEAR = 2,
+    AMIIBO_LIBRARY_DELETE = 3,
 };
 
 enum AmiiboLibraryResult : uint8_t {

@@ -286,6 +286,8 @@ static int callback_ws(struct lws *wsi, enum lws_callback_reasons reason, void *
                     if (request.version == ns::AMIIBO_LIBRARY_VERSION) {
                         if (request.action == ns::AMIIBO_LIBRARY_CLEAR) {
                             result = amiibo_library::clear();
+                        } else if (request.action == ns::AMIIBO_LIBRARY_DELETE) {
+                            result = amiibo_library::remove(amiibo_head, amiibo_tail);
                         } else if (request.action == ns::AMIIBO_LIBRARY_SELECT
                                    && request.subpad < 4) {
                             int port = console_port_for_client_subpad(

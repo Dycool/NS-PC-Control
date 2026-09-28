@@ -4,6 +4,7 @@
 #include <QDialog>
 #include <QString>
 #include <QVector>
+#include <functional>
 
 class QComboBox;
 class QLabel;
@@ -31,12 +32,13 @@ struct AmiiboCatalogItem {
 enum class AmiiboPickerAction {
     None,
     Use,
-    Format,
 };
 
 class AmiiboPickerDialog final : public QDialog {
 public:
-    explicit AmiiboPickerDialog(QWidget* parent = nullptr);
+    explicit AmiiboPickerDialog(
+        QWidget* parent = nullptr,
+        std::function<bool(const AmiiboCatalogItem&)> formatHandler = {});
     ~AmiiboPickerDialog() override;
 
     const AmiiboCatalogItem* selectedAmiibo() const;
@@ -50,9 +52,11 @@ private:
     QLabel* imagePreview = nullptr;
     QLabel* status = nullptr;
     QPushButton* chooseButton = nullptr;
+    QPushButton* lastButton = nullptr;
     QPushButton* formatButton = nullptr;
     QVector<AmiiboCatalogItem> catalogue;
     AmiiboPickerAction action = AmiiboPickerAction::None;
+    std::function<bool(const AmiiboCatalogItem&)> formatHandler;
 #ifdef HAS_QT_NETWORK
     QNetworkAccessManager* networkManager = nullptr;
     QNetworkReply* currentReply = nullptr;

@@ -1,4 +1,8 @@
 #include "amiibo_library.hpp"
+#if __has_include("../generated/amiibo_v3_machine_responses.hpp")
+#include "../generated/amiibo_v3_machine_responses.hpp"
+#define NS_V3_MACHINE_RESPONSES 1
+#endif
 #include "s2_nfc_codec.hpp"
 
 // Key derivation/tag packing is based on amiitool:
@@ -26,6 +30,10 @@
 #ifdef NS_EMBEDDED_AMIIBO_TEMPLATES
 #include "amiibo_templates_embed.h"
 #endif
+#if __has_include("../generated/amiibo_v3_factory_images.hpp")
+#include "../generated/amiibo_v3_factory_images.hpp"
+#define NS_V3_FACTORY_IMAGES 1
+#endif
 
 namespace amiibo_library {
 namespace {
@@ -42,6 +50,21 @@ constexpr std::size_t CIPHER_LENGTH = 0x188;
 constexpr std::size_t DATA_HMAC_POS = 0x008;
 constexpr std::size_t TAG_HMAC_POS = 0x1b4;
 constexpr uint32_t FORMAT_REQUEST_FLAG = 0x80000000u;
+
+bool populate_blank_v3_machine_response(uint32_t head, uint32_t tail,
+                                        std::vector<uint8_t>& tag) {
+    if (tag.size() != V3_SIZE
+            || !std::all_of(tag.begin() + 0x3c0, tag.begin() + 0x3fe,
+                            [](uint8_t value) { return value == 0; })) return false;
+#ifdef NS_V3_MACHINE_RESPONSES
+    for (const auto& response : V3_MACHINE_RESPONSES) {
+        if (response.head != head || response.tail != tail) continue;
+        std::copy(response.bytes.begin(), response.bytes.end(), tag.begin() + 0x3c0);
+        return true;
+    }
+#endif
+    return false;
+}
 
 std::mutex g_mutex;
 std::array<std::string, 4> g_selected_ids;
@@ -405,6 +428,7 @@ std::optional<std::vector<uint8_t>> generate_tag(
         std::span<const uint8_t>(tag.data() + 0x3c0, 0x3e));
     tag[0x3fe] = static_cast<uint8_t>(crc >> 8);
     tag[0x3ff] = static_cast<uint8_t>(crc);
+    populate_blank_v3_machine_response(head, tail, tag);
 
     std::copy_n(uid.begin(), 7, tag.begin());
     tag[7] = 0x00;
@@ -459,9 +483,23 @@ std::optional<std::vector<uint8_t>> embedded_template(
     return std::nullopt;
 }
 
+std::optional<std::vector<uint8_t>> v3_factory_image(uint32_t head, uint32_t tail) {
+#ifdef NS_V3_FACTORY_IMAGES
+    for (const auto& factory : V3_FACTORY_IMAGES) {
+        if (factory.head == head && factory.tail == tail)
+            return std::vector<uint8_t>(factory.bytes.begin(), factory.bytes.end());
+    }
+#else
+    (void)head;
+    (void)tail;
+#endif
+    return std::nullopt;
+}
+
 std::optional<std::vector<uint8_t>> factory_template(
     uint32_t head, uint32_t tail, std::span<const uint8_t> fallback_template) {
-    std::optional<std::vector<uint8_t>> factory = embedded_template(head, tail);
+    std::optional<std::vector<uint8_t>> factory = v3_factory_image(head, tail);
+    if (!factory) factory = embedded_template(head, tail);
     if (!factory && ns::is_supported_amiibo_dump_size(fallback_template.size())) {
         factory = std::vector<uint8_t>(fallback_template.begin(), fallback_template.end());
     }
@@ -473,9 +511,18 @@ OperationResult stage_v3_read_prefix(std::span<const uint8_t> tag) {
     if (tag.size() != V3_SIZE) {
         return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
     }
+    if (std::all_of(tag.begin() + 0x3c0, tag.begin() + 0x3fe,
+                    [](uint8_t value) { return value == 0; })
+            || crc16_mcrf4xx(tag.subspan(0x3c0, 62))
+                != static_cast<uint16_t>((static_cast<uint16_t>(tag[0x3fe]) << 8)
+                                         | tag[0x3ff])) {
+        return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0,
+                "This v3 Amiibo is missing its machine response. A matching complete dump is required."};
+    }
+    // The SRAM response belongs in the 0x21 device result, not in the
+    // originality-signature field of the initial read header. PicoSwitch2's
+    // confirmed v3 read path uses a zero signature for imported dumps.
     ns::s2nfc::Signature prefix{ns::s2nfc::Signature::Base{}};
-    std::copy_n(tag.begin() + ns::s2nfc::V3_SRAM_OFFSET,
-                prefix.size(), prefix.begin());
     g_pending_v3_read_prefix = prefix;
     return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
 }
@@ -488,6 +535,10 @@ OperationResult generate_template(uint32_t head, uint32_t tail,
     if ((head == 0 && tail == 0) || !validate_key(retail_key)) {
         return {ns::AMIIBO_LIBRARY_INVALID_REQUEST, 0,
                 "invalid Amiibo ID or 160-byte build key"};
+    }
+    if (auto factory = v3_factory_image(head, tail)) {
+        tag = std::move(*factory);
+        return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
     }
     const auto generated = generate_tag(
         head, tail,
@@ -517,16 +568,18 @@ OperationResult select(uint32_t head, uint32_t tail, int console_port,
     auto stored = read_file(tag_path(id));
 
     if (format_requested) {
-        std::string key_error;
-        const auto retail_key = load_retail_key(key_error);
-        if (!retail_key) {
-            return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0, std::move(key_error)};
+        auto generated = v3_factory_image(head, tail);
+        if (!generated) {
+            std::string key_error;
+            const auto retail_key = load_retail_key(key_error);
+            if (!retail_key) {
+                return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0, std::move(key_error)};
+            }
+            generated = generate_tag(
+                head, tail,
+                std::span<const uint8_t, RETAIL_KEY_SIZE>(retail_key->data(),
+                                                          retail_key->size()));
         }
-
-        const auto generated = generate_tag(
-            head, tail,
-            std::span<const uint8_t, RETAIL_KEY_SIZE>(retail_key->data(),
-                                                      retail_key->size()));
         if (!generated) {
             return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0,
                     "OpenSSL could not format the selected Amiibo"};
@@ -545,17 +598,28 @@ OperationResult select(uint32_t head, uint32_t tail, int console_port,
 
     if (stored && ns::is_supported_amiibo_dump_size(stored->size())) {
         tag = *stored;
+        if (populate_blank_v3_machine_response(head, tail, tag)) {
+            // Preserve existing registration/game data; repair only the empty
+            // machine response left by older template generators.
+            const auto backup_path = tag_path(id).string() + ".pre-machine-response";
+            std::string error;
+            if ((!read_file(backup_path) && !atomic_write(backup_path, *stored, error))
+                    || !atomic_write(tag_path(id), tag, error)) {
+                return {ns::AMIIBO_LIBRARY_STORAGE_ERROR, 0, std::move(error)};
+            }
+        }
         const OperationResult prefix_result = stage_v3_read_prefix(tag);
         if (!prefix_result) return prefix_result;
         g_selected_ids[console_port] = id;
         return {ns::AMIIBO_LIBRARY_OK, static_cast<uint16_t>(tag.size()), {}};
     }
 
-    const auto factory = factory_template(head, tail, fallback_template);
+    auto factory = factory_template(head, tail, fallback_template);
     if (!factory) {
         return {ns::AMIIBO_LIBRARY_GENERATION_ERROR, 0,
                 "this build has no factory template for the selected Amiibo"};
     }
+    populate_blank_v3_machine_response(head, tail, *factory);
     const OperationResult prefix_result = stage_v3_read_prefix(*factory);
     if (!prefix_result) return prefix_result;
     std::string error;
@@ -578,6 +642,24 @@ OperationResult clear() {
                 "cannot clear " + root.string() + ": " + ec.message()};
     }
     g_selected_ids.fill({});
+    g_pending_v3_read_prefix.reset();
+    return {ns::AMIIBO_LIBRARY_OK, 0, {}};
+}
+
+OperationResult remove(uint32_t head, uint32_t tail) {
+    if (head == 0 && tail == 0) {
+        return {ns::AMIIBO_LIBRARY_INVALID_REQUEST, 0, "invalid Amiibo ID"};
+    }
+    std::lock_guard lock(g_mutex);
+    const std::string id = tag_id(head, tail);
+    std::error_code ec;
+    std::filesystem::remove(tag_path(id), ec);
+    if (ec) {
+        return {ns::AMIIBO_LIBRARY_STORAGE_ERROR, 0, ec.message()};
+    }
+    for (auto& selected : g_selected_ids) {
+        if (selected == id) selected.clear();
+    }
     g_pending_v3_read_prefix.reset();
     return {ns::AMIIBO_LIBRARY_OK, 0, {}};
 }

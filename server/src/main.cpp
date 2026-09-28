@@ -755,6 +755,8 @@ int main(int argc, char** argv) {
                     if (authenticated && rate_allow(sender.sin_addr.s_addr)) {
                         if (request.action == ns::AMIIBO_LIBRARY_CLEAR) {
                             result = amiibo_library::clear();
+                        } else if (request.action == ns::AMIIBO_LIBRARY_DELETE) {
+                            result = amiibo_library::remove(request.head, request.tail);
                         } else if (request.action == ns::AMIIBO_LIBRARY_SELECT
                                    && request.subpad < 4) {
                             int client_idx = -1;

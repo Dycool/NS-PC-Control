@@ -19,6 +19,12 @@ on:
       AMIIBO_RETAIL_KEY_B64:
         description: Build-only base64 encoding of the 160-byte amiitool retail key
         required: true
+      AMIIBO_V3_RESPONSES_B64:
+        description: Base64 JSON map of Amiibo IDs to base64 machine responses
+        required: true
+      AMIIBO_V3_FACTORY_B64:
+        description: Base64 JSON map of Amiibo IDs to complete factory images
+        required: true
 
 permissions:
   contents: read
@@ -251,8 +257,11 @@ jobs:
       - name: Build Unified Pi Server
         env:
           AMIIBO_RETAIL_KEY_B64: ${{ secrets.AMIIBO_RETAIL_KEY_B64 }}
+          AMIIBO_V3_RESPONSES_B64: ${{ secrets.AMIIBO_V3_RESPONSES_B64 }}
+          AMIIBO_V3_FACTORY_B64: ${{ secrets.AMIIBO_V3_FACTORY_B64 }}
         run: |
           set -euo pipefail
+          python3 scripts/prepare_v3_machine_responses.py
 
           MINIUPNPC_PREFIX="$HOME/.local/miniupnpc-aarch64-static"
           MINIUPNPC_INCLUDE_DIR="$MINIUPNPC_PREFIX/include"
@@ -313,6 +322,9 @@ jobs:
             -DREQUIRE_SDL_BT=ON
 
           make -j"$(nproc)"
+          ./s2-nfc-codec-test || { result=$?; echo "NFC codec test exited $result"; exit "$result"; }
+          ./s2-vendor-rx-test || { result=$?; echo "Vendor RX test exited $result"; exit "$result"; }
+          ctest --output-on-failure -R '^(s2-(nfc-codec|vendor-rx)|amiibo-library)$'
 
           if readelf -d ns-backend | grep -q 'libminiupnpc\.so'; then
             echo "::error::ns-backend still has a dynamic miniupnpc dependency"

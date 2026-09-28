@@ -29,9 +29,10 @@ inline constexpr std::size_t V3_DEVICE_RESULT_SIZE = 19 + V3_SRAM_SIZE;
 inline constexpr std::size_t V3_EXTENDED_CLEAR_SIZE = 355;
 inline constexpr std::size_t V3_EXTENDED_UPDATE_SIZE = 167;
 inline constexpr std::size_t STATUS_PAYLOAD_SIZE = 61;
-inline constexpr std::size_t READ_METADATA_SIZE = 63;
-inline constexpr std::size_t READ_TRAILER_SIZE = 19;
+inline constexpr std::size_t READ_METADATA_SIZE = 60;
+inline constexpr std::size_t READ_TRAILER_SIZE = 0;
 inline constexpr std::size_t READ_PAYLOAD_SIZE = READ_METADATA_SIZE + RAW_DUMP_SIZE + READ_TRAILER_SIZE;
+inline constexpr std::size_t WRITE_PREP_BUFFER_SIZE = READ_METADATA_SIZE + 4;
 inline constexpr std::size_t V3_OPERATION_PREFIX_SIZE = 60;
 inline constexpr std::size_t V3_SECTOR_READ_PREFIX_SIZE = 64;
 inline constexpr std::size_t V3_SECTOR_READ_MAX_SIZE = V3_SECTOR_READ_PREFIX_SIZE + V3_DUMP_SIZE;
@@ -140,11 +141,16 @@ struct Ntag215Runtime {
     uint8_t nfc_status = 0x09;
     uint8_t nfc_detail = 0x00;
     bool operation_active = false;
+    bool read_complete = false;
+    bool defer_read_eject = false;
     bool write_mode = false;
     std::array<uint8_t, WRITE_STAGING_SIZE> write_staging{};
     std::array<uint8_t, WRITE_STAGING_SIZE> write_coverage{};
     bool write_committed = false;
+    bool write_persisted = true;
+    bool eject_waiting_for_persist = false;
     std::array<uint8_t, 9> operation_metadata{};
+    Signature signature{};
     std::vector<uint8_t> op_buffer;
     bool tag_ejected = false;
     uint64_t represent_cooldown_until_ms = 0;
@@ -166,6 +172,8 @@ struct AmiiboV3Runtime {
     uint8_t nfc_status = 0x09;
     uint8_t nfc_detail = 0x00;
     bool operation_active = false;
+    bool read_complete = false;
+    bool defer_read_eject = false;
     bool device_cmd_staged = false;
     bool write_mode = false;
     bool extended_mode = false;
@@ -175,6 +183,8 @@ struct AmiiboV3Runtime {
     std::array<uint8_t, WRITE_STAGING_SIZE> write_staging{};
     std::array<uint8_t, WRITE_STAGING_SIZE> write_coverage{};
     bool write_committed = false;
+    bool write_persisted = true;
+    bool eject_waiting_for_persist = false;
     std::vector<uint8_t> op_buffer;
     bool tag_ejected = false;
     uint64_t represent_cooldown_until_ms = 0;
@@ -208,6 +218,12 @@ public:
     bool is_v3() const { return tag_type_ == TagType::V3; }
     bool is_modified() const { return modified_; }
     void clear_modified() { modified_ = false; }
+    bool has_committed_write() const;
+    bool has_completed_read() const;
+    bool defers_read_eject() const;
+    bool write_in_progress() const;
+    void set_defer_read_eject(bool defer);
+    void set_write_persisted(bool persisted, uint64_t now_ms);
     TagType type() const { return tag_type_; }
     const std::vector<uint8_t>& image() const { return tag_image_; }
     std::vector<uint8_t>& image() { return tag_image_; }
@@ -216,6 +232,8 @@ public:
 
     uint8_t nfc_status() const;
     uint8_t nfc_detail() const;
+    bool awaiting_v3_extended_update() const;
+    bool v3_extended_update_committed() const;
 
 private:
     TagType tag_type_ = TagType::NONE;

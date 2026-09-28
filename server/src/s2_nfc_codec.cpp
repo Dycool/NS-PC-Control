@@ -162,16 +162,18 @@ bool build_read_buffer_payload(std::span<const std::uint8_t> raw,
                                std::span<std::uint8_t> output,
                                std::string* error) {
     if (!validate_raw_dump(raw, error)) return false;
-    if (output.size() < READ_PAYLOAD_SIZE) {
-        set_error(error, std::format("output buffer must be at least {} bytes", READ_PAYLOAD_SIZE));
+    const size_t buffer_size = write_mode ? WRITE_PREP_BUFFER_SIZE : READ_PAYLOAD_SIZE;
+    if (output.size() < buffer_size) {
+        set_error(error, std::format("output buffer must be at least {} bytes", buffer_size));
         return false;
     }
 
-    std::fill(output.begin(), output.begin() + READ_PAYLOAD_SIZE, static_cast<std::uint8_t>(0));
+    std::fill(output.begin(), output.begin() + buffer_size, static_cast<std::uint8_t>(0));
 
     output[0] = 0x04;
     output[4] = 0x01;
     output[5] = 0x02;
+    output[6] = 0x00;
     output[7] = 0x07;
 
     const auto uid = uid_from_raw(raw);
@@ -188,18 +190,10 @@ bool build_read_buffer_payload(std::span<const std::uint8_t> raw,
         std::copy_n(operation_metadata.begin(), 9, output.begin() + 51);
     }
 
-    if (write_mode) {
-        std::copy_n(raw.begin() + 12, 8, output.begin() + 63);
-        output[71] = 0x04;
-        output[72] = 0x54;
-        output[73] = 0x02;
-        output[74] = 0x01;
-    } else {
-        std::copy_n(raw.begin(), RAW_DUMP_SIZE, output.begin() + 63);
-        output[603] = 0x01;
-        output[604] = 0x00;
-        output[605] = 0x0F;
-    }
+    if (write_mode)
+        std::copy_n(raw.begin() + 12, 4, output.begin() + READ_METADATA_SIZE);
+    else
+        std::copy_n(raw.begin(), RAW_DUMP_SIZE, output.begin() + READ_METADATA_SIZE);
 
     return true;
 }
@@ -446,12 +440,6 @@ bool build_v3_device_result(std::span<const std::uint8_t> image,
     output[18] = 0x06;
 
     std::copy_n(image.begin() + V3_SRAM_OFFSET, V3_SRAM_SIZE, output.begin() + 19);
-
-    output[19 + V3_NS_REG_OFFSET - V3_SRAM_OFFSET] |= V3_SRAM_RF_READY;
-
-    const std::uint16_t crc = crc16_mcrf4xx(
-        std::span<const std::uint8_t>(output.data() + 19, V3_SRAM_DATA_SIZE));
-    write_u16le(output.data() + 19 + V3_SRAM_DATA_SIZE, crc);
     return true;
 }
 
@@ -719,6 +707,7 @@ WriteApplyResult apply_v3_extended_staging(std::span<const std::uint8_t> staging
 
 void Ntag215Runtime::init(std::span<const uint8_t> raw, const Signature& sig) {
     reset_transaction();
+    signature = sig;
     write_staging.fill(0);
     write_coverage.fill(0);
     operation_metadata.fill(0);
@@ -727,10 +716,14 @@ void Ntag215Runtime::init(std::span<const uint8_t> raw, const Signature& sig) {
 
 void Ntag215Runtime::reset_transaction() {
     operation_active = false;
+    read_complete = false;
+    defer_read_eject = false;
     write_mode = false;
     nfc_status = 0x09;
     nfc_detail = 0x00;
     write_committed = false;
+    write_persisted = true;
+    eject_waiting_for_persist = false;
     tag_ejected = false;
     represent_cooldown_until_ms = 0;
 }
@@ -743,10 +736,8 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
 
     switch (sub) {
     case 0x03: // enter scan
-        if (tag_ejected && now_ms >= represent_cooldown_until_ms) {
-            tag_ejected = false;
-        }
         operation_active = false;
+        read_complete = false;
         if (write_mode) {
             write_mode = false;
             write_staging.fill(0);
@@ -762,15 +753,24 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
         operation_active = false;
         write_mode = false;
         if (write_committed) {
-            write_committed = false;
-            tag_ejected = true;
-            represent_cooldown_until_ms = now_ms + 3000;
-            nfc_status = 0x07;
-            nfc_detail = 0x41;
+            if (write_persisted) {
+                write_committed = false;
+                tag_ejected = true;
+                represent_cooldown_until_ms = now_ms + 3000;
+                nfc_status = 0x07;
+                nfc_detail = 0x41;
+            } else {
+                eject_waiting_for_persist = true;
+            }
+        } else if (read_complete) {
+            tag_ejected = !defer_read_eject;
+            nfc_status = defer_read_eject ? 0x09 : 0x07;
+            nfc_detail = defer_read_eject ? 0x00 : 0x41;
         } else if (!tag_ejected) {
             nfc_status = 0x09;
             nfc_detail = 0x00;
         }
+        read_complete = false;
         break;
 
     case 0x05: { // status
@@ -782,9 +782,9 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
             payload[4] = 0x01;
             payload[5] = 0x01;
             payload[6] = 0x02;
-            payload[7] = 0x07;
+            payload[8] = 0x07;
             const auto uid = uid_from_raw(image);
-            std::copy_n(uid.begin(), 7, payload + 8);
+            std::copy_n(uid.begin(), 7, payload + 9);
         } else {
             payload[0] = 0x07;
             payload[1] = 0x41;
@@ -794,13 +794,20 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
     }
 
     case 0x06: { // begin read/write operation
-        const bool valid = req.size() >= 19 && req[0] == 0xD0 && req[1] == 0x07 && !tag_ejected;
+        const bool valid = req.size() >= 19 && req[0] == 0xD0 && req[1] == 0x07
+            && !tag_ejected && image.size() == RAW_DUMP_SIZE;
         if (valid) {
             const auto uid = uid_from_raw(image);
             bool is_zero_uid = true;
             for (size_t i = 2; i < 9; ++i) if (req[i] != 0) { is_zero_uid = false; break; }
-
-            write_mode = !is_zero_uid && std::equal(uid.begin(), uid.end(), req.begin() + 2);
+            if (!is_zero_uid && !std::equal(uid.begin(), uid.end(), req.begin() + 2)) {
+                nfc_status = 0x07;
+                nfc_detail = 0x41;
+                operation_active = false;
+                break;
+            }
+            write_mode = !is_zero_uid;
+            read_complete = false;
             nfc_status = 0x04;
             nfc_detail = 0x00;
             operation_active = true;
@@ -808,8 +815,13 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
             operation_metadata.fill(0);
             std::copy_n(req.begin() + 10, 9, operation_metadata.begin());
 
-            op_buffer.resize(READ_PAYLOAD_SIZE);
-            build_read_buffer_payload(image, Signature{}, operation_metadata, write_mode, op_buffer);
+            op_buffer.resize(write_mode ? WRITE_PREP_BUFFER_SIZE : READ_PAYLOAD_SIZE);
+            if (!build_read_buffer_payload(image, signature, operation_metadata,
+                                           write_mode, op_buffer)) {
+                operation_active = false;
+                nfc_status = 0x07;
+                nfc_detail = 0x41;
+            }
         } else {
             nfc_status = 0x07;
             nfc_detail = 0x41;
@@ -819,10 +831,19 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
     }
 
     case 0x15: { // fetch read buffer
-        direction = 0x01;
-        if (operation_active && op_buffer.size() == READ_PAYLOAD_SIZE) {
-            std::copy_n(op_buffer.begin(), READ_PAYLOAD_SIZE, payload);
-            payload_len = READ_PAYLOAD_SIZE;
+        if (operation_active && req.size() >= 2 && !op_buffer.empty()) {
+            const uint16_t offset = static_cast<uint16_t>(req[0])
+                | (static_cast<uint16_t>(req[1]) << 8);
+            if (offset < op_buffer.size()
+                    && build_buffer_chunk(op_buffer, offset,
+                        std::span<uint8_t>(payload, READ_CHUNK_PAYLOAD_SIZE), payload_len)) {
+                direction = 0x01;
+                if (!write_mode && offset + payload_len - 3 >= op_buffer.size())
+                    read_complete = true;
+            } else {
+                nfc_status = 0x07;
+                nfc_detail = 0x41;
+            }
         }
         break;
     }
@@ -832,6 +853,14 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
             const uint16_t offset = static_cast<uint16_t>(req[0]) | (static_cast<uint16_t>(req[1]) << 8);
             const uint16_t declared = static_cast<uint16_t>(req[2]) | (static_cast<uint16_t>(req[3]) << 8);
             if (offset + declared <= WRITE_STAGING_SIZE && req.size() >= 4 + declared) {
+                // A format operation can begin with a zero-UID read descriptor,
+                // then switch to writing when the console sends staging chunks.
+                if (!write_mode) {
+                    write_mode = true;
+                    read_complete = false;
+                    write_staging.fill(0);
+                    write_coverage.fill(0);
+                }
                 std::copy_n(req.begin() + 4, declared, write_staging.begin() + offset);
                 std::fill_n(write_coverage.begin() + offset, declared, static_cast<uint8_t>(1));
             }
@@ -846,6 +875,8 @@ bool Ntag215Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t>
                 nfc_status = 0x05;
                 nfc_detail = 0x00;
                 write_committed = true;
+                write_persisted = false;
+                eject_waiting_for_persist = false;
                 operation_active = false;
                 write_mode = false;
             } else {
@@ -879,6 +910,8 @@ void AmiiboV3Runtime::init(std::span<const uint8_t> v3_image, const Signature& s
 
 void AmiiboV3Runtime::reset_transaction() {
     operation_active = false;
+    read_complete = false;
+    defer_read_eject = false;
     device_cmd_staged = false;
     write_mode = false;
     extended_mode = false;
@@ -888,6 +921,8 @@ void AmiiboV3Runtime::reset_transaction() {
     nfc_status = 0x09;
     nfc_detail = 0x00;
     write_committed = false;
+    write_persisted = true;
+    eject_waiting_for_persist = false;
     tag_ejected = false;
     represent_cooldown_until_ms = 0;
 }
@@ -901,6 +936,16 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
     // Expire extended sequence if deadline passed
     if (extended_phase == V3ExtendedPhase::AWAIT_UPDATE && now_ms >= extended_deadline_ms) {
         extended_phase = V3ExtendedPhase::IDLE;
+        if (!operation_active && !tag_ejected) {
+            // A format clear may be followed by one sector-aware update. If
+            // the console never starts it, finish the removal handshake when
+            // that continuation window closes instead of leaving the tag up.
+            tag_ejected = true;
+            write_committed = false;
+            nfc_status = 0x07;
+            nfc_detail = 0x41;
+            represent_cooldown_until_ms = now_ms + 3000;
+        }
     }
 
     // Preserve NS_REG stored in flash; SRAM_RF_READY is raised on served copy
@@ -911,10 +956,20 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
 
     switch (sub) {
     case 0x03: // enter scan
-        if (tag_ejected && now_ms >= represent_cooldown_until_ms) {
-            tag_ejected = false;
+        if (extended_phase == V3ExtendedPhase::AWAIT_UPDATE) {
+            // After the format clear, PicoSwitch2 can follow with a sector
+            // update without restarting the scan. A fresh scan is therefore
+            // the console's signal that formatting ended and it wants removal.
+            extended_phase = V3ExtendedPhase::IDLE;
+            extended_deadline_ms = 0;
+            tag_ejected = true;
+            write_committed = false;
+            nfc_status = 0x07;
+            nfc_detail = 0x41;
+            represent_cooldown_until_ms = now_ms + 3000;
         }
         operation_active = false;
+        read_complete = false;
         if (write_mode || extended_mode) {
             write_mode = false;
             extended_mode = false;
@@ -922,7 +977,7 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
             write_staging.fill(0);
             write_coverage.fill(0);
         }
-        if (!write_committed) {
+        if (!write_committed && !tag_ejected) {
             nfc_status = 0x09;
             nfc_detail = 0x00;
         }
@@ -947,15 +1002,24 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
             nfc_status = 0x09;
             nfc_detail = 0x00;
         } else if (completed_write) {
-            write_committed = false;
-            tag_ejected = true;
-            represent_cooldown_until_ms = now_ms + 3000;
-            nfc_status = 0x07;
-            nfc_detail = 0x41;
+            if (write_persisted) {
+                write_committed = false;
+                tag_ejected = true;
+                represent_cooldown_until_ms = now_ms + 3000;
+                nfc_status = 0x07;
+                nfc_detail = 0x41;
+            } else {
+                eject_waiting_for_persist = true;
+            }
+        } else if (read_complete) {
+            tag_ejected = !defer_read_eject;
+            nfc_status = defer_read_eject ? 0x09 : 0x07;
+            nfc_detail = defer_read_eject ? 0x00 : 0x41;
         } else if (!tag_ejected) {
             nfc_status = 0x09;
             nfc_detail = 0x00;
         }
+        read_complete = false;
         break;
     }
 
@@ -968,8 +1032,8 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
             payload[4] = 0x01;
             payload[5] = 0x01;
             payload[6] = 0x02;
-            payload[7] = 0x07;
-            std::copy_n(image.begin(), 7, payload + 8);
+            payload[8] = 0x07;
+            std::copy_n(image.begin(), 7, payload + 9);
 
             // Genuine controller reports empty status body for 0x15, 0x16, 0x18!
             if (nfc_status == 0x15 || nfc_status == 0x16 || nfc_status == 0x18) {
@@ -998,6 +1062,7 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
         if (valid) {
             build_v3_read_buffer(image, signature, req, op_buffer);
             operation_active = true;
+            read_complete = false;
             nfc_status = 0x04; // active
             nfc_detail = 0x00;
             write_committed = false;
@@ -1017,9 +1082,9 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
             const uint16_t offset = static_cast<uint16_t>(req[0]) | (static_cast<uint16_t>(req[1]) << 8);
             if (build_buffer_chunk(op_buffer, offset, std::span<uint8_t>(payload, READ_CHUNK_PAYLOAD_SIZE), payload_len)) {
                 direction = 0x01;
-                if (nfc_status == 0x18) {
-                    nfc_status = 0x09;
-                }
+                if (offset + payload_len - 3 >= op_buffer.size()) read_complete = true;
+                // PicoSwitch2 retains the operation status while its result is
+                // fetched, including after the final device-result chunk.
             }
         }
         break;
@@ -1028,6 +1093,7 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
     case 0x1E: { // sector-aware read
         if (!tag_ejected && build_v3_sector_read_buffer(image, signature, req, op_buffer)) {
             operation_active = true;
+            read_complete = false;
             nfc_status = 0x15;
             nfc_detail = 0x00;
             write_mode = false;
@@ -1063,6 +1129,25 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
             break;
         }
 
+        // Switch 2 Format Amiibo can begin its write immediately after the
+        // 0x21 device-result read, while status is still 0x18. A structurally
+        // valid write-start frame is the intent signal for that transition.
+        if (!write_mode && !extended_mode && offset == 0 && operation_active
+                && nfc_status == 0x18 && read_complete
+                && is_v3_write_start(data, image)) {
+            nfc_status = 0x04;
+            nfc_detail = 0x00;
+        }
+        // Format Amiibo immediately follows its ordinary 0x08 commit with a
+        // sector-aware clear. There is no intervening scan/read command. Only
+        // a valid extended start may reopen that just-committed operation.
+        if (!operation_active && write_committed && nfc_status == 0x05
+                && offset == 0 && v3_extended_expected_size(data, image) != 0) {
+            operation_active = true;
+            nfc_status = 0x04;
+            nfc_detail = 0x00;
+            write_committed = false;
+        }
         if (!write_mode && !extended_mode && offset == 0 && operation_active && nfc_status == 0x04) {
             if (is_v3_write_start(data, image)) {
                 write_mode = true;
@@ -1109,6 +1194,8 @@ bool AmiiboV3Runtime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t
                 write_mode = false;
                 extended_expected_size = 0;
                 write_committed = true;
+                write_persisted = false;
+                eject_waiting_for_persist = false;
             } else {
                 nfc_status = 0x07;
                 nfc_detail = 0x41;
@@ -1236,7 +1323,8 @@ bool S2NfcRuntime::step(uint64_t now_ms, uint8_t sub, std::span<const uint8_t> r
 
     if (tag_type_ == TagType::V3) {
         const bool ok = v3_.step(now_ms, sub, req, payload, payload_len, direction, tag_image_);
-        if (v3_.write_committed) modified_ = true;
+        if ((sub == 0x08 && v3_.write_committed)
+                || (sub == 0x20 && v3_.nfc_status == 0x16)) modified_ = true;
         return ok;
     } else {
         const bool ok = ntag215_.step(now_ms, sub, req, payload, payload_len, direction, tag_image_);
@@ -1251,6 +1339,56 @@ bool S2NfcRuntime::is_placed(uint64_t now_ms) const {
     return !ntag215_.tag_ejected;
 }
 
+bool S2NfcRuntime::has_committed_write() const {
+    if (tag_type_ == TagType::V3) return v3_.write_committed;
+    if (tag_type_ == TagType::NTAG215) return ntag215_.write_committed;
+    return false;
+}
+
+bool S2NfcRuntime::has_completed_read() const {
+    if (tag_type_ == TagType::V3) return v3_.read_complete;
+    if (tag_type_ == TagType::NTAG215) return ntag215_.read_complete;
+    return false;
+}
+
+bool S2NfcRuntime::defers_read_eject() const {
+    if (tag_type_ == TagType::V3) return v3_.defer_read_eject;
+    if (tag_type_ == TagType::NTAG215) return ntag215_.defer_read_eject;
+    return false;
+}
+
+bool S2NfcRuntime::write_in_progress() const {
+    if (tag_type_ == TagType::V3) return v3_.write_mode || v3_.extended_mode;
+    if (tag_type_ == TagType::NTAG215) return ntag215_.write_mode;
+    return false;
+}
+
+void S2NfcRuntime::set_defer_read_eject(bool defer) {
+    ntag215_.defer_read_eject = defer;
+    v3_.defer_read_eject = defer;
+}
+
+void S2NfcRuntime::set_write_persisted(bool persisted, uint64_t now_ms) {
+    (void)now_ms;
+    if (tag_type_ == TagType::NTAG215) {
+        ntag215_.write_persisted = persisted;
+        if (persisted && ntag215_.eject_waiting_for_persist) {
+            ntag215_.eject_waiting_for_persist = false;
+            ntag215_.write_committed = false;
+            ntag215_.tag_ejected = true;
+            ntag215_.represent_cooldown_until_ms = now_ms + 3000;
+        }
+    } else if (tag_type_ == TagType::V3) {
+        v3_.write_persisted = persisted;
+        if (persisted && v3_.eject_waiting_for_persist) {
+            v3_.eject_waiting_for_persist = false;
+            v3_.write_committed = false;
+            v3_.tag_ejected = true;
+            v3_.represent_cooldown_until_ms = now_ms + 3000;
+        }
+    }
+}
+
 uint8_t S2NfcRuntime::nfc_status() const {
     if (tag_type_ == TagType::V3) return v3_.nfc_status;
     if (tag_type_ == TagType::NTAG215) return ntag215_.nfc_status;
@@ -1261,6 +1399,16 @@ uint8_t S2NfcRuntime::nfc_detail() const {
     if (tag_type_ == TagType::V3) return v3_.nfc_detail;
     if (tag_type_ == TagType::NTAG215) return ntag215_.nfc_detail;
     return 0x41;
+}
+
+bool S2NfcRuntime::awaiting_v3_extended_update() const {
+    return tag_type_ == TagType::V3
+        && v3_.extended_phase == V3ExtendedPhase::AWAIT_UPDATE;
+}
+
+bool S2NfcRuntime::v3_extended_update_committed() const {
+    return tag_type_ == TagType::V3
+        && v3_.extended_phase == V3ExtendedPhase::UPDATE_COMMITTED;
 }
 
 } // namespace ns::s2nfc

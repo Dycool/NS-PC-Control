@@ -131,6 +131,10 @@ static std::atomic<uint64_t> g_s1_identity_change_us{0};
 
 static ns::s2nfc::S2NfcRuntime g_nfc_runtimes[HID_PORT_COUNT];
 static std::chrono::steady_clock::time_point g_amiibo_expiry[HID_PORT_COUNT];
+static std::array<uint8_t, 7> g_recent_read_uid[HID_PORT_COUNT]{};
+static std::chrono::steady_clock::time_point g_recent_read_at[HID_PORT_COUNT];
+static bool g_recent_read_valid[HID_PORT_COUNT] = {};
+static bool g_amiibo_scan_suppressed[HID_PORT_COUNT] = {};
 
 // Report 0x09 byte 13 (and Joy-Con 2 R report 0x08 byte 15) is not a
 // boolean "tag present" bit. The real controller exposes a 3-bit NFC event
@@ -305,6 +309,7 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
         return;
     }
 
+    bool continue_for_write = false;
     {
         std::lock_guard<std::mutex> lk(g_amiibo_mtx);
         if (!g_nfc_runtimes[port].set_tag_data(std::span<const uint8_t>(data, len))) {
@@ -313,15 +318,25 @@ void set_amiibo_data_for_port(int port, const uint8_t* data, size_t len) {
             }
             return;
         }
-        g_amiibo_expiry[port] = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        g_amiibo_scan_suppressed[port] = false;
+        const auto now = std::chrono::steady_clock::now();
+        const auto uid = ns::s2nfc::uid_from_dump(std::span<const uint8_t>(data, len));
+        // After the user presents the same tag again, keep it available for
+        // the write that follows the format confirmation or game read.
+        // The first presentation still ejects after its completed read.
+        continue_for_write = g_recent_read_valid[port]
+            && now - g_recent_read_at[port] <= std::chrono::seconds(30)
+            && uid == g_recent_read_uid[port];
+        g_nfc_runtimes[port].set_defer_read_eject(continue_for_write);
+        g_amiibo_expiry[port] = now + std::chrono::seconds(3);
         signal_amiibo_hid_state_locked(port, NfcHidEventReason::TagPresented);
     }
 
     if (nfc_debug_enabled()) {
         const auto uid = ns::s2nfc::uid_from_dump(std::span<const uint8_t>(data, len));
-        std::println("[s2][nfc][upload] accepted t_us={} port={} format={} uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        std::println("[s2][nfc][upload] accepted t_us={} port={} format={} uid={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} continue_for_write={}",
                      current_time_us(), port, g_nfc_runtimes[port].is_v3() ? "v3-2048" : "ntag215",
-                     uid[0], uid[1], uid[2], uid[3], uid[4], uid[5], uid[6]);
+                     uid[0], uid[1], uid[2], uid[3], uid[4], uid[5], uid[6], continue_for_write);
     }
     publish_amiibo_request_for_port(port, false);
 }
@@ -333,13 +348,15 @@ void check_amiibo_expiry(int port) {
     bool was_modified = false;
     {
         std::lock_guard<std::mutex> lk(g_amiibo_mtx);
-        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (!g_nfc_runtimes[port].is_placed(now_ms) || std::chrono::steady_clock::now() <= g_amiibo_expiry[port]) return;
+        if (g_nfc_runtimes[port].type() == ns::s2nfc::TagType::NONE
+                || std::chrono::steady_clock::now() <= g_amiibo_expiry[port]) return;
         expired = true;
         was_modified = g_nfc_runtimes[port].is_modified();
         if (was_modified) writeback = g_nfc_runtimes[port].image();
-        clear_amiibo_locked(port);
+        if (g_nfc_runtimes[port].is_placed())
+            clear_amiibo_locked(port);
+        else
+            reset_amiibo_transaction_locked(port);
     }
     if (nfc_debug_enabled() && expired) {
         std::println("[s2][nfc][expiry] t_us={} port={} expired=true modified={} writeback_len={}",
@@ -1133,16 +1150,19 @@ bool rumble_half_is_neutral_carrier(const uint8_t* f) { return f[0] == 0x00 && f
 //
 // PC2_Write_Amiibo.pcapng establishes the legacy NTAG215 USB happy path:
 //   * 0x05 is a 69-byte transfer (8-byte header + 61-byte status payload)
-//   * 0x15 is a 630-byte transfer (8-byte header + 622-byte payload)
+//   * 0x15 serves the 600-byte read buffer in offset-addressed chunks
 //   * 0x14 carries a 454-byte staging image in six offset-addressed chunks
 //   * 0x08 commits that staging image, after which status becomes 0x05
 // Figure-v3 uses the newer offset-addressed 0x15 chunk envelope (up to 70 data
 // bytes) plus sector-aware 0x1E/0x20 and SRAM device command 0x14/0x21.
 // USB packetisation is handled by Raw Gadget; these are application lengths.
 namespace {
-constexpr size_t S2_NFC_MAX_RESPONSE_PAYLOAD = ns::s2nfc::READ_PAYLOAD_SIZE;
+constexpr size_t S2_NFC_MAX_RESPONSE_PAYLOAD = ns::s2nfc::READ_CHUNK_PAYLOAD_SIZE;
 constexpr auto S2_NFC_READ_HOLD = std::chrono::seconds(3);
-constexpr auto S2_NFC_WRITE_HOLD = std::chrono::seconds(5);
+constexpr auto S2_NFC_OPERATION_HOLD = std::chrono::seconds(5);
+constexpr auto S2_NFC_WRITE_HOLD = std::chrono::seconds(20);
+constexpr auto S2_NFC_WRITE_CONTINUATION_HOLD = std::chrono::seconds(15);
+constexpr auto S2_NFC_EJECT_CLEANUP_HOLD = std::chrono::seconds(1);
 
 void fill_s2_nfc_identity(uint8_t* payload, const std::vector<uint8_t>& raw,
                           size_t uid_len_offset) {
@@ -1182,8 +1202,9 @@ void publish_amiibo_writeback_for_port(int port, const std::vector<uint8_t>& wri
 
 // Builds the payload after the standard eight-byte command-response header.
 size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_data,
-                                 uint8_t* payload, int port) {
+                                 uint8_t* payload, int port, uint8_t& direction) {
     if (port < 0 || port >= HID_PORT_COUNT) port = 0;
+    direction = 0x04;
     std::memset(payload, 0, S2_NFC_MAX_RESPONSE_PAYLOAD);
     if (!controller_port_supports_amiibo(port)) {
         if (nfc_debug_enabled()) {
@@ -1197,6 +1218,7 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
 
     std::vector<uint8_t> writeback;
     bool has_writeback = false;
+    bool persist_committed_write = false;
     size_t payload_len = 0;
 
     {
@@ -1205,8 +1227,27 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
         const uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now.time_since_epoch()).count();
 
-        uint8_t direction = 0x04;
+        const bool completed_read = nfc_sub == 0x04
+            && g_nfc_runtimes[port].has_completed_read()
+            && !g_nfc_runtimes[port].has_committed_write();
+        const auto completed_read_uid = completed_read
+            ? ns::s2nfc::uid_from_dump(g_nfc_runtimes[port].image())
+            : std::array<uint8_t, 7>{};
+        const bool was_placed = g_nfc_runtimes[port].is_placed(now_ms);
         g_nfc_runtimes[port].step(now_ms, nfc_sub, cmd_data, payload, payload_len, direction);
+        if (g_nfc_runtimes[port].awaiting_v3_extended_update())
+            g_amiibo_scan_suppressed[port] = true;
+        else if (g_nfc_runtimes[port].v3_extended_update_committed())
+            g_amiibo_scan_suppressed[port] = false;
+        if (was_placed && !g_nfc_runtimes[port].is_placed(now_ms)) {
+            signal_amiibo_hid_state_locked(port, NfcHidEventReason::TagRemoved);
+            g_amiibo_expiry[port] = now + S2_NFC_EJECT_CLEANUP_HOLD;
+        }
+        if (completed_read) {
+            g_recent_read_uid[port] = completed_read_uid;
+            g_recent_read_at[port] = now;
+            g_recent_read_valid[port] = true;
+        }
 
         if (nfc_debug_enabled()) {
             std::println("[s2][nfc][state] t_us={} port={} sub=0x{:02x} request_len={} placed={} status=0x{:02x}{:02x} hid_state={} payload_len={}",
@@ -1219,21 +1260,36 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
             if (g_nfc_runtimes[port].is_placed(now_ms)) {
                 schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(40), NfcHidEventReason::ScanReady);
             }
-            publish_amiibo_request_for_port(port, !g_nfc_runtimes[port].is_placed(now_ms));
+            publish_amiibo_request_for_port(
+                port, !g_nfc_runtimes[port].is_placed(now_ms)
+                    && !g_amiibo_scan_suppressed[port]);
         } else if (nfc_sub == 0x06 || nfc_sub == 0x1E || nfc_sub == 0x21) {
             schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(40), NfcHidEventReason::OperationReady);
+            g_amiibo_expiry[port] = now + (g_nfc_runtimes[port].write_in_progress()
+                ? S2_NFC_WRITE_HOLD : S2_NFC_OPERATION_HOLD);
+        } else if (nfc_sub == 0x14 && g_nfc_runtimes[port].write_in_progress()) {
             g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
         } else if (nfc_sub == 0x08 || nfc_sub == 0x20) {
             schedule_amiibo_hid_state_locked(port, std::chrono::milliseconds(700), NfcHidEventReason::WriteComplete);
             g_amiibo_expiry[port] = now + S2_NFC_WRITE_HOLD;
+            if (g_nfc_runtimes[port].has_committed_write())
+                g_recent_read_valid[port] = false;
         } else if (nfc_sub == 0x04) {
             if (g_nfc_runtimes[port].is_placed(now_ms)) {
-                g_amiibo_expiry[port] = now + S2_NFC_READ_HOLD;
+                g_amiibo_expiry[port] = now + (g_nfc_runtimes[port].defers_read_eject()
+                    ? S2_NFC_WRITE_CONTINUATION_HOLD : S2_NFC_READ_HOLD);
             }
-            publish_amiibo_request_for_port(port, false);
+            // The console may stop an empty scan almost immediately and then
+            // retry. Keep the picker available until a tag is actually
+            // presented; otherwise the true event lasts only a few frames.
+            if (was_placed)
+                publish_amiibo_request_for_port(port, false);
         }
 
-        if (g_nfc_runtimes[port].is_modified()) {
+        persist_committed_write = g_nfc_runtimes[port].has_committed_write();
+        const bool needs_writeback = g_nfc_runtimes[port].is_modified()
+            || (persist_committed_write && nfc_sub == 0x04);
+        if (needs_writeback) {
             g_nfc_runtimes[port].clear_modified();
             writeback = g_nfc_runtimes[port].image();
             has_writeback = true;
@@ -1242,9 +1298,21 @@ size_t fill_nfc_response_payload(uint8_t nfc_sub, std::span<const uint8_t> cmd_d
 
     if (has_writeback && !writeback.empty()) {
         std::string persistence_error;
-        if (!amiibo_library::store_writeback(
-                port, writeback.data(), writeback.size(), &persistence_error)
-                && nfc_debug_enabled()) {
+        const bool persisted = amiibo_library::store_writeback(
+            port, writeback.data(), writeback.size(), &persistence_error);
+        if (persist_committed_write) {
+            std::lock_guard<std::mutex> lk(g_amiibo_mtx);
+            const uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool was_placed = g_nfc_runtimes[port].is_placed(now_ms);
+            g_nfc_runtimes[port].set_write_persisted(persisted, now_ms);
+            if (was_placed && !g_nfc_runtimes[port].is_placed(now_ms)) {
+                signal_amiibo_hid_state_locked(port, NfcHidEventReason::TagRemoved);
+                g_amiibo_expiry[port] = std::chrono::steady_clock::now()
+                    + S2_NFC_EJECT_CLEANUP_HOLD;
+            }
+        }
+        if (!persisted && nfc_debug_enabled()) {
             std::println(stderr,
                          "[s2][nfc][library] writeback was not persisted: {}",
                          persistence_error);

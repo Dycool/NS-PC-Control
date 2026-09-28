@@ -2,6 +2,7 @@
 #include "s2_nfc_codec.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -51,6 +52,38 @@ int main() {
     assert(ns::s2nfc::validate_v3_dump(tag, nullptr));
     assert(tag[0x388] == 0x01);
     assert(tag[0x3b0] == 0x41);
+
+    // Every catalogued v3 figure needs its machine response, including its CRC.
+    for (const auto id : {
+             std::array<uint32_t, 2>{0x1f030100u, 0x04c91e03u},
+             std::array<uint32_t, 2>{0x1f020000u, 0x04c71e03u},
+             std::array<uint32_t, 2>{0x1f000000u, 0x04c41e03u},
+             std::array<uint32_t, 2>{0x1f040000u, 0x04ca1e03u},
+             std::array<uint32_t, 2>{0x1f010000u, 0x04c61e03u}}) {
+        if (!amiibo_library::generate_template(id[0], id[1], test_key, tag)
+                || !ns::s2nfc::v3_sram_response_valid(tag)
+                || tag[0x3c0] != 0x02) return 10;
+        const auto complete = tag;
+        // Simulate an old saved template with user data and a blank response.
+        std::fill(tag.begin() + 0x3c0, tag.begin() + 0x400, 0);
+        const auto legacy = tag;
+        if (!amiibo_library::select(id[0], id[1], 0, tag, legacy)) return 11;
+        std::fill(tag.begin() + 0x3c0, tag.begin() + 0x400, 0);
+        tag[100] ^= 0x5a;
+        if (!amiibo_library::store_writeback(0, tag.data(), tag.size())) return 12;
+        auto expected = complete;
+        expected[100] ^= 0x5a;
+        if (!amiibo_library::select(id[0], id[1], 0, tag)
+                || tag != expected) return 13;
+        if (!amiibo_library::select(id[0], id[1], 0, tag)
+                || tag != expected) return 14;
+        if (!amiibo_library::select(id[0], id[1] | 0x80000000u, 0, tag)
+                || tag != complete) return 15;
+        if (!amiibo_library::remove(id[0], id[1])
+                || amiibo_library::store_writeback(0, tag.data(), tag.size())
+                || !amiibo_library::select(id[0], id[1], 0, tag)
+                || tag != complete) return 16;
+    }
 
     assert(amiibo_library::clear());
     tag.clear();

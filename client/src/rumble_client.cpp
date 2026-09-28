@@ -159,6 +159,8 @@ void pump_udp_replies(SOCKET sock, RumbleManager& rumble,
                         message = "Amiibo selected and sent to the console.";
                     } else if (result.action == ns::AMIIBO_LIBRARY_CLEAR) {
                         message = "All private Amiibo data was cleared from the server.";
+                    } else if (result.action == ns::AMIIBO_LIBRARY_DELETE) {
+                        message = "Saved data for the selected Amiibo was deleted.";
                     }
                     break;
                 case ns::AMIIBO_LIBRARY_STORAGE_ERROR:

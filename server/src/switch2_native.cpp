@@ -493,9 +493,8 @@ bool switch2_native_handle_vendor_command(int port,
                      s2_hex(c.first(8)), s2_hex(c.subspan(8)), s2_hex(c));
     }
 
-    // NFC Read Buffer replies are 630 bytes in the real USB capture.
-    // Use dynamic storage so the complete vendor transfer is queued intact.
-    std::vector<uint8_t> r(8 + 622, 0);
+    // NFC reader data is returned in offset-addressed chunks of at most 73 bytes.
+    std::vector<uint8_t> r(128, 0);
     r[0] = id;
     r[1] = 0x01;
     r[2] = transport;
@@ -674,10 +673,7 @@ bool switch2_native_handle_vendor_command(int port,
                 // eight-byte command header above and append the tag payload
                 // produced by the shared Amiibo state machine.
                 const std::span<const uint8_t> nfc_data = c.subspan(8);
-                const bool v3_amiibo = is_v3_amiibo_placed(port);
-                dl = fill_nfc_response_payload(sub, nfc_data, d, port);
-                if (dl == 0 && v3_amiibo)
-                    r[1] = 0x04;
+                dl = fill_nfc_response_payload(sub, nfc_data, d, port, r[1]);
 
                 // Data replies retain the ordinary 00 F8 ACK. Figure-v3
                 // header-only acknowledgements use direction 0x04, as observed

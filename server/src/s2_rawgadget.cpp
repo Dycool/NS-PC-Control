@@ -3,6 +3,7 @@
 #include "app_state.hpp"
 #include "raw_gadget_embedded.hpp"
 #include "s2_enumeration.hpp"
+#include "s2_vendor_rx.hpp"
 #include "switch2_native.hpp"
 #include "virtual_controller.hpp"
 #include "shared/protocol.hpp"
@@ -22,6 +23,7 @@
 #include <initializer_list>
 #include <mutex>
 #include <print>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -1153,6 +1155,7 @@ void hid_out_loop() {
 
 void vendor_out_loop() {
     std::vector<uint8_t> buf(512);
+    ns::S2VendorCommandAssembler assembler;
     while (g_rg.io_running.load(std::memory_order_relaxed)) {
         if (g_rg.vendor_out_h < 0 || g_rg.state.load() < S2GadgetState::HidReady) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1162,28 +1165,26 @@ void vendor_out_loop() {
         ssize_t r = raw_ep_read(g_rg.vendor_out_h, buf.data(), buf.size());
         if (r > 0) {
             if (generation != g_rg.generation.load(std::memory_order_acquire)) continue;
-            std::lock_guard<std::mutex> lk(g_rg.vendor_out_mtx);
-            const auto duplicate = std::find_if(
-                g_rg.vendor_out_reports.begin(), g_rg.vendor_out_reports.end(),
-                [&](const QueueEntry& pending) {
-                    return pending.generation == generation
-                        && pending.data.size() == static_cast<size_t>(r)
-                        && std::equal(pending.data.begin(), pending.data.end(),
-                                      buf.begin());
-                });
-            if (duplicate != g_rg.vendor_out_reports.end()) {
-                // Native commands are request/reply transactions. During a
-                // cold wake the host can enqueue the same OUT command twice
-                // before the writer thread has consumed the first one. If both
-                // reach the response queue, the extra reply is delivered as the
-                // answer to the next command and every following step waits for
-                // the host's 10-second retry timeout. Coalesce only while the
-                // exact request is still unprocessed; a later repeat after the
-                // transaction drains remains a new request.
-                continue;
-            }
-            if (g_rg.vendor_out_reports.size() >= QUEUE_LIMIT) g_rg.vendor_out_reports.pop_front();
-            g_rg.vendor_out_reports.push_back({std::vector<uint8_t>(buf.begin(), buf.begin() + r), generation});
+            assembler.feed(std::span<const uint8_t>(buf.data(), static_cast<size_t>(r)),
+                           generation, std::chrono::steady_clock::now(),
+                           [&](std::span<const uint8_t> command) {
+                std::lock_guard<std::mutex> lk(g_rg.vendor_out_mtx);
+                const auto duplicate = std::find_if(
+                    g_rg.vendor_out_reports.begin(), g_rg.vendor_out_reports.end(),
+                    [&](const QueueEntry& pending) {
+                        return pending.generation == generation
+                            && pending.data.size() == command.size()
+                            && std::equal(pending.data.begin(), pending.data.end(),
+                                          command.begin());
+                    });
+                // A cold wake can repeat an identical request before the
+                // first queued response is consumed. Keep one pending copy.
+                if (duplicate != g_rg.vendor_out_reports.end()) return;
+                if (g_rg.vendor_out_reports.size() >= QUEUE_LIMIT)
+                    g_rg.vendor_out_reports.pop_front();
+                g_rg.vendor_out_reports.push_back(
+                    {std::vector<uint8_t>(command.begin(), command.end()), generation});
+            });
             continue;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
