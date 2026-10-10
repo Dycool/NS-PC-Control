@@ -1,6 +1,7 @@
 #pragma once
 
 #include "platform.hpp"
+#include "connection_recovery.hpp"
 #include "shared/protocol.hpp"
 #include "shared/sdl_input.hpp"
 
@@ -14,6 +15,10 @@
 
 extern std::atomic<bool> g_connected;
 extern std::atomic<bool> g_connecting;
+extern std::atomic<ClientConnectionState> g_connectionState;
+extern std::atomic<ClientDisconnectReason> g_serverDisconnectReason;
+extern std::atomic<uint32_t> g_missedHeartbeatReplies;
+extern std::atomic<uint32_t> g_reconnectAttempts;
 extern std::thread g_senderThread;
 extern std::atomic<bool> g_senderRunning;
 extern uint8_t g_hmacKey[32];
@@ -99,7 +104,8 @@ bool sendAmiiboLibraryCommand(uint8_t action, uint8_t subpad = 0,
                               uint32_t head = 0, uint32_t tail = 0);
 int run_client_stream(const ClientStreamConfig& cfg,
                       std::atomic<bool>& running,
-                      std::string* err_out = nullptr);
+                      std::string* err_out = nullptr,
+                      ClientDisconnectReason* disconnect_reason = nullptr);
 void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port);
 std::expected<void, std::string> start_connection(const std::string& target);
 void stop_connection();

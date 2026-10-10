@@ -154,8 +154,8 @@ int MainWindow::platformHeight() { return 365; }
 int MainWindow::platformPairHeight() { return platformHeight() - 42; }
 
 void MainWindow::toggleConnection() {
-    if (g_connecting.load(std::memory_order_relaxed)) return;
-    if (g_connected.load()) {
+    // Cancel works during discovery and during the reconnect backoff.
+    if (g_connectionState.load(std::memory_order_relaxed) != ClientConnectionState::Disconnected) {
         stop_connection();
     } else {
         connectBtn->setEnabled(false);
@@ -170,15 +170,16 @@ void MainWindow::toggleConnection() {
 }
 
 void MainWindow::updateUi() {
-    const bool connected = g_connected.load();
-    const bool connecting = g_connecting.load(std::memory_order_relaxed);
-    connectBtn->setText(connecting ? "Connecting..." : (connected ? "Disconnect" : "Connect"));
-    connectBtn->setEnabled(!connecting);
-    ipEdit->setEnabled(!connected && !connecting);
-    keyboardCombo->setEnabled(!connected && !connecting);
+    const ClientConnectionState state = g_connectionState.load(std::memory_order_relaxed);
+    const bool connected = state == ClientConnectionState::Connected;
+    const bool busy = state != ClientConnectionState::Disconnected;
+    connectBtn->setText(connected ? "Disconnect" : (busy ? "Cancel" : "Connect"));
+    connectBtn->setEnabled(true);
+    ipEdit->setEnabled(!busy);
+    keyboardCombo->setEnabled(!busy);
     bindingsBtn->setEnabled(true);
-    macrosBtn->setEnabled(connected && !connecting);
-    settingsBtn->setEnabled(!connecting);
+    macrosBtn->setEnabled(connected);
+    settingsBtn->setEnabled(!busy);
     if (!connected && macroDialog) macroDialog->close();
     statusLabel->setText(std_to_q(status_message()));
 

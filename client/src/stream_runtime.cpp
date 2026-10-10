@@ -19,6 +19,10 @@
 
 std::atomic<bool> g_connected{false};
 std::atomic<bool> g_connecting{false};
+std::atomic<ClientConnectionState> g_connectionState{ClientConnectionState::Disconnected};
+std::atomic<ClientDisconnectReason> g_serverDisconnectReason{ClientDisconnectReason::None};
+std::atomic<uint32_t> g_missedHeartbeatReplies{0};
+std::atomic<uint32_t> g_reconnectAttempts{0};
 std::atomic<bool> g_amiiboScanPending[4]{};
 std::atomic<uint16_t> g_amiiboRequestSequence[4]{};
 std::atomic<uint64_t> g_amiiboScanDeadlineUs[4]{};
@@ -94,7 +98,8 @@ void handle_client_assignment_packet(const ns::ClientAssignmentPacket& packet) {
     }
     if (packet.flags & ns::CLIENT_ASSIGNMENT_FLAG_SESSION_TERMINATED) {
         g_serverRequestedDisconnect.store(true, std::memory_order_relaxed);
-        set_status_message("Server ended the controller session; reconnecting");
+        g_serverDisconnectReason.store(ClientDisconnectReason::SessionTerminated, std::memory_order_relaxed);
+        set_status_message("Server ended the controller session; reconnect manually");
     }
 }
 
@@ -587,20 +592,30 @@ static void s2_audio_client_loop(std::stop_token st, std::atomic<bool>& running,
     closesocket(asock);
 }
 
-int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running, std::string* err_out) {
+int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
+                      std::string* err_out, ClientDisconnectReason* disconnect_reason) {
+    if (disconnect_reason) *disconnect_reason = ClientDisconnectReason::None;
+    auto fail = [&](ClientDisconnectReason reason, const std::string& message) {
+        if (disconnect_reason) *disconnect_reason = reason;
+        if (err_out) *err_out = message;
+        return 1;
+    };
     g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
     g_serverFullDisconnect.store(false, std::memory_order_relaxed);
     g_serverProfileUnsupportedDisconnect.store(false, std::memory_order_relaxed);
-    if (!cfg.hmac_key) return (err_out ? *err_out = "Missing HMAC key." : ""), 1;
+    g_serverDisconnectReason.store(ClientDisconnectReason::None, std::memory_order_relaxed);
+    // Discovery uses another UDP socket: require a fresh streaming-socket reply.
+    g_serverLastReplyUs.store(0, std::memory_order_relaxed);
+    g_missedHeartbeatReplies.store(0, std::memory_order_relaxed);
+    if (!cfg.hmac_key) return fail(ClientDisconnectReason::InputError, "Missing HMAC key.");
     raise_sender_priority();
-    if (!g_sdlInput.start()) return (err_out ? *err_out = "SDL3 input failed: " + g_sdlInput.error() : ""), 1;
+    if (!g_sdlInput.start()) return fail(ClientDisconnectReason::InputError, "SDL3 input failed: " + g_sdlInput.error());
 
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
     sockaddr_in dest{};
     if (sock == INVALID_SOCKET || !resolve_udp_destination(cfg.host, cfg.port, dest)) {
-        if (err_out) *err_out = "Socket or resolve error: " + cfg.host;
         if (sock != INVALID_SOCKET) closesocket(sock);
-        return 1;
+        return fail(ClientDisconnectReason::SocketError, "Socket or resolve error: " + cfg.host);
     }
     set_socket_nonblocking(sock);
 
@@ -616,9 +631,8 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             std::lock_guard<std::mutex> transport_lk(g_sendTransportMutex);
             if (g_sendSock == sock) g_sendSock = INVALID_SOCKET;
         }
-        if (err_out) *err_out = "Server not reachable.";
         closesocket(sock);
-        return 1;
+        return fail(ClientDisconnectReason::Unreachable, "Server did not answer the streaming handshake.");
     }
     uint32_t seq = 0;
     uint32_t joycon_mouse_seq = 0;
@@ -642,6 +656,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     ClientFrame frame;
     frame.reset();
     uint64_t next_input_frame_us = 0;
+    ClientDisconnectReason stop_reason = ClientDisconnectReason::None;
 
     while (running.load(std::memory_order_relaxed)) {
         const uint64_t loop_start_us = ns::now_us();
@@ -700,27 +715,44 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         if (!upload.empty()) send_macro_udp_packet(sock, dest, cfg.hmac_key, upload, 0);
         pump_udp_replies(sock, rumble, frame.controller_for_slot);
         if (g_serverRequestedDisconnect.load(std::memory_order_relaxed)) {
+            std::string message;
             if (g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed)) {
-                const std::string message = "Switch 2 mode does not support Joy-Con L + R. Use an individual Joy-Con or Pro Controller.";
-                set_status_message(message);
-                if (err_out) *err_out = message;
+                stop_reason = ClientDisconnectReason::UnsupportedProfile;
+                message = "Switch 2 mode does not support Joy-Con L + R. Use an individual Joy-Con or Pro Controller.";
+            } else if (g_serverFullDisconnect.load(std::memory_order_relaxed)) {
+                stop_reason = ClientDisconnectReason::ServerFull;
+                message = "Server full; reconnect manually after a slot becomes available.";
+            } else if (g_serverDisconnectReason.load(std::memory_order_relaxed) == ClientDisconnectReason::SwitchAsleep) {
+                stop_reason = ClientDisconnectReason::SwitchAsleep;
+                message = "Switch asleep; reconnect manually after waking it.";
             } else {
-                set_status_message(g_serverFullDisconnect.load(std::memory_order_relaxed) ? "Server full" : "Disconnected");
+                stop_reason = ClientDisconnectReason::SessionTerminated;
+                message = "Server ended the controller session; reconnect manually.";
             }
-            running.store(false, std::memory_order_relaxed);
+            set_status_message(message);
+            if (err_out) *err_out = message;
             break;
         }
         rumble.update_timeouts(frame.controller_for_slot);
 
         const uint64_t now = ns::now_us();
         if (now - last_probe_us >= 5000000ULL) {
+            if (last_probe_us && g_serverLastReplyUs.load(std::memory_order_relaxed) <= last_probe_us)
+                g_missedHeartbeatReplies.fetch_add(1, std::memory_order_relaxed);
+            else
+                g_missedHeartbeatReplies.store(0, std::memory_order_relaxed);
             ns::ServerInfoProbe probe{};
             send_all_udp(sock, dest, std::span(reinterpret_cast<const uint8_t*>(&probe), sizeof(probe)));
             last_probe_us = now;
         }
-        if (last_probe_us && now - g_serverLastReplyUs.load(std::memory_order_relaxed) > 15000000ULL) {
-            set_status_message("Lost connection to server");
-            running.store(false, std::memory_order_relaxed);
+        const uint64_t last_reply_us = g_serverLastReplyUs.load(std::memory_order_relaxed);
+        if (last_probe_us && last_reply_us && now > last_reply_us && now - last_reply_us > 15000000ULL) {
+            stop_reason = ClientDisconnectReason::Timeout;
+            const std::string message = "No server reply for 15 seconds ("
+                + std::to_string(g_missedHeartbeatReplies.load(std::memory_order_relaxed))
+                + " missed heartbeat probes).";
+            set_status_message(message);
+            if (err_out) *err_out = message;
             break;
         }
 
@@ -745,9 +777,8 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         }
     }
 
-    // The audio thread (audio_thread) stops and sends its own capability
-    // teardown when this function returns (running is already false here) via its
-    // jthread destructor; nothing to do for audio on this path.
+    // The audio jthread receives its stop request on return even if the outer
+    // reconnect worker remains running.
     rumble.stop_all();
     if (joycon_mouse_last_flags & ns::JOYCON_MOUSE_FLAG_ACTIVE) {
         send_joycon_mouse_update(sock, dest, cfg.hmac_key,
@@ -760,60 +791,100 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
         if (g_sendSock == sock) g_sendSock = INVALID_SOCKET;
     }
     closesocket(sock);
-    return g_serverProfileUnsupportedDisconnect.load(std::memory_order_relaxed) ? 1 : 0;
+    if (disconnect_reason) *disconnect_reason = stop_reason;
+    return stop_reason == ClientDisconnectReason::None ? 0 : 1;
 }
 
 void sender_thread_main(std::atomic<bool>& running, std::string host, uint16_t port) {
-    set_status_message("Connecting to " + host + ":" + std::to_string(port) + "...");
-    if (!probe_server_sync(host, port)) {
-        const std::string error = g_serverProbeFull.load(std::memory_order_relaxed)
-            ? "Server is full. All virtual controller slots are in use."
-            : "Server not reachable. Check the IP address.";
-        g_lastError = error;
-        set_status_message(error);
-        g_connecting.store(false, std::memory_order_relaxed);
-        g_connected.store(false, std::memory_order_relaxed);
-        g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
-        mouse_input_reset();
-        running.store(false, std::memory_order_relaxed);
-        return;
-    }
-    if (!running.load(std::memory_order_relaxed)) {
-        g_connecting.store(false, std::memory_order_relaxed);
-        return;
-    }
-    if (!g_sdlInput.start()) {
-        const std::string error = "SDL3 input failed: " + g_sdlInput.error();
-        g_lastError = error;
-        set_status_message(error);
-        g_connecting.store(false, std::memory_order_relaxed);
-        g_connected.store(false, std::memory_order_relaxed);
-        g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
-        mouse_input_reset();
-        running.store(false, std::memory_order_relaxed);
-        return;
-    }
-    if (!running.load(std::memory_order_relaxed)) {
-        g_connecting.store(false, std::memory_order_relaxed);
-        return;
-    }
-
     ClientStreamConfig cfg{.host = std::move(host), .port = port,
                            .gui_features = true, .print_cli_waiting_messages = false,
                            .idle_sleep_ms = 50, .hmac_key = g_hmacKey};
-    g_connected.store(true, std::memory_order_relaxed);
-    g_connecting.store(false, std::memory_order_relaxed);
-    set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
-    std::string err;
-    int rc = run_client_stream(cfg, running, &err);
-    if (rc != 0 && !err.empty()) {
-        g_lastError = err;
-        set_status_message(err);
+    const std::string endpoint = cfg.host + ":" + std::to_string(cfg.port);
+    unsigned consecutive_failures = 0;
+    bool previously_connected = false;
+    set_status_message("Connecting to " + endpoint + "...");
+
+    // A single cancellable worker owns discovery, streaming and all retries.
+    // The 250 Hz input loop runs only while a live stream is established.
+    while (running.load(std::memory_order_relaxed)) {
+        g_serverProbeFull.store(false, std::memory_order_relaxed);
+        g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
+        g_serverFullDisconnect.store(false, std::memory_order_relaxed);
+        g_serverProfileUnsupportedDisconnect.store(false, std::memory_order_relaxed);
+        g_serverDisconnectReason.store(ClientDisconnectReason::None, std::memory_order_relaxed);
+        g_serverLastReplyUs.store(0, std::memory_order_relaxed);
+        ClientDisconnectReason reason = ClientDisconnectReason::None;
+        std::string error;
+
+        if (!probe_server_sync(cfg.host, cfg.port)) {
+            reason = ClientDisconnectReason::Unreachable;
+            error = "Server not reachable (check IP address, network, and Raspberry Pi).";
+        } else if (g_serverDisconnectReason.load(std::memory_order_relaxed) == ClientDisconnectReason::SwitchAsleep) {
+            reason = ClientDisconnectReason::SwitchAsleep;
+            error = "Switch asleep; reconnect manually after waking it.";
+        } else if (g_serverDisconnectReason.load(std::memory_order_relaxed) == ClientDisconnectReason::SessionTerminated) {
+            reason = ClientDisconnectReason::SessionTerminated;
+            error = "Server ended the controller session; reconnect manually.";
+        } else if (g_serverProbeFull.load(std::memory_order_relaxed)) {
+            reason = ClientDisconnectReason::ServerFull;
+            error = "Server full; reconnect manually after a slot becomes available.";
+        } else if (!running.load(std::memory_order_relaxed)) {
+            break;
+        } else if (!g_sdlInput.start()) {
+            reason = ClientDisconnectReason::InputError;
+            error = "SDL3 input failed: " + g_sdlInput.error();
+        } else {
+            g_connected.store(true, std::memory_order_relaxed);
+            g_connecting.store(false, std::memory_order_relaxed);
+            g_connectionState.store(ClientConnectionState::Connected, std::memory_order_relaxed);
+            set_status_message("Connected to " + endpoint);
+            if (previously_connected)
+                std::println(stderr, "[network] Connection to {} restored", endpoint);
+            previously_connected = true;
+            consecutive_failures = 0;
+
+            std::string stream_error;
+            run_client_stream(cfg, running, &stream_error, &reason);
+            g_connected.store(false, std::memory_order_relaxed);
+            g_connecting.store(true, std::memory_order_relaxed);
+            if (!running.load(std::memory_order_relaxed)) break;
+            error = stream_error.empty() ? "Connection ended unexpectedly." : stream_error;
+            if (reason == ClientDisconnectReason::None)
+                reason = ClientDisconnectReason::Unreachable;
+        }
+
+        if (!running.load(std::memory_order_relaxed)) break;
+        g_lastError = error;
+        if (!should_reconnect(reason)) {
+            set_status_message(error);
+            std::println(stderr, "[network] {}", error);
+            break;
+        }
+
+        ++consecutive_failures;
+        const unsigned attempt = g_reconnectAttempts.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto delay = reconnect_backoff(consecutive_failures);
+        g_connectionState.store(ClientConnectionState::Reconnecting, std::memory_order_relaxed);
+        g_connecting.store(true, std::memory_order_relaxed);
+        g_switch2ModeEnabled.store(false, std::memory_order_relaxed);
+        g_switch2AudioSupported.store(false, std::memory_order_relaxed);
+        g_horiModeEnabled.store(false, std::memory_order_relaxed);
+        g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
+        reset_server_assignment_state();
+        reset_roster_state();
+        mouse_input_reset();
+        const std::string retry_message = error + " Retrying in "
+            + std::to_string(delay.count() / 1000) + "s (attempt "
+            + std::to_string(attempt) + ").";
+        set_status_message(retry_message);
+        std::println(stderr, "[network] {} (missed probes: {})",
+                     retry_message, g_missedHeartbeatReplies.load(std::memory_order_relaxed));
+        sleep_while_running(running, std::chrono::duration_cast<std::chrono::microseconds>(delay));
     }
-    g_connected.store(false);
+
+    g_connected.store(false, std::memory_order_relaxed);
     g_connecting.store(false, std::memory_order_relaxed);
-    g_joyconMouseModeEnabled.store(false, std::memory_order_relaxed);
-    mouse_input_reset();
+    g_connectionState.store(ClientConnectionState::Disconnected, std::memory_order_relaxed);
     running.store(false, std::memory_order_relaxed);
 }
 
@@ -831,6 +902,9 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     save_last_ip(target);
     load_macro_entries();
     g_packetCount.store(0);
+    g_reconnectAttempts.store(0, std::memory_order_relaxed);
+    g_missedHeartbeatReplies.store(0, std::memory_order_relaxed);
+    g_serverDisconnectReason.store(ClientDisconnectReason::None, std::memory_order_relaxed);
     g_serverLastReplyUs.store(0);
     g_serverRequestedDisconnect.store(false, std::memory_order_relaxed);
     g_serverFullDisconnect.store(false, std::memory_order_relaxed);
@@ -850,6 +924,7 @@ std::expected<void, std::string> start_connection(const std::string& target) {
     }
     g_senderRunning = true;
     g_connecting.store(true, std::memory_order_relaxed);
+    g_connectionState.store(ClientConnectionState::Connecting, std::memory_order_relaxed);
     g_senderThread = std::thread(sender_thread_main, std::ref(g_senderRunning), host, (uint16_t)port);
     return {};
 }
@@ -857,6 +932,7 @@ std::expected<void, std::string> start_connection(const std::string& target) {
 void stop_connection() {
     const bool was_connected = g_connected.exchange(false);
     const bool was_connecting = g_connecting.exchange(false, std::memory_order_relaxed);
+    g_connectionState.store(ClientConnectionState::Disconnected, std::memory_order_relaxed);
     if (g_senderThread.joinable()) {
         g_senderRunning = false;
         g_senderThread.join();

@@ -233,3 +233,10 @@ else()
         -Wpedantic
     )
 endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(ns-connection-recovery-test tests/connection_recovery_test.cpp)
+    target_include_directories(ns-connection-recovery-test PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+    add_test(NAME ns-connection-recovery-test COMMAND ns-connection-recovery-test)
+endif()
