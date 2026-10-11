@@ -389,4 +389,10 @@ if(BUILD_TESTING)
     )
     target_link_libraries(amiibo-library-test PRIVATE OpenSSL::Crypto)
     add_test(NAME amiibo-library COMMAND amiibo-library-test)
+
+    add_executable(usb-sleep-policy-test tests/usb_sleep_policy_test.cpp)
+    target_include_directories(usb-sleep-policy-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME usb-sleep-policy COMMAND usb-sleep-policy-test)
 endif()

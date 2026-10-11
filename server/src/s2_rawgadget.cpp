@@ -1,6 +1,7 @@
 #include "s2_rawgadget.hpp"
 
 #include "app_state.hpp"
+#include "usb_sleep_policy.hpp"
 #include "raw_gadget_embedded.hpp"
 #include "s2_enumeration.hpp"
 #include "s2_vendor_rx.hpp"
@@ -1066,13 +1067,16 @@ void event_pump_loop() {
                 break;
             case USB_RAW_EVENT_SUSPEND:
                 mark_switch2_usb_host_disconnected();
-                // Release P1 immediately, but do not publish durable sleep yet:
-                // Switch 2 power-down includes a transient suspend followed by
-                // a native re-enumeration several seconds later.
-                release_switch2_active_session("USB suspend", false);
-                if (g_ctx.verbose) {
-                    std::println("[s2-rg] USB suspend; active P1 session disconnected "
-                                 "without enumeration retry");
+                if (usb_sleep_may_release_clients(g_ctx.switch2_wake_config_loaded)) {
+                    // With wake configured, preserve the normal Switch 2
+                    // suspend lifecycle, including explicit P1 release.
+                    release_switch2_active_session("USB suspend", false);
+                    if (g_ctx.verbose) {
+                        std::println("[s2-rg] USB suspend; active P1 session disconnected "
+                                     "without enumeration retry");
+                    }
+                } else if (g_ctx.verbose) {
+                    std::println("[s2-rg] USB suspend; client session kept (wake not configured)");
                 }
                 break;
             case USB_RAW_EVENT_RESUME: {

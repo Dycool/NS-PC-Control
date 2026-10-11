@@ -1,4 +1,5 @@
 #include "app_state.hpp"
+#include "usb_sleep_policy.hpp"
 #include "gadget_wakeup.hpp"
 #include "s2_enumeration.hpp"
 #include "switch2_native.hpp"
@@ -282,6 +283,11 @@ static void confirm_switch2_sleep(uint64_t quiet_us, const char* evidence) {
 }
 
 void poll_switch2_sleep_state(uint64_t now) {
+    // With no configured wake flow, host USB OUT silence is not a reason to
+    // release an otherwise active UDP/WebSocket/Bluetooth controller session.
+    // This also suppresses sleep-termination flags on server info replies.
+    if (!usb_sleep_may_release_clients(g_ctx.switch2_wake_config_loaded)) return;
+
     if (now == 0) now = now_us();
 
     // Native S2 SUSPEND releases P1 synchronously in the Raw Gadget event
