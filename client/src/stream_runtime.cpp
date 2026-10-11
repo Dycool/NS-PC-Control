@@ -657,6 +657,7 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
     frame.reset();
     uint64_t next_input_frame_us = 0;
     ClientDisconnectReason stop_reason = ClientDisconnectReason::None;
+    bool heartbeat_unresponsive = false;
 
     while (running.load(std::memory_order_relaxed)) {
         const uint64_t loop_start_us = ns::now_us();
@@ -746,14 +747,20 @@ int run_client_stream(const ClientStreamConfig& cfg, std::atomic<bool>& running,
             last_probe_us = now;
         }
         const uint64_t last_reply_us = g_serverLastReplyUs.load(std::memory_order_relaxed);
-        if (last_probe_us && last_reply_us && now > last_reply_us && now - last_reply_us > 15000000ULL) {
-            stop_reason = ClientDisconnectReason::Timeout;
-            const std::string message = "No server reply for 15 seconds ("
+        const bool unresponsive = udp_heartbeat_unresponsive(now, last_probe_us, last_reply_us);
+        if (unresponsive && !heartbeat_unresponsive) {
+            heartbeat_unresponsive = true;
+            // UDP can lose replies even while the server is receiving input.
+            // Do not tear down the socket or send FLAG_DISCONNECT on silence.
+            const std::string message = "No server heartbeat for 15+ seconds ("
                 + std::to_string(g_missedHeartbeatReplies.load(std::memory_order_relaxed))
-                + " missed heartbeat probes).";
+                + " missed probes); still sending controller input.";
             set_status_message(message);
-            if (err_out) *err_out = message;
-            break;
+            std::println(stderr, "[network] {}", message);
+        } else if (!unresponsive && heartbeat_unresponsive) {
+            heartbeat_unresponsive = false;
+            set_status_message("Connected to " + cfg.host + ":" + std::to_string(cfg.port));
+            std::println(stderr, "[network] Server heartbeat restored; input stream stayed active");
         }
 
         if (frame.active_count > 0) {

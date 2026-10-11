@@ -19,4 +19,16 @@ int main() {
     assert(!should_reconnect(ClientDisconnectReason::SessionTerminated));
     assert(!should_reconnect(ClientDisconnectReason::SwitchAsleep));
     assert(!should_reconnect(ClientDisconnectReason::InputError));
+
+    // A heartbeat gap changes diagnostic state, not the stream's lifetime.
+    constexpr std::uint64_t probe = 10'000'000ULL;
+    constexpr std::uint64_t reply = 11'000'000ULL;
+    assert(!udp_heartbeat_unresponsive(reply + 15'000'000ULL, probe, reply));
+    assert(udp_heartbeat_unresponsive(reply + 15'000'001ULL, probe, reply));
+    assert(!udp_heartbeat_unresponsive(reply + 60'000'000ULL, 0, reply));
+    assert(!udp_heartbeat_unresponsive(reply + 60'000'000ULL, probe, 0));
+    assert(!udp_heartbeat_unresponsive(reply - 1, probe, reply));
+    // One later server reply immediately clears the warning.
+    assert(!udp_heartbeat_unresponsive(reply + 60'000'000ULL, probe,
+                                       reply + 59'000'000ULL));
 }
